@@ -26,6 +26,16 @@ use lapin::{
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, ConnectOptions, TlsRequirement};
+use nervix_connector_kafka::testing_rdkafka::{
+    admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
+    client::DefaultClientContext,
+    config::ClientConfig,
+    consumer::{BaseConsumer, Consumer, StreamConsumer},
+    error::RDKafkaErrorCode,
+    message::{Header as KafkaHeader, Headers, Message, OwnedHeaders},
+    producer::{FutureProducer, FutureRecord},
+    topic_partition_list::{Offset, TopicPartitionList},
+};
 use nervix_consensus::RaftRetentionPolicy;
 use nervix_execution::Executor;
 use nervix_interconnect::{
@@ -58,16 +68,6 @@ use pulsar::{
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType, date_time_ymd,
-};
-use rdkafka::{
-    admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
-    client::DefaultClientContext,
-    config::ClientConfig,
-    consumer::{BaseConsumer, Consumer, StreamConsumer},
-    error::RDKafkaErrorCode,
-    message::{Header as KafkaHeader, Headers, Message, OwnedHeaders},
-    producer::{FutureProducer, FutureRecord},
-    topic_partition_list::{Offset, TopicPartitionList},
 };
 use redis::AsyncCommands;
 use rumqttc::{

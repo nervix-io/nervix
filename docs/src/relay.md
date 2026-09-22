@@ -210,7 +210,9 @@ Operational notes:
 Materialized state is also the readable snapshot surface for `GENERATOR` nodes. A generator declares exactly one materialized relay with `USING MATERIALIZED STATE <relay>` and reads it through `relay_state.<relay>.<field>`.
 
 `SHOW RELAY <relay> MATERIALIZED STATE` reports `kind: RELAY`, the relay owner, and its
-scheduler-selected state replicas before the materialized entries or empty-state message.
+scheduler-selected state replicas before the materialized entries or empty-state message. Each
+entry keeps its typed branch key through collection and renders it at this reporting boundary;
+unbranched entries render as `key=(root)`.
 
 `DESCRIBE RELAY <relay>` reports the owner and state replicas immediately after `kind: RELAY`, then
 the logical definition and owner buffer-utilization metrics. An ordinary relay reports

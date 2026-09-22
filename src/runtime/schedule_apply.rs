@@ -783,7 +783,9 @@ impl Runtime {
                             RuntimeMaterializedRelaySpec::new(
                                 schema.arrow_schema(),
                                 schema.vm_sensitivity(),
-                                desired_node.effective_branching.clone().unwrap_or_default(),
+                                desired_node.resolved_branching.clone().assured(
+                                    "the schedule resolves every relay branch declaration",
+                                ),
                             ),
                         );
                         execution.materialized_stream_owner_nodes.insert(
@@ -1376,16 +1378,13 @@ impl Runtime {
                                     desired_generator.materialized_relay.as_str()
                                 ),
                             })?;
-                        let source_branch_schema = execution
-                            .relay_branching_schemas
-                            .get(&desired_generator.materialized_relay)
-                            .cloned()
-                            .flatten();
                         let source_branching = execution
                             .relay_branchings
                             .get(&desired_generator.materialized_relay)
                             .cloned()
-                            .unwrap_or_default();
+                            .assured("the generator's validated source relay has branch routing");
+                        let source_branch_schema =
+                            RuntimeVmSchema::from_branching(&source_branching);
                         let mut routes =
                             Vec::with_capacity(desired_generator.output_routes.routes.len());
                         for output in desired_generator.output_routes.outputs() {
@@ -1427,9 +1426,14 @@ impl Runtime {
                                 &desired_generator,
                                 output,
                                 GeneratorSetProgramSchemas {
-                                    output: output_schema.arrow_schema(),
-                                    output_sensitivity: output_schema.vm_sensitivity(),
-                                    source: source_schema.arrow_schema(),
+                                    output: RuntimeVmSchema {
+                                        schema: output_schema.arrow_schema(),
+                                        sensitivity: output_schema.vm_sensitivity(),
+                                    },
+                                    source: RuntimeVmSchema {
+                                        schema: source_schema.arrow_schema(),
+                                        sensitivity: source_schema.vm_sensitivity(),
+                                    },
                                     branch: source_branch_schema.clone(),
                                 },
                                 Some(&execution.udfs),
@@ -1448,7 +1452,6 @@ impl Runtime {
                                 desired_generator.clone(),
                                 source_schema,
                                 source_branching,
-                                source_branch_schema,
                                 routes,
                             ),
                         )
@@ -1684,13 +1687,24 @@ impl Runtime {
                 reason: format!("failed to build dynamic schedule graph: {error}"),
             }
         })?;
+        // A reset's new generation must be visible before its supervisor writes the generation's
+        // initial checkpoint. Publishing the identity first is safe because the selected inputs
+        // remain fenced until the same schedule reaches Ready.
+        self.install_state_identities(&schedule);
         self.apply_dynamic_model_updates(domain, updates).await?;
         let graph_handle = self.domain_graph_handle(domain).await;
         graph_handle.store(Some(StdArc::new(graph)));
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             execution.schedule = schedule;
         }
-        self.force_flush_domain(domain);
+        if updates.iter().any(|update| {
+            !matches!(
+                update,
+                nervix_models::DynamicModelUpdate::WasmStateReset { .. }
+            )
+        }) {
+            self.force_flush_domain(domain);
+        }
         Ok(())
     }
 
@@ -1706,6 +1720,46 @@ impl Runtime {
                     self.set_relay_capacity(domain, relay, *capacity);
                 }
                 nervix_models::DynamicModelUpdate::Processor { .. } => {}
+                nervix_models::DynamicModelUpdate::WasmStateReset { processor, reset } => {
+                    let commands = if let Some(execution) = self.inner.executions.get(domain)
+                        && let Some(task) = execution
+                            .node_tasks
+                            .get(&NodeRef::new(ModelKind::WasmProcessor, processor.clone()))
+                    {
+                        Some(task.commands.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(commands) = commands {
+                        let (response, receiver) = oneshot::channel();
+                        commands
+                            .send(ProcessorNodeCommand::ApplyWasmStateReset {
+                                reset: reset.clone(),
+                                response,
+                            })
+                            .await
+                            .map_err(|_| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "WASM processor '{}' reset command channel closed",
+                                    processor.as_str()
+                                ),
+                            })?;
+                        receiver
+                            .await
+                            .map_err(|_| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!(
+                                    "WASM processor '{}' dropped its reset response",
+                                    processor.as_str()
+                                ),
+                            })?
+                            .map_err(|error| RuntimeError::BuildDomainExecution {
+                                domain: domain.as_str().to_string(),
+                                reason: format!("{error:#}"),
+                            })?;
+                    }
+                }
                 // Endpoint routing reads only a VHOST's hostnames. The certificate belongs to the
                 // HTTPS listener, which installs it from the same admitted state on every node.
                 nervix_models::DynamicModelUpdate::VhostTlsVersion { .. } => {}

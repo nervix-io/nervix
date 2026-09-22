@@ -81,6 +81,13 @@ impl EntityGatePlan {
     pub(crate) fn relays(&self) -> &[RelayName] {
         &self.relays
     }
+
+    pub(crate) fn from_commit_plan(plan: nervix_models::TransactionEntityGatePlan) -> Self {
+        Self {
+            affected_entities: plan.affected_entities,
+            relays: plan.relays,
+        }
+    }
 }
 
 pub(crate) fn scheduled_impact_coverage(node: &ScheduledNode) -> ImpactNodeCoverage {
@@ -96,7 +103,7 @@ pub(crate) fn scheduled_impact_coverage(node: &ScheduledNode) -> ImpactNodeCover
         Some(branch) => ConcreteBranchCoverage::AllOfBranch {
             branch: branch.clone(),
         },
-        None if node.effective_branching.is_some()
+        None if node.resolved_branching.is_some()
             && matches!(node.kind(), ModelKind::Emitter | ModelKind::Reingestor) =>
         {
             ConcreteBranchCoverage::All

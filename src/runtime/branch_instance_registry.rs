@@ -35,7 +35,6 @@ where
     }
 
     #[cfg(test)]
-    #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.entries.len()
     }
@@ -76,6 +75,17 @@ where
                 state: state.clone(),
             },
         );
+        state
+    }
+
+    /// Insert a branch whose lifecycle changed while it was absent from this registry.
+    ///
+    /// Unlike restore from a checkpoint or an ownership handoff, this advances the lifecycle
+    /// snapshot revision. A replica may already hold the preceding revision, so reusing it for a
+    /// different branch set would let the replica acknowledge the preceding payload as current.
+    pub(super) fn insert_changed(&mut self, key: K, last_ingestion: Timestamp, state: V) -> Arc<V> {
+        let state = self.insert_restored(key, last_ingestion, state);
+        self.bump_version();
         state
     }
 

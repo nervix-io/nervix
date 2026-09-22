@@ -16,12 +16,14 @@ use crate::{
     CreateDeduplicator, CreateEmitter, CreateGenerator, CreateIngestor, CreateJunction,
     CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, CreateWireSchema, EmitSink,
     EmitterName, MessageErrorPolicy, Model, ModelKind, ModelName, NodeRef, ProcessorInputs,
-    ProcessorOutput, ProcessorOutputs, RelayName, VhostName,
+    ProcessorOutput, ProcessorOutputs, RelayName, VhostName, WasmStateReset,
 };
 
+mod commit;
 mod impact;
 mod inspection;
 
+pub use commit::*;
 pub use impact::*;
 pub use inspection::*;
 
@@ -73,6 +75,12 @@ pub enum DynamicModelUpdate {
         kind: ModelKind,
         processor: ModelName,
     },
+    /// A committed WASM guest-state generation transition, or the readiness publication that
+    /// admits the selected scope after its initial checkpoint became durable.
+    WasmStateReset {
+        processor: ModelName,
+        reset: WasmStateReset,
+    },
     Emitter {
         emitter: EmitterName,
         config: Box<CreateEmitter>,
@@ -89,6 +97,9 @@ impl DynamicModelUpdate {
         match self {
             Self::RelayCapacity { relay, .. } => NodeRef::new(ModelKind::Relay, relay.clone()),
             Self::Processor { kind, processor } => NodeRef::new(*kind, processor.clone()),
+            Self::WasmStateReset { processor, .. } => {
+                NodeRef::new(ModelKind::WasmProcessor, processor.clone())
+            }
             Self::Emitter { emitter, .. } => NodeRef::new(ModelKind::Emitter, emitter.clone()),
             Self::VhostTlsVersion { vhost } => NodeRef::new(ModelKind::Vhost, vhost.clone()),
         }
@@ -98,9 +109,10 @@ impl DynamicModelUpdate {
     /// while a VHOST's new TLS version is an HTTPS listener refresh on every node.
     pub const fn activation(&self) -> ActivationAction {
         match self {
-            Self::RelayCapacity { .. } | Self::Processor { .. } | Self::Emitter { .. } => {
-                ActivationAction::Activate
-            }
+            Self::RelayCapacity { .. }
+            | Self::Processor { .. }
+            | Self::WasmStateReset { .. }
+            | Self::Emitter { .. } => ActivationAction::Activate,
             Self::VhostTlsVersion { .. } => ActivationAction::RefreshHttpsListener,
         }
     }

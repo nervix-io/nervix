@@ -83,9 +83,12 @@ pub use quiesce::{
     OperationImpactReport, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
     QuiesceLevel, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
     ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, StatePurge,
-    StateResetImpact, TransactionImpactReport, TransactionImpactSummary,
-    TransactionInspectionTarget, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition, TransactionPreviewIdentity,
+    StateResetImpact, TransactionCommitPlan, TransactionCommitPlanHeader,
+    TransactionCommitPlanStep, TransactionCommitStepKind, TransactionEntityGatePlan,
+    TransactionImpactReport, TransactionImpactSummary, TransactionInspectionTarget,
+    TransactionModelTransition, TransactionOperation, TransactionOperationAdmission,
+    TransactionOperationNumber, TransactionOperationRange, TransactionPosition,
+    TransactionPreviewIdentity, TransactionResolvedDomainStart,
 };
 pub use rebind_resource::{RebindResource, RebindResourceMembers, RebindResourceSelection};
 pub use remote::{
@@ -152,8 +155,8 @@ pub use statement::{
     ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
     RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
     RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
-    RelocationPreferenceStrategy, RelocationSelection, ResolvedCodecWireFormat, RetryPolicy,
-    S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
+    RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
+    RetryPolicy, S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
     ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
     ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
@@ -166,5 +169,6 @@ pub use statement::{
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
 pub use wasm_state_generation::{
-    InvalidWasmStateGeneration, WasmStateGeneration, WasmStateGenerations,
+    InvalidWasmStateGeneration, WasmStateGeneration, WasmStateGenerations, WasmStateReset,
+    WasmStateResetPhase, WasmStateResetScope,
 };

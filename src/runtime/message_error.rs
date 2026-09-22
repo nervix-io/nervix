@@ -275,7 +275,7 @@ pub(super) struct MessageErrorCompileSchemas {
     pub(super) left: Option<Arc<CompiledSchema>>,
     pub(super) right: Option<Arc<CompiledSchema>>,
     pub(super) partial_output: Option<Arc<CompiledSchema>>,
-    pub(super) current_branching: Vec<FieldName>,
+    pub(super) current_branching: ResolvedBranching,
     pub(super) allow_header_reads: bool,
 }
 
@@ -326,12 +326,12 @@ pub(super) fn planned_structured_message_error(
 }
 
 pub(super) fn preserved_message_error_branch(
-    target_branching: &[FieldName],
+    target_branching: &ResolvedBranching,
     incoming: &Option<BranchKey>,
     relay: &RelayName,
     reference: uuid::Uuid,
 ) -> error_stack::Result<Option<BranchKey>, MessageErrorHandlingError> {
-    match (target_branching.is_empty(), incoming.as_ref()) {
+    match (target_branching.is_unbranched(), incoming.as_ref()) {
         (true, None) | (false, Some(_)) => Ok(incoming.clone()),
         (true, Some(_)) => Err(error_stack::Report::new(
             MessageErrorHandlingError::BranchedErrorForUnbranchedRelay {
@@ -762,7 +762,7 @@ impl Runtime {
         struct MessageErrorRoutePlan {
             schema: Arc<CompiledSchema>,
             target: MessageErrorRouteTarget,
-            branching: Vec<FieldName>,
+            branching: ResolvedBranching,
             program: CompiledProgramWithMaterializedInterest,
             flush_policy: Option<RuntimeFlushPolicy>,
         }
@@ -813,7 +813,7 @@ impl Runtime {
                 .relay_branchings
                 .get(relay)
                 .cloned()
-                .unwrap_or_default();
+                .assured("the validated message-error relay has branch routing");
             let flush_policy = Self::message_error_flush_policy(
                 &execution,
                 domain,
@@ -841,8 +841,6 @@ impl Runtime {
                     available_materialized_streams: &execution.materialized_stream_specs,
                     available_lookups: &execution.lookups,
                     current_branching: &branching,
-                    current_branch_schema: None,
-                    current_branch_sensitivity: None,
                     udfs: Some(&execution.udfs),
                 },
             )
@@ -1034,7 +1032,7 @@ impl Runtime {
             left: None,
             right: None,
             partial_output: None,
-            current_branching: Vec::new(),
+            current_branching: ResolvedBranching::unbranched(),
             allow_header_reads: false,
         };
         let mut current_branch_relay = None;
@@ -1133,7 +1131,7 @@ impl Runtime {
                 .relay_branchings
                 .get(&relay)
                 .cloned()
-                .unwrap_or_default();
+                .assured("a validated route's source relay has installed branch routing");
         }
         Ok(schemas)
     }
@@ -1835,7 +1833,7 @@ mod tests {
             RuntimeMaterializedRelaySpec::new(
                 state_schema.arrow_schema(),
                 VmSchemaSensitivity::default(),
-                Vec::new(),
+                ResolvedBranching::unbranched(),
             ),
         )]);
         let assignments = construction(
@@ -1854,15 +1852,13 @@ mod tests {
                 left: None,
                 right: None,
                 partial_output: Some(partial_schema),
-                current_branching: Vec::new(),
+                current_branching: ResolvedBranching::unbranched(),
                 allow_header_reads: false,
             },
             RuntimeVmCompileContext {
                 available_materialized_streams: &materialized_specs,
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -1917,15 +1913,13 @@ mod tests {
                 left: None,
                 right: None,
                 partial_output: None,
-                current_branching: Vec::new(),
+                current_branching: ResolvedBranching::unbranched(),
                 allow_header_reads: false,
             },
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -1985,20 +1979,22 @@ mod tests {
         let incoming = string_branch_key("tenant", "acme");
         let relay = named("processing_errors");
         let reference = uuid::Uuid::now_v7();
+        let branching = test_branching(&[("tenant", ParseAsType::String)]);
+        let unbranched = ResolvedBranching::unbranched();
 
         assert_eq!(
-            preserved_message_error_branch(&[named("tenant")], &incoming, &relay, reference,)
+            preserved_message_error_branch(&branching, &incoming, &relay, reference,)
                 .expect("matching branched error route should preserve its key"),
             incoming
         );
         assert!(
-            preserved_message_error_branch(&[], &incoming, &relay, reference)
+            preserved_message_error_branch(&unbranched, &incoming, &relay, reference)
                 .expect_err("unbranched error relay must reject a branch")
                 .to_string()
                 .contains("cannot receive branched message error")
         );
         assert!(
-            preserved_message_error_branch(&[named("tenant")], &None, &relay, reference,)
+            preserved_message_error_branch(&branching, &None, &relay, reference,)
                 .expect_err("branched error relay must reject unbranched execution")
                 .to_string()
                 .contains("cannot receive unbranched message error")

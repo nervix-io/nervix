@@ -6,7 +6,7 @@
 //!   explicit execution timestamps.
 //! - **Must not know.** NSPL parsing, source-client lifecycle or persisted control state.
 
-use nervix_connector::IngestMetadataRow;
+use nervix_connector::{IngestMetadataRow, SourceMetadataScope};
 
 use super::*;
 
@@ -64,6 +64,16 @@ pub(in crate::runtime) enum IngestMetadataKind {
     Kafka,
     Syslog,
     Headers,
+}
+
+impl IngestMetadataKind {
+    pub(super) fn source_scope(self) -> SourceMetadataScope {
+        match self {
+            Self::Kafka => SourceMetadataScope::Kafka,
+            Self::Syslog => SourceMetadataScope::Syslog,
+            Self::Headers => SourceMetadataScope::Headers,
+        }
+    }
 }
 
 pub(super) type IngestMetadataResult<T> = Result<T, Report<IngestMetadataError>>;
@@ -777,9 +787,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -933,9 +941,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )
@@ -1075,9 +1081,7 @@ mod tests {
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
-                current_branching: &[],
-                current_branch_schema: None,
-                current_branch_sensitivity: None,
+                current_branching: &ResolvedBranching::unbranched(),
                 udfs: None,
             },
         )

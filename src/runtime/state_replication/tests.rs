@@ -18,7 +18,7 @@ use nervix_models::{
     CreateSchema, DomainNodeRef, DomainSchedule, DomainStatus, MaterializedRelayState, ModelKind,
     ModelName, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
     OwnershipStateResetCause, OwnershipTransition, ParseAsType, RelayBranching, RelayName,
-    ScheduledNode, SchemaField, SchemaName, Timestamp,
+    ResolvedBranching, ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
 use nonzero_ext::nonzero;
 use tempfile::tempdir;
@@ -71,6 +71,7 @@ impl EmptyRelayHandoffFixture {
             }),
             SchemaFingerprint::from_digest([1; 32]),
         )
+        .with_resolved_branching(Some(ResolvedBranching::unbranched()))
         .placed_on(Some(source.clone()), vec![source.clone()]);
         let base_schedule = DomainSchedule::new(
             domain.clone(),
@@ -489,6 +490,7 @@ async fn forced_recovery_completion_survives_runtime_restart_and_schedule_rebuil
         }),
         SchemaFingerprint::from_digest([7; 32]),
     )
+    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
     .placed_on(Some(destination.clone()), vec![destination.clone()]);
     scheduled.ownership_transition = Some(OwnershipTransition {
         id: operation_id.to_string(),
@@ -644,6 +646,7 @@ async fn forced_recovery_recreates_state_only_for_a_complete_reset_decision() {
         }),
         SchemaFingerprint::from_digest([7; 32]),
     )
+    .with_resolved_branching(Some(ResolvedBranching::unbranched()))
     .placed_on(Some(destination.clone()), vec![destination.clone()]);
     scheduled.ownership_transition = Some(OwnershipTransition {
         id: "forced-reset".to_string(),
@@ -726,13 +729,11 @@ fn forced_recovery_replay_preserves_source_offsets_and_branch_processor_state() 
         .take()
         .expect("local Kafka state should grant authoritative access");
     let (_, kafka_payload) = kafka_originator
-        .replace_offsets(HashMap::from_iter([(
-            KafkaTopicPartition {
-                topic: "orders".to_string(),
-                partition: 3,
-            },
-            42,
-        )]))
+        .replace_offsets(vec![KafkaOffsetPosition {
+            topic: "orders".to_string(),
+            partition: 3,
+            offset: 42,
+        }])
         .expect("Kafka offset should update");
     let deduplicator_placement = RuntimeStatePlacement {
         domain: domain.clone(),
@@ -1364,7 +1365,14 @@ async fn kafka_offset_snapshot_task_owns_persistence() {
         .clone();
 
     runtime
-        .commit_domain_kafka_offset(&originator, "orders", 3, 43)
+        .commit_domain_kafka_offset(
+            &originator,
+            KafkaOffsetPosition {
+                topic: "orders".to_string(),
+                partition: 3,
+                offset: 43,
+            },
+        )
         .await
         .expect("the Kafka offset assignment should remain authoritative");
 
@@ -1690,22 +1698,18 @@ fn kafka_offset_state_roundtrips_partition_schedule_through_fjall() {
         .take()
         .expect("local Kafka state should grant authoritative access");
     let (offset_lsm, offset_payload) = originator
-        .replace_offsets(HashMap::from_iter([
-            (
-                KafkaTopicPartition {
-                    topic: "notifications".to_string(),
-                    partition: 0,
-                },
-                12,
-            ),
-            (
-                KafkaTopicPartition {
-                    topic: "notifications".to_string(),
-                    partition: 1,
-                },
-                18,
-            ),
-        ]))
+        .replace_offsets(vec![
+            KafkaOffsetPosition {
+                topic: "notifications".to_string(),
+                partition: 0,
+                offset: 12,
+            },
+            KafkaOffsetPosition {
+                topic: "notifications".to_string(),
+                partition: 1,
+                offset: 18,
+            },
+        ])
         .expect("offsets should update");
     store
         .persist_latest_snapshot(&placement, offset_lsm, &offset_payload)
@@ -1966,6 +1970,7 @@ fn reinstalling_schema_fingerprints_never_exposes_a_node_without_one() {
                 }),
                 SchemaFingerprint::from_digest([1; 32]),
             )
+            .with_resolved_branching(Some(ResolvedBranching::unbranched()))
             .placed_on(
                 Some(ClusterNodeName::parse("node-1").expect("valid name")),
                 vec![ClusterNodeName::parse("node-1").expect("valid name")],

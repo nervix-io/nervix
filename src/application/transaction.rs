@@ -18,17 +18,20 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
     TransactionActivity, TransactionApplicationOutcome, TransactionApplyingStep,
-    TransactionCommandResult, TransactionCommitAdvance, TransactionDiagnostic, TransactionOutcome,
-    TransactionQueueAdmission, TransactionQueueLimits, TransactionState, TransactionStatement,
-    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
+    TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionCommitAdmissionPlan,
+    TransactionCommitAdvance, TransactionDiagnostic, TransactionMutationError, TransactionOutcome,
+    TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest,
+    TransactionReportArchive, TransactionScheduleEligibility, TransactionState,
+    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+    TransactionStepResult,
 };
 use nervix_models::{
     ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference, DomainName,
-    DomainSchedule, DomainState, DomainStatus, ExecutionStepImpactReport, ImpactDiagnostic,
-    ImpactDiagnosticKind, ImpactNodeCoverage, ImpactPlanningBasis, ImpactReportCompleteness, Model,
-    ModelIndex, ModelKind, OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact,
-    QuiesceLevel, RequestedResourceVersion, ResourceId, ResourceName, ResourceUploads, Statement,
-    TransactionOperationNumber, TransactionOperationRange, UserName,
+    DomainSchedule, DomainState, DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage,
+    ImpactPlanningBasis, Model, ModelIndex, ModelKind, OwnershipMoveImpact, QuiesceLevel,
+    RequestedResourceVersion, ResourceId, ResourceName, ResourceUploads, Statement,
+    TransactionCommitStepKind, TransactionOperationAdmission, TransactionOperationNumber,
+    TransactionPreviewIdentity, TransactionResolvedDomainStart, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
@@ -49,7 +52,7 @@ use super::{
         command_ok, command_ok_already_existed, parse_request_domain, quiesce_level_message,
         rebind_resource_message,
     },
-    ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
+    ownership_handoff::planned_ownership_moves,
     schedule_planning::DomainSchedulePlanningSnapshot,
     session_service::SessionServiceImpl,
     subscription::{PendingSessionCommand, SessionSubscriptions},
@@ -120,6 +123,17 @@ impl TransactionRecovery {
     fn considered(&self, id: String) {
         *self.cursor.lock() = Some(id);
     }
+}
+
+struct PreparedTransactionAdmission {
+    result: TransactionCommandResult,
+    report: TransactionReportArchive,
+}
+
+struct PreparedTransactionCommit {
+    expected_preview: TransactionPreviewIdentity,
+    report: TransactionReportArchive,
+    plan: TransactionCommitAdmissionPlan,
 }
 
 #[derive(Serialize)]
@@ -202,6 +216,17 @@ pub(in crate::application) fn transaction_planning_error_message(
     }
 }
 
+fn transaction_commit_error_message(error: &Report<TransactionCommitError>) -> String {
+    let context = match error.downcast_ref::<TransactionPlanningError>() {
+        Some(planning_error) => planning_error.to_string(),
+        None => error.to_string(),
+    };
+    match error.downcast_ref::<String>() {
+        Some(message) => format!("{context}: {message}"),
+        None => context,
+    }
+}
+
 #[derive(Debug, Error)]
 pub(in crate::application) enum TransactionCommitError {
     #[error(transparent)]
@@ -218,8 +243,21 @@ pub(in crate::application) enum TransactionCommitError {
     SynchronizeRegistry { id: String },
     #[error("failed to recover transaction '{id}' domain quiescence")]
     RecoverQuiescence { id: String },
+    #[error("transaction '{id}' planning inputs changed: {reason}")]
+    PlanningInputsChanged { id: String, reason: String },
     #[error("transaction '{id}' commit task failed")]
     TaskJoin { id: String },
+    #[error("failed to prepare the complete commit plan for transaction '{id}'")]
+    PreparePlan { id: String },
+    #[error("failed to archive the complete commit report for transaction '{id}'")]
+    ArchiveReport { id: String },
+    #[error("failed to resolve the domain start at operation {operation} for transaction '{id}'")]
+    PrepareDomainStart {
+        id: String,
+        operation: TransactionOperationNumber,
+    },
+    #[error("transaction '{id}' cannot start paced domain '{domain}' without a live clock voter")]
+    PrepareClockAuthority { id: String, domain: DomainName },
     #[error("transaction '{id}' commit was cancelled because the node's shutdown deadline passed")]
     ShutdownCancelled { id: String },
 }
@@ -231,6 +269,16 @@ impl TransactionCommitError {
             _ => None,
         }
     }
+
+    fn planning_input_conflict(&self) -> Option<&str> {
+        match self {
+            Self::Proposal(ConsensusTransactionError::Mutation(
+                nervix_consensus::TransactionMutationError::StepConflict { reason, .. },
+            )) => Some(reason),
+            Self::PlanningInputsChanged { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
 }
 
 pub(in crate::application) struct TransactionModelStepContext<'a> {
@@ -239,11 +287,20 @@ pub(in crate::application) struct TransactionModelStepContext<'a> {
     pub(in crate::application) planned_step: PlannedTransactionStep,
     pub(in crate::application) operations: Vec<nervix_models::OperationImpactReport>,
     pub(in crate::application) inputs: DomainPlanningInputs,
-    pub(in crate::application) schedule_inputs: DomainSchedulePlanningSnapshot,
+    pub(in crate::application) eligibility: TransactionScheduleEligibility,
     pub(in crate::application) outcome:
         &'a ParkingMutex<Option<Result<ReplicatedTransaction, Report<TransactionCommitError>>>>,
 }
-
+impl TransactionModelStepContext<'_> {
+    pub(in crate::application) fn retain_planning_input_conflict(&self, reason: String) {
+        *self.outcome.lock() = Some(Err(Report::new(
+            TransactionCommitError::PlanningInputsChanged {
+                id: self.transaction.id.clone(),
+                reason,
+            },
+        )));
+    }
+}
 pub(in crate::application) struct CapturedTransactionPlan {
     pub(in crate::application) plan: PlannedTransaction,
     pub(in crate::application) inputs: DomainPlanningInputs,
@@ -253,6 +310,26 @@ pub(in crate::application) struct CapturedTransactionPlan {
 enum TransactionApplicationAttempt {
     Retry,
     Completed(Box<ReplicatedTransaction>),
+}
+
+#[derive(Clone, Copy)]
+enum TransactionStepFailure {
+    Operation,
+    PlanningInputsChanged,
+}
+impl TransactionStepFailure {
+    fn outcome(self, failing_step: usize, error: String) -> TransactionOutcome {
+        match self {
+            Self::Operation => TransactionOutcome::Failed {
+                failing_step,
+                error,
+            },
+            Self::PlanningInputsChanged => TransactionOutcome::PlanningInputsChanged {
+                failing_step,
+                error,
+            },
+        }
+    }
 }
 
 /// Why a session may not act on the transaction it names. `Detached` is a recoverable routing
@@ -340,6 +417,10 @@ pub(in crate::application) fn transaction_status(
             TransactionOutcome::Failed {
                 failing_step,
                 error,
+            }
+            | TransactionOutcome::PlanningInputsChanged {
+                failing_step,
+                error,
             } => ReportedOutcome {
                 state: ApiTransactionState::Failed,
                 error: error.clone(),
@@ -379,6 +460,7 @@ fn replicated_command_result(result: &CommandResult) -> TransactionCommandResult
             })
             .collect(),
         already_existed: result.already_existed,
+        admission: None,
     }
 }
 
@@ -404,10 +486,32 @@ fn admitted_command_result(
             i32::from(CommandResultKind::Error)
         },
         already_existed: admission.already_existed,
+        transaction_admission: admission
+            .admission
+            .as_ref()
+            .map(api_transaction_operation_admission),
         ..Default::default()
     };
     result.transaction = Some(transaction_status(transaction));
     result
+}
+
+fn api_transaction_operation_admission(
+    admission: &TransactionOperationAdmission,
+) -> proto::TransactionOperationAdmission {
+    proto::TransactionOperationAdmission {
+        operation: admission.operation.get().arch_into(),
+        preview: Some(proto::TransactionPreviewIdentity {
+            transaction_id: admission.preview.transaction_id.clone(),
+            position: admission.preview.position.accepted_operations().arch_into(),
+            planning_basis: admission
+                .preview
+                .planning_basis
+                .fingerprint()
+                .to_vec()
+                .into(),
+        }),
+    }
 }
 
 fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResult {
@@ -427,7 +531,10 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
         .sum::<usize>();
     let mut message = match transaction.finished_outcome() {
         Some(TransactionOutcome::Committed) => String::new(),
-        Some(TransactionOutcome::Failed { error, .. }) => error.clone(),
+        Some(
+            TransactionOutcome::Failed { error, .. }
+            | TransactionOutcome::PlanningInputsChanged { error, .. },
+        ) => error.clone(),
         Some(outcome) => format!("transaction finished with outcome {}", outcome.as_str()),
         None => "transaction commit is still in progress".to_string(),
     };
@@ -504,33 +611,6 @@ fn finished_transaction_attach_result(
     result.transaction = Some(transaction_status(transaction));
     Some(result)
 }
-
-fn failed_transaction_step_impact(
-    first_statement: usize,
-    statement_count: usize,
-    message: String,
-) -> ExecutionStepImpactReport {
-    let operations =
-        TransactionOperationRange::from_index_and_count(first_statement, statement_count).assured(
-            "a commit step contains at least one queued statement in its addressable range",
-        );
-    let completeness = ImpactReportCompleteness::incomplete(vec![ImpactDiagnostic {
-        kind: ImpactDiagnosticKind::Planning,
-        operation: Some(operations.first()),
-        message,
-    }])
-    .assured("a failed planning step supplies one diagnostic");
-    ExecutionStepImpactReport::new(
-        operations,
-        PlannedExecutionStepImpact {
-            completeness,
-            pause: PauseRequirement::NoPause,
-            effects: Default::default(),
-        },
-        ActualExecutionStepImpact::unattempted(),
-    )
-}
-
 fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> CommandResult {
     if !matches!(
         transaction.finished_outcome(),
@@ -566,6 +646,11 @@ fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> Command
             i32::from(CommandResultKind::Error)
         },
         already_existed: step.result.already_existed,
+        transaction_admission: step
+            .result
+            .admission
+            .as_ref()
+            .map(api_transaction_operation_admission),
         ..Default::default()
     }
 }
@@ -678,6 +763,21 @@ impl SessionServiceImpl {
                 self.consensus_error_response(&error, message).await
             }
             _ => command_error(message),
+        }
+    }
+
+    async fn transaction_consensus_report_response(
+        &self,
+        error: Report<ConsensusTransactionError>,
+    ) -> CommandResult {
+        let message = error.to_string();
+        match error.current_context() {
+            ConsensusTransactionError::Consensus(error) => {
+                self.consensus_error_response(error, message).await
+            }
+            ConsensusTransactionError::Mutation(_) | ConsensusTransactionError::InvalidResponse => {
+                command_error(message)
+            }
         }
     }
 
@@ -905,7 +1005,7 @@ impl SessionServiceImpl {
             Ok(TransactionQueueAdmission::New) => {}
             Err(error) => return command_error(error.to_string()),
         }
-        let admission = match self
+        let prepared = match self
             .preflight_transaction_statement(&transaction, &queued)
             .await
         {
@@ -913,18 +1013,19 @@ impl SessionServiceImpl {
             Err(error) => return command_error(error),
         };
         let request_reference = queued.request_reference.clone();
-        let queued = TransactionStatement::admitted(queued, replicated_command_result(&admission));
+        let queued = TransactionStatement::admitted(queued, prepared.result);
         match self
             .inner
             .consensus
-            .queue_transaction_statement(
-                id.to_string(),
-                subscriptions.user.clone(),
+            .queue_transaction_statement(TransactionQueueRequest {
+                id: id.to_string(),
+                owner: subscriptions.user.clone(),
                 domain,
-                self.transaction_activity(),
-                queued,
+                activity: self.transaction_activity(),
+                statement: queued,
+                report: prepared.report,
                 limits,
-            )
+            })
             .await
         {
             Ok(transaction) => {
@@ -946,6 +1047,51 @@ impl SessionServiceImpl {
     }
 
     pub(in crate::application) async fn execute_standalone_transaction(
+        &self,
+        transaction_id: String,
+        request_reference: CommandExecutionReference,
+        owner: UserName,
+        domain: DomainName,
+        source: String,
+        statement: Statement,
+    ) -> CommandResult {
+        let root_transaction_id = transaction_id;
+        let mut attempt_transaction_id = root_transaction_id.clone();
+        loop {
+            tokio::task::consume_budget().await;
+            let result = Box::pin(self.execute_standalone_transaction_attempt(
+                attempt_transaction_id.clone(),
+                request_reference.clone(),
+                owner.clone(),
+                domain.clone(),
+                source.clone(),
+                statement.clone(),
+            ))
+            .await;
+            let attempt = self
+                .inner
+                .consensus
+                .current_transaction(&attempt_transaction_id)
+                .await;
+            let Some(TransactionState::Finished(finished)) =
+                attempt.as_ref().map(|transaction| &transaction.state)
+            else {
+                return result;
+            };
+            if !matches!(
+                &finished.outcome,
+                TransactionOutcome::PlanningInputsChanged { .. }
+            ) {
+                return result;
+            }
+            attempt_transaction_id = format!(
+                "{root_transaction_id}.refresh.{}",
+                finished.outcome_revision
+            );
+        }
+    }
+
+    async fn execute_standalone_transaction_attempt(
         &self,
         transaction_id: String,
         request_reference: CommandExecutionReference,
@@ -988,17 +1134,14 @@ impl SessionServiceImpl {
             if let Err(error) = candidate.queue_admission(&owner, &domain, &queued, limits) {
                 return command_error(error.to_string());
             }
-            let admission = match self
+            let prepared_admission = match self
                 .preflight_transaction_statement(&candidate, &queued)
                 .await
             {
                 Ok(admission) => admission,
                 Err(error) => return command_error(error),
             };
-            prepared = Some(TransactionStatement::admitted(
-                queued.clone(),
-                replicated_command_result(&admission),
-            ));
+            prepared = Some(prepared_admission);
             if let Err(error) = self
                 .inner
                 .consensus
@@ -1018,6 +1161,35 @@ impl SessionServiceImpl {
                 .consensus
                 .current_transaction(&transaction_id)
                 .await;
+            if current
+                .as_ref()
+                .is_some_and(|transaction| transaction.statements.is_empty())
+            {
+                let prepared_admission = prepared
+                    .take()
+                    .verified("the newly opened transaction prepared its first admission above");
+                let admitted =
+                    TransactionStatement::admitted(queued.clone(), prepared_admission.result);
+                match self
+                    .inner
+                    .consensus
+                    .queue_transaction_statement(TransactionQueueRequest {
+                        id: transaction_id.clone(),
+                        owner: owner.clone(),
+                        domain: domain.clone(),
+                        activity: self.transaction_activity(),
+                        statement: admitted,
+                        report: prepared_admission.report,
+                        limits,
+                    })
+                    .await
+                {
+                    Ok(queued_transaction) => current = Some(queued_transaction),
+                    Err(error) => {
+                        return self.transaction_consensus_error_response(error).await;
+                    }
+                }
+            }
         }
         let mut transaction =
             current.verified("the durable command transaction was opened or observed above");
@@ -1032,33 +1204,32 @@ impl SessionServiceImpl {
             match transaction.queue_admission(&owner, &domain, &queued, limits) {
                 Ok(TransactionQueueAdmission::Existing(_)) => {}
                 Ok(TransactionQueueAdmission::New) => {
-                    let admitted = match prepared.take() {
-                        Some(admitted) => admitted,
+                    let prepared_admission = match prepared.take() {
+                        Some(prepared_admission) => prepared_admission,
                         None => {
-                            let admission = match self
+                            match self
                                 .preflight_transaction_statement(&transaction, &queued)
                                 .await
                             {
                                 Ok(admission) => admission,
                                 Err(error) => return command_error(error),
-                            };
-                            TransactionStatement::admitted(
-                                queued.clone(),
-                                replicated_command_result(&admission),
-                            )
+                            }
                         }
                     };
+                    let admitted =
+                        TransactionStatement::admitted(queued.clone(), prepared_admission.result);
                     transaction = match self
                         .inner
                         .consensus
-                        .queue_transaction_statement(
-                            transaction_id.clone(),
-                            owner.clone(),
-                            domain.clone(),
-                            self.transaction_activity(),
-                            admitted,
+                        .queue_transaction_statement(TransactionQueueRequest {
+                            id: transaction_id.clone(),
+                            owner: owner.clone(),
+                            domain: domain.clone(),
+                            activity: self.transaction_activity(),
+                            statement: admitted,
+                            report: prepared_admission.report,
                             limits,
-                        )
+                        })
                         .await
                     {
                         Ok(transaction) => transaction,
@@ -1071,22 +1242,69 @@ impl SessionServiceImpl {
             }
         }
 
-        let current = transaction;
-        let committing = match &current.state {
-            TransactionState::Open(_) => match self
-                .inner
-                .consensus
-                .start_transaction_commit(
-                    transaction_id.clone(),
-                    owner,
-                    self.transaction_activity(),
-                )
-                .await
-            {
-                Ok(transaction) => transaction,
-                Err(error) => return self.transaction_consensus_error_response(error).await,
-            },
-            TransactionState::Committing(_) | TransactionState::Finished(_) => current,
+        let mut current = transaction;
+        let committing = loop {
+            tokio::task::consume_budget().await;
+            match &current.state {
+                TransactionState::Open(_) => {
+                    let prepared = match self.prepare_transaction_commit(&current).await {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            let message = transaction_commit_error_message(&error);
+                            match self
+                                .fail_incomplete_transaction_commit(&current, &owner, &error)
+                                .await
+                            {
+                                Ok(Some(transaction)) => {
+                                    return standalone_transaction_result(&transaction);
+                                }
+                                Ok(None) => return command_error(message),
+                                Err(error) => {
+                                    return self.transaction_consensus_report_response(error).await;
+                                }
+                            }
+                        }
+                    };
+                    let admission = self
+                        .inner
+                        .consensus
+                        .start_transaction_commit(
+                            transaction_id.clone(),
+                            owner.clone(),
+                            self.transaction_activity(),
+                            prepared.expected_preview,
+                            prepared.report,
+                            prepared.plan,
+                        )
+                        .await;
+                    match admission {
+                        Ok(transaction) => break transaction,
+                        Err(error)
+                            if matches!(
+                                &error,
+                                ConsensusTransactionError::Mutation(
+                                    TransactionMutationError::PreviewStale { .. }
+                                        | TransactionMutationError::PlanningInputsChanged { .. }
+                                )
+                            ) =>
+                        {
+                            let refreshed = self
+                                .inner
+                                .consensus
+                                .current_transaction(&transaction_id)
+                                .await;
+                            let Some(refreshed) = refreshed else {
+                                return self.transaction_consensus_error_response(error).await;
+                            };
+                            current = refreshed;
+                        }
+                        Err(error) => {
+                            return self.transaction_consensus_error_response(error).await;
+                        }
+                    }
+                }
+                TransactionState::Committing(_) | TransactionState::Finished(_) => break current,
+            }
         };
         let finished = if matches!(committing.state, TransactionState::Finished(_)) {
             Ok(committing)
@@ -1321,7 +1539,7 @@ impl SessionServiceImpl {
         &self,
         transaction: &ReplicatedTransaction,
         candidate: &TransactionStatementRequest,
-    ) -> Result<CommandResult, String> {
+    ) -> Result<PreparedTransactionAdmission, String> {
         let mut statements = transaction
             .statements
             .iter()
@@ -1337,15 +1555,210 @@ impl SessionServiceImpl {
                     transaction_planning_error_message(&error)
                 )
             })?;
-        captured
+        let report = captured
             .plan
             .report()
             .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
-        Ok(Self::transaction_admission_result(
+        let report = TransactionReportArchive::new(transaction.id.clone(), report)
+            .map_err(|error| format!("transaction statement failed report archival: {error}"))?;
+        let result = Self::transaction_admission_result(
             &candidate.statement,
             &captured.plan,
             candidate.expected_position,
-        ))
+        );
+        let mut result = replicated_command_result(&result);
+        result.admission = Some(TransactionOperationAdmission {
+            operation: TransactionOperationNumber::from_index(candidate.expected_position)
+                .assured("an admitted candidate index is below the transaction queue limit"),
+            preview: report.identity().clone(),
+        });
+        Ok(PreparedTransactionAdmission { result, report })
+    }
+
+    async fn prepare_transaction_commit(
+        &self,
+        transaction: &ReplicatedTransaction,
+    ) -> Result<PreparedTransactionCommit, Report<TransactionCommitError>> {
+        let statements = transaction
+            .statements
+            .iter()
+            .map(|queued| queued.statement.clone())
+            .collect::<Vec<_>>();
+        let captured = self
+            .plan_transaction_statements(&transaction.domain, &statements, 0, false)
+            .await
+            .change_context(TransactionCommitError::PreparePlan {
+                id: transaction.id.clone(),
+            })?;
+        let report =
+            captured
+                .plan
+                .report()
+                .change_context(TransactionCommitError::PreparePlan {
+                    id: transaction.id.clone(),
+                })?;
+        let mut resolved_starts = BTreeMap::new();
+        for step in captured.plan.steps() {
+            tokio::task::consume_budget().await;
+            let PlannedTransactionStepKind::StartDomain { previous } = &step.kind else {
+                continue;
+            };
+            let operation = step.impact.operations().first();
+            let statement_index = step.impact.operations().first_index();
+            let queued = transaction.statements.get(statement_index).ok_or_else(|| {
+                Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                })
+            })?;
+            let Statement::StartDomain(start) = &queued.statement else {
+                return Err(Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                }));
+            };
+            let authority = if previous.config.pace.is_paced() {
+                Some(
+                    self.selected_domain_clock_authority(&transaction.domain)
+                        .await
+                        .ok_or_else(|| {
+                            Report::new(TransactionCommitError::PrepareClockAuthority {
+                                id: transaction.id.clone(),
+                                domain: transaction.domain.clone(),
+                            })
+                        })?,
+                )
+            } else {
+                None
+            };
+            let resolved = self
+                .resolve_domain_start(&transaction.domain, previous, &start.start)
+                .await
+                .change_context(TransactionCommitError::PrepareDomainStart {
+                    id: transaction.id.clone(),
+                    operation,
+                })?;
+            resolved_starts.insert(
+                operation,
+                TransactionResolvedDomainStart {
+                    start: resolved.concrete_start,
+                    clock: previous.config.pace.is_paced().then_some(resolved.clock),
+                    authority,
+                },
+            );
+        }
+        captured
+            .schedule_inputs
+            .validate_eligibility(self)
+            .await
+            .change_context(TransactionCommitError::PreparePlan {
+                id: transaction.id.clone(),
+            })?;
+        let ownership_transition_ids = captured
+            .plan
+            .steps()
+            .iter()
+            .filter(|step| !step.impact.planned().effects.ownership_moves.is_empty())
+            .map(|step| {
+                (
+                    step.impact.operations().first(),
+                    uuid::Uuid::now_v7().to_string(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let commit_plan = captured.plan.commit_plan(
+            transaction.id.clone(),
+            &ownership_transition_ids,
+            &resolved_starts,
+        );
+        let eligibility = captured.schedule_inputs.transaction_eligibility();
+        let commit_plan =
+            TransactionCommitAdmissionPlan::capture(commit_plan, captured.inputs, eligibility)
+                .change_context(TransactionCommitError::PreparePlan {
+                    id: transaction.id.clone(),
+                })?;
+        let report =
+            TransactionReportArchive::new(transaction.id.clone(), report).map_err(|error| {
+                Report::new(TransactionCommitError::ArchiveReport {
+                    id: transaction.id.clone(),
+                })
+                .attach(error)
+            })?;
+        let expected_preview = transaction
+            .latest_preview()
+            .cloned()
+            .unwrap_or_else(|| report.identity().clone());
+        Ok(PreparedTransactionCommit {
+            expected_preview,
+            report,
+            plan: commit_plan,
+        })
+    }
+
+    async fn fail_incomplete_transaction_commit(
+        &self,
+        transaction: &ReplicatedTransaction,
+        owner: &UserName,
+        failure: &Report<TransactionCommitError>,
+    ) -> Result<Option<ReplicatedTransaction>, Report<ConsensusTransactionError>> {
+        let statements = transaction
+            .statements
+            .iter()
+            .map(|queued| queued.statement.clone())
+            .collect::<Vec<_>>();
+        let captured = match self
+            .plan_transaction_statements(&transaction.domain, &statements, 0, true)
+            .await
+        {
+            Ok(captured) => captured,
+            Err(_) => return Ok(None),
+        };
+        let report = match captured.plan.report() {
+            Ok(report) => report,
+            Err(_) => return Ok(None),
+        };
+        if report.completeness().is_complete() {
+            return Ok(None);
+        }
+        let planned_operation = failure
+            .downcast_ref::<TransactionPlanningError>()
+            .and_then(TransactionPlanningError::operation);
+        let diagnosed_operation = report
+            .completeness()
+            .diagnostics()
+            .iter()
+            .find_map(|diagnostic| diagnostic.operation);
+        let first_operation = report
+            .execution_steps()
+            .first()
+            .map(|step| step.operations().first());
+        let Some(operation) = planned_operation
+            .or(diagnosed_operation)
+            .or(first_operation)
+        else {
+            return Ok(None);
+        };
+        let report = match TransactionReportArchive::new(transaction.id.clone(), report) {
+            Ok(report) => report,
+            Err(_) => return Ok(None),
+        };
+        let expected_preview = transaction
+            .latest_preview()
+            .cloned()
+            .unwrap_or_else(|| report.identity().clone());
+        let failed = self
+            .inner
+            .consensus
+            .fail_transaction_commit_admission(TransactionCommitAdmissionFailure {
+                id: transaction.id.clone(),
+                owner: owner.clone(),
+                activity: self.transaction_activity(),
+                expected_preview,
+                report,
+                inputs: captured.inputs,
+                operation,
+                error: transaction_commit_error_message(failure),
+            })
+            .await?;
+        Ok(Some(failed))
     }
 
     fn transaction_registry_mutation(
@@ -1414,18 +1827,40 @@ impl SessionServiceImpl {
             return command_error(format!("transaction '{id}' is unknown"));
         };
         let started = match &current.state {
-            TransactionState::Open(_) => match self
-                .inner
-                .consensus
-                .start_transaction_commit(
-                    id.clone(),
-                    subscriptions.user.clone(),
-                    self.transaction_activity(),
-                )
-                .await
-            {
-                Ok(transaction) => transaction,
-                Err(error) => return self.transaction_consensus_error_response(error).await,
+            TransactionState::Open(_) => match self.prepare_transaction_commit(&current).await {
+                Ok(prepared) => {
+                    match self
+                        .inner
+                        .consensus
+                        .start_transaction_commit(
+                            id.clone(),
+                            subscriptions.user.clone(),
+                            self.transaction_activity(),
+                            prepared.expected_preview,
+                            prepared.report,
+                            prepared.plan,
+                        )
+                        .await
+                    {
+                        Ok(transaction) => transaction,
+                        Err(error) => {
+                            return self.transaction_consensus_error_response(error).await;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let message = transaction_commit_error_message(&error);
+                    match self
+                        .fail_incomplete_transaction_commit(&current, &subscriptions.user, &error)
+                        .await
+                    {
+                        Ok(Some(transaction)) => transaction,
+                        Ok(None) => return command_error(message),
+                        Err(error) => {
+                            return self.transaction_consensus_report_response(error).await;
+                        }
+                    }
+                }
             },
             TransactionState::Committing(_) => current,
             TransactionState::Finished(_) => {
@@ -1435,29 +1870,32 @@ impl SessionServiceImpl {
         };
         let finished = if matches!(started.state, TransactionState::Finished(_)) {
             Ok(started)
-        } else if started.statements.is_empty() {
-            self.inner
-                .consensus
-                .finish_empty_transaction_commit(id.clone(), current_timestamp())
-                .await
-                .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
         } else {
-            // A replicated commit owns its execution independently of the session. Keep its
-            // model-mutation future off the session's poll stack as well.
-            let service = self.clone();
-            let commit_id = id.clone();
-            let commit = self
-                .inner
-                .service_tasks
-                .spawn(async move { service.execute_replicated_commit(&commit_id).await })
-                .await;
-            match commit {
-                Ok(Some(result)) => result,
-                Ok(None) => Err(Report::new(TransactionCommitError::ShutdownCancelled {
-                    id: id.clone(),
-                })),
-                Err(error) => Err(Report::new(error)
-                    .change_context(TransactionCommitError::TaskJoin { id: id.clone() })),
+            if started.statements.is_empty() {
+                self.pause_transaction_commit_if_armed(&started).await;
+                self.inner
+                    .consensus
+                    .finish_empty_transaction_commit(id.clone(), current_timestamp())
+                    .await
+                    .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
+            } else {
+                // A replicated commit owns its execution independently of the session. Keep its
+                // model-mutation future off the session's poll stack as well.
+                let service = self.clone();
+                let commit_id = id.clone();
+                let commit = self
+                    .inner
+                    .service_tasks
+                    .spawn(async move { service.execute_replicated_commit(&commit_id).await })
+                    .await;
+                match commit {
+                    Ok(Some(result)) => result,
+                    Ok(None) => Err(Report::new(TransactionCommitError::ShutdownCancelled {
+                        id: id.clone(),
+                    })),
+                    Err(error) => Err(Report::new(error)
+                        .change_context(TransactionCommitError::TaskJoin { id: id.clone() })),
+                }
             }
         };
         match finished {
@@ -1517,6 +1955,7 @@ impl SessionServiceImpl {
             .ok_or_else(|| {
                 Report::new(TransactionCommitError::UnknownTransaction { id: id.to_string() })
             })?;
+        self.pause_transaction_commit_if_armed(&transaction).await;
         let result = if matches!(transaction.state, TransactionState::Finished(_)) {
             Ok(transaction)
         } else {
@@ -1579,7 +2018,7 @@ impl SessionServiceImpl {
                 }
             }
             let first_statement = progress.next_statement;
-            let Some(first) = transaction.statements.get(first_statement) else {
+            let Some(_) = transaction.statements.get(first_statement) else {
                 return Box::pin(
                     self.inner
                         .consensus
@@ -1590,48 +2029,46 @@ impl SessionServiceImpl {
             };
             Box::pin(self.recover_transaction_quiescence(&transaction, first_statement)).await?;
 
-            let mut step_end = first_statement
-                .checked_add(1)
-                .assured("the next commit statement is in the transaction statement sequence");
-            if first.statement.is_model_mutation() {
-                while transaction
-                    .statements
-                    .get(step_end)
-                    .is_some_and(|queued| queued.statement.is_model_mutation())
-                {
-                    step_end = step_end
-                        .checked_add(1)
-                        .assured("a transaction statement count is below usize::MAX");
-                }
-            }
-            let remaining = transaction
-                .statements
-                .get(first_statement..step_end)
-                .verified("the exact commit step is bounded by the transaction statement sequence")
-                .iter()
-                .map(|queued| queued.statement.clone())
-                .collect::<Vec<_>>();
-            let captured = Box::pin(self.plan_transaction_statements(
+            let plan_step_index = progress.results.len();
+            let stored_step = Box::pin(
+                self.inner
+                    .consensus
+                    .current_transaction_commit_step(id, plan_step_index),
+            )
+            .await
+            .map_err(|_| {
+                Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                })
+            })?;
+            let stored_impact = stored_step.decision.impact.clone();
+            let admitted_kind = stored_step.decision.kind.clone();
+            let previous = stored_step.inputs.state().cloned().ok_or_else(|| {
+                Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                })
+            })?;
+            let expected_schedule = stored_step.inputs.schedule().cloned();
+            let current_models = self
+                .inner
+                .registry
+                .transaction_planning_models(&transaction.domain);
+            let planned_step = match Registry::restore_transaction_commit_step(
                 &transaction.domain,
-                &remaining,
-                first_statement,
-                false,
-            ))
-            .await;
-            let captured = match captured {
-                Ok(captured) => captured,
+                current_models,
+                previous,
+                expected_schedule,
+                stored_step.decision,
+            ) {
+                Ok(planned_step) => planned_step,
                 Err(error) => {
-                    let planning_error = transaction_planning_error_message(&error);
-                    let message =
-                        format!("transaction step failed refreshed preflight: {planning_error}");
-                    let impact = failed_transaction_step_impact(
-                        first_statement,
-                        remaining.len(),
-                        planning_error,
+                    let message = format!(
+                        "transaction step could not restore its admitted plan: {}",
+                        transaction_planning_error_message(&error)
                     );
                     let advanced = Box::pin(self.record_transaction_step(
                         &transaction,
-                        impact,
+                        stored_impact,
                         command_error(message),
                         None,
                     ))
@@ -1642,14 +2079,21 @@ impl SessionServiceImpl {
                     .await;
                 }
             };
-            let planned_step = captured.plan.first_step().cloned().ok_or_else(|| {
-                Report::new(TransactionCommitError::InvalidProgress {
-                    id: transaction.id.clone(),
-                })
-            })?;
             let planned_range = planned_step.impact.operations();
-            let operation_impacts = captured
-                .plan
+            let Some(commit_plan) = transaction.commit_plan() else {
+                return Err(Report::new(TransactionCommitError::InvalidProgress {
+                    id: transaction.id.clone(),
+                }));
+            };
+            let preview = &commit_plan.preview;
+            let report = Box::pin(self.inner.consensus.current_transaction_report(preview))
+                .await
+                .map_err(|_| {
+                    Report::new(TransactionCommitError::InvalidProgress {
+                        id: transaction.id.clone(),
+                    })
+                })?;
+            let operation_impacts = report
                 .operations()
                 .iter()
                 .filter(|operation| planned_range.contains(operation.number))
@@ -1686,8 +2130,8 @@ impl SessionServiceImpl {
                         first_statement,
                         planned_step,
                         operations: operation_impacts,
-                        inputs: captured.inputs,
-                        schedule_inputs: captured.schedule_inputs,
+                        inputs: stored_step.inputs,
+                        eligibility: stored_step.eligibility,
                         outcome: &outcome,
                     }),
                 ))
@@ -1695,7 +2139,17 @@ impl SessionServiceImpl {
                 let recorded = outcome.lock().take();
                 let advanced = match recorded {
                     Some(Ok(transaction)) => transaction,
-                    Some(Err(error)) => return Err(error),
+                    Some(Err(error)) => match error.current_context().planning_input_conflict() {
+                        Some(reason) => {
+                            Box::pin(self.record_transaction_planning_conflict(
+                                &transaction,
+                                planned_impact,
+                                reason,
+                            ))
+                            .await?
+                        }
+                        None => return Err(error),
+                    },
                     None if result.kind == i32::from(CommandResultKind::NotLeader) => {
                         return Err(Report::new(TransactionCommitError::Proposal(
                             ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
@@ -1728,8 +2182,9 @@ impl SessionServiceImpl {
                 &transaction,
                 first_statement,
                 planned_step,
-                captured.inputs,
-                captured.schedule_inputs,
+                stored_step.inputs,
+                stored_step.eligibility,
+                admitted_kind,
             ))
             .await?;
             if matches!(advanced.state, TransactionState::Finished(_)) {
@@ -2028,9 +2483,27 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn record_transaction_step(
         &self,
         transaction: &ReplicatedTransaction,
+        impact: ExecutionStepImpactReport,
+        result: CommandResult,
+        effect: Option<TransactionStepEffect>,
+    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
+        self.record_transaction_step_with_failure(
+            transaction,
+            impact,
+            result,
+            effect,
+            TransactionStepFailure::Operation,
+        )
+        .await
+    }
+
+    async fn record_transaction_step_with_failure(
+        &self,
+        transaction: &ReplicatedTransaction,
         mut impact: ExecutionStepImpactReport,
         result: CommandResult,
         effect: Option<TransactionStepEffect>,
+        failure: TransactionStepFailure,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
         let operations = impact.operations();
         let first_statement = operations.first_index();
@@ -2042,13 +2515,26 @@ impl SessionServiceImpl {
             (next_statement == transaction.statements.len())
                 .then_some(TransactionOutcome::Committed)
         } else {
-            Some(TransactionOutcome::Failed {
-                failing_step: first_statement,
-                error: result.message.clone(),
-            })
+            Some(failure.outcome(first_statement, result.message.clone()))
         };
         let effect = if result.success { effect } else { None };
-        *impact.actual_mut() = ActualExecutionStepImpact::applying();
+        let actual_effects = if result.success {
+            impact.planned().effects.clone()
+        } else {
+            Default::default()
+        };
+        *impact.actual_mut() = ActualExecutionStepImpact {
+            outcome: nervix_models::ExecutionStepOutcome::Applying,
+            quiescence: Vec::new(),
+            effects: actual_effects,
+        };
+        let mut replicated_result = replicated_command_result(&result);
+        if statement_count == 1 {
+            replicated_result.admission = transaction
+                .statements
+                .get(first_statement)
+                .and_then(|statement| statement.admission.admission.clone());
+        }
         self.inner
             .consensus
             .advance_transaction_commit(TransactionCommitAdvance {
@@ -2058,7 +2544,7 @@ impl SessionServiceImpl {
                 at: current_timestamp(),
                 result: TransactionStepResult {
                     impact,
-                    result: replicated_command_result(&result),
+                    result: replicated_result,
                 },
                 effect,
                 completion,
@@ -2067,20 +2553,45 @@ impl SessionServiceImpl {
             .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))
     }
 
+    async fn record_transaction_planning_conflict(
+        &self,
+        transaction: &ReplicatedTransaction,
+        impact: ExecutionStepImpactReport,
+        reason: impl std::fmt::Display,
+    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
+        let result = command_error(format!("transaction planning inputs changed: {reason}"));
+        let applying = self
+            .record_transaction_step_with_failure(
+                transaction,
+                impact,
+                result,
+                None,
+                TransactionStepFailure::PlanningInputsChanged,
+            )
+            .await?;
+        self.record_transaction_application_completion(&applying, None)
+            .await
+    }
+
     async fn execute_transaction_configuration_step(
         &self,
         transaction: &ReplicatedTransaction,
         statement_index: usize,
         planned_step: PlannedTransactionStep,
         inputs: DomainPlanningInputs,
-        schedule_inputs: DomainSchedulePlanningSnapshot,
+        eligibility: TransactionScheduleEligibility,
+        admitted_kind: TransactionCommitStepKind,
     ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
-        let queued = transaction.statements.get(statement_index).verified(
+        transaction.statements.get(statement_index).verified(
             "the caller checked this index against the same statement list before dispatching the \
              step",
         );
         let impact = planned_step.impact;
         let planned_kind = planned_step.kind;
+        let resolved_start = match admitted_kind {
+            TransactionCommitStepKind::StartDomain { resolved, .. } => Some(resolved),
+            _ => None,
+        };
         let mut ownership_handoff = None;
         let domain_id = &transaction.domain;
         let _alter_guard = if let PlannedTransactionStepKind::AlterDomain { .. } = &planned_kind {
@@ -2105,18 +2616,17 @@ impl SessionServiceImpl {
         };
         if matches!(planned_kind, PlannedTransactionStepKind::AlterDomain { .. }) {
             if let Err(error) = self.validate_domain_planning_inputs(&inputs).await {
-                return Err(Report::new(TransactionCommitError::Proposal(
-                    ConsensusTransactionError::Consensus(ConsensusError::Conflict(
-                        error.to_string(),
-                    )),
-                )));
+                return self
+                    .record_transaction_planning_conflict(transaction, impact, error)
+                    .await;
             }
-            if let Err(error) = schedule_inputs.validate_eligibility(self).await {
-                return Err(Report::new(TransactionCommitError::Proposal(
-                    ConsensusTransactionError::Consensus(ConsensusError::Conflict(
-                        error.to_string(),
-                    )),
-                )));
+            if let Err(error) = self
+                .validate_transaction_schedule_eligibility(&eligibility)
+                .await
+            {
+                return self
+                    .record_transaction_planning_conflict(transaction, impact, error)
+                    .await;
             }
         }
         let (result, effect) = match planned_kind {
@@ -2135,14 +2645,8 @@ impl SessionServiceImpl {
                         None,
                     )
                 } else {
-                    let mut schedule = plan.schedule;
+                    let schedule = plan.schedule;
                     let ownership_gate = plan.ownership_gate;
-                    if let Some(schedule) = schedule.as_mut() {
-                        mark_complete_ownership_transitions(
-                            plan.expected_schedule.as_ref(),
-                            schedule,
-                        );
-                    }
                     let handoff = if relocations > 0 {
                         self.begin_planned_ownership_handoff_with_exact_gate(
                             domain_id,
@@ -2198,53 +2702,18 @@ impl SessionServiceImpl {
                     )
                 }
             }
-            PlannedTransactionStepKind::StartDomain { previous } => {
-                let Statement::StartDomain(start) = &queued.statement else {
-                    return Err(Report::new(TransactionCommitError::InvalidProgress {
-                        id: transaction.id.clone(),
-                    }));
-                };
-                let authority = if previous.config.pace.is_paced() {
-                    match self.selected_domain_clock_authority(domain_id).await {
-                        Some(authority) => Ok(Some(authority)),
-                        None => Err(format!(
-                            "no live voter is available to own the clock for domain '{}'",
-                            domain_id.as_str()
-                        )),
-                    }
-                } else {
-                    Ok(None)
-                };
-                match authority {
-                    Ok(authority) => {
-                        match self
-                            .resolve_domain_start(domain_id, &previous, &start.start)
-                            .await
-                        {
-                            Ok(resolved_start) => (
-                                command_ok(format!("starting domain '{}'", domain_id.as_str())),
-                                Some(TransactionStepEffect::StartDomain {
-                                    inputs: Box::new(inputs),
-                                    start: resolved_start.concrete_start,
-                                    clock: previous
-                                        .config
-                                        .pace
-                                        .is_paced()
-                                        .then_some(resolved_start.clock),
-                                    authority,
-                                }),
-                            ),
-                            Err(error) => (
-                                command_error(format!(
-                                    "failed to construct domain clock start for '{}': {error}",
-                                    domain_id.as_str()
-                                )),
-                                None,
-                            ),
-                        }
-                    }
-                    Err(message) => (command_error(message), None),
-                }
+            PlannedTransactionStepKind::StartDomain { .. } => {
+                let resolved = resolved_start
+                    .verified("a restored START step retains its exact admitted clock decision");
+                (
+                    command_ok(format!("starting domain '{}'", domain_id.as_str())),
+                    Some(TransactionStepEffect::StartDomain {
+                        inputs: Box::new(inputs),
+                        start: resolved.start,
+                        clock: resolved.clock,
+                        authority: resolved.authority,
+                    }),
+                )
             }
             PlannedTransactionStepKind::StopDomain => (
                 command_ok(format!("stopped domain '{}'", domain_id.as_str())),
@@ -2260,6 +2729,7 @@ impl SessionServiceImpl {
         };
 
         let succeeded = result.success;
+        let planned_impact = impact.clone();
         let advanced = match self
             .record_transaction_step(transaction, impact, result, effect)
             .await
@@ -2270,7 +2740,12 @@ impl SessionServiceImpl {
                     self.abort_planned_ownership_handoff(domain_id, handoff)
                         .await;
                 }
-                return Err(error);
+                let Some(reason) = error.current_context().planning_input_conflict() else {
+                    return Err(error);
+                };
+                return self
+                    .record_transaction_planning_conflict(transaction, planned_impact, reason)
+                    .await;
             }
         };
         self.pause_transaction_commit_if_armed(&advanced).await;
@@ -2520,5 +2995,5 @@ impl SessionServiceImpl {
 }
 
 #[cfg(test)]
-#[path = "transaction_tests.rs"]
+#[path = "transaction/tests.rs"]
 mod tests;

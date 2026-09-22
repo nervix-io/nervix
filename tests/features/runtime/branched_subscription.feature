@@ -1,4 +1,80 @@
 Feature: Branched session subscriptions
+  Scenario Outline: Session subscriptions mask sensitive branch-key fields
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA incoming_notification (
+        tenant STRING SENSITIVE,
+        user_id I64
+      );
+
+      CREATE SCHEMA public_notification (
+        tenant STRING SENSITIVE,
+        user_id I64
+      );
+
+      CREATE WIRE JSON SCHEMA incoming_notification_wire MODE STRICT (
+        tenant string,
+        user_id integer
+      );
+
+      CREATE CODEC incoming_notification_codec
+        FROM WIRE JSON SCHEMA incoming_notification_wire
+        TO SCHEMA incoming_notification;
+
+      CREATE SCHEMA sensitive_tenant_branch (
+        tenant STRING SENSITIVE
+      );
+
+      CREATE BRANCH by_sensitive_tenant
+        SCHEMA sensitive_tenant_branch TTL 5m;
+
+      CREATE RELAY public_notifications
+        SCHEMA public_notification
+        BRANCHED BY by_sensitive_tenant;
+
+      CREATE VHOST edge sensitive-branch-{{test_id}}.example.com;
+      CREATE ENDPOINT sensitive_branch_ingress
+        ON edge
+        PATH '/ingest'
+        TYPE HTTP;
+
+      CREATE INGESTOR sensitive_branch_source
+        FROM ENDPOINT sensitive_branch_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING incoming_notification_codec
+        TO public_notifications
+          SET tenant = message.tenant,
+              user_id = message.user_id
+          BRANCHED BY by_sensitive_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+
+      CREATE SUBSCRIPTION public_notifications_subscription TO public_notifications;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "sensitive-branch-{{test_id}}.example.com" path "/ingest"
+      """
+      {"tenant":"acme-secret","user_id":42}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      "user_id":42
+      """
+    And the last relay subscription payload masks field "tenant"
+    And the last relay subscription payload does not contain "acme-secret"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: Session subscriptions collect records from all branched branches
     Given MQTT is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"

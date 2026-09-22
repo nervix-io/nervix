@@ -424,6 +424,31 @@ every branch in the schedule publication that commits it, so the new module star
 without guest state. See
 [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects).
 
+#### Coordinated reset
+
+The control plane can replace the state lifetime of the explicit unbranched instance, one concrete
+branch, or every branch of a WASM processor. One-branch reset leaves every sibling generation and
+task intact. All-branches reset advances the processor's shared generation and also covers branches
+that currently exist only as stored checkpoints, so a later appearance cannot restore their old
+state.
+
+The owner first stops selected live instances at their callback boundary, initializes fresh guests
+without calling `nervix_load_state`, and captures each fresh `nervix_dump_state` result. No durable
+identity has changed yet; an initialization failure restores the stopped instances. The control
+plane then publishes the new generation as `Publishing`. From that point, the old checkpoints are
+unreachable and the operation cannot roll back. The owner durably publishes the selected branch
+lifecycle, writes the first checkpoint of each fresh guest, and waits for the assigned replicas
+before the schedule becomes `Ready` and input resumes.
+
+Accepted input drains before the stop boundary, and its buffered output and acknowledgements are
+finalized once. Work still suspended on materialized state is discarded and negatively acknowledged.
+Timeout handles and remaining guest-local capabilities are not copied into the fresh lifetime. A
+pre-publication failure reports an ordinary reset failure with the old lifetime still usable. A
+post-publication failure reports a committed but unusable reset; retrying the same stable request
+reference resumes its initial checkpoints without advancing the generation again. Restart, owner
+failover, and an offline replica follow the same published generation, and no stale former owner can
+make an older checkpoint current.
+
 A checkpoint of an instance whose generation or ownership has already moved on is refused before
 anything is saved, persisted or replicated, and is reported as a `state authority check` failure.
 Checkpoints are written to the node's state store on its storage workers, never on the worker that

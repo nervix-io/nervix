@@ -2,12 +2,17 @@
 
 use error_stack::Report;
 use flatbuffers::WIPOffset;
-use nervix_models::{CommandExecutionReference, TransactionPreviewIdentity};
+use nervix_models::{
+    CommandExecutionReference, TransactionOperationAdmission, TransactionPreviewIdentity,
+};
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, OutcomeOrigin},
-    transaction::{TransactionStatus, decode_preview_identity, encode_preview_identity},
+    transaction::{
+        TransactionStatus, decode_operation_number, decode_preview_identity,
+        encode_operation_number, encode_preview_identity,
+    },
     wire,
 };
 
@@ -318,6 +323,8 @@ pub struct CommandOutcome {
     pub statements: Vec<StatementOutcome>,
     /// The transaction this session was bound to while serving the command.
     pub transaction: Option<TransactionStatus>,
+    /// Stable operation metadata when the command accepted one transaction append.
+    pub transaction_admission: Option<TransactionOperationAdmission>,
 }
 
 impl CommandOutcome {
@@ -342,6 +349,19 @@ impl CommandOutcome {
             Some(transaction) => Some(transaction.encode(encoder)?),
             None => None,
         };
+        let transaction_admission = match &self.transaction_admission {
+            Some(admission) => {
+                let preview = encode_preview_identity(encoder, &admission.preview)?;
+                Some(wire::TransactionOperationAdmission::create(
+                    encoder.fbb(),
+                    &wire::TransactionOperationAdmissionArgs {
+                        operation: encode_operation_number(admission.operation),
+                        preview: Some(preview),
+                    },
+                ))
+            }
+            None => None,
+        };
         let outcome = wire::CommandOutcome::create(
             encoder.fbb(),
             &wire::CommandOutcomeArgs {
@@ -353,6 +373,7 @@ impl CommandOutcome {
                 diagnostics: Some(diagnostics),
                 statements: Some(statements),
                 transaction,
+                transaction_admission,
             },
         );
         Ok(EncodedUnion::new(wire::ReplyBody::CommandOutcome, outcome))
@@ -389,6 +410,17 @@ impl CommandOutcome {
             Some(transaction) => Some(TransactionStatus::decode(decoder, transaction)?),
             None => None,
         };
+        let transaction_admission = match outcome.transaction_admission() {
+            Some(admission) => Some(TransactionOperationAdmission {
+                operation: decode_operation_number(
+                    decoder,
+                    "TransactionOperationAdmission.operation",
+                    admission.operation(),
+                )?,
+                preview: decode_preview_identity(decoder, admission.preview())?,
+            }),
+            None => None,
+        };
         Ok(Self {
             execution_reference,
             origin,
@@ -397,6 +429,7 @@ impl CommandOutcome {
             diagnostics,
             statements,
             transaction,
+            transaction_admission,
         })
     }
 }

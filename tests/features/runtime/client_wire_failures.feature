@@ -262,21 +262,24 @@ Feature: Client wire failure regressions
         TO relocation_offsets INHERIT ALL
         BRANCHED BY relocation_by_tenant
         SET tenant = 'tenant'
-        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
-        ON MESSAGE ERROR LOG
-        ON GENERAL ERROR LOG;
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      START;
+      """
+    Then within "5s" DESCRIBE INGESTOR "relocation_offset_source" on the leader node contains
+      """
+      kafka observed partitions: 0
+      """
+    When these NSPL commands are executed on the leader node
+      """
       CREATE JUNCTION relocation_route FROM relocation_input UNBRANCHED
         TO relocation_output INHERIT ALL
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG;
-      START;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "junction" "relocation_route" is saved as placeholder "source_owner"
     And the first replica for scheduled "junction" "relocation_route" in the last cluster status is saved as placeholder "relocation_target"
-    And within "5s" DESCRIBE INGESTOR "relocation_offset_source" on the leader node contains
-      """
-      kafka observed partitions: 0
-      """
     Given relocation publication for domain "{{domain}}" pauses after planning
     When these NSPL commands begin executing in the background
       """

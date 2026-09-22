@@ -8,7 +8,10 @@
 //! - **Must not know.** How a transaction is inspected, planned, persisted, transported or
 //!   presented.
 
-use super::{ImpactPlanningBasis, TransactionPosition};
+use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
+use serde::{Deserialize, Serialize};
+
+use super::{ImpactPlanningBasis, TransactionOperationNumber, TransactionPosition};
 
 /// Which transaction an inspection reads.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -25,9 +28,34 @@ pub enum TransactionInspectionTarget {
 /// The identity covers the transaction, the accepted-operation position the preview described and
 /// the planning basis it was planned from, so a commit can refuse a preview that no longer
 /// describes the transaction before any of its effects apply.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 pub struct TransactionPreviewIdentity {
     pub transaction_id: String,
     pub position: TransactionPosition,
     pub planning_basis: ImpactPlanningBasis,
+}
+
+/// The stable operation number and whole-transaction preview returned by an accepted append.
+///
+/// An exact retry returns this same value, allowing a client to advance its queue position and
+/// commit basis from the one durable admission result.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct TransactionOperationAdmission {
+    pub operation: TransactionOperationNumber,
+    pub preview: TransactionPreviewIdentity,
 }

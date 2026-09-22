@@ -117,6 +117,26 @@ identity. Prepared handoff state persists it in the sole current stored shape an
 before activation or cleanup after a restart. The handoff's committed schedule-transition ID still
 names the schedule change; it does not authorize coordination traffic.
 
+A coordinated WASM guest-state reset uses the same authenticated coordination identity and adds its
+typed reset scope to the entity-gate purpose. Engagement publishes a branch-selective relay fence:
+one concrete fingerprint, the explicit unbranched instance, or all concrete branches. A retry must
+match the complete domain, relay and entity set, purpose, and scope. It cannot widen a one-branch
+hold or release another reset's hold.
+
+The management pool exposes one typed coordinator request for internal administrative, SDK, and
+recovery callers. It carries the stable execution reference and exact reset target to the leader,
+which runs the single control-plane operation. Its lower-level runtime requests have three actions.
+`Prepare` reaches only the scheduled processor owner and creates fresh guest state while retaining
+enough stopped branch state to abort before publication. `ActivateCommittedSchedule` reaches every
+gate participant, applying the committed schedule locally to replicas before the owner writes and
+replicates its initial checkpoint. This ordered activation does not join the ordinary cluster-wide
+runtime-revision barrier: an owner whose initial checkpoint failed is the node that keeps that
+barrier incomplete. The background runtime applicator still owns the node's prepared and ready
+revision observations. `Abort` is valid only before publication and restores the retained branch
+tasks. Responses carry the complete classified failure chain. A transport success proves only that
+the receiver performed the requested action; the Raft-backed `Publishing` and `Ready` schedule
+phases remain the durability and usability boundaries.
+
 The coordinator records every destination as an attempted participant before sending its prepare
 request. A timeout, cancellation, or missing response after the destination persisted the request
 therefore remains explicit cleanup work. A participant that refuses capture, preparation, forced
@@ -502,6 +522,13 @@ current one.
 The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
 activate after a later one is committed.
+
+The same rule fences a coordinated reset. Once its `Publishing` schedule is committed, every
+runtime-state request for the replaced WASM generation is stale even while the new initial
+checkpoint is still being made durable. Replicas that were offline install the committed schedule
+before accepting state, then synchronize only the new placement. A reset does not delete old bytes
+through an unbounded cluster sweep; generation-addressed reads make them unreachable immediately,
+and the existing bounded state-store retention removes them locally.
 
 A replica acknowledges a branch-state checkpoint — WASM guest state, deduplicator and window state,
 and the branch lifecycle that names the branches — only after it has written the checkpoint to its

@@ -49,6 +49,10 @@ impl ConfiguredFaultInjection {
         false
     }
 
+    pub(in crate::runtime) fn wasm_state_reset_fresh_initialization_fails(&self) -> bool {
+        false
+    }
+
     pub(in crate::runtime) fn state_replica_installation_fails(&self) -> bool {
         false
     }

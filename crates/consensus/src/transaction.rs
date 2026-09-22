@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use arch_into::ArchInto as _;
+use error_stack::Report;
 use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
@@ -8,14 +9,21 @@ use nervix_models::{
     ClusterNodeIdentity, CommandExecutionReference, DomainClockState, DomainName, DomainSchedule,
     DomainStartPoint, DomainState, ExecutionStepImpactReport, ExecutionStepOutcome,
     ImpactDiagnostic, ImpactDiagnosticKind, ResourceName, Statement, Timestamp,
-    TransactionOperationRange, UserName,
+    TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPreviewIdentity, UserName,
+};
+pub use nervix_models::{
+    TransactionCommitPlan, TransactionCommitPlanHeader, TransactionCommitPlanStep,
+    TransactionCommitStepKind, TransactionEntityGatePlan, TransactionModelTransition,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::IntoStaticStr;
 use thiserror::Error;
 
-use crate::{DomainMutationLease, DomainMutationOwner, DomainPlanningInputs};
+use crate::{
+    DomainMutationLease, DomainMutationOwner, DomainPlanningInputs, TransactionReportArchive,
+};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -56,6 +64,7 @@ impl TransactionStatement {
                 message: "admitted".to_string(),
                 diagnostics: Vec::new(),
                 already_existed: false,
+                admission: None,
             },
         )
     }
@@ -94,10 +103,44 @@ pub struct TransactionQueueLimits {
     pub max_source_bytes: u64,
 }
 
+/// Everything one consensus proposal needs to admit a transaction statement and its preview.
+#[derive(Debug)]
+pub struct TransactionQueueRequest {
+    pub id: String,
+    pub owner: UserName,
+    pub domain: DomainName,
+    pub activity: TransactionActivity,
+    pub statement: TransactionStatement,
+    pub report: TransactionReportArchive,
+    pub limits: TransactionQueueLimits,
+}
+
+/// A complete, side-effect-free planning failure proposed against one identified preview.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct TransactionCommitAdmissionFailure {
+    pub id: String,
+    pub owner: UserName,
+    pub activity: TransactionActivity,
+    pub expected_preview: TransactionPreviewIdentity,
+    pub report: TransactionReportArchive,
+    pub inputs: DomainPlanningInputs,
+    pub operation: TransactionOperationNumber,
+    pub error: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionQueueAdmission {
     New,
     Existing(TransactionCommandResult),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransactionQueueDecision {
+    Added,
+    Existing,
+    Expired,
 }
 
 #[derive(
@@ -117,6 +160,7 @@ pub struct TransactionCommandResult {
     pub message: String,
     pub diagnostics: Vec<TransactionDiagnostic>,
     pub already_existed: bool,
+    pub admission: Option<TransactionOperationAdmission>,
 }
 
 #[derive(
@@ -142,22 +186,38 @@ impl TransactionStepResult {
 }
 
 #[cfg(test)]
-pub(crate) fn test_step_impact(
-    first_statement: usize,
-    statement_count: usize,
-) -> ExecutionStepImpactReport {
-    let operations =
-        TransactionOperationRange::from_index_and_count(first_statement, statement_count)
-            .assured("test transaction steps use non-empty addressable statement ranges");
-    ExecutionStepImpactReport::new(
-        operations,
-        nervix_models::PlannedExecutionStepImpact {
-            completeness: nervix_models::ImpactReportCompleteness::Complete,
-            pause: nervix_models::PauseRequirement::NoPause,
-            effects: nervix_models::ImpactEffects::default(),
+pub(crate) fn test_commit_plan(
+    transaction_id: &str,
+    operation_count: usize,
+) -> TransactionCommitPlan {
+    let domain = DomainName::parse("tenant")
+        .assured("the test transaction domain is an identifier-shaped literal");
+    let report = crate::transaction_report::test_report(&domain, operation_count);
+    let steps = report
+        .execution_steps()
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, impact)| {
+            let resource = format!("resource_{index}");
+            TransactionCommitPlanStep {
+                impact,
+                kind: TransactionCommitStepKind::CreateResource {
+                    resource: ResourceName::parse(&resource)
+                        .assured("the bounded test index produces an identifier-shaped resource"),
+                    already_existed: false,
+                },
+            }
+        })
+        .collect();
+    TransactionCommitPlan {
+        preview: TransactionPreviewIdentity {
+            transaction_id: transaction_id.to_string(),
+            position: nervix_models::TransactionPosition::new(operation_count),
+            planning_basis: nervix_models::ImpactPlanningBasis::new([1; 32]),
         },
-        nervix_models::ActualExecutionStepImpact::applying(),
-    )
+        steps,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,7 +273,15 @@ pub struct TransactionApplyingStep {
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionOutcome {
     Committed,
-    Failed { failing_step: usize, error: String },
+    Failed {
+        failing_step: usize,
+        error: String,
+    },
+    #[strum(serialize = "FAILED")]
+    PlanningInputsChanged {
+        failing_step: usize,
+        error: String,
+    },
     Reverted,
     Expired,
 }
@@ -305,6 +373,13 @@ enum OpenActivityDecision {
     NotOpen,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransactionCommitFailureDecision {
+    Failed,
+    Expired,
+    Existing,
+}
+
 impl TransactionState {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -334,6 +409,8 @@ pub struct ReplicatedTransaction {
     pub statement_count: usize,
     pub queued_source_bytes: u64,
     pub statements: Vec<TransactionStatement>,
+    latest_preview: Option<TransactionPreviewIdentity>,
+    commit_plan: Option<TransactionCommitPlanHeader>,
     mutation_owner: DomainMutationOwner,
 }
 
@@ -380,6 +457,8 @@ impl ReplicatedTransaction {
             statement_count: 0,
             queued_source_bytes: 0,
             statements: Vec::new(),
+            latest_preview: None,
+            commit_plan: None,
             mutation_owner,
         }
     }
@@ -453,6 +532,26 @@ impl ReplicatedTransaction {
             TransactionState::Finished(finished) => Some(&finished.outcome),
             TransactionState::Open(_) | TransactionState::Committing(_) => None,
         }
+    }
+
+    pub fn latest_preview(&self) -> Option<&TransactionPreviewIdentity> {
+        self.latest_preview.as_ref()
+    }
+
+    pub(crate) fn set_latest_preview(&mut self, preview: TransactionPreviewIdentity) {
+        self.latest_preview = Some(preview);
+    }
+
+    pub fn commit_plan(&self) -> Option<&TransactionCommitPlanHeader> {
+        self.commit_plan.as_ref()
+    }
+
+    pub(crate) fn has_commit_admission(&self, plan: &TransactionCommitPlanHeader) -> bool {
+        self.commit_plan.as_ref() == Some(plan)
+            && matches!(
+                &self.state,
+                TransactionState::Committing(_) | TransactionState::Finished(_)
+            )
     }
 
     pub(crate) fn ensure_owner(&self, owner: &UserName) -> Result<(), TransactionMutationError> {
@@ -579,16 +678,18 @@ impl ReplicatedTransaction {
         outcome_revision: u64,
         statement: TransactionStatement,
         limits: TransactionQueueLimits,
-    ) -> Result<(), TransactionMutationError> {
+    ) -> Result<TransactionQueueDecision, TransactionMutationError> {
         self.ensure_owner(owner)?;
         self.ensure_domain(domain)?;
         match self.expire_open_if_inactive(activity, outcome_revision) {
             OpenActivityDecision::Active => {}
-            OpenActivityDecision::Expired => return Ok(()),
+            OpenActivityDecision::Expired => return Ok(TransactionQueueDecision::Expired),
             OpenActivityDecision::NotOpen => return Err(self.not_open_error()),
         }
         match self.queue_admission(owner, domain, &statement.request, limits)? {
-            TransactionQueueAdmission::Existing(_) => return Ok(()),
+            TransactionQueueAdmission::Existing(_) => {
+                return Ok(TransactionQueueDecision::Existing);
+            }
             TransactionQueueAdmission::New => {}
         }
         let TransactionState::Open(current) = &mut self.state else {
@@ -605,7 +706,7 @@ impl ReplicatedTransaction {
             .verified("the admission check above bounds the count by the statement limit");
         self.queued_source_bytes = next_source_bytes;
         self.statements.push(statement);
-        Ok(())
+        Ok(TransactionQueueDecision::Added)
     }
 
     pub(crate) fn start_commit(
@@ -614,6 +715,7 @@ impl ReplicatedTransaction {
         activity: TransactionActivity,
         outcome_revision: u64,
         domain_mutation: Option<DomainMutationLease>,
+        commit_plan: TransactionCommitPlanHeader,
     ) -> Result<(), TransactionMutationError> {
         self.ensure_owner(owner)?;
         match self.expire_open_if_inactive(activity, outcome_revision) {
@@ -626,6 +728,8 @@ impl ReplicatedTransaction {
         };
         current.renew(activity);
         let last_activity_at = current.last_activity_at();
+        self.latest_preview = Some(commit_plan.preview.clone());
+        self.commit_plan = Some(commit_plan);
         self.state = TransactionState::Committing(Box::new(TransactionCommitProgress {
             last_activity_at,
             next_statement: 0,
@@ -634,6 +738,70 @@ impl ReplicatedTransaction {
             domain_mutation,
         }));
         Ok(())
+    }
+
+    pub(crate) fn matches_commit_admission_failure(
+        &self,
+        preview: &TransactionPreviewIdentity,
+        failing_step: usize,
+        error: &str,
+    ) -> bool {
+        self.latest_preview.as_ref() == Some(preview)
+            && matches!(
+                &self.state,
+                TransactionState::Finished(FinishedTransaction {
+                    outcome: TransactionOutcome::Failed {
+                        failing_step: retained_step,
+                        error: retained_error,
+                    },
+                    ..
+                }) if *retained_step == failing_step && retained_error == error
+            )
+    }
+
+    pub(crate) fn fail_commit_admission(
+        &mut self,
+        owner: &UserName,
+        activity: TransactionActivity,
+        outcome_revision: u64,
+        preview: &TransactionPreviewIdentity,
+        failing_step: usize,
+        error: &str,
+    ) -> error_stack::Result<TransactionCommitFailureDecision, TransactionMutationError> {
+        self.ensure_owner(owner).map_err(Report::new)?;
+        if self.matches_commit_admission_failure(preview, failing_step, error) {
+            return Ok(TransactionCommitFailureDecision::Existing);
+        }
+        match self.expire_open_if_inactive(activity, outcome_revision) {
+            OpenActivityDecision::Active => {}
+            OpenActivityDecision::Expired => {
+                return Ok(TransactionCommitFailureDecision::Expired);
+            }
+            OpenActivityDecision::NotOpen => return Err(Report::new(self.not_open_error())),
+        }
+        if failing_step >= self.statements.len() {
+            return Err(Report::new(TransactionMutationError::InvalidProgress {
+                id: self.id.clone(),
+                next: failing_step,
+                statement_count: self.statements.len(),
+            }));
+        }
+        let TransactionState::Open(current) = &mut self.state else {
+            return Err(Report::new(self.not_open_error()));
+        };
+        current.renew(activity);
+        let finished_at = current.last_activity_at();
+        self.latest_preview = Some(preview.clone());
+        self.finish(
+            finished_at,
+            outcome_revision,
+            TransactionOutcome::Failed {
+                failing_step,
+                error: error.to_string(),
+            },
+            Vec::new(),
+        );
+        Ok(TransactionCommitFailureDecision::Failed)
     }
 
     pub(crate) fn touch(
@@ -1022,6 +1190,21 @@ pub enum TransactionMutationError {
         expected: usize,
         actual: usize,
     },
+    #[error("transaction '{id}' report identity does not match its accepted queue state")]
+    ReportMismatch { id: String },
+    #[error("transaction '{id}' report conflicts with retained report content")]
+    ReportConflict { id: String },
+    #[error("transaction preview is stale: expected {expected:?}, current {current:?}")]
+    PreviewStale {
+        expected: Box<TransactionPreviewIdentity>,
+        current: Box<TransactionPreviewIdentity>,
+    },
+    #[error("transaction '{id}' commit plan does not match its complete preview")]
+    InvalidCommitPlan { id: String },
+    #[error("transaction '{id}' commit failure does not match its incomplete preview")]
+    InvalidCommitFailure { id: String },
+    #[error("transaction '{id}' planning inputs changed before commit admission: {reason}")]
+    PlanningInputsChanged { id: String, reason: String },
     #[error(
         "transaction '{id}' commit progress changed: expected statement {expected}, found {actual}"
     )]
@@ -1108,7 +1291,16 @@ mod tests {
             )
             .assured("the first test statement is within every admission limit");
         transaction
-            .start_commit(&owner, activity(3), 3, None)
+            .start_commit(
+                &owner,
+                activity(3),
+                3,
+                None,
+                TransactionCommitPlanHeader {
+                    preview: test_commit_plan("transaction-1", 1).preview,
+                    step_count: 1,
+                },
+            )
             .assured("an open test transaction can begin committing");
         transaction
     }
@@ -1134,6 +1326,7 @@ mod tests {
                     message: "listed transactions".to_string(),
                     diagnostics: Vec::new(),
                     already_existed: false,
+                    admission: None,
                 },
             },
             effect: None,
@@ -1267,7 +1460,16 @@ mod tests {
             activity(1),
         );
         empty
-            .start_commit(&owner, activity(2), 2, None)
+            .start_commit(
+                &owner,
+                activity(2),
+                2,
+                None,
+                TransactionCommitPlanHeader {
+                    preview: test_commit_plan("empty", 0).preview,
+                    step_count: 0,
+                },
+            )
             .assured("the empty test transaction can begin committing");
         empty
             .finish_empty_commit(Timestamp::from_unix_nanos(3), 7)
@@ -1400,7 +1602,16 @@ mod tests {
             activity(1),
         );
         transaction
-            .start_commit(&owner, activity(2), 2, None)
+            .start_commit(
+                &owner,
+                activity(2),
+                2,
+                None,
+                TransactionCommitPlanHeader {
+                    preview: test_commit_plan("committing", 0).preview,
+                    step_count: 0,
+                },
+            )
             .assured("the open transaction can enter commit recovery");
 
         assert!(

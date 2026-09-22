@@ -19,7 +19,8 @@ use nervix_models::{
     ClusterSchedule, CreateAvroWireSchema, CreateDeduplicator, CreateEmitter, CreateGenerator,
     CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
     CreateReorderer, CreateSchema, DomainName, IngestSource, IngestorName, Model, ModelIndex,
-    ModelKind, ModelName, NodeRef, PlacementPolicy, RequestedResourceVersion, UniquelyKindedModel,
+    ModelKind, ModelName, NodeRef, PlacementPolicy, RequestedResourceVersion,
+    TransactionModelTransition, UniquelyKindedModel,
 };
 use nervix_recovery::Discarded;
 use parking_lot::{Mutex, RwLock};
@@ -903,6 +904,105 @@ impl Registry {
             }),
             candidate_models,
             incomplete_reason: None,
+        })
+    }
+
+    /// Restores the exact Model decision stored at commit admission against its captured base.
+    pub(crate) fn restore_transaction_model_plan(
+        domain: &DomainName,
+        current_models: ModelIndex,
+        transitions: &[TransactionModelTransition],
+        operation_count: usize,
+    ) -> Result<PlannedMutations, Report<RegistryError>> {
+        let current_state = DomainState::build(domain, &current_models)?;
+        let mut candidate = current_models.clone();
+        for transition in transitions {
+            match transition {
+                TransactionModelTransition::Create { model } => {
+                    let key = model.node_ref();
+                    if candidate.contains(&key) {
+                        return Err(Report::new(RegistryError::ConcurrentMutation {
+                            domain: domain.as_str().to_string(),
+                        }));
+                    }
+                    candidate.insert(model.as_ref().clone());
+                }
+                TransactionModelTransition::Replace { before, after } => {
+                    let key = before.node_ref();
+                    if after.node_ref() != key {
+                        return Err(Report::new(RegistryError::InvalidTransactionPlan {
+                            domain: domain.as_str().to_string(),
+                        }));
+                    }
+                    if candidate.get(&key) != Some(before.as_ref()) {
+                        return Err(Report::new(RegistryError::ConcurrentMutation {
+                            domain: domain.as_str().to_string(),
+                        }));
+                    }
+                    candidate.insert(after.as_ref().clone());
+                }
+                TransactionModelTransition::Drop { model } => {
+                    let key = model.node_ref();
+                    if candidate.get(&key) != Some(model.as_ref()) {
+                        return Err(Report::new(RegistryError::ConcurrentMutation {
+                            domain: domain.as_str().to_string(),
+                        }));
+                    }
+                    candidate.remove(&key).verified(
+                        "the admitted drop matched the Model in this same candidate index",
+                    );
+                }
+            }
+        }
+
+        let domain_state = DomainState::build(domain, &candidate)?;
+        let drops_in_batch = current_models
+            .nodes()
+            .filter(|key| !candidate.contains(key))
+            .cloned()
+            .collect::<HashSet<_>>();
+        let models_to_persist = candidate
+            .iter()
+            .filter_map(|(key, model)| match current_models.get(key) {
+                None => Some((key.clone(), RegistryPersistMutation::Create(model.clone()))),
+                Some(current) if current != model => {
+                    Some((key.clone(), RegistryPersistMutation::Replace(model.clone())))
+                }
+                Some(_) => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let quiesce = classify_quiesce(
+            &current_models,
+            &candidate,
+            &current_state.graph,
+            &domain_state.graph,
+        );
+        let is_noop = models_to_persist.is_empty() && drops_in_batch.is_empty();
+        let runtime_changes = if is_noop {
+            RuntimeChanges {
+                domain: domain.clone(),
+                graph: None,
+                changes: Vec::new(),
+            }
+        } else {
+            runtime_changes_for_domain(
+                domain,
+                (domain_state.graph.node_count() > 0).then_some(domain_state.graph.clone()),
+                &current_state.models,
+                &domain_state.models,
+            )
+        };
+        Ok(PlannedMutations {
+            domain: domain.clone(),
+            batch_size: operation_count,
+            operation_name: "admitted transaction model step".to_string(),
+            base_models: current_models,
+            base_graph: current_state.graph.clone(),
+            domain_state,
+            models_to_persist,
+            drops_in_batch,
+            runtime_changes,
+            quiesce,
         })
     }
 

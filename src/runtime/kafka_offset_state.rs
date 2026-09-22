@@ -13,6 +13,7 @@ use arch_into::ArchInto as _;
 use error_stack::Report;
 #[cfg(test)]
 use meticulous::OptionExt as _;
+use nervix_connector_kafka::KafkaOffsetPosition;
 use nervix_execution::sync::{ArcSwap, DashMap};
 use nervix_models::ClusterNodeName;
 #[cfg(test)]
@@ -57,13 +58,6 @@ struct KafkaTopicSchedulingSnapshot {
 struct KafkaOffsetSnapshot {
     offsets: Vec<KafkaOffsetEntrySnapshot>,
     schedules: Vec<KafkaTopicSchedulingSnapshot>,
-}
-
-/// One partition of one topic, which is what a Kafka offset is recorded against.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(in crate::runtime) struct KafkaTopicPartition {
-    pub(in crate::runtime) topic: String,
-    pub(in crate::runtime) partition: i32,
 }
 
 /// Where each recorded partition resumes, and the schedule each topic was last rebalanced onto.
@@ -315,7 +309,7 @@ impl KafkaOffsetStateOriginator {
     /// Replace every recorded offset, as a new start point does, and encode the state that leaves.
     pub(super) fn replace_offsets(
         &self,
-        offsets: HashMap<KafkaTopicPartition, i64>,
+        offsets: Vec<KafkaOffsetPosition>,
     ) -> Result<(u64, Vec<u8>), RuntimeStateOperationError> {
         let state = &self.read.state;
         let result = state.assignment.authorize_exclusive(
@@ -341,16 +335,14 @@ impl KafkaOffsetStateOriginator {
     /// snapshot task does, on its interval.
     pub(super) fn apply_committed_offset(
         &self,
-        topic: &str,
-        partition: i32,
-        next_offset: i64,
+        position: &KafkaOffsetPosition,
     ) -> Result<u64, Report<StateAuthorityError>> {
         let state = &self.read.state;
         let moved =
             state
                 .assignment
                 .authorize(self.assignment, StateCapability::Originate, || {
-                    state.move_recorded_offset(topic, partition, next_offset)
+                    state.move_recorded_offset(&position.topic, position.partition, position.offset)
                 })?;
         if let Some(lsm) = moved {
             return Ok(lsm);
@@ -358,7 +350,7 @@ impl KafkaOffsetStateOriginator {
         state
             .assignment
             .authorize_exclusive(self.assignment, StateCapability::Originate, || {
-                state.record_first_offset(topic, partition, next_offset)
+                state.record_first_offset(&position.topic, position.partition, position.offset)
             })
     }
 
@@ -478,15 +470,15 @@ impl KafkaOffsetStatePersistence {
 impl KafkaOffsetTable {
     /// A table recording `offsets`, each partition in a slot of its own, beside `schedules`.
     fn from_offsets(
-        offsets: HashMap<KafkaTopicPartition, i64>,
+        offsets: Vec<KafkaOffsetPosition>,
         schedules: HashMap<String, KafkaTopicSchedulingState>,
     ) -> Self {
         let mut table = Self {
             topics: HashMap::default(),
             schedules,
         };
-        for (key, next_offset) in offsets {
-            table.record_partition(&key.topic, key.partition, next_offset);
+        for position in offsets {
+            table.record_partition(&position.topic, position.partition, position.offset);
         }
         table
     }
@@ -609,13 +601,11 @@ mod tests {
         let topic = "events";
         let partition = 0;
         let offset = |next_offset| {
-            HashMap::from_iter([(
-                KafkaTopicPartition {
-                    topic: topic.to_string(),
-                    partition,
-                },
-                next_offset,
-            )])
+            vec![KafkaOffsetPosition {
+                topic: topic.to_string(),
+                partition,
+                offset: next_offset,
+            }]
         };
         let payload = |next_offset| {
             KafkaOffsetTable::from_offsets(offset(next_offset), HashMap::default())
@@ -668,7 +658,11 @@ mod tests {
             .take()
             .assured("node-2 is assigned as the owner");
         originator
-            .apply_committed_offset(topic, partition, 9)
+            .apply_committed_offset(&KafkaOffsetPosition {
+                topic: topic.to_string(),
+                partition,
+                offset: 9,
+            })
             .assured("the promoted owner assignment is current");
         let _ = release_tx.send(());
         let delayed_result = delayed_install
@@ -725,7 +719,11 @@ mod tests {
             // A partition's first commit records the partition itself; the commit after it only
             // moves that partition's offset.
             originator
-                .apply_committed_offset("events", 0, 1)
+                .apply_committed_offset(&KafkaOffsetPosition {
+                    topic: "events".to_string(),
+                    partition: 0,
+                    offset: 1,
+                })
                 .assured("the owner assignment is current");
             let (held_tx, held_rx) = mpsc::channel();
             let (release_tx, release_rx) = mpsc::channel::<()>();
@@ -749,7 +747,11 @@ mod tests {
 
             // The barrier stays held until the commit and its quorum check return, so either one
             // waiting for it would leave every thread blocked, which Shuttle reports as a deadlock.
-            let committed = originator.apply_committed_offset("events", 0, 2);
+            let committed = originator.apply_committed_offset(&KafkaOffsetPosition {
+                topic: "events".to_string(),
+                partition: 0,
+                offset: 2,
+            });
             let quorum_satisfied = originator.read().replica_quorum_satisfied(1);
             release_tx
                 .send(())

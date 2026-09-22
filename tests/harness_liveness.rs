@@ -104,6 +104,8 @@ mod tests {
         WithholdSession,
         /// Receives the session's command, signals `received`, and never answers it.
         WithholdResponse { received: Arc<Notify> },
+        /// Keeps the response stream ready with events that are unrelated to the command result.
+        FloodResponses,
         /// Refuses every session.
         RejectSession,
         /// Fails the response stream instead of answering.
@@ -131,6 +133,13 @@ mod tests {
                     received.notify_one();
                     future::pending::<()>().await;
                 }
+                Self::FloodResponses => loop {
+                    tokio::task::consume_budget().await;
+                    let response = SessionResponse { event: None };
+                    if responses.send(Ok(response)).await.is_err() {
+                        return;
+                    }
+                },
                 Self::FailResponse => responses
                     .send(Err(Status::internal("the stand-in fails every response")))
                     .await
@@ -176,6 +185,7 @@ mod tests {
                 StandInBehavior::Answer(_)
                 | StandInBehavior::AnswerAfter { .. }
                 | StandInBehavior::WithholdResponse { .. }
+                | StandInBehavior::FloodResponses
                 | StandInBehavior::FailResponse
                 | StandInBehavior::EndSession => {}
             }
@@ -619,6 +629,14 @@ mod tests {
         timeout(TEST_TIMEOUT, received.notified())
             .await
             .assured("the stalled stand-in received the status command");
+    }
+
+    #[tokio::test]
+    async fn status_request_ends_at_its_deadline_while_unrelated_responses_remain_ready() {
+        let flooding = StandInNode::serve(StandInBehavior::FloodResponses).await;
+
+        assert_request_ends_at_its_deadline(&flooding.endpoint(), StatusOperation::ReceiveResponse)
+            .await;
     }
 
     #[tokio::test(start_paused = true)]

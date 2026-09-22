@@ -25,9 +25,7 @@ async fn filter_evaluation_uses_the_typed_operation_when_the_error_site_is_unmap
         RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_branching: &[],
-            current_branch_schema: None,
-            current_branch_sensitivity: None,
+            current_branching: &ResolvedBranching::unbranched(),
             udfs: None,
         },
     )
@@ -85,9 +83,7 @@ async fn filter_predicate_evaluation_error_becomes_a_planned_message_error() {
         RuntimeVmCompileContext {
             available_materialized_streams: &HashMap::default(),
             available_lookups: &HashMap::default(),
-            current_branching: &[],
-            current_branch_schema: None,
-            current_branch_sensitivity: None,
+            current_branching: &ResolvedBranching::unbranched(),
             udfs: None,
         },
         RuntimeFilterScope::Source {

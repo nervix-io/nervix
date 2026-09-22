@@ -6657,7 +6657,10 @@ dependencies = [
  "nervix-models",
  "rdkafka",
  "shuttle-tokio",
+ "thiserror 2.0.20",
  "tokio",
+ "tracing",
+ "triomphe",
 ]
 
 [[package]]
@@ -6665,6 +6668,7 @@ name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
  "arch-into",
+ "blake3",
  "error-stack",
  "fjall",
  "futures-util",
@@ -6995,7 +6999,6 @@ dependencies = [
  "protox",
  "pulsar",
  "rcgen",
- "rdkafka",
  "redis",
  "reqwest 0.13.4",
  "rkyv",

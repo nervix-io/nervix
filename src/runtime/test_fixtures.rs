@@ -19,8 +19,8 @@ use nervix_models::{
     ClusterNodeIncarnation, ClusterNodeName, CreateBranch, CreateSchema, DomainConfig, DomainName,
     DomainPace, DomainState, DomainStatus, ErrorPolicies, Expression, FieldName, FieldReference,
     FieldScope, IngestQuiesceMode, IngestorName, MessageErrorPolicy, ModelKind, ModelName,
-    OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ScheduledNode,
-    SchemaField, SchemaFingerprint, SchemaName, Timestamp,
+    OutputBranch, ParseAsType, ProcessorOutput, ProcessorOutputs, RelayName, ResolvedBranching,
+    ScheduledNode, SchemaField, SchemaFingerprint, SchemaName, Timestamp,
 };
 use nervix_vm::window::lower_window_assignments;
 use nervix_wasm::{
@@ -460,6 +460,31 @@ pub(super) fn test_schema(fields: &[(&str, ParseAsType)]) -> Arc<super::Compiled
     }))
 }
 
+pub(super) fn test_branching(fields: &[(&str, ParseAsType)]) -> ResolvedBranching {
+    test_named_branching("test_branch", fields)
+}
+
+pub(super) fn test_named_branching(
+    branch: &str,
+    fields: &[(&str, ParseAsType)],
+) -> ResolvedBranching {
+    ResolvedBranching::branched(
+        named(branch),
+        CreateSchema {
+            name: named("test_branch_schema"),
+            fields: fields
+                .iter()
+                .map(|(name, ty)| SchemaField {
+                    name: named(name),
+                    ty: ty.clone(),
+                    optional: false,
+                    sensitive: false,
+                })
+                .collect(),
+        },
+    )
+}
+
 /// One field of a test schema whose optionality varies per field.
 pub(super) struct OptionalTestField {
     pub(super) name: &'static str,
@@ -643,10 +668,56 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
 }
 
 pub(super) fn scheduled_model(model: nervix_models::Model) -> ScheduledNode {
-    ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32])).placed_on(
-        Some(ClusterNodeName::parse("node-1").expect("valid name")),
-        vec![ClusterNodeName::parse("node-1").expect("valid name")],
-    )
+    let resolved_branching = match &model {
+        nervix_models::Model::Relay(model) => {
+            assert!(
+                model.branching.is_unbranched(),
+                "branched schedule fixtures must provide their resolved branch and schema"
+            );
+            Some(ResolvedBranching::unbranched())
+        }
+        nervix_models::Model::Generator(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Inferencer(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::WasmProcessor(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Deduplicator(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Correlator(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Junction(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::Reorderer(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        nervix_models::Model::WindowProcessor(model) => {
+            assert_unbranched_schedule_fixture(&model.branched_by)
+        }
+        _ => None,
+    };
+    ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32]))
+        .with_resolved_branching(resolved_branching)
+        .placed_on(
+            Some(ClusterNodeName::parse("node-1").expect("valid name")),
+            vec![ClusterNodeName::parse("node-1").expect("valid name")],
+        )
+}
+
+fn assert_unbranched_schedule_fixture(
+    branching: &nervix_models::BranchSelection,
+) -> Option<ResolvedBranching> {
+    assert!(
+        branching.is_unbranched(),
+        "branched schedule fixtures must provide their resolved branch and schema"
+    );
+    Some(ResolvedBranching::unbranched())
 }
 
 pub(super) fn install_test_domain_execution(
@@ -714,6 +785,7 @@ pub(super) fn junction_branch_template(
         )]
         .into_iter()
         .collect(),
+        wasm_state_reset: None,
     }
 }
 

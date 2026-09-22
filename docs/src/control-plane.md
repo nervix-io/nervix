@@ -128,11 +128,20 @@ pass ordinary creation and external-resource validation before the one model ste
 resolution and the rebinding contract.
 A rejected statement does not change the pending count or the transaction's activity time, so the
 client can correct it and continue the same transaction. The admitted result is stored with the
-statement; an exact retry with the same request reference, source, semantic statement, and expected
-position returns that result without rerunning preflight or extending activity. A reused reference
-with different content is rejected. Limits are checked before preflight and the same ordered
-planner runs from a refreshed snapshot during `COMMIT`, because other sessions may change relevant
-control-plane state after admission.
+statement. The same consensus update also stores its stable operation number and the report revision
+for the resulting prefix. A report identity contains the transaction id, accepted queue position,
+and a fingerprint of the coherent planning basis. An exact retry with the same request reference,
+source, semantic statement, and expected position returns that admission and identity without
+rerunning preflight or extending activity. A reused reference with different content is rejected.
+Limits are checked before preflight.
+
+Side-effect-free preview planning always reads the replicated semantic transaction content and one
+coherent set of authoritative inputs. `COMMIT` requires a complete identified preview. Admission
+validates its position and captured inputs, then stores the report, exact execution plan, and domain
+mutation fence in the same transition to `COMMITTING`. A stale preview returns the typed refreshed
+identity while the transaction remains `OPEN`; no gate or external effect has begun. Once admitted,
+each step uses the stored decisions and captured inputs. A restart or new leader does not replan it
+from newer configuration.
 
 The plan records affected topology on both sides of every execution step. The before side retains
 nodes and edges that the step drops or rewires; the after side records the graph that activation
@@ -183,6 +192,14 @@ readiness, remote stopping, ownership handoff, or gate release is outstanding. I
 authoritatively visible. Its successful output is only the highest quiesce level actually executed
 across the transaction; it does not repeat the individual command outputs.
 
+The retained report starts with every frozen step unattempted. The authoritative effect transition
+records that step as applying with its planned and actual impact, and application completion records
+it as applied or failed. Operation summaries and before/after topology are independent of the
+executable statement payload, so clearing statements at a terminal outcome does not erase the facts
+an inspection reads. Reports use keyed header, operation, and step records. Topology graphs are
+content-addressed, stored as bounded node and edge records, and shared by every report revision that
+names the same content instead of being copied into one growing transaction value.
+
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and
 error while preserving the applied prefix. A model step that did not pause and whose VHOSTs an HTTPS
@@ -193,8 +210,11 @@ this execution and waits for the retained terminal result. Atomicity still does 
 transaction.
 
 Finished transactions remain as small tombstones containing the outcome, step progress, errors,
-and executed quiesce levels. During retention, attach reports the exact outcome and aggregate
-commit output; after removal the id is unknown. `SHOW TRANSACTIONS;`
+and executed quiesce levels. Their final report revision remains available for committed, failed,
+reverted, and expired outcomes even after later graph changes. Removing the tombstone removes its
+plan and report records and any topology content no retained report references. During retention,
+attach reports the exact outcome and aggregate commit output; after removal the id is unknown.
+`SHOW TRANSACTIONS;`
 can be served by any node from locally applied replicated state and lists the id, owner, domain,
 state, pending count, progress, age, and idle time for live transactions and retained tombstones.
 
@@ -339,6 +359,50 @@ operator `PAUSE` or `RESUME` statement.
 
 An entity-paused model change also gates everything downstream of the affected model, so a
 dependent node cannot observe a half-applied change through its input relay.
+
+## Coordinated WASM Guest-State Reset
+
+The control plane owns one reset operation for a WASM processor. Its target is always one of three
+typed scopes: the explicit unbranched instance, one concrete branch, or every concrete branch. A
+request for an unbranched instance is rejected for a branched processor, and a concrete or
+all-branches request is rejected for an unbranched processor. The operation takes the domain's
+exclusive alteration lock, so reset, lifecycle, model, placement, ownership-handoff, and resource
+rebinding decisions cannot publish competing schedules.
+
+The coordinator engages a branch-selective gate on every live node for each input relay of the
+processor. A one-branch gate waits for dispatches already admitted to that branch and leaves sibling
+branches open; the unbranched and all-branches forms select their complete declared scope. The owner
+then drains accepted input and stops each selected branch task at its serialized callback boundary.
+Completed callbacks and their buffered output are finalized once through the ordinary output,
+checkpoint, and acknowledgement paths. Work still suspended on a materialized dependency is
+discarded with the old task and negatively acknowledged, and old timeout handles are cancelled.
+
+Before changing durable state, the owner creates a fresh guest for every selected live branch,
+runs initialization without restoring saved state, and captures its initial save in memory. A
+failure here restores the stopped branch tasks and releases the gate; the schedule, generation,
+stored checkpoints, and branch lifetimes remain unchanged.
+
+Publication is a two-phase schedule transition identified by the administrative command's stable
+execution reference:
+
+1. `Publishing` advances the selected branch generation in the Raft-backed schedule. Every live
+   replica installs the new state identity before the owner while the selected relay scope remains
+   gated. This ordered local activation does not wait on the ordinary cluster runtime-revision
+   barrier, because a failed owner checkpoint leaves that same barrier incomplete. This is the
+   point of no return: checkpoints and replica state of the replaced generation can no longer
+   address current state.
+2. The owner installs the selected fresh branch tasks, durably publishes their branch lifecycle,
+   writes each initial guest checkpoint, and waits for every assigned replica. Only then does the
+   coordinator publish `Ready` and release the gates.
+
+A failure before `Publishing` preserves the previous lifetime. A failure after it reports that the
+reset is committed but not usable and leaves the scope fenced. Repeating the same execution
+reference resumes the same generation and missing durability work; it does not start another
+lifetime. Restart, leadership change, and owner recovery read the published phase and follow the
+same path. Offline replicas catch up under the new generation, and a stale former owner, replica, or
+handoff preparation cannot reinstall bytes from the generation that was replaced. The control-plane
+operation is the single owner that later administrative, SDK, or restore interfaces call; it is not
+currently a separate NSPL graph statement.
 
 ## Planned Ownership Handoffs And Failover
 

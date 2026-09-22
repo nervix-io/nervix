@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use error_stack::Report;
-use nervix_consensus::DomainPlanningInputs;
+use nervix_consensus::{DomainPlanningInputs, TransactionScheduleEligibility};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, DomainName, DomainSchedule, PlacementPolicy,
 };
@@ -197,6 +197,18 @@ impl DomainSchedulePlanningSnapshot {
         self.mode.as_str()
     }
 
+    pub(in crate::application) fn transaction_eligibility(&self) -> TransactionScheduleEligibility {
+        TransactionScheduleEligibility::new(
+            self.domain.clone(),
+            self.voters.iter().cloned().collect(),
+            self.live_identities.iter().cloned().collect(),
+            self.placement_candidate_identities
+                .iter()
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// Recheck the volatile liveness and process-incarnation inputs consumed by this plan.
     pub(in crate::application) async fn validate_eligibility(
         &self,
@@ -217,6 +229,28 @@ impl DomainSchedulePlanningSnapshot {
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) async fn validate_transaction_schedule_eligibility(
+        &self,
+        expected: &TransactionScheduleEligibility,
+    ) -> error_stack::Result<(), SchedulePlanningStale> {
+        let availability = self.inner.cluster.availability_state().await;
+        let (live_identities, placement_candidate_identities) =
+            DomainSchedulePlanningSnapshot::eligibility_inputs(&availability, expected.voters());
+        let expected_live = expected.live_identities().iter().cloned().collect();
+        let expected_candidates = expected
+            .placement_candidate_identities()
+            .iter()
+            .cloned()
+            .collect();
+        if live_identities != expected_live || placement_candidate_identities != expected_candidates
+        {
+            return Err(Report::new(SchedulePlanningStale::Eligibility {
+                domain: expected.domain().clone(),
+            }));
+        }
+        Ok(())
+    }
+
     pub(in crate::application) async fn validate_domain_planning_inputs(
         &self,
         expected: &DomainPlanningInputs,
@@ -351,7 +385,6 @@ mod tests {
             &planned, &unrelated, &voters,
         ));
     }
-
     #[tokio::test]
     async fn captured_planning_basis_classifies_each_stale_input() {
         let TestService {

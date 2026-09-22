@@ -237,27 +237,30 @@ captured for that plan. It never resolves at runtime.
 - **A statement queued inside `BEGIN`** is planned at admission against the transaction's prefix so
   that it can be validated. That resolution is provisional and is reported as
   `provisionally resolved VERSION LATEST ...`; the queued statement keeps the written `LATEST`.
-  `COMMIT` plans the step again from a fresh snapshot, and `LATEST` then binds the highest version
-  completed at that moment, which may be newer than the provisional one.
+  `COMMIT` plans the whole transaction again as one preview from a fresh snapshot, and admission
+  freezes that plan, so `LATEST` binds the highest version completed when the admitted preview was
+  planned, which may be newer than the provisional one.
 - **`REBIND RESOURCE ... TO VERSION LATEST`** follows the same timing and resolves its target once
   for the whole statement. Its summary line marks the resolved target with `(latest)`.
 
 The captured inputs include the domain's declared resources and all of its completed versions, and
-they are compared with the current catalog twice: by the leader just before it applies the step,
-and again at the replicated apply boundary. An upload that completes in the domain in between, for
-any of its resources, makes the plan stale, and the step is rejected as
-`domain '<domain>' resource inputs changed` before any model is committed:
+they are compared with the current catalog twice: by the leader just before it applies a step, and
+again at the replicated apply boundary. An upload that completes in the domain in between, for any
+of its resources, makes the plan stale. The step is then rejected as
+`domain '<domain>' resource inputs changed` before any model is committed. The leader's check runs
+before anything pauses; a rejection at the replicated boundary first releases the pause, gates, and
+handoff the step had engaged and rolls back the leader's local registry.
 
-- **Caught by the leader's check**, before anything pauses, the step fails, and the command or
-  transaction reports that failure.
-- **Caught at the replicated apply boundary**, the leader releases the pause, gates, and handoff the
-  step had engaged, rolls back its local registry, and leaves the step applying. When the leader's
-  transaction recovery or a repeated `COMMIT` resumes it, the step is planned again from a fresh
-  snapshot, and `LATEST` binds the version that completed.
+What follows depends on who owns the plan. An ordinary command retains that failed attempt and
+starts another attempt, derived from the newer revision, under the same execution reference, so it
+plans again and `LATEST` binds the version that completed. An explicit transaction is frozen from
+`COMMIT` admission onwards: a basis that is already stale at admission leaves the transaction `OPEN`
+with a refreshed identity to commit again, and a conflict found after admission ends the
+transaction instead of replanning it.
 
 Either way, a plan never commits a `LATEST` it resolved against an older catalog.
-[Control Plane](./control-plane.md#replicated-nspl-transactions) defines admission, the refreshed
-commit plan, and resumption.
+[Control Plane](./control-plane.md#replicated-nspl-transactions) defines preview identity,
+admission, and the frozen plan.
 
 ## Rebinding
 
@@ -350,7 +353,7 @@ the rule for any model step:
 `REBIND RESOURCE` is ordinary transaction content. Inside `BEGIN`, it joins the consecutive model
 run it is written in, so a transaction can create a model and rebind it, or rebind several
 resources, as one atomic step, and the run is classified as a whole. Its target and selection are
-provisional at admission and are planned again at `COMMIT`.
+provisional at admission and are planned again in the preview that `COMMIT` admits and freezes.
 
 A rebinding that changes no usage, because every selected usage already binds the target or the
 resource has no usages at all, writes no model. On its own it reports `DYNAMIC` and lists every
@@ -491,7 +494,7 @@ Nervix does not provide:
 | --- | --- |
 | A statement binds a missing, applying, or failed version, uses `LATEST` with no completed version, names an unknown resource, or lists a missing or non-binding `FOR` member | The statement is rejected before any effect. No model is stored, nothing pauses, and every usage keeps its version. |
 | A VHOST's TLS bundle does not load, a hash map's file is missing, or an ONNX model does not match its inferencer | The leader's content checks reject the statement before any effect. |
-| An upload completes in the domain between capture and apply | The step is rejected as stale before any model is committed. A rejection by the leader's check fails the command or transaction before anything pauses; a rejection at the replicated apply boundary releases what the step engaged and leaves it applying until it is planned again. |
+| An upload completes in the domain between capture and apply | The step is rejected as stale before any model is committed, and whatever it engaged is released. An ordinary command plans again as another attempt under the same execution reference; an explicit transaction reports the conflict instead of replanning. |
 | An HTTPS listener cannot install a VHOST change in a step that did not pause | The failure record restores the previous models and schedule, and every listener presents the restored certificates before the command reports the failure. |
 | A consumer cannot load the version during activation, such as protobuf sources that do not compile, a WASM module that does not compile, or a hash-map line that does not decode | The step releases any pause it engaged, the committed models remain, and the command or transaction reports the activation failure. Nothing returns the models to their previous versions; a later model change, such as a rebinding to a usable version, repairs the binding. |
 | One node cannot install a version during its upload, including a transfer that is interrupted | The upload fails with that node's reason. The number stays assigned and is never bindable. |

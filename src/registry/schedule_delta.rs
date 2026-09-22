@@ -9,6 +9,7 @@
 
 use nervix_models::{
     DomainSchedule, DynamicModelUpdate, ModelKind, NodeRef, QuiesceLevel, ScheduledNode,
+    WasmStateResetPhase,
 };
 use sorted_vec::SortedSet;
 
@@ -83,10 +84,20 @@ impl ScheduleDelta {
                 .config
                 .change_aspects_against(&desired_node.config);
             let level = aspects.quiesce_level();
-            // A new guest-state lifetime replaces the branch instances that still hold the previous
-            // one. A reassignment alone rebuilds a node only where its execution starts or stops,
-            // so the lifetime change swaps the entity wherever it keeps executing.
-            if existing_node.wasm_state_generations() != desired_node.wasm_state_generations() {
+            let reset_changed = existing_node.wasm_state_reset() != desired_node.wasm_state_reset();
+            if reset_changed && let Some(reset) = desired_node.wasm_state_reset() {
+                updates.push(DynamicModelUpdate::WasmStateReset {
+                    processor: desired_node.identifier.clone(),
+                    reset: reset.clone(),
+                });
+            }
+            // Forced recovery and a changed module binding still replace the complete processor.
+            // A coordinated reset carries its exact scope as a dynamic update, so the runtime can
+            // replace only those branch tasks and keep sibling branches live.
+            let coordinated_reset = Self::is_coordinated_wasm_reset(existing_node, desired_node);
+            if existing_node.wasm_state_generations() != desired_node.wasm_state_generations()
+                && !coordinated_reset
+            {
                 entities.push(desired_node.identity());
             }
             let emitter_schema_fingerprint_may_change =
@@ -143,6 +154,28 @@ impl ScheduleDelta {
         }
     }
 
+    fn is_coordinated_wasm_reset(existing: &ScheduledNode, desired: &ScheduledNode) -> bool {
+        let Some(reset) = desired.wasm_state_reset() else {
+            return false;
+        };
+        if reset.phase() != WasmStateResetPhase::Publishing
+            || existing
+                .wasm_state_reset()
+                .is_some_and(|current| current.request() == reset.request())
+        {
+            return false;
+        }
+        let (Some(existing_generations), Some(desired_generations)) = (
+            existing.wasm_state_generations(),
+            desired.wasm_state_generations(),
+        ) else {
+            return false;
+        };
+        let mut expected = existing_generations.clone();
+        expected.begin_reset(reset.scope());
+        &expected == desired_generations
+    }
+
     pub(crate) const fn quiesce_level(&self) -> QuiesceLevel {
         match self {
             Self::Unchanged | Self::Dynamic(_) => QuiesceLevel::Dynamic,
@@ -172,16 +205,14 @@ impl ScheduleDelta {
     ) -> bool {
         let ScheduledNode {
             identifier: existing_identifier,
-            effective_branching: existing_effective_branching,
-            effective_branching_schema: existing_effective_branching_schema,
+            resolved_branching: existing_resolved_branching,
             schema_fingerprint: existing_schema_fingerprint,
             kafka_partition_schedule: existing_kafka_partition_schedule,
             ..
         } = existing;
         let ScheduledNode {
             identifier: desired_identifier,
-            effective_branching: desired_effective_branching,
-            effective_branching_schema: desired_effective_branching_schema,
+            resolved_branching: desired_resolved_branching,
             schema_fingerprint: desired_schema_fingerprint,
             kafka_partition_schedule: desired_kafka_partition_schedule,
             ..
@@ -195,15 +226,9 @@ impl ScheduleDelta {
         }
 
         if !allow_model_derived_residue_change {
-            let effective_branching_matches =
-                existing_effective_branching == desired_effective_branching;
-            if !effective_branching_matches {
-                return false;
-            }
-
-            let effective_branching_schema_matches =
-                existing_effective_branching_schema == desired_effective_branching_schema;
-            if !effective_branching_schema_matches {
+            let resolved_branching_matches =
+                existing_resolved_branching == desired_resolved_branching;
+            if !resolved_branching_matches {
                 return false;
             }
 
@@ -231,14 +256,14 @@ mod tests {
     use std::num::NonZeroUsize;
 
     use nervix_models::{
-        AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, CreateEmitter,
-        CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateVhost,
+        AckMode, BranchKeyFingerprint, BranchSelection, ClusterNodeName, CommandExecutionReference,
+        CreateEmitter, CreateIngestor, CreateJunction, CreatePlacement, CreateRelay, CreateVhost,
         CreateWasmProcessor, DomainName, DomainSchedule, DynamicModelUpdate, EmitSink,
         EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, Expression, FlushPolicy,
         GeneralErrorPolicy, IngestSource, Literal, Model, ModelKind, NodeRef, OutputBranch,
         PlacementPolicy, ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel,
-        RelayBranching, RetryPolicy, RouteConstruction, ScheduledNode, SchemaFingerprint,
-        VhostTlsResource, WasmProcessorLimits,
+        RelayBranching, ResolvedBranching, RetryPolicy, RouteConstruction, ScheduledNode,
+        SchemaFingerprint, VhostTlsResource, WasmProcessorLimits, WasmStateResetScope,
     };
     use nonzero_ext::nonzero;
 
@@ -294,7 +319,7 @@ mod tests {
                     }),
                     SchemaFingerprint::from_digest([1; 32]),
                 )
-                .with_effective_branching(Some(Vec::new()), None)
+                .with_resolved_branching(Some(ResolvedBranching::unbranched()))
                 .placed_on(
                     Some(ClusterNodeName::parse("node-1").expect("valid name")),
                     vec![ClusterNodeName::parse("node-1").expect("valid name")],
@@ -519,7 +544,7 @@ mod tests {
                     Model::Junction(junction.clone()),
                     SchemaFingerprint::from_digest([1; 32]),
                 )
-                .with_effective_branching(Some(Vec::new()), None)
+                .with_resolved_branching(Some(ResolvedBranching::unbranched()))
                 .placed_on(
                     Some(ClusterNodeName::parse("node-1").expect("valid name")),
                     vec![ClusterNodeName::parse("node-1").expect("valid name")],
@@ -612,7 +637,7 @@ mod tests {
                     Model::Emitter(emitter.clone()),
                     SchemaFingerprint::from_digest([1; 32]),
                 )
-                .with_effective_branching(Some(Vec::new()), None)
+                .with_resolved_branching(Some(ResolvedBranching::unbranched()))
                 .placed_on(
                     Some(ClusterNodeName::parse("node-1").expect("valid name")),
                     vec![ClusterNodeName::parse("node-1").expect("valid name")],
@@ -797,6 +822,44 @@ mod tests {
         assert_eq!(
             ScheduleDelta::classify(&every_branch, &every_branch),
             ScheduleDelta::Unchanged
+        );
+    }
+
+    #[test]
+    fn coordinated_reset_publication_and_readiness_are_dynamic_processor_updates() {
+        let existing = wasm_processor_schedule("node-1");
+        let mut publishing = existing.clone();
+        let request = CommandExecutionReference::parse("reset-counting-guest")
+            .expect("the reset reference must be valid");
+        assert!(
+            publishing.nodes[0]
+                .begin_wasm_state_reset(request.clone(), WasmStateResetScope::Unbranched,)
+        );
+        let publishing_reset = publishing.nodes[0]
+            .wasm_state_reset()
+            .expect("the reset was published")
+            .clone();
+
+        assert_eq!(
+            ScheduleDelta::classify(&existing, &publishing),
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::WasmStateReset {
+                processor: named("counting_guest"),
+                reset: publishing_reset,
+            }])
+        );
+
+        let mut ready = publishing.clone();
+        assert!(ready.nodes[0].complete_wasm_state_reset(&request));
+        let ready_reset = ready.nodes[0]
+            .wasm_state_reset()
+            .expect("the reset became ready")
+            .clone();
+        assert_eq!(
+            ScheduleDelta::classify(&publishing, &ready),
+            ScheduleDelta::Dynamic(vec![DynamicModelUpdate::WasmStateReset {
+                processor: named("counting_guest"),
+                reset: ready_reset,
+            }])
         );
     }
 

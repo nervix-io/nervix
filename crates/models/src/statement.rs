@@ -22,16 +22,17 @@ use thiserror::Error;
 
 use crate::{
     AlterSchema, AlterWireSchema, AvroType, BranchKeyFingerprint, BranchName, CborType,
-    ChannelName, ClientName, ClusterNodeName, CodecName, CollectionName, ConsumerGroupName,
-    CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, CreateSchema,
-    CreateUdf, DeduplicatorName, DomainClockPeriod, DomainClockSkew, DomainClockState, DomainName,
-    DomainTimeRate, EmitterName, EndpointName, FieldName, GeneratorName, InferencerName,
-    IngestorName, JsonType, JunctionName, LookupName, ModelName, NodeRef, ParseAsType,
-    PlacementName, PulsarSubscriptionName, QueueGroupName, QueueName, RebindResource,
-    ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
-    SchemaFingerprint, SchemaName, SignalingProtocolName, SubjectName, SubscriptionName, TableName,
-    Timestamp, TopicName, UdfName, UserName, VhostName, WasmProcessorName, WasmStateGenerations,
-    WindowProcessorName, WireSchemaName,
+    ChannelName, ClientName, ClusterNodeName, CodecName, CollectionName, CommandExecutionReference,
+    ConsumerGroupName, CorrelatorName, CreateAvroWireSchema, CreateCborWireSchema,
+    CreateJsonWireSchema, CreateSchema, CreateUdf, DeduplicatorName, DomainClockPeriod,
+    DomainClockSkew, DomainClockState, DomainName, DomainTimeRate, EmitterName, EndpointName,
+    FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
+    ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
+    QueueName, RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
+    ResourceName, SchemaFingerprint, SchemaName, SignalingProtocolName, SubjectName,
+    SubscriptionName, TableName, Timestamp, TopicName, UdfName, UserName, VhostName,
+    WasmProcessorName, WasmStateGenerations, WasmStateReset, WasmStateResetPhase,
+    WasmStateResetScope, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -2666,6 +2667,60 @@ impl BranchSelection {
     }
 }
 
+/// The branch contract after the registry has resolved every referenced model.
+///
+/// A branched declaration retains both identities and the complete key schema so execution does
+/// not have to reconstruct branch semantics from parallel fields or model lookups.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum ResolvedBranching {
+    Unbranched,
+    Branched {
+        branch: BranchName,
+        schema: CreateSchema,
+    },
+}
+
+impl ResolvedBranching {
+    pub fn unbranched() -> Self {
+        Self::Unbranched
+    }
+
+    pub fn branched(branch: BranchName, schema: CreateSchema) -> Self {
+        Self::Branched { branch, schema }
+    }
+
+    pub fn branch(&self) -> Option<&BranchName> {
+        match self {
+            Self::Unbranched => None,
+            Self::Branched { branch, .. } => Some(branch),
+        }
+    }
+
+    pub fn schema(&self) -> Option<&CreateSchema> {
+        match self {
+            Self::Unbranched => None,
+            Self::Branched { schema, .. } => Some(schema),
+        }
+    }
+
+    pub fn fields(&self) -> &[crate::SchemaField] {
+        match self {
+            Self::Unbranched => &[],
+            Self::Branched { schema, .. } => &schema.fields,
+        }
+    }
+
+    pub fn field_names(&self) -> impl Iterator<Item = &FieldName> {
+        self.fields().iter().map(|field| &field.name)
+    }
+
+    pub fn is_unbranched(&self) -> bool {
+        matches!(self, Self::Unbranched)
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -4420,8 +4475,7 @@ impl KafkaPartitionSchedule {
 pub struct ScheduledNode {
     pub identifier: ModelName,
     pub config: Box<Model>,
-    pub effective_branching: Option<Vec<FieldName>>,
-    pub effective_branching_schema: Option<SchemaName>,
+    pub resolved_branching: Option<ResolvedBranching>,
     /// The fingerprint of the schemas this node's records are laid out by, as the registry computed
     /// it. Every scheduled node carries one; the runtime keys each of the node's schema-bound states
     /// by it.
@@ -4436,6 +4490,9 @@ pub struct ScheduledNode {
     /// The guest-state generation of every branch when this node is a WASM processor, and nothing
     /// for every other kind. Only [`Self::new`] decides which, from the configuration it places.
     wasm_state_generations: Option<WasmStateGenerations>,
+    /// The latest coordinated reset of this WASM processor, including an incomplete publication
+    /// whose selected scope must remain fenced. Every other kind of node carries nothing.
+    wasm_state_reset: Option<WasmStateReset>,
 }
 
 impl ScheduledNode {
@@ -4449,26 +4506,21 @@ impl ScheduledNode {
         Self {
             identifier: config.name(),
             config: Box::new(config),
-            effective_branching: None,
-            effective_branching_schema: None,
+            resolved_branching: None,
             schema_fingerprint,
             kafka_partition_schedule: None,
             primary_node: None,
             assigned_nodes: Vec::new(),
             ownership_transition: None,
             wasm_state_generations,
+            wasm_state_reset: None,
         }
     }
 
-    /// The branch fields and branch schema the registry resolved for this node.
+    /// The complete branch declaration the registry resolved for this node.
     #[must_use]
-    pub fn with_effective_branching(
-        mut self,
-        fields: Option<Vec<FieldName>>,
-        schema: Option<SchemaName>,
-    ) -> Self {
-        self.effective_branching = fields;
-        self.effective_branching_schema = schema;
+    pub fn with_resolved_branching(mut self, branching: Option<ResolvedBranching>) -> Self {
+        self.resolved_branching = branching;
         self
     }
 
@@ -4508,6 +4560,11 @@ impl ScheduledNode {
         self.wasm_state_generations.as_ref()
     }
 
+    /// The latest coordinated guest-state reset this WASM processor published.
+    pub fn wasm_state_reset(&self) -> Option<&WasmStateReset> {
+        self.wasm_state_reset.as_ref()
+    }
+
     /// Continue the guest-state lifetimes `existing` published for this same node.
     ///
     /// A generation belongs to the pinned module binding it was published for. When this entry
@@ -4531,6 +4588,7 @@ impl ScheduledNode {
             generations.begin_every_branch();
         }
         self.wasm_state_generations = Some(generations);
+        self.wasm_state_reset = existing.wasm_state_reset.clone();
     }
 
     /// Start a new guest-state lifetime for every branch of this WASM processor, including branches
@@ -4547,6 +4605,43 @@ impl ScheduledNode {
         if let Some(generations) = self.wasm_state_generations.as_mut() {
             generations.begin_branch(branch);
         }
+    }
+
+    /// Start or resume the coordinated reset identified by `request`.
+    ///
+    /// Returns `false` when this node has no WASM guest state or when this exact request and scope
+    /// are already published. A caller validates a reused request with a different scope before
+    /// invoking this method.
+    pub fn begin_wasm_state_reset(
+        &mut self,
+        request: CommandExecutionReference,
+        scope: WasmStateResetScope,
+    ) -> bool {
+        let Some(generations) = self.wasm_state_generations.as_mut() else {
+            return false;
+        };
+        if self
+            .wasm_state_reset
+            .as_ref()
+            .is_some_and(|reset| reset.request() == &request && reset.scope() == &scope)
+        {
+            return false;
+        }
+        generations.begin_reset(&scope);
+        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope));
+        true
+    }
+
+    /// Mark the initial checkpoint of this exact reset durable and ready for runtime admission.
+    pub fn complete_wasm_state_reset(&mut self, request: &CommandExecutionReference) -> bool {
+        let Some(reset) = self.wasm_state_reset.as_mut() else {
+            return false;
+        };
+        if reset.request() != request || reset.phase() == WasmStateResetPhase::Ready {
+            return false;
+        }
+        reset.mark_ready();
+        true
     }
 
     pub fn ownership_state_components(&self) -> Vec<OwnershipStateComponent> {
@@ -5312,7 +5407,7 @@ mod tests {
         ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDimension,
         InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
         KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, PlacementPolicy,
-        RelayBranching, RetryPolicy, ScheduledNode,
+        RelayBranching, ResolvedBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
         ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
@@ -5453,7 +5548,7 @@ mod tests {
             }),
             SchemaFingerprint::from_digest([1; 32]),
         )
-        .with_effective_branching(Some(vec![named("tenant")]), None)
+        .with_resolved_branching(Some(ResolvedBranching::unbranched()))
         .placed_on(
             Some(named::<ClusterNodeName>("node-a")),
             vec![named::<ClusterNodeName>("node-a")],

@@ -212,6 +212,10 @@ impl ClusterEntityGate {
         self.nodes.remove(node);
     }
 
+    pub(in crate::application) fn nodes(&self) -> Vec<ClusterNodeName> {
+        self.nodes.iter().cloned().collect()
+    }
+
     fn schedule_remaining_releases(&mut self) {
         let Some(owner) = self.release_owner.take() else {
             return;
@@ -526,6 +530,7 @@ impl SessionServiceImpl {
         let reason = match purpose {
             EntityGatePurpose::ModelAlteration => "leader-orchestrated entity alteration",
             EntityGatePurpose::OwnershipHandoff => "leader-orchestrated ownership handoff",
+            EntityGatePurpose::WasmStateReset(_) => "leader-orchestrated WASM guest-state reset",
         };
         for node in &nodes {
             tokio::task::consume_budget().await;

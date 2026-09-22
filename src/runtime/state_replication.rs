@@ -2639,17 +2639,15 @@ impl Runtime {
     pub(in crate::runtime) async fn commit_domain_kafka_offset(
         &self,
         state: &KafkaOffsetStateOriginator,
-        topic: &str,
-        partition: i32,
-        next_offset: i64,
+        position: KafkaOffsetPosition,
     ) -> error_stack::Result<(), StateReplicationError> {
         let lsm = state
-            .apply_committed_offset(topic, partition, next_offset)
+            .apply_committed_offset(&position)
             .change_context_lazy(|| StateReplicationError::CommitKafkaOffset {
                 placement: state.placement().clone(),
-                topic: topic.to_string(),
-                partition,
-                next_offset,
+                topic: position.topic.clone(),
+                partition: position.partition,
+                next_offset: position.offset,
             })?;
         let offsets = state.read();
         if offsets.required_replica_acks() == 0 {
@@ -2663,7 +2661,7 @@ impl Runtime {
     pub(in crate::runtime) async fn reset_domain_kafka_offsets(
         &self,
         state: &KafkaOffsetStateOriginator,
-        offsets: HashMap<KafkaTopicPartition, i64>,
+        offsets: Vec<KafkaOffsetPosition>,
     ) -> error_stack::Result<(), StateReplicationError> {
         let (lsm, payload) = state
             .replace_offsets(offsets)

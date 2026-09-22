@@ -1857,6 +1857,7 @@ mod tests {
                 failing_step: None,
             }),
             execution_reference: "command-1".to_string(),
+            transaction_admission: None,
         });
         assert!(!outcome.success);
         assert_eq!(outcome.kind, CommandOutcomeKind::NotLeader);
