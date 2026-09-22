@@ -292,10 +292,12 @@ impl SessionServiceImpl {
             }));
         }
         let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
-        let node = inputs
-            .schedule()
-            .and_then(|schedule| schedule.nodes.get(&entity))
-            .ok_or_else(|| Report::new(unavailable()))?;
+        let Some(schedule) = inputs.schedule() else {
+            return Err(Report::new(unavailable()));
+        };
+        let Some(node) = schedule.nodes.get(&entity) else {
+            return Err(Report::new(unavailable()));
+        };
         let wasm = node
             .wasm_processor()
             .ok_or_else(|| Report::new(unavailable()))?;
