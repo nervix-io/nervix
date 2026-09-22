@@ -1,8 +1,8 @@
 [package]
-description = "The Syslog source and sink transports and their shared client configuration for Nervix"
+description = "The SQS sink connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
-name = "nervix-connector-syslog"
+name = "nervix-connector-sqs"
 version.workspace = true
 
 [lints]
@@ -19,31 +19,18 @@ shuttle = [
 [dependencies]
 ahash = { workspace = true }
 async-trait = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-sdk-sqs = { workspace = true }
+# The SDK crates disable their TLS defaults; select AWS-LC on their shared client.
+aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 error-stack = { workspace = true }
 meticulous = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
-nonzero_ext = { workspace = true }
-rustls = { workspace = true }
-rustls-pki-types = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
-  "io-util",
   "macros",
-  "net",
   "rt",
-  "sync",
 ], optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = [
-  "io-util",
-  "macros",
-  "net",
-  "rt",
-  "sync",
-] }
-tokio-rustls = { workspace = true }
-tracing = { workspace = true }
-url = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
