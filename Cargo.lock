@@ -6664,6 +6664,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-pulsar"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "pulsar",
+ "shuttle-tokio",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "nervix-connector-redis"
 version = "0.1.0-dev"
 dependencies = [
@@ -7032,6 +7049,7 @@ dependencies = [
  "nervix-client-wire",
  "nervix-connector",
  "nervix-connector-kafka",
+ "nervix-connector-pulsar",
  "nervix-connector-redis",
  "nervix-connector-sentry",
  "nervix-connector-syslog",
