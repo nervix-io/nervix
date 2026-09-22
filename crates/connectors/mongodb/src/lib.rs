@@ -40,9 +40,7 @@ use nervix_connector::{
     SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
     optional_client_config_value,
 };
-use nervix_models::{
-    ClientConfigEntry, ClientPoolBounds, CollectionName, FieldPath, Timestamp,
-};
+use nervix_models::{ClientConfigEntry, ClientPoolBounds, CollectionName, FieldPath, Timestamp};
 use tracing::trace;
 
 const MONGODB: &str = "mongodb";
@@ -889,7 +887,9 @@ mod tests {
         let columns = MappedBsonColumns::new(&batch, &names).expect("columns should be mapped");
 
         assert_eq!(
-            columns.document(0).expect("the signed maximum should encode"),
+            columns
+                .document(0)
+                .expect("the signed maximum should encode"),
             doc! { "count": i64::MAX, "name": "representable" }
         );
         let rejected = columns
