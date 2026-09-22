@@ -16,7 +16,7 @@ jaq-fmts = { workspace = true }
 jaq-json = { workspace = true, features = ["serde"] }
 jaq-std = { workspace = true }
 nervix-models = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
 strum = { workspace = true }
 thiserror = { workspace = true }
 
