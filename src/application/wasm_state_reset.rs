@@ -70,7 +70,7 @@ pub(in crate::application) enum WasmStateResetError {
     Abort { processor: ModelName },
     #[error("WASM processor '{}' reset was committed but its new lifetime is not usable", .processor.as_str())]
     CommittedNotUsable { processor: ModelName },
-    #[error("failed to reach the coordinator of WASM processor '{}' state reset", .processor.as_str())]
+    #[error("WASM processor '{}' state reset was not coordinated", .processor.as_str())]
     Coordinator { processor: ModelName },
 }
 
@@ -210,7 +210,7 @@ impl SessionServiceImpl {
         request: CommandExecutionReference,
         target: WasmStateResetTarget,
     ) -> error_stack::Result<(), WasmStateResetError> {
-        let unreachable = || WasmStateResetError::Coordinator {
+        let uncoordinated = || WasmStateResetError::Coordinator {
             processor: processor.clone(),
         };
         if let Some(leader) = self.inner.consensus.current_leader().await
@@ -229,10 +229,13 @@ impl SessionServiceImpl {
                     },
                 )
                 .await
-                .change_context_lazy(unreachable)?;
+                .change_context_lazy(uncoordinated)?;
+            // The coordinator's own answer is what a caller acts on, so it stays a context of its
+            // own rather than an attachment the rendered error drops.
             return response
                 .result
-                .map_err(|failure| Report::new(unreachable()).attach_printable(failure));
+                .map_err(Report::new)
+                .change_context_lazy(uncoordinated);
         }
         self.reset_wasm_processor_state(domain, processor, request, target, None)
             .await
