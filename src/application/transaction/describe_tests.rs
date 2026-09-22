@@ -8,7 +8,11 @@
 //! - **Must not know.** Production ownership beyond the parent module under test.
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::UserName;
+use nervix_models::{
+    DomainName, ImpactPlanningBasis, ImpactReportCompleteness, TransactionImpactReport,
+    TransactionInspection, TransactionLifecycle, TransactionOperationNumber, TransactionPosition,
+    TransactionStatus, UserName,
+};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -401,4 +405,107 @@ async fn a_refused_inspection_names_why_nothing_was_read() {
     unbound.stop_all(&service).await;
     owner.stop_all(&service).await;
     let _ = std::fs::remove_dir_all(&path);
+}
+
+fn empty_report() -> TransactionImpactReport {
+    TransactionImpactReport::new(
+        DomainName::parse("default").assured("the fixture domain is an accepted literal"),
+        TransactionPosition::new(0),
+        ImpactPlanningBasis::new([3; 32]),
+        ImpactReportCompleteness::Complete,
+        Vec::new(),
+        Vec::new(),
+    )
+    .assured("an empty report numbers no operation and so needs no execution step")
+}
+
+fn operation(number: usize) -> TransactionOperationNumber {
+    TransactionOperationNumber::from_index(
+        number
+            .checked_sub(1)
+            .assured("a test operation number is one-based"),
+    )
+    .assured("a test operation number is addressable")
+}
+
+#[test]
+fn the_envelope_reports_every_lifecycle_as_the_session_api_names_it() {
+    for (lifecycle, expected) in [
+        (TransactionLifecycle::Open, ApiTransactionState::Open),
+        (
+            TransactionLifecycle::Committing,
+            ApiTransactionState::Committing,
+        ),
+        (
+            TransactionLifecycle::Committed,
+            ApiTransactionState::Committed,
+        ),
+        (
+            TransactionLifecycle::Reverted,
+            ApiTransactionState::Reverted,
+        ),
+        (TransactionLifecycle::Expired, ApiTransactionState::Expired),
+    ] {
+        let inspection = TransactionInspection {
+            transaction: TransactionStatus::new(
+                "tx-lifecycle".to_string(),
+                DomainName::parse("default").assured("the fixture domain is an accepted literal"),
+                lifecycle,
+                TransactionPosition::new(0),
+                0,
+            )
+            .assured("the fixture applies no more operations than it accepted"),
+            operation: None,
+            report: empty_report(),
+        };
+
+        let envelope = super::api_transaction_inspection(&inspection);
+
+        let status = envelope
+            .transaction
+            .verified("the envelope always names the inspected transaction");
+        assert_eq!(status.state, i32::from(expected));
+        assert_eq!(status.error, "");
+        assert_eq!(status.failing_step, None);
+        assert_eq!(envelope.operation, None);
+    }
+}
+
+#[test]
+fn a_failed_inspection_envelope_names_the_failing_operation_and_its_error() {
+    let inspection = TransactionInspection {
+        transaction: TransactionStatus::new(
+            "tx-failed".to_string(),
+            DomainName::parse("default").assured("the fixture domain is an accepted literal"),
+            TransactionLifecycle::Failed {
+                failing_operation: operation(2),
+                error: "domain start refused".to_string(),
+            },
+            TransactionPosition::new(2),
+            1,
+        )
+        .assured("the fixture applies no more operations than it accepted"),
+        operation: Some(operation(2)),
+        report: empty_report(),
+    };
+
+    let envelope = super::api_transaction_inspection(&inspection);
+
+    let status = envelope
+        .transaction
+        .verified("the envelope always names the inspected transaction");
+    assert_eq!(status.id, "tx-failed");
+    assert_eq!(status.state, i32::from(ApiTransactionState::Failed));
+    assert_eq!(status.error, "domain start refused");
+    assert_eq!(status.failing_step, Some(2));
+    assert_eq!(status.total_count, 2);
+    assert_eq!(status.completed_count, 1);
+    assert_eq!(
+        status.pending_count, 0,
+        "a finished transaction has nothing pending"
+    );
+    assert_eq!(envelope.operation, Some(2));
+    let report: TransactionImpactReport = serde_json::from_slice(&envelope.report)
+        .assured("the envelope carries the report's JSON representation");
+    assert_eq!(report, inspection.report);
 }

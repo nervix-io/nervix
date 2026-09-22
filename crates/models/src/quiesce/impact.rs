@@ -2184,6 +2184,35 @@ mod impact_report_tests {
     }
 
     #[test]
+    fn fingerprints_read_as_hexadecimal_and_reject_anything_else() {
+        let basis = ImpactPlanningBasis::new([0xab; 32]);
+        assert_eq!(basis.to_string(), "ab".repeat(32));
+        let json =
+            serde_json::to_string(&basis).assured("a planning basis has a JSON representation");
+        assert_eq!(json, format!("\"{}\"", "ab".repeat(32)));
+        let restored: ImpactPlanningBasis =
+            serde_json::from_str(&json).assured("the JSON was produced from a planning basis");
+        assert_eq!(restored, basis);
+
+        let key = BranchKeyFingerprint::new([0x0f; 32]);
+        let json = serde_json::to_string(&key).assured("a branch key has a JSON representation");
+        assert_eq!(json, format!("\"{}\"", "0f".repeat(32)));
+
+        for malformed in [
+            "\"abab\"".to_string(),
+            format!("\"{}\"", "zz".repeat(32)),
+            format!("\"{}\"", "\u{e9}".repeat(32)),
+            format!("\"a{}a\"", "\u{e9}".repeat(31)),
+            "[1, 2, 3]".to_string(),
+        ] {
+            assert!(
+                serde_json::from_str::<ImpactPlanningBasis>(&malformed).is_err(),
+                "{malformed} is not a fingerprint"
+            );
+        }
+    }
+
+    #[test]
     fn canonical_sets_and_ordered_reasons_survive_json_and_rkyv_losslessly() {
         let report = two_operation_report();
         let json = serde_json::to_vec(&report)

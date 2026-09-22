@@ -8,13 +8,17 @@
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ActualExecutionStepImpact, AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet,
-    ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition, DomainName,
-    ExecutionStepImpactReport, ExecutionStepOutcome, ImpactAttribution, ImpactDiagnostic,
-    ImpactDiagnosticKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
-    ImpactPlanningBasis, ImpactReportCompleteness, ModelChangeAspect, ModelKind, NodeRef,
-    OperationImpactReason, OperationImpactReport, PauseRequirement, PlannedExecutionStepImpact,
-    QuiesceSubgraph, RebuildImpact, RebuildReason, RelayName, TransactionImpactReport,
+    ActivationAction, ActivationImpact, ActualExecutionStepImpact, ActualQuiescence,
+    AffectedTopology, AttributedGateBoundary, AttributedImpactNode, BranchKeyFingerprint,
+    BranchName, CanonicalImpactSet, ClusterNodeName, ConcreteBranchCoverage, ConfigurationImpact,
+    ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
+    ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
+    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
+    ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, ModelChangeAspect, ModelKind,
+    NodeRef, OperationImpactReason, OperationImpactReport, OwnershipMoveImpact, PauseRequirement,
+    PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
+    RelayName, RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction,
+    ResourceCatalogImpact, ResourceName, StatePurge, StateResetImpact, TransactionImpactReport,
     TransactionInspection, TransactionLifecycle, TransactionOperation, TransactionOperationNumber,
     TransactionOperationRange, TransactionPosition, TransactionReportFormat, TransactionStatus,
 };
@@ -399,4 +403,380 @@ fn json_names_a_failure_inline_and_an_unselected_operation_as_null() {
     assert_eq!(document["transaction"]["failing_operation"], 3);
     assert_eq!(document["transaction"]["error"], "domain start refused");
     assert!(document["operation"].is_null());
+}
+
+fn relay_node(name: &str) -> NodeRef {
+    node(ModelKind::Relay, name)
+}
+
+fn resource(name: &str) -> ResourceName {
+    ResourceName::parse(name).assured("the fixture resource name is an accepted literal")
+}
+
+fn branch(name: &str) -> BranchName {
+    BranchName::parse(name).assured("the fixture branch name is an accepted literal")
+}
+
+fn cluster_node(name: &str) -> ClusterNodeName {
+    ClusterNodeName::parse(name).assured("the fixture node name is an accepted literal")
+}
+
+fn unresolved(operation: Option<TransactionOperationNumber>) -> ImpactReportCompleteness {
+    ImpactReportCompleteness::incomplete(vec![ImpactDiagnostic {
+        kind: ImpactDiagnosticKind::Planning,
+        operation,
+        message: "the prefix is still being planned".to_string(),
+    }])
+    .assured("the fixture names what remains unresolved")
+}
+
+/// One operation for each operation kind the text names, each executed as its own step, with every
+/// effect, coverage and actual outcome a step can carry.
+fn every_kind_report() -> TransactionImpactReport {
+    let dropped = relay_node("retired_events");
+    let rebound = node(ModelKind::Inferencer, "score");
+    let enrich = node(ModelKind::Junction, "enrich");
+    let bundle = resource("bundle");
+    let selected = ConcreteBranchCoverage::selected(
+        branch("tenant"),
+        [
+            BranchKeyFingerprint::new([1; 32]),
+            BranchKeyFingerprint::new([2; 32]),
+        ],
+    )
+    .assured("the fixture selects two concrete branch keys");
+    let operations = vec![
+        OperationImpactReport {
+            number: operation(1),
+            operation: TransactionOperation::DropConfiguration {
+                domain: domain(),
+                node: dropped.clone(),
+            },
+            execution_step: step_range(1, 1),
+            completeness: unresolved(Some(operation(1))),
+            reasons: vec![OperationImpactReason::Configuration {
+                node: dropped.clone(),
+                aspect: ModelChangeAspect::RelaySchema,
+            }],
+            contribution: ImpactEffects::default(),
+        },
+        OperationImpactReport {
+            number: operation(2),
+            operation: TransactionOperation::AlterDomain { domain: domain() },
+            execution_step: step_range(2, 2),
+            completeness: ImpactReportCompleteness::Complete,
+            reasons: vec![OperationImpactReason::DomainPlacement],
+            contribution: ImpactEffects::default(),
+        },
+        OperationImpactReport {
+            number: operation(3),
+            operation: TransactionOperation::StopDomain { domain: domain() },
+            execution_step: step_range(3, 3),
+            completeness: ImpactReportCompleteness::Complete,
+            reasons: vec![OperationImpactReason::DomainStop],
+            contribution: ImpactEffects::default(),
+        },
+        OperationImpactReport {
+            number: operation(4),
+            operation: TransactionOperation::CreateResource {
+                domain: domain(),
+                resource: bundle.clone(),
+            },
+            execution_step: step_range(4, 4),
+            completeness: ImpactReportCompleteness::Complete,
+            reasons: vec![OperationImpactReason::ResourceCatalog {
+                resource: bundle.clone(),
+            }],
+            contribution: ImpactEffects::default(),
+        },
+        OperationImpactReport {
+            number: operation(5),
+            operation: TransactionOperation::RebindResource {
+                domain: domain(),
+                resource: bundle.clone(),
+                requested: RequestedResourceVersion::Latest,
+                version: 3,
+            },
+            execution_step: step_range(5, 5),
+            completeness: ImpactReportCompleteness::Complete,
+            reasons: vec![OperationImpactReason::ResourceRebinding {
+                node: rebound.clone(),
+                resource: bundle.clone(),
+                from_version: 2,
+                to_version: 3,
+            }],
+            contribution: ImpactEffects::default(),
+        },
+    ];
+    let first_effects = ImpactEffects {
+        changed_configuration: CanonicalImpactSet::new([ConfigurationImpact {
+            transition: ConfigurationTransition::Dropped {
+                node: dropped.clone(),
+            },
+            attribution: ImpactAttribution::single(operation(1)),
+        }]),
+        topology: AffectedTopology {
+            before: ImpactTopology {
+                nodes: CanonicalImpactSet::new([AttributedImpactNode {
+                    coverage: ImpactNodeCoverage::configuration(dropped.clone()),
+                    attribution: ImpactAttribution::single(operation(1)),
+                }]),
+                edges: CanonicalImpactSet::default(),
+            },
+            after: ImpactTopology::default(),
+        },
+        ownership_moves: CanonicalImpactSet::new([OwnershipMoveImpact {
+            node: ImpactNodeCoverage::execution(
+                enrich.clone(),
+                ConcreteBranchCoverage::AllOfBranch {
+                    branch: branch("tenant"),
+                },
+            ),
+            source: cluster_node("node-1"),
+            destination: cluster_node("node-2"),
+            attribution: ImpactAttribution::single(operation(1)),
+        }]),
+        activations: CanonicalImpactSet::new([ActivationImpact {
+            node: ImpactNodeCoverage::execution(
+                dropped.clone(),
+                ConcreteBranchCoverage::Unbranched,
+            ),
+            action: ActivationAction::Deactivate,
+            attribution: ImpactAttribution::single(operation(1)),
+        }]),
+        rebuilds: CanonicalImpactSet::new([RebuildImpact {
+            node: ImpactNodeCoverage::execution(enrich.clone(), selected),
+            reason: RebuildReason::Ownership,
+            attribution: ImpactAttribution::single(operation(1)),
+        }]),
+        state_resets: CanonicalImpactSet::new([StateResetImpact {
+            node: ImpactNodeCoverage::all_executions(enrich.clone()),
+            state: StatePurge::WindowAccumulator,
+            attribution: ImpactAttribution::single(operation(1)),
+        }]),
+        force_flushes: CanonicalImpactSet::new([ForceFlushImpact {
+            node: ImpactNodeCoverage::configuration(enrich),
+            attribution: ImpactAttribution::single(operation(1)),
+        }]),
+        ..ImpactEffects::default()
+    };
+    let lifecycle_effects = ImpactEffects {
+        lifecycle: CanonicalImpactSet::new([DomainLifecycleImpact {
+            domain: domain(),
+            action: DomainLifecycleAction::Stop,
+            attribution: ImpactAttribution::single(operation(3)),
+        }]),
+        ..ImpactEffects::default()
+    };
+    let catalog_effects = ImpactEffects {
+        resource_catalog: CanonicalImpactSet::new([ResourceCatalogImpact {
+            resource: bundle.clone(),
+            action: ResourceCatalogAction::Create,
+            attribution: ImpactAttribution::single(operation(4)),
+        }]),
+        ..ImpactEffects::default()
+    };
+    let binding_effects = ImpactEffects {
+        resource_bindings: CanonicalImpactSet::new([ResourceBindingImpact {
+            node: rebound,
+            resource: bundle,
+            requested: RequestedResourceVersion::Latest,
+            version: 3,
+            attribution: ImpactAttribution::single(operation(5)),
+        }]),
+        ..ImpactEffects::default()
+    };
+    let domain_pause = PauseRequirement::Domain { domain: domain() };
+    let applied = ActualExecutionStepImpact {
+        outcome: ExecutionStepOutcome::Applied,
+        quiescence: vec![ActualQuiescence {
+            requirement: domain_pause.clone(),
+            outcomes: vec![
+                QuiescenceOutcome::Requested,
+                QuiescenceOutcome::Confirmed,
+                QuiescenceOutcome::Released,
+            ],
+        }],
+        effects: ImpactEffects::default(),
+    };
+    let refused = ActualExecutionStepImpact {
+        outcome: ExecutionStepOutcome::Failed {
+            diagnostic: ImpactDiagnostic {
+                kind: ImpactDiagnosticKind::Quiescence,
+                operation: None,
+                message: "the domain did not pause".to_string(),
+            },
+        },
+        quiescence: vec![ActualQuiescence {
+            requirement: domain_pause.clone(),
+            outcomes: vec![
+                QuiescenceOutcome::Requested,
+                QuiescenceOutcome::Failed {
+                    diagnostic: ImpactDiagnostic {
+                        kind: ImpactDiagnosticKind::Quiescence,
+                        operation: Some(operation(2)),
+                        message: "pause refused".to_string(),
+                    },
+                },
+            ],
+        }],
+        effects: ImpactEffects::default(),
+    };
+    let uncertain = ActualExecutionStepImpact {
+        outcome: ExecutionStepOutcome::Applying,
+        quiescence: vec![ActualQuiescence {
+            requirement: domain_pause.clone(),
+            outcomes: vec![QuiescenceOutcome::Uncertain {
+                diagnostic: ImpactDiagnostic {
+                    kind: ImpactDiagnosticKind::Recovery,
+                    operation: None,
+                    message: "leadership changed".to_string(),
+                },
+            }],
+        }],
+        effects: ImpactEffects::default(),
+    };
+    let planned = |pause: PauseRequirement, effects: ImpactEffects| PlannedExecutionStepImpact {
+        completeness: ImpactReportCompleteness::Complete,
+        pause,
+        effects,
+    };
+    let steps = vec![
+        ExecutionStepImpactReport::new(
+            step_range(1, 1),
+            PlannedExecutionStepImpact {
+                completeness: unresolved(Some(operation(1))),
+                pause: domain_pause.clone(),
+                effects: first_effects,
+            },
+            applied,
+        ),
+        ExecutionStepImpactReport::new(
+            step_range(2, 2),
+            planned(domain_pause.clone(), ImpactEffects::default()),
+            refused,
+        ),
+        ExecutionStepImpactReport::new(
+            step_range(3, 3),
+            planned(domain_pause, lifecycle_effects),
+            uncertain,
+        ),
+        ExecutionStepImpactReport::new(
+            step_range(4, 4),
+            planned(PauseRequirement::NoPause, catalog_effects),
+            ActualExecutionStepImpact::unattempted(),
+        ),
+        ExecutionStepImpactReport::new(
+            step_range(5, 5),
+            planned(PauseRequirement::NoPause, binding_effects),
+            ActualExecutionStepImpact::unattempted(),
+        ),
+    ];
+    TransactionImpactReport::new(
+        domain(),
+        TransactionPosition::new(5),
+        ImpactPlanningBasis::new([0xcd; 32]),
+        unresolved(None),
+        operations,
+        steps,
+    )
+    .assured("the fixture numbers its operations in order and covers each with one step")
+}
+
+#[test]
+fn text_names_every_operation_reason_effect_and_outcome() {
+    let inspection = inspection(
+        TransactionLifecycle::Committing,
+        1,
+        None,
+        every_kind_report(),
+    );
+
+    let text = InspectionRendering::new(&inspection).render(TransactionReportFormat::Text);
+
+    for expected in [
+        "state: COMMITTING",
+        "operations: 5 accepted, 1 applied, 4 pending",
+        "report: INCOMPLETE",
+        "- kind=PLANNING the prefix is still being planned",
+        "quiesce level: DOMAIN_PAUSE",
+        "pause: DOMAIN domain=payments",
+        "operation 1: DROP_CONFIGURATION kind=relay name=retired_events",
+        "  incomplete: kind=PLANNING operation=1 the prefix is still being planned",
+        "  reason: CONFIGURATION kind=relay name=retired_events aspect=RELAY_SCHEMA",
+        "operation 2: ALTER_DOMAIN domain=payments",
+        "  reason: DOMAIN_PLACEMENT",
+        "operation 3: STOP_DOMAIN domain=payments",
+        "  reason: DOMAIN_STOP",
+        "operation 4: CREATE_RESOURCE resource=bundle",
+        "  reason: RESOURCE_CATALOG resource=bundle",
+        "operation 5: REBIND_RESOURCE resource=bundle version=3 requested=LATEST",
+        "  reason: RESOURCE_REBINDING kind=inferencer name=score resource=bundle from=2 to=3",
+        "execution step 1: planned DOMAIN_PAUSE, actual DOMAIN_PAUSE, outcome APPLIED",
+        "  pause: DOMAIN domain=payments",
+        "  effect: configuration DROPPED kind=relay name=retired_events operations=1",
+        "  effect: topology before nodes=1 edges=0 after nodes=0 edges=0",
+        "  effect: ownership move kind=junction name=enrich branches=ALL_OF_BRANCH branch=tenant \
+         from=node-1 to=node-2 operations=1",
+        "  effect: activation DEACTIVATE kind=relay name=retired_events branches=UNBRANCHED \
+         operations=1",
+        "  effect: rebuild OWNERSHIP kind=junction name=enrich branches=SELECTED branch=tenant \
+         keys=2 operations=1",
+        "  effect: state reset WINDOW_ACCUMULATOR kind=junction name=enrich branches=ALL \
+         operations=1",
+        "  effect: force flush kind=junction name=enrich operations=1",
+        "  quiescence: DOMAIN domain=payments REQUESTED, CONFIRMED, RELEASED",
+        "execution step 2: planned DOMAIN_PAUSE, actual DYNAMIC, outcome FAILED",
+        "  quiescence: DOMAIN domain=payments REQUESTED, FAILED (pause refused)",
+        "  failure: kind=QUIESCENCE the domain did not pause",
+        "execution step 3: planned DOMAIN_PAUSE, actual DOMAIN_PAUSE, outcome APPLYING",
+        "  effect: lifecycle STOP domain=payments operations=3",
+        "  quiescence: DOMAIN domain=payments UNCERTAIN (leadership changed)",
+        "execution step 4: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED",
+        "  effect: resource CREATE resource=bundle operations=4",
+        "execution step 5: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED",
+        "  effect: resource binding kind=inferencer name=score resource=bundle version=3 \
+         requested=LATEST operations=5",
+    ] {
+        assert!(
+            text.lines().any(|line| line == expected),
+            "{expected:?} missing from:\n{text}"
+        );
+    }
+    let step_one = text
+        .lines()
+        .position(|line| line.starts_with("execution step 1:"))
+        .verified("the first step is rendered");
+    assert_eq!(
+        text.lines().nth(step_one + 2),
+        Some("  incomplete: kind=PLANNING operation=1 the prefix is still being planned"),
+        "an incomplete step says what it could not resolve"
+    );
+}
+
+#[test]
+fn json_keeps_every_kind_of_the_same_report() {
+    let inspection = inspection(
+        TransactionLifecycle::Committing,
+        1,
+        Some(operation(5)),
+        every_kind_report(),
+    );
+
+    let json = InspectionRendering::new(&inspection).render(TransactionReportFormat::Json);
+    let document: serde_json::Value =
+        serde_json::from_str(&json).assured("FORMAT JSON prints one JSON document");
+    let report: TransactionImpactReport = serde_json::from_value(document["report"].clone())
+        .assured("the JSON report is the typed report's own representation");
+
+    assert_eq!(report, inspection.report);
+    assert_eq!(document["transaction"]["state"], "COMMITTING");
+    assert_eq!(document["operation"], 5);
+    let rebuild_keys = &document["report"]["execution_steps"][0]["planned"]["effects"]["rebuilds"]
+        [0]["node"]["branches"]["keys"];
+    assert_eq!(
+        rebuild_keys[0],
+        "01".repeat(32),
+        "branch-key fingerprints are hexadecimal like the planning basis"
+    );
 }
