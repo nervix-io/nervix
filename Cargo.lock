@@ -6784,6 +6784,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-jaq"
+version = "0.1.0-dev"
+dependencies = [
+ "bytes",
+ "ciborium",
+ "error-stack",
+ "jaq-core",
+ "jaq-fmts",
+ "jaq-json",
+ "jaq-std",
+ "nervix-models",
+ "serde_json",
+ "strum 0.26.3",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "nervix-models"
 version = "0.1.0-dev"
 dependencies = [
@@ -6950,10 +6967,6 @@ dependencies = [
  "iceberg-catalog-rest",
  "iceberg-storage-opendal",
  "indexmap 2.14.2",
- "jaq-core",
- "jaq-fmts",
- "jaq-json",
- "jaq-std",
  "lapin",
  "meticulous",
  "mongodb",
@@ -6969,6 +6982,7 @@ dependencies = [
  "nervix-execution",
  "nervix-expiry-map",
  "nervix-interconnect",
+ "nervix-jaq",
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",

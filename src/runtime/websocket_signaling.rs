@@ -2,6 +2,7 @@ use std::{future::Future, time::Duration};
 
 use error_stack::{AttachmentKind, FrameKind, Report};
 use futures_util::{SinkExt, StreamExt};
+use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
 use nervix_models::CreateSignalingProtocol;
 use prost_reflect::MessageDescriptor;
 use serde_json::Value as JsonValue;
@@ -16,10 +17,7 @@ use tokio_tungstenite::{
 };
 use triomphe::Arc;
 
-use crate::{
-    jaq_program::{JaqNativeFormat, StatefulJaqProgram},
-    runtime_schema::{decode_protobuf_payload, encode_protobuf_payload},
-};
+use crate::runtime_schema::{decode_protobuf_payload, encode_protobuf_payload};
 
 /// How much of a rejection value is carried into the failure reason.
 const MAX_REJECTION_REASON_BYTES: usize = 512;

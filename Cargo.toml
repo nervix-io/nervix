@@ -97,10 +97,6 @@ iceberg = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
 iceberg-storage-opendal = { workspace = true }
 indexmap = { workspace = true }
-jaq-core = { workspace = true }
-jaq-fmts = { workspace = true }
-jaq-json = { workspace = true, features = ["serde"] }
-jaq-std = { workspace = true }
 lapin = { workspace = true }
 meticulous = { workspace = true }
 mongodb = { workspace = true }
@@ -117,6 +113,7 @@ nervix-dataflow-graph = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
+nervix-jaq = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
 nervix-proto = { workspace = true, features = ["client", "server"] }
@@ -263,6 +260,7 @@ members = [
   "crates/execution",
   "crates/expiry-map",
   "crates/interconnect",
+  "crates/jaq",
   "crates/nervix-wasm",
   "crates/nervix-wasm-protocol",
   "crates/nervix-wasm-sdk",
@@ -410,6 +408,7 @@ nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/data
 nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
+nervix-jaq = { package = "nervix-jaq", path = "crates/jaq" }
 nervix-models = { package = "nervix-models", path = "crates/models" }
 nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
