@@ -130,6 +130,13 @@ client mount usage pauses the domain. If any node's listener cannot install the 
 the rebinding fails; when none of its usages paused, as when it moves only VHOSTs, every usage keeps
 its previous version.
 
+A moved WASM processor usage also discards the saved guest state of every one of its branches,
+because the state a new module would restore was written by the module it replaces. Nervix compiles
+each candidate module before the batch is published, so a module it cannot compile rejects the whole
+rebinding with the previous binding and its saved state still in place. A rebinding that leaves a
+WASM processor on the version it already binds resets nothing. See
+[State Generations](wasm-processor-guests.md#state-generations).
+
 ## Upload Format
 
 The client builds a deterministic tar archive, declares its exact size, and sends it in bounded chunks. Internode replication also streams bounded chunks with HTTP/2 flow control; neither endpoint retains the complete archive in memory. A failed transfer restarts from the beginning on its next reconciliation attempt.

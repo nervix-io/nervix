@@ -418,6 +418,28 @@ that generation; a branch with no surviving checkpoint of the generation being r
 fresh, and `SHOW CLUSTER STATUS` reports it as a `wasm_processor` reset. Applying the same committed
 schedule again, after a restart or a rebuild, publishes nothing new.
 
+#### Module rebinding
+
+Changing the module a processor binds changes what its saved state means, so `REBIND RESOURCE`
+starts a new generation for every branch of every WASM processor it moves, including branches that
+currently exist only as stored checkpoints. The change is the pinned resource, resource version, or
+module file: an upload alone binds nothing, a rebinding to the version a processor already holds
+changes nothing and resets nothing, and changing only `MAX FUEL`, `MAX MEMORY`, or the global error
+policy keeps every branch in the generation it has.
+
+Nervix compiles the candidate module before the batch is published. A module that cannot be
+compiled rejects the whole rebinding while the previous binding and its saved state are still the
+current ones, so no selected usage moves and no guest state is discarded:
+
+```text
+invalid WASM PROCESSOR 'counting_guest': wasm processor 'counting_guest' module compilation failed
+```
+
+The new binding and its new generation are published together, under the same entity pause that
+replaces the processor. From that point the checkpoints of the previous binding are unreachable:
+a restart, an owner failover, a returning former owner, and a handoff prepared before the
+rebinding all resolve to the new generation and start each branch's guest without saved state.
+
 #### Coordinated reset
 
 The control plane can replace the state lifetime of the explicit unbranched instance, one concrete

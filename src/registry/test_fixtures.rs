@@ -545,6 +545,19 @@ pub(in crate::registry) fn wasm_processor(name: &str, from_relay: &str, into_rel
     })
 }
 
+pub(in crate::registry) fn wasm_processor_branched_by(
+    name: &str,
+    from_relay: &str,
+    into_relay: &str,
+    branch: &str,
+) -> Model {
+    let Model::WasmProcessor(mut processor) = wasm_processor(name, from_relay, into_relay) else {
+        unreachable!("the WASM processor helper must build a WASM processor model")
+    };
+    processor.branched_by = BranchSelection::branched_by(named(branch));
+    Model::WasmProcessor(processor)
+}
+
 pub(in crate::registry) fn unbranched_correlator(
     name: &str,
     left_relay: &str,

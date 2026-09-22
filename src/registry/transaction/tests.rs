@@ -781,6 +781,13 @@ pub(super) enum FixtureUploadOutcome {
 }
 
 pub(super) fn tls_bundle_uploads(uploads: &[(u64, FixtureUploadOutcome)]) -> ResourceUploads {
+    fixture_uploads("tls_bundle", uploads)
+}
+
+pub(super) fn fixture_uploads(
+    resource: &str,
+    uploads: &[(u64, FixtureUploadOutcome)],
+) -> ResourceUploads {
     let domain = named::<DomainName>("default");
     let mut records = Vec::new();
     for (version, outcome) in uploads {
@@ -797,7 +804,7 @@ pub(super) fn tls_bundle_uploads(uploads: &[(u64, FixtureUploadOutcome)]) -> Res
                 UserName::parse("default")
                     .assured("the fixture owner is an identifier-shaped literal"),
                 domain.clone(),
-                named("tls_bundle"),
+                named(resource),
                 ResourceUploadIdentity::parse(format!("upload-{version}"))
                     .assured("fixture upload identities use accepted characters"),
             ),

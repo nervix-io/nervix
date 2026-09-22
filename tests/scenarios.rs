@@ -4168,14 +4168,7 @@ async fn when_unbranched_wasm_processor_state_is_reset(
 
 #[given("a branched state-counting WASM reset graph is running")]
 async fn given_branched_state_counting_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
-    configure_wasm_state_reset_graph(
-        world,
-        true,
-        false,
-        WasmStateResetGraphPlacement::Unconstrained,
-        true,
-    )
-    .await;
+    configure_wasm_state_reset_graph(world, WasmStateResetGraph::branched()).await;
 }
 
 #[given("a branched state-counting WASM reset graph is running in the existing domain")]
@@ -4184,10 +4177,10 @@ async fn given_branched_state_counting_wasm_reset_graph_is_running_in_the_existi
 ) {
     configure_wasm_state_reset_graph(
         world,
-        true,
-        false,
-        WasmStateResetGraphPlacement::Unconstrained,
-        false,
+        WasmStateResetGraph {
+            create_domain: false,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4198,10 +4191,10 @@ async fn given_node_one_owned_branched_state_counting_wasm_reset_graph_is_runnin
 ) {
     configure_wasm_state_reset_graph(
         world,
-        true,
-        false,
-        WasmStateResetGraphPlacement::NodeOne,
-        true,
+        WasmStateResetGraph {
+            placement: WasmStateResetGraphPlacement::NodeOne,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4212,10 +4205,10 @@ async fn given_non_node_one_owned_branched_state_counting_wasm_reset_graph_is_ru
 ) {
     configure_wasm_state_reset_graph(
         world,
-        true,
-        false,
-        WasmStateResetGraphPlacement::AwayFromNodeOne,
-        true,
+        WasmStateResetGraph {
+            placement: WasmStateResetGraphPlacement::AwayFromNodeOne,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4224,10 +4217,10 @@ async fn given_non_node_one_owned_branched_state_counting_wasm_reset_graph_is_ru
 async fn given_unbranched_state_counting_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
     configure_wasm_state_reset_graph(
         world,
-        false,
-        false,
-        WasmStateResetGraphPlacement::Unconstrained,
-        true,
+        WasmStateResetGraph {
+            branched: false,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4236,10 +4229,26 @@ async fn given_unbranched_state_counting_wasm_reset_graph_is_running(world: &mut
 async fn given_branched_timeout_buffering_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
     configure_wasm_state_reset_graph(
         world,
-        true,
-        true,
-        WasmStateResetGraphPlacement::Unconstrained,
-        true,
+        WasmStateResetGraph {
+            timeout_buffering: true,
+            ..WasmStateResetGraph::branched()
+        },
+    )
+    .await;
+}
+
+#[given(
+    "a branched state-counting WASM reset graph with a second usage of its resource is running"
+)]
+async fn given_branched_state_counting_wasm_reset_graph_with_a_second_usage_is_running(
+    world: &mut ScenarioWorld,
+) {
+    configure_wasm_state_reset_graph(
+        world,
+        WasmStateResetGraph {
+            second_wasm_usage: true,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4251,13 +4260,39 @@ enum WasmStateResetGraphPlacement {
     AwayFromNodeOne,
 }
 
-async fn configure_wasm_state_reset_graph(
-    world: &mut ScenarioWorld,
+/// The shape of the guest-state graph a WASM reset or rebind scenario runs on.
+#[derive(Clone, Copy)]
+struct WasmStateResetGraph {
     branched: bool,
     timeout_buffering: bool,
     placement: WasmStateResetGraphPlacement,
     create_domain: bool,
-) {
+    /// Also bind the processor's resource version from a second WASM processor, so a rebinding of
+    /// that resource moves more than one usage in one batch. The second processor filters every
+    /// row away, so it holds no guest state of its own.
+    second_wasm_usage: bool,
+}
+
+impl WasmStateResetGraph {
+    fn branched() -> Self {
+        Self {
+            branched: true,
+            timeout_buffering: false,
+            placement: WasmStateResetGraphPlacement::Unconstrained,
+            create_domain: true,
+            second_wasm_usage: false,
+        }
+    }
+}
+
+async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: WasmStateResetGraph) {
+    let WasmStateResetGraph {
+        branched,
+        timeout_buffering,
+        placement,
+        create_domain,
+        second_wasm_usage,
+    } = graph;
     let leader = current_leader_node(world).await;
     if create_domain {
         let domain_commands = format!("CREATE UNPACED DOMAIN {};", world.domain);
@@ -4358,6 +4393,27 @@ async fn configure_wasm_state_reset_graph(
     } else {
         "\"unbranched\""
     };
+    let second_usage_commands = if second_wasm_usage {
+        format!(
+            r#"
+        CREATE RELAY counted_secondary_events SCHEMA counted_output_event{relay_branching};
+        CREATE WASM PROCESSOR secondary_guest FROM counted_input_events
+          FILTER WHERE input.sequence < 0 AS I32
+          USING RESOURCE wasm_reset_guest VERSION 1
+          FILE 'processors/filter_even.wasm'
+          MAX FUEL 1000000000
+          MAX MEMORY 64MiB
+          {processor_branching}
+          TO counted_secondary_events
+          SET tenant = {tenant_expression},
+              note = coalesce(note, "{output_note}")
+          ON MESSAGE ERROR LOG
+          ON GLOBAL ERROR LOG;
+        "#
+        )
+    } else {
+        String::new()
+    };
     let commands = format!(
         r#"
         CREATE SCHEMA counted_input_event ( tenant STRING, sequence I32 );
@@ -4389,6 +4445,7 @@ async fn configure_wasm_state_reset_graph(
               note = coalesce(note, "{output_note}")
           ON MESSAGE ERROR LOG
           ON GLOBAL ERROR LOG;
+        {second_usage_commands}
         CREATE SUBSCRIPTION {subscription} TO {output_relay};
         START;
         "#

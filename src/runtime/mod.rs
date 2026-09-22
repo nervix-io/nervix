@@ -67,25 +67,25 @@ use nervix_models::{
     ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CommandExecutionReference,
     CoordinationIdentity, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateCodec,
     CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSignalingProtocol, CreateUdf, DomainClockAuthority, DomainConfig, DomainName,
-    DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow, EmitterName,
-    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
-    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
-    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
-    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
-    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, PostgresConflictAction,
-    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
-    WasmStateResetScope,
+    CreateSignalingProtocol, CreateUdf, CreateWasmProcessor, DomainClockAuthority, DomainConfig,
+    DomainName, DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow,
+    EmitterName, EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName,
+    FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog,
+    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
+    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
+    MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
+    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
+    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
+    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
+    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
+    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
+    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -507,9 +507,9 @@ use wasm_checkpoint::{
     checkpoint_wasm_guest_state, wasm_callback_decided_tokens,
 };
 use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
+pub(crate) use wasm_processor::WasmInstanceError;
 use wasm_processor::{
-    WasmBranchModule, WasmInstanceError, WasmLiveInstance, WasmModuleFile,
-    flush_branch_wasm_processor,
+    WasmBranchModule, WasmLiveInstance, WasmModuleFile, flush_branch_wasm_processor,
 };
 use wasm_state::{
     CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,

@@ -17,7 +17,7 @@ use super::{state_replication::StateReplicationError, *};
 /// about the saved state: only a guest's rejection of the state it was asked to restore classifies
 /// those bytes, and every other failure leaves them as usable as they were.
 #[derive(Debug, thiserror::Error)]
-pub(super) enum WasmInstanceError {
+pub(crate) enum WasmInstanceError {
     #[error("resource store is not attached")]
     ResourceStoreDetached,
     #[error(
@@ -81,7 +81,7 @@ pub(super) enum WasmInstanceError {
 
 /// The stage of a WASM processor branch instance's lifecycle at which a failure happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
-pub(super) enum WasmLifecycleStage {
+pub(crate) enum WasmLifecycleStage {
     /// Resolving, reading, or compiling the pinned module file.
     #[strum(to_string = "module compilation")]
     ModuleCompilation,
@@ -144,7 +144,7 @@ impl WasmLifecycleStage {
 /// them. The pinned resource version carries the owning domain, which the node reporting the
 /// failure already renders beside it.
 #[derive(Debug, Clone)]
-pub(super) struct WasmBranchModule {
+pub(crate) struct WasmBranchModule {
     pub(super) processor: ModelName,
     pub(super) branch: Option<BranchKey>,
     pub(super) resource: ResourceId,
@@ -620,6 +620,30 @@ impl Runtime {
             .compiled_wasm_modules
             .insert(module_file, compiled.clone());
         Ok(compiled)
+    }
+
+    /// Compile the module a candidate WASM processor binds, before the batch that would activate
+    /// it is published.
+    ///
+    /// A binding a node cannot compile is the one WASM failure that a whole batch has to be
+    /// rejected for: activating it replaces the processor and starts a new guest-state lifetime,
+    /// so a batch discovered to be unusable after publication has already invalidated the saved
+    /// state of the binding it replaced. Compiling first keeps the previous model and its guest
+    /// state the current ones, and the module this check compiles is the one activation installs.
+    pub(crate) async fn prepare_candidate_wasm_module(
+        &self,
+        domain: &DomainName,
+        processor: &CreateWasmProcessor,
+    ) -> error_stack::Result<(), WasmInstanceError> {
+        self.compile_wasm_processor_module(
+            domain,
+            &processor.name,
+            &processor.resource,
+            processor.resource_version,
+            &processor.file,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Keep the compiled modules of the WASM processors `schedule` assigns to `local_node_id`, as

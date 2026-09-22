@@ -290,7 +290,10 @@ carve-outs, lifecycle commands, and introspection.
 
 Every model-mutation batch acquires one exclusive leader-local ALTER lock for its domain before
 validation. The lock remains held through candidate planning, quiescing, persistence, schedule
-publication, rollback when required, and resume. A concurrent mutation is rejected instead of
+publication, rollback when required, and resume. Validation covers every candidate binding that
+reaches outside the registry: domain pace, VHOST TLS material, hash-map content, inferencer tensor
+metadata, and WASM module compilation. A binding that fails there rejects the batch while the models
+it would have replaced, and the node-owned state keyed by them, are still the current ones. A concurrent mutation is rejected instead of
 queued. Raft still serializes the durable domain lifecycle and schedule, while the registry's
 base-model comparison remains a final consistency check.
 
@@ -334,7 +337,10 @@ operator `PAUSE` or `RESUME` statement.
   Correlator, window-processor, inferencer, and WASM-processor structural changes use this level
   as well. A WASM processor participates like every other stateful node: the host gates its input
   relays, asks the guest to release what it buffers, checkpoints it, and restores that checkpoint
-  into the replacement instance.
+  into the replacement instance. A changed module binding is the one WASM-processor change whose
+  replacement does not restore that checkpoint: publishing the new binding also starts a new
+  guest-state generation for every branch, so each replacement branch initializes a fresh guest.
+  See [State Generations](wasm-processor-guests.md#state-generations).
 - A schedule change that only adjusts replica roles is `DYNAMIC`. A planned primary-owner change
   uses `ENTITY_PAUSE`, even when no model changed. `RELOCATE` is classified this way: it reports
   `ENTITY_PAUSE` when it moves at least one runtime node in a running domain, and `DYNAMIC` when it

@@ -185,8 +185,9 @@ impl OnnxTensorMetadata {
 
 impl SessionServiceImpl {
     /// Validates the bindings a planned batch would activate: everything that has to reach outside
-    /// the registry (domain pace, resource storage, ONNX metadata) and therefore cannot live in
-    /// `DomainState::build`, which follower synchronization and startup replay also run.
+    /// the registry (domain pace, resource storage, ONNX metadata, WASM module compilation) and
+    /// therefore cannot live in `DomainState::build`, which follower synchronization and startup
+    /// replay also run.
     ///
     /// This runs over the candidate models the batch produces rather than over the statements that
     /// produced them, so `CREATE` and every present and future `ALTER` share one boundary.
@@ -236,6 +237,21 @@ impl SessionServiceImpl {
                         .await
                         .map_err(|error| {
                             format!("invalid INFERENCER '{}': {error}", processor.name.as_str())
+                        })?;
+                }
+                Model::WasmProcessor(processor) => {
+                    // Activating a changed module binding also starts a new guest-state lifetime,
+                    // so a module that cannot be compiled has to reject the batch here, while the
+                    // previous binding and its saved state are still the current ones.
+                    self.inner
+                        .runtime
+                        .prepare_candidate_wasm_module(domain, processor)
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "invalid WASM PROCESSOR '{}': {error:#}",
+                                processor.name.as_str()
+                            )
                         })?;
                 }
                 _ => {}

@@ -484,3 +484,407 @@ Feature: Coordinated WASM processor state reset
       key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
       """
+
+  Scenario Outline: Rebinding a WASM module starts a fresh lifetime in every branch
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      REBIND RESOURCE wasm_reset_guest TO VERSION 2;
+      """
+    Then the last command output contains
+      """
+      rebound 1 of 1 usage(s) of resource 'wasm_reset_guest' to version 2
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: An upload and a no-op rebind keep every WASM guest lifetime
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      REBIND RESOURCE wasm_reset_guest TO VERSION 1;
+      """
+    Then the last command output contains
+      """
+      rebound 0 of 1 usage(s) of resource 'wasm_reset_guest' to version 1
+      """
+    And the last command output contains
+      """
+      quiesce level: DYNAMIC
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: A rebound WASM module keeps only its new lifetime through a cluster restart
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      REBIND RESOURCE wasm_reset_guest TO VERSION 2;
+      """
+    Then the last command output contains
+      """
+      rebound 1 of 1 usage(s) of resource 'wasm_reset_guest' to version 2
+      """
+    When the cluster is restarted
+    Then node "node-1" eventually observes a stable leader
+    And node "node-1" eventually reports status containing "{{domain}} status=Running"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE WASM PROCESSOR counting_guest;
+      """
+    Then the last command output contains
+      """
+      USING RESOURCE wasm_reset_guest VERSION 2
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: A rebind rejected by an unusable module keeps the previous binding and its guest lifetimes
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_unusable"
+    And resource directory "wasm_unusable" additionally contains
+      """
+      {
+        "processors/filter_even.wasm": "not a WebAssembly module"
+      }
+      """
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_unusable}}';
+      """
+    And these NSPL commands fail with "invalid WASM PROCESSOR 'counting_guest':"
+      """
+      REBIND RESOURCE wasm_reset_guest TO VERSION 2;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE WASM PROCESSOR counting_guest;
+      """
+    Then the last command output contains
+      """
+      USING RESOURCE wasm_reset_guest VERSION 1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION counted_events_retained TO counted_events;
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: A rebinding of two usages resets guest lifetimes only when the whole batch activates
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_unusable"
+    And resource directory "wasm_unusable" additionally contains
+      """
+      {
+        "processors/filter_even.wasm": "not a WebAssembly module"
+      }
+      """
+    And a branched state-counting WASM reset graph with a second usage of its resource is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_unusable}}';
+      """
+    And these NSPL commands fail with "invalid WASM PROCESSOR"
+      """
+      REBIND RESOURCE wasm_reset_guest TO VERSION 2;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE WASM PROCESSOR counting_guest;
+      """
+    Then the last command output contains
+      """
+      USING RESOURCE wasm_reset_guest VERSION 1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE WASM PROCESSOR secondary_guest;
+      """
+    Then the last command output contains
+      """
+      USING RESOURCE wasm_reset_guest VERSION 1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION counted_events_retained TO counted_events;
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":3}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      REBIND RESOURCE wasm_reset_guest TO VERSION 3;
+      """
+    Then the last command output contains
+      """
+      rebound 2 of 2 usage(s) of resource 'wasm_reset_guest' to version 3
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":4}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":4}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":5}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":5}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: A coordinated reset after a rebinding starts another lifetime on the rebound module
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When these NSPL commands are executed through the client on the leader node
+      """
+      UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      REBIND RESOURCE wasm_reset_guest TO VERSION 2;
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When WASM processor "counting_guest" state is reset for all branches
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":3}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":4}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":4}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
