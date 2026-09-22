@@ -102,12 +102,13 @@ use crate::common::{
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
     phase_deadline::{BeforeDeadline, PhaseDeadline},
-    scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioPhase},
+    scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
+    suite_watchdog::{SuiteOutcome, SuiteRun, SuiteWatchdogArgs},
 };
 
 mod common;
@@ -404,6 +405,16 @@ impl fmt::Debug for ScenarioWorld {
 }
 
 impl ScenarioWorld {
+    /// Which scenario this world belongs to, as every registry that groups work by scenario names
+    /// it.
+    fn scenario_identity(&self) -> ScenarioIdentity {
+        self.active_scenario
+            .as_ref()
+            .verified("the before hook registers a scenario before its first step runs")
+            .identity()
+            .clone()
+    }
+
     /// Publishes the phase this scenario is entering and writes the marker that names it.
     ///
     /// The marker is written as the phase begins, so a scenario whose log ends at one of them is a
@@ -3917,6 +3928,7 @@ async fn given_cluster_is_started(world: &mut ScenarioWorld, node_count: usize) 
         node_count,
         world.fault_injection.clone(),
         world.cluster_config.clone(),
+        world.scenario_identity(),
     )
     .await
     {
@@ -19965,19 +19977,30 @@ fn main() {
     let dependency_teardown_errors = runtime.block_on(TestDependencies::shutdown_suite());
     drop(runtime);
 
+    let outcome = match execution {
+        Ok(outcome) => outcome,
+        Err(payload) => resume_unwind(payload),
+    };
+    // A run the watchdog ended was dropped mid-scenario, so whatever its dependency teardown then
+    // found is a consequence of that ending rather than a separate failure. The status that says
+    // the budget ended the run is reported first, and the teardown's own errors go out with it.
+    if let SuiteOutcome::TimedOut(_) = &outcome {
+        for error in &dependency_teardown_errors {
+            eprintln!("suite dependency teardown failed after the suite timeout: {error}");
+        }
+        outcome.end_process();
+        return;
+    }
+
     assert!(
         dependency_teardown_errors.is_empty(),
         "suite dependency teardown failed: {}",
         dependency_teardown_errors.join("; ")
     );
-    match execution {
-        Ok(Some(message)) => panic!("{message}"),
-        Ok(None) => {}
-        Err(payload) => resume_unwind(payload),
-    }
+    outcome.end_process();
 }
 
-async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
+async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     let mut dependencies = TestDependencies::default();
     dependencies
         .start_redis(&scope)
@@ -19996,9 +20019,18 @@ async fn run_dependency_lifecycle_helper(scope: String) -> Option<String> {
     panic!("intentional dependency lifecycle helper unwind");
 }
 
-async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
+/// Everything a scenario run may be configured with beyond cucumber's own options.
+#[derive(Clone, Copy, Debug, clap::Args)]
+struct ScenarioRunArgs {
+    #[command(flatten)]
+    parallelism: TestParallelismArgs,
+    #[command(flatten)]
+    watchdog: SuiteWatchdogArgs,
+}
+
+async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     let mut cli =
-        cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, TestParallelismArgs>::parsed();
+        cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline)"
@@ -20006,7 +20038,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
     }
-    let concurrency_factor = cli.custom.concurrency_factor();
+    let watchdog = cli.custom.watchdog.watchdog();
+    let concurrency_factor = cli.custom.parallelism.concurrency_factor();
     let default_max_concurrent_scenarios = parallelism.max_concurrent_scenarios(concurrency_factor);
     let effective_max_concurrent_scenarios = cli
         .runner
@@ -20015,8 +20048,9 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
     truncate_cucumber_log();
     append_cucumber_log_line(&format!(
         "scenario parallelism: max_concurrent_scenarios={effective_max_concurrent_scenarios} \
-         concurrency_factor={concurrency_factor} tokio_worker_threads={}",
-        parallelism.tokio_worker_threads()
+         concurrency_factor={concurrency_factor} tokio_worker_threads={} suite_budget={:?}",
+        parallelism.tokio_worker_threads(),
+        watchdog.budget()
     ));
     let writer = writer::Basic::raw(
         std::io::stdout(), // Output to stdout
@@ -20026,12 +20060,13 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
     .summarized()
     .normalized()
     .repeat_failed();
-    let writer = ScenarioWorld::cucumber()
+    let run = ScenarioWorld::cucumber()
         .max_concurrent_scenarios(default_max_concurrent_scenarios)
         .retries(2)
         .before(|feature, rule, scenario, world| {
             let feature_name = feature.name.clone();
             let scenario_name = scenario.name.clone();
+            let scenario_line = scenario.position.line;
             let exclusive = scenario
                 .tags
                 .iter()
@@ -20044,6 +20079,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                 world.active_scenario = Some(ActiveScenarioRegistration::start(
                     &feature_name,
                     &scenario_name,
+                    scenario_line,
                 ));
                 let wasm_state_reset_scenario_permit =
                     if feature_name == WASM_STATE_RESET_FEATURE_NAME {
@@ -20194,8 +20230,29 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
         // its scenario while the suite still reports green.
         .fail_on_skipped()
         .with_cli(cli)
-        .run(SCENARIOS_PATH)
-        .await;
+        .run(SCENARIOS_PATH);
+
+    // The run is bounded rather than awaited: a step, a teardown diagnostic or a node stop that
+    // never returns would otherwise keep the whole suite alive until the workflow job is killed,
+    // which uploads nothing. Cucumber's fail-fast is not this guarantee — it stops scheduling and
+    // leaves the scenarios already running exactly where they are — so the retry coverage below
+    // keeps running until the budget itself expires.
+    let writer = match watchdog.bound(run).await {
+        SuiteRun::Completed(writer) => writer,
+        SuiteRun::TimedOut(timeout) => {
+            for line in timeout.to_string().lines() {
+                append_cucumber_log_line(line);
+            }
+            if timeout.cleanup.was_forced() {
+                // A node the watchdog could not stop is aborted with the run, so the record of
+                // what it was is this line and nothing else.
+                append_cucumber_log_line(
+                    "suite timeout cleanup forced: the run was dropped with nodes still running",
+                );
+            }
+            return SuiteOutcome::TimedOut(timeout);
+        }
+    };
 
     let execution_failure = if writer.execution_has_failed() {
         let mut messages = Vec::new();
@@ -20211,9 +20268,9 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
         if hook_errors > 0 {
             messages.push(format!("{hook_errors} hook error(s)"));
         }
-        Some(messages.join(", "))
+        SuiteOutcome::Failed(messages.join(", "))
     } else {
-        None
+        SuiteOutcome::Passed
     };
     drop(writer);
 

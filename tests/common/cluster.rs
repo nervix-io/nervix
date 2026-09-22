@@ -117,10 +117,12 @@ use super::{
         cluster_startup_budget,
     },
     phase_deadline::PhaseDeadline,
+    scenario_phase::ScenarioIdentity,
     status_request::{
         STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint,
         StatusRequestError, StatusTransport,
     },
+    suite_watchdog::{LiveClusterHandle, LiveClusterRegistration, NodeStop},
 };
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -748,6 +750,9 @@ pub(crate) struct Cluster {
     nodes: BTreeMap<String, NodeHandle>,
     fault_injection: FaultInjection,
     dependencies: DependencyEndpoints,
+    /// Publishes this cluster to the suite watchdog for as long as the scenario holds it, so a
+    /// suite timeout can name its nodes and ask every one of them to stop.
+    live: LiveClusterRegistration,
 }
 
 #[derive(Debug, Clone)]
@@ -804,6 +809,7 @@ impl Cluster {
         node_count: usize,
         fault_injection: FaultInjection,
         config: TestClusterConfig,
+        scenario: ScenarioIdentity,
     ) -> io::Result<Self> {
         assert!(node_count >= 1, "cluster must contain at least one node");
         #[cfg(feature = "testing")]
@@ -821,6 +827,7 @@ impl Cluster {
         init_tracing_to_file(std::path::Path::new(TEST_LOG_FILE))?;
         let root_dir = tempdir()?;
         let interconnect_ca = InterconnectTestCa::new(&root_dir)?;
+        let live = LiveClusterRegistration::start(scenario);
         let mut nodes = BTreeMap::new();
 
         for index in 1..=node_count {
@@ -830,7 +837,7 @@ impl Cluster {
                 .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
                 node_id.clone(),
-                NodeHandle::new(spec, fault_injection.clone(), config.clone()),
+                NodeHandle::new(spec, fault_injection.clone(), config.clone(), live.handle()),
             );
         }
 
@@ -840,6 +847,7 @@ impl Cluster {
             fault_injection,
             nodes,
             dependencies: config.dependencies,
+            live,
         };
 
         if let Err(error) = cluster.start_nodes_and_wait(node_count).await {
@@ -1029,7 +1037,12 @@ impl Cluster {
             .set_syslog_ingestor_bind_ip(node_name(node_id), spec.syslog_ingestor_host);
         self.nodes.insert(
             node_id.to_string(),
-            NodeHandle::new(spec, self.fault_injection.clone(), config),
+            NodeHandle::new(
+                spec,
+                self.fault_injection.clone(),
+                config,
+                self.live.handle(),
+            ),
         );
         self.start_node(node_id).await?;
 
@@ -2680,16 +2693,23 @@ struct NodeHandle {
     config: TestClusterConfig,
     task: OwnedNodeTask,
     shutdown: Option<ShutdownCoordinator>,
+    live: LiveClusterHandle,
 }
 
 impl NodeHandle {
-    fn new(spec: NodeSpec, fault_injection: FaultInjection, config: TestClusterConfig) -> Self {
+    fn new(
+        spec: NodeSpec,
+        fault_injection: FaultInjection,
+        config: TestClusterConfig,
+        live: LiveClusterHandle,
+    ) -> Self {
         Self {
             spec,
             fault_injection,
             config,
             task: OwnedNodeTask::not_started(),
             shutdown: None,
+            live,
         }
     }
 
@@ -2751,8 +2771,17 @@ impl NodeHandle {
             .graceful_shutdown_drain(self.config.graceful_shutdown_drain)
             .drain_timeout(self.config.drain_timeout)
             .build();
+        // Published before the task is spawned and handed to that task, so the watchdog sees the
+        // node for exactly as long as it runs: the registration leaves the registry when the task
+        // ends, whether it returned, failed, panicked or was aborted.
+        let live = self
+            .live
+            .node_started(&self.spec.node_id, StdArc::new(shutdown.clone()));
         self.shutdown = Some(shutdown);
-        self.task = OwnedNodeTask::spawn(application.run());
+        self.task = OwnedNodeTask::spawn(async move {
+            let _live = live;
+            application.run().await
+        });
         Ok(())
     }
 
@@ -2934,6 +2963,16 @@ impl TeardownNode for NodeHandle {
 impl Drop for NodeHandle {
     fn drop(&mut self) {
         self.abort();
+    }
+}
+
+/// The stop a live node publishes to the suite watchdog is the one its own teardown uses, so a
+/// node the watchdog ends stops exactly the way a scenario's cleanup would have stopped it.
+impl NodeStop for ShutdownCoordinator {
+    fn request_stop(&self) {
+        // Whether this request or an earlier one started the shutdown does not change what the
+        // watchdog does next: it waits for the node's task to end either way.
+        ShutdownCoordinator::request_stop(self);
     }
 }
 
