@@ -1,7 +1,9 @@
 use std::{num::NonZeroUsize, sync::Arc as StdArc};
 
 use ahash::HashSet;
-use nervix_connector::{RustlsClientConfigSource, client_tls_paths, read_tls_file};
+use nervix_connector::{
+    RustlsClientConfigSource, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
+};
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
@@ -290,7 +292,7 @@ impl SyslogClientConfig {
     }
 
     pub(super) fn tls_server_config(&self) -> Result<StdArc<ServerConfig>, SyslogConfigError> {
-        nervix_interconnect::install_rustls_crypto_provider();
+        install_rustls_crypto_provider();
         let tls = client_tls_paths(&self.entries);
         let cert_file = tls
             .cert_file

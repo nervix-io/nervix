@@ -1,48 +1,133 @@
-//! Syslog ingestor execution.
+//! Syslog source transport and runtime composition.
 //!
-//! Layer: data plane.
-//! - **Owns.** Syslog listeners, wire timestamp completion and source-boundary observation.
-//! - **Depends on.** Typed Syslog plans, socket transports and ingestor runtime admission.
-//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+//! Layer: data plane, pending the mechanical connector move.
+//!
+//! - **Owns.** Composing the Syslog connector plan with host-owned intake, plus the listener
+//!   transport that moves to its connector crate in the following commit.
+//! - **Depends on.** The connector source contract, typed Syslog configuration, socket transports,
+//!   and pre-resolved runtime execution handles.
+//! - **Must not know.** NSPL parsing, registry validation, or placement computation.
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, num::NonZeroUsize};
 
-use nervix_connector::physical_time::actual_utc_now;
-use nervix_models::{DomainName, IngestorName};
+use async_trait::async_trait;
+use error_stack::{Report, ResultExt as _};
+use nervix_connector::{
+    IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, ParsedRetryPolicy, SourceAckPolicy,
+    SourceBatch, SourceBatchRequest, SourceCapabilities, SourceConnector, SourceError,
+    SourceMessage, SourcePlan, SourceResult, SourceResume,
+};
+use nervix_models::ClientConfigEntry;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     net::{TcpListener, UdpSocket},
-    sync::mpsc,
+    sync::{mpsc, watch},
     task::JoinSet,
 };
 use tokio_rustls::TlsAcceptor;
 
-use super::super::*;
+use super::{
+    super::*,
+    source::{BrokerSourceHost, BrokerSourceHostSpec, run_source_instance_with_retry},
+};
 use crate::runtime::syslog::{SyslogClientConfig, SyslogDirection, SyslogProtocol};
 
+const SYSLOG: &str = "syslog";
 const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
 const MAX_OCTET_COUNT_DIGITS: usize = 10;
+const SYSLOG_RETRY_POLICY: ParsedRetryPolicy = ParsedRetryPolicy {
+    backoff: Duration::from_millis(250),
+    max_backoff: Duration::from_secs(30),
+};
 
 pub(in crate::runtime) struct SyslogIngestor;
 
 #[derive(Clone)]
-struct SyslogIngestContext {
-    runtime: Runtime,
-    domain: DomainName,
-    ingestor: IngestorName,
-    timestamp_source: Option<IngestTimestampSource>,
-    output_routes: RelayProcessorOutputsNode,
-    filter_where: Option<CompiledProgramWithMaterializedInterest>,
-    branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
-    codec: Arc<CompiledCodec>,
-    metrics: MessageMetricsHandle,
-    quiesce: Arc<IngestorQuiesceControl>,
+struct SyslogSourcePlan {
+    config: SyslogClientConfig,
+    bind_addr: String,
+}
+
+impl SyslogSourcePlan {
+    fn new(
+        entries: Vec<ClientConfigEntry>,
+        bind_addr: impl FnOnce(&str) -> String,
+    ) -> Result<Self, crate::runtime::syslog::SyslogConfigError> {
+        let config = SyslogClientConfig::parse(&entries, SyslogDirection::Ingest)?;
+        let bind_addr = bind_addr(&config.addr);
+        Ok(Self { config, bind_addr })
+    }
+}
+
+struct SyslogSourceMessage {
+    payload: Vec<u8>,
+    peer_addr: SocketAddr,
+    position: (),
+    headers: NoIngestHeaders,
+}
+
+impl SyslogSourceMessage {
+    fn new(payload: Vec<u8>, peer_addr: SocketAddr) -> Self {
+        Self {
+            payload,
+            peer_addr,
+            position: (),
+            headers: NoIngestHeaders,
+        }
+    }
+}
+
+impl SourceMessage for SyslogSourceMessage {
+    type Position = ();
+
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    fn position(&self) -> &Self::Position {
+        &self.position
+    }
+
+    fn headers(&self) -> &dyn IngestMessageHeaders {
+        &self.headers
+    }
+
+    fn metadata(&self) -> IngestMetadataRow<'_> {
+        IngestMetadataRow::Syslog {
+            peer_addr: self.peer_addr,
+        }
+    }
 }
 
 struct ReceivedSyslogFrame {
     payload: Vec<u8>,
     peer_addr: SocketAddr,
+}
+
+enum SyslogListener {
+    Udp(SyslogUdpListener),
+    Stream(SyslogStreamListener),
+}
+
+struct SyslogUdpListener {
+    socket: UdpSocket,
+    datagram: Vec<u8>,
+}
+
+struct SyslogStreamListener {
+    listener: TcpListener,
+    frame_tx: mpsc::Sender<ReceivedSyslogFrame>,
+    frame_rx: mpsc::Receiver<ReceivedSyslogFrame>,
+    connections: JoinSet<Result<(), SyslogConnectionError>>,
+    paused: watch::Sender<bool>,
+}
+
+struct SyslogSource {
+    config: SyslogClientConfig,
+    bind_addr: String,
+    tls_acceptor: Option<TlsAcceptor>,
+    listener: Option<SyslogListener>,
 }
 
 #[derive(Debug, Error)]
@@ -108,6 +193,297 @@ enum SyslogFrameError {
     NonOctetTlsFrame,
 }
 
+#[async_trait]
+impl SourceConnector for SyslogSource {
+    type Plan = SyslogSourcePlan;
+    type Message = SyslogSourceMessage;
+    type Position = ();
+
+    async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
+        let tls_acceptor = if plan.config.protocol == SyslogProtocol::Tls {
+            let config = plan.config.tls_server_config().map_err(|error| {
+                Report::new(error).change_context(SourceError::Open { connector: SYSLOG })
+            })?;
+            Some(TlsAcceptor::from(config))
+        } else {
+            None
+        };
+        Ok(Self {
+            config: plan.config.clone(),
+            bind_addr: plan.bind_addr.clone(),
+            tls_acceptor,
+            listener: None,
+        })
+    }
+
+    fn needs_resume(&mut self) -> bool {
+        self.listener.is_none()
+    }
+
+    async fn next_batch(
+        &mut self,
+        _request: SourceBatchRequest,
+    ) -> SourceResult<SourceBatch<Self::Message>> {
+        let result = match self.listener.as_mut() {
+            Some(SyslogListener::Udp(listener)) => {
+                listener.receive(self.config.max_message_size).await
+            }
+            Some(SyslogListener::Stream(listener)) => {
+                listener
+                    .receive(self.config.max_message_size, self.tls_acceptor.clone())
+                    .await
+            }
+            None => return Ok(SourceBatch::ResumeRequired),
+        };
+        match result {
+            Ok(message) => Ok(SourceBatch::Messages(vec![message])),
+            Err(error) => {
+                self.drop_listener();
+                Err(error.change_context(SourceError::Read { connector: SYSLOG }))
+            }
+        }
+    }
+
+    async fn acknowledge(&mut self, _positions: &[Self::Position]) -> SourceResult<()> {
+        Ok(())
+    }
+
+    async fn reject(&mut self, _positions: &[Self::Position]) -> SourceResult<()> {
+        Ok(())
+    }
+
+    async fn suspend(&mut self) -> SourceResult<()> {
+        if let Some(SyslogListener::Stream(listener)) = self.listener.as_mut() {
+            listener.paused.send_replace(true);
+        }
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> SourceResult<SourceResume> {
+        if let Some(listener) = self.listener.as_mut() {
+            if let SyslogListener::Stream(listener) = listener {
+                listener.paused.send_replace(false);
+            }
+            return Ok(SourceResume::Ready);
+        }
+        let listener = self
+            .bind_listener()
+            .await
+            .change_context(SourceError::Resume { connector: SYSLOG })?;
+        self.listener = Some(listener);
+        Ok(SourceResume::Ready)
+    }
+
+    async fn close(&mut self) -> SourceResult<()> {
+        self.drop_listener();
+        Ok(())
+    }
+}
+
+impl SyslogSource {
+    async fn bind_listener(&self) -> Result<SyslogListener, Report<SyslogListenerError>> {
+        match self.config.protocol {
+            SyslogProtocol::Udp => {
+                let socket = UdpSocket::bind(&self.bind_addr).await.map_err(|source| {
+                    Report::new(SyslogListenerError::Bind {
+                        transport: "UDP",
+                        addr: self.bind_addr.clone(),
+                        source,
+                    })
+                })?;
+                Ok(SyslogListener::Udp(SyslogUdpListener {
+                    socket,
+                    datagram: vec![0_u8; 65_535],
+                }))
+            }
+            SyslogProtocol::Tcp | SyslogProtocol::Tls => {
+                let listener = TcpListener::bind(&self.bind_addr).await.map_err(|source| {
+                    Report::new(SyslogListenerError::Bind {
+                        transport: "stream",
+                        addr: self.bind_addr.clone(),
+                        source,
+                    })
+                })?;
+                let (frame_tx, frame_rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
+                let (paused, _) = watch::channel(false);
+                Ok(SyslogListener::Stream(SyslogStreamListener {
+                    listener,
+                    frame_tx,
+                    frame_rx,
+                    connections: JoinSet::new(),
+                    paused,
+                }))
+            }
+        }
+    }
+
+    fn drop_listener(&mut self) {
+        if let Some(SyslogListener::Stream(listener)) = self.listener.as_mut() {
+            listener.connections.abort_all();
+        }
+        self.listener = None;
+    }
+}
+
+impl SyslogUdpListener {
+    async fn receive(
+        &mut self,
+        max_message_size: NonZeroUsize,
+    ) -> Result<SyslogSourceMessage, Report<SyslogListenerError>> {
+        loop {
+            tokio::task::consume_budget().await;
+            let (size, peer_addr) = self
+                .socket
+                .recv_from(&mut self.datagram)
+                .await
+                .map_err(|source| Report::new(SyslogListenerError::UdpReceive { source }))?;
+            if size > max_message_size.get() {
+                debug!(
+                    peer_addr = %peer_addr,
+                    size,
+                    max_message_size,
+                    "dropped oversized syslog UDP datagram"
+                );
+                continue;
+            }
+            return Ok(SyslogSourceMessage::new(
+                self.datagram[..size].to_vec(),
+                peer_addr,
+            ));
+        }
+    }
+}
+
+impl SyslogStreamListener {
+    async fn receive(
+        &mut self,
+        max_message_size: NonZeroUsize,
+        tls_acceptor: Option<TlsAcceptor>,
+    ) -> Result<SyslogSourceMessage, Report<SyslogListenerError>> {
+        loop {
+            tokio::task::consume_budget().await;
+            tokio::select! {
+                accepted = self.listener.accept() => {
+                    let (stream, peer_addr) = accepted.map_err(|source| {
+                        Report::new(SyslogListenerError::StreamAccept { source })
+                    })?;
+                    if let Err(error) = stream.set_nodelay(true) {
+                        debug!(
+                            peer_addr = %peer_addr,
+                            error = %error,
+                            "failed to configure accepted syslog connection"
+                        );
+                        continue;
+                    }
+                    let tx = self.frame_tx.clone();
+                    let paused = self.paused.subscribe();
+                    let connection_tls = tls_acceptor.clone();
+                    self.connections.spawn(async move {
+                        if let Some(acceptor) = connection_tls {
+                            let stream = acceptor
+                                .accept(stream)
+                                .await
+                                .map_err(|source| SyslogConnectionError::TlsHandshake { source })?;
+                            read_stream_connection(
+                                stream,
+                                peer_addr,
+                                max_message_size,
+                                false,
+                                tx,
+                                paused,
+                            )
+                            .await
+                        } else {
+                            read_stream_connection(
+                                stream,
+                                peer_addr,
+                                max_message_size,
+                                true,
+                                tx,
+                                paused,
+                            )
+                            .await
+                        }
+                    });
+                }
+                frame = self.frame_rx.recv() => {
+                    let Some(frame) = frame else {
+                        return Err(Report::new(SyslogListenerError::IntakeQueueClosed));
+                    };
+                    return Ok(SyslogSourceMessage::new(frame.payload, frame.peer_addr));
+                }
+                joined = self.connections.join_next(), if !self.connections.is_empty() => {
+                    match joined {
+                        Some(Ok(Err(error))) => {
+                            debug!(error = %error, "closed malformed or failed syslog connection");
+                        }
+                        Some(Err(error)) if !error.is_cancelled() => {
+                            debug!(error = %error, "syslog connection task failed");
+                        }
+                        Some(Ok(Ok(()))) | Some(Err(_)) | None => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn read_stream_connection(
+    mut stream: impl AsyncRead + Unpin,
+    peer_addr: SocketAddr,
+    max_message_size: NonZeroUsize,
+    allow_non_transparent: bool,
+    tx: mpsc::Sender<ReceivedSyslogFrame>,
+    mut paused: watch::Receiver<bool>,
+) -> Result<(), SyslogConnectionError> {
+    let mut decoder = StreamFrameDecoder::new(max_message_size, allow_non_transparent);
+    loop {
+        tokio::task::consume_budget().await;
+        if *paused.borrow() {
+            if paused.changed().await.is_err() {
+                return Ok(());
+            }
+            continue;
+        }
+        if let Some(frame) = decoder.next_frame()? {
+            tokio::select! {
+                sent = tx.send(ReceivedSyslogFrame { payload: frame, peer_addr }) => {
+                    if sent.is_err() {
+                        return Ok(());
+                    }
+                }
+                changed = paused.changed() => {
+                    if changed.is_err() {
+                        return Ok(());
+                    }
+                }
+            }
+            continue;
+        }
+        let read_capacity = decoder.read_capacity()?;
+        let mut chunk = [0_u8; 8_192];
+        let read_capacity = read_capacity.min(chunk.len());
+        let read = tokio::select! {
+            changed = paused.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+                continue;
+            }
+            read = stream.read(&mut chunk[..read_capacity]) => read,
+        }
+        .map_err(|source| SyslogConnectionError::StreamRead { source })?;
+        if read == 0 {
+            return if decoder.is_empty() {
+                Ok(())
+            } else {
+                Err(SyslogConnectionError::IncompleteFrame)
+            };
+        }
+        decoder.extend(&chunk[..read]);
+    }
+}
+
 impl SyslogIngestor {
     pub(in crate::runtime) async fn start(
         runtime: &Runtime,
@@ -125,138 +501,97 @@ impl SyslogIngestor {
         }
         let resolved = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-            .map_err(|reason| RuntimeError::StartIngestor {
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason: reason.to_string(),
+                reason: error.to_string(),
             })?;
-        let config = SyslogClientConfig::parse(&resolved.entries, SyslogDirection::Ingest)
-            .map_err(|reason| RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-        let tls_acceptor = if config.protocol == SyslogProtocol::Tls {
-            Some(TlsAcceptor::from(config.tls_server_config().map_err(
-                |reason| RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: reason.to_string(),
-                },
-            )?))
-        } else {
-            None
+        let connector = SyslogSourcePlan::new(resolved.entries, |configured| {
+            runtime.syslog_ingestor_bind_addr(configured)
+        })
+        .map_err(|error| RuntimeError::StartIngestor {
+            domain: domain.as_str().to_string(),
+            ingestor: ingestor.name.as_str().to_string(),
+            reason: error.to_string(),
+        })?;
+        let acknowledgement = SourceAckPolicy::None;
+        let source_plan = SourcePlan {
+            connector,
+            capabilities: SourceCapabilities::new(
+                ingestor.allow_header_reads,
+                ingestor.metadata_kind.source_scope(),
+                ingestor.quiesce.supports(ingestor.quiesce.mode()),
+                NonZeroU64::MIN,
+                acknowledgement.support(),
+            ),
+            acknowledgement,
         };
-        let bind_addr = runtime.syslog_ingestor_bind_addr(&config.addr);
-
+        let source = SyslogSource::open(&source_plan.connector, 0)
+            .await
+            .map_err(|error| RuntimeError::StartIngestor {
+                domain: domain.as_str().to_string(),
+                ingestor: ingestor.name.as_str().to_string(),
+                reason: error.to_string(),
+            })?;
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
             &ingestor.name,
             dependencies.branched_templates,
         );
-        let context = SyslogIngestContext {
+        let quiesce = runtime
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
+        let (shutdown_tx, _) = watch::channel(false);
+        runtime.prepare_ingestor_readiness(
+            domain,
+            &ingestor.name,
+            source_plan.capabilities.instances(),
+        );
+        let host = BrokerSourceHost::build(BrokerSourceHostSpec {
             runtime: runtime.clone(),
             domain: domain.clone(),
             ingestor: ingestor.name.clone(),
             timestamp_source: ingestor.timestamp_source.clone(),
             output_routes: dependencies.output_routes,
             filter_where: dependencies.filter_where,
-            branched_senders: branched_runtime.senders.clone(),
             codec: dependencies.codec,
             metrics: dependencies.metrics,
-            quiesce: runtime
-                .ingestor_quiesce_control(domain, &ingestor.name)
-                .verified(
-                    "the runtime registers quiesce control for an ingestor before it starts the \
-                     task",
-                ),
-        };
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let task_context = context.clone();
+            branched_senders: branched_runtime.senders.clone(),
+            quiesce,
+            shutdown: shutdown_tx.subscribe(),
+            instance_index: 0,
+            metadata_kind: ingestor.metadata_kind,
+            buffered_intake: true,
+        });
+        let task_domain = domain.clone();
+        let task_ingestor = ingestor.name.clone();
+        let shutdown = shutdown_tx.subscribe();
+        let acknowledgement = source_plan.acknowledgement;
+        let client_mounts = resolved.mounts;
         let task = tokio::spawn(async move {
-            let _client_mounts = resolved.mounts;
-            let mut backoff = RuntimeReconnectBackoff::default();
+            let _client_mounts = client_mounts;
             info!(
-                domain = task_context.domain.as_str(),
-                ingestor = task_context.ingestor.as_str(),
+                domain = task_domain.as_str(),
+                ingestor = task_ingestor.as_str(),
                 "started syslog ingestor"
             );
-            loop {
-                tokio::task::consume_budget().await;
-                if task_context
-                    .runtime
-                    .wait_if_ingestor_faulted(
-                        &task_context.domain,
-                        &task_context.ingestor,
-                        &mut shutdown_rx,
-                    )
-                    .await
-                {
-                    break;
-                }
-                if task_context
-                    .runtime
-                    .inner
-                    .fault_injection
-                    .ingestor_is_failed(&task_context.ingestor)
-                {
-                    continue;
-                }
-                let listener = match config.protocol {
-                    SyslogProtocol::Udp => {
-                        Self::run_udp_listener(
-                            &task_context,
-                            &config,
-                            &bind_addr,
-                            &mut backoff,
-                            &mut shutdown_rx,
-                        )
-                        .await
-                    }
-                    SyslogProtocol::Tcp | SyslogProtocol::Tls => {
-                        Self::run_stream_listener(
-                            &task_context,
-                            &config,
-                            &bind_addr,
-                            tls_acceptor.clone(),
-                            &mut backoff,
-                            &mut shutdown_rx,
-                        )
-                        .await
-                    }
-                };
-                match listener {
-                    Ok(()) => break,
-                    Err(reason) => {
-                        let reason = reason.to_string();
-                        task_context
-                            .runtime
-                            .record_ingestor_transient_error_with_backoff(
-                                &task_context.domain,
-                                &task_context.ingestor,
-                                reason.clone(),
-                                backoff.next_delay(),
-                            );
-                        warn!(
-                            domain = task_context.domain.as_str(),
-                            ingestor = task_context.ingestor.as_str(),
-                            error = reason,
-                            "syslog listener failed; retrying"
-                        );
-                        if !backoff.wait(&mut shutdown_rx).await {
-                            break;
-                        }
-                    }
-                }
-            }
+            run_source_instance_with_retry(
+                source,
+                host,
+                acknowledgement,
+                SYSLOG_RETRY_POLICY,
+                shutdown,
+            )
+            .await;
             info!(
-                domain = task_context.domain.as_str(),
-                ingestor = task_context.ingestor.as_str(),
+                domain = task_domain.as_str(),
+                ingestor = task_ingestor.as_str(),
                 "stopped syslog ingestor"
             );
         });
-
         runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
@@ -266,368 +601,6 @@ impl SyslogIngestor {
             },
         );
         Ok(())
-    }
-
-    async fn run_udp_listener(
-        context: &SyslogIngestContext,
-        config: &SyslogClientConfig,
-        bind_addr: &str,
-        backoff: &mut RuntimeReconnectBackoff,
-        shutdown_rx: &mut watch::Receiver<bool>,
-    ) -> Result<(), SyslogListenerError> {
-        let socket =
-            UdpSocket::bind(bind_addr)
-                .await
-                .map_err(|source| SyslogListenerError::Bind {
-                    transport: "UDP",
-                    addr: bind_addr.to_string(),
-                    source,
-                })?;
-        context
-            .runtime
-            .clear_ingestor_transient_error(&context.domain, &context.ingestor);
-        backoff.reset();
-        let mut collector = IngestRouteCollector::new(
-            IngestMetadataKind::Syslog,
-            INGEST_GROUP_MAX_ROWS,
-            context.metrics.clone(),
-        );
-        let mut datagram = vec![0_u8; 65_535];
-        loop {
-            tokio::task::consume_budget().await;
-            if Self::dispatch_buffered(context, &mut collector).await {
-                continue;
-            }
-            if context.quiesce.should_suspend_intake() {
-                Self::flush_collector(context, &mut collector).await;
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            return Ok(());
-                        }
-                    }
-                    _ = context.quiesce.wait_until_not_suspended() => {}
-                }
-                continue;
-            }
-            let next_flush = collector.next_flush();
-            let flush_at =
-                next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
-            tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        Self::flush_collector(context, &mut collector).await;
-                        return Ok(());
-                    }
-                }
-                _ = sleep_until(flush_at), if next_flush.is_some() => {
-                    Self::flush_collector(context, &mut collector).await;
-                }
-                _ = context.quiesce.wait_for_change() => {}
-                received = socket.recv_from(&mut datagram) => {
-                    let (size, peer_addr) = received
-                        .map_err(|source| SyslogListenerError::UdpReceive { source })?;
-                    if size > config.max_message_size.get() {
-                        debug!(
-                            domain = context.domain.as_str(),
-                            ingestor = context.ingestor.as_str(),
-                            peer_addr = %peer_addr,
-                            size,
-                            max_message_size = config.max_message_size,
-                            "dropped oversized syslog UDP datagram"
-                        );
-                        continue;
-                    }
-                    let payload = BufferedIngestPayload::new(
-                        &datagram[..size],
-                        BufferedIngestMetadata::Syslog { peer_addr },
-                        actual_utc_now(),
-                    );
-                    if let IngestorQuiesceIntake::Dispatch(payload) =
-                        context.quiesce.intake(0, payload, false)
-                    {
-                        Self::dispatch(context, &mut collector, &payload).await;
-                    }
-                }
-            }
-        }
-    }
-
-    async fn run_stream_listener(
-        context: &SyslogIngestContext,
-        config: &SyslogClientConfig,
-        bind_addr: &str,
-        tls_acceptor: Option<TlsAcceptor>,
-        backoff: &mut RuntimeReconnectBackoff,
-        shutdown_rx: &mut watch::Receiver<bool>,
-    ) -> Result<(), SyslogListenerError> {
-        let listener =
-            TcpListener::bind(bind_addr)
-                .await
-                .map_err(|source| SyslogListenerError::Bind {
-                    transport: "stream",
-                    addr: bind_addr.to_string(),
-                    source,
-                })?;
-        context
-            .runtime
-            .clear_ingestor_transient_error(&context.domain, &context.ingestor);
-        backoff.reset();
-        let (frame_tx, mut frame_rx) = mpsc::channel(STREAM_INTAKE_QUEUE_CAPACITY);
-        let mut connections = JoinSet::new();
-        let mut collector = IngestRouteCollector::new(
-            IngestMetadataKind::Syslog,
-            INGEST_GROUP_MAX_ROWS,
-            context.metrics.clone(),
-        );
-        loop {
-            tokio::task::consume_budget().await;
-            if Self::dispatch_buffered(context, &mut collector).await {
-                continue;
-            }
-            if context.quiesce.should_suspend_intake() {
-                Self::flush_collector(context, &mut collector).await;
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            connections.abort_all();
-                            return Ok(());
-                        }
-                    }
-                    _ = context.quiesce.wait_until_not_suspended() => {}
-                }
-                continue;
-            }
-            let next_flush = collector.next_flush();
-            let flush_at =
-                next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
-            tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        connections.abort_all();
-                        Self::flush_collector(context, &mut collector).await;
-                        return Ok(());
-                    }
-                }
-                _ = sleep_until(flush_at), if next_flush.is_some() => {
-                    Self::flush_collector(context, &mut collector).await;
-                }
-                _ = context.quiesce.wait_for_change() => {}
-                accepted = listener.accept() => {
-                    let (stream, peer_addr) = accepted
-                        .map_err(|source| SyslogListenerError::StreamAccept { source })?;
-                    if let Err(error) = stream.set_nodelay(true) {
-                        debug!(
-                            domain = context.domain.as_str(),
-                            ingestor = context.ingestor.as_str(),
-                            peer_addr = %peer_addr,
-                            error = %error,
-                            "failed to configure accepted syslog connection"
-                        );
-                        continue;
-                    }
-                    let tx = frame_tx.clone();
-                    let connection_quiesce = context.quiesce.clone();
-                    let connection_shutdown = shutdown_rx.clone();
-                    let max_message_size = config.max_message_size;
-                    let connection_tls = tls_acceptor.clone();
-                    let domain = context.domain.clone();
-                    let ingestor = context.ingestor.clone();
-                    connections.spawn(async move {
-                        let result = if let Some(acceptor) = connection_tls {
-                            match acceptor.accept(stream).await {
-                                Ok(stream) => Self::read_stream_connection(
-                                    stream,
-                                    peer_addr,
-                                    max_message_size,
-                                    false,
-                                    tx,
-                                    connection_quiesce,
-                                    connection_shutdown,
-                                )
-                                .await,
-                                Err(source) => Err(SyslogConnectionError::TlsHandshake { source }),
-                            }
-                        } else {
-                            Self::read_stream_connection(
-                                stream,
-                                peer_addr,
-                                max_message_size,
-                                true,
-                                tx,
-                                connection_quiesce,
-                                connection_shutdown,
-                            )
-                            .await
-                        };
-                        if let Err(error) = result {
-                            debug!(
-                                domain = domain.as_str(),
-                                ingestor = ingestor.as_str(),
-                                peer_addr = %peer_addr,
-                                error = %error,
-                                "closed malformed or failed syslog connection"
-                            );
-                        }
-                    });
-                }
-                frame = frame_rx.recv() => {
-                    let Some(frame) = frame else {
-                        return Err(SyslogListenerError::IntakeQueueClosed);
-                    };
-                    let payload = BufferedIngestPayload::new(
-                        &frame.payload,
-                        BufferedIngestMetadata::Syslog {
-                            peer_addr: frame.peer_addr,
-                        },
-                        actual_utc_now(),
-                    );
-                    if let IngestorQuiesceIntake::Dispatch(payload) =
-                        context.quiesce.intake(0, payload, false)
-                    {
-                        Self::dispatch(context, &mut collector, &payload).await;
-                    }
-                }
-                joined = connections.join_next(), if !connections.is_empty() => {
-                    if let Some(Err(error)) = joined
-                        && !error.is_cancelled()
-                    {
-                        debug!(
-                            domain = context.domain.as_str(),
-                            ingestor = context.ingestor.as_str(),
-                            error = %error,
-                            "syslog connection task failed"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    async fn read_stream_connection(
-        mut stream: impl AsyncRead + Unpin,
-        peer_addr: SocketAddr,
-        max_message_size: NonZeroUsize,
-        allow_non_transparent: bool,
-        tx: mpsc::Sender<ReceivedSyslogFrame>,
-        quiesce: Arc<IngestorQuiesceControl>,
-        mut shutdown_rx: watch::Receiver<bool>,
-    ) -> Result<(), SyslogConnectionError> {
-        let mut decoder = StreamFrameDecoder::new(max_message_size, allow_non_transparent);
-        loop {
-            tokio::task::consume_budget().await;
-            if quiesce.should_suspend_intake() {
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            return Ok(());
-                        }
-                    }
-                    _ = quiesce.wait_until_not_suspended() => {}
-                }
-                continue;
-            }
-            if let Some(frame) = decoder.next_frame()? {
-                tokio::select! {
-                    sent = tx.send(ReceivedSyslogFrame { payload: frame, peer_addr }) => {
-                        if sent.is_err() {
-                            return Ok(());
-                        }
-                    }
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            return Ok(());
-                        }
-                    }
-                }
-                continue;
-            }
-            let read_capacity = decoder.read_capacity()?;
-            let mut chunk = [0_u8; 8_192];
-            let read_capacity = read_capacity.min(chunk.len());
-            let read = tokio::select! {
-                changed = shutdown_rx.changed() => {
-                    if changed.is_err() || *shutdown_rx.borrow() {
-                        return Ok(());
-                    }
-                    continue;
-                }
-                _ = quiesce.wait_for_change() => continue,
-                read = stream.read(&mut chunk[..read_capacity]) => read,
-            }
-            .map_err(|source| SyslogConnectionError::StreamRead { source })?;
-            if read == 0 {
-                return if decoder.is_empty() {
-                    Ok(())
-                } else {
-                    Err(SyslogConnectionError::IncompleteFrame)
-                };
-            }
-            decoder.extend(&chunk[..read]);
-        }
-    }
-
-    async fn dispatch_buffered(
-        context: &SyslogIngestContext,
-        collector: &mut IngestRouteCollector,
-    ) -> bool {
-        let Some(payload) = context.quiesce.pop_buffered(0) else {
-            return false;
-        };
-        Self::dispatch(context, collector, &payload).await;
-        true
-    }
-
-    async fn dispatch(
-        context: &SyslogIngestContext,
-        collector: &mut IngestRouteCollector,
-        payload: &BufferedIngestPayload,
-    ) {
-        if let Err(error) = context
-            .runtime
-            .dispatch_raw_ingest_payload(RawIngestDispatch {
-                domain: &context.domain,
-                ingestor: &context.ingestor,
-                timestamp_source: context.timestamp_source.as_ref(),
-                output_routes: &context.output_routes,
-                filter_where: context.filter_where.as_ref(),
-                branched_senders: &context.branched_senders,
-                codec: context.codec.clone(),
-                payload,
-                collector,
-                flush: false,
-            })
-            .await
-        {
-            debug!(
-                domain = context.domain.as_str(),
-                ingestor = context.ingestor.as_str(),
-                error = %error,
-                "skipped syslog frame after decode or route failure"
-            );
-        }
-        if collector.len() >= INGEST_GROUP_MAX_ROWS {
-            Self::flush_collector(context, collector).await;
-        }
-    }
-
-    async fn flush_collector(context: &SyslogIngestContext, collector: &mut IngestRouteCollector) {
-        if let Err(error) = context
-            .runtime
-            .flush_ingest_collector(
-                &context.domain,
-                &context.ingestor,
-                &context.branched_senders,
-                collector,
-            )
-            .await
-        {
-            context.runtime.events().report_error(format!(
-                "failed to flush Syslog messages for ingestor '{}' in domain '{}': {error}",
-                context.ingestor.as_str(),
-                context.domain.as_str()
-            ));
-        }
     }
 }
 
