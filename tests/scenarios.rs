@@ -7386,24 +7386,24 @@ async fn when_emitter_leaves_fault_mode(world: &mut ScenarioWorld, emitter: Stri
     world.cluster().clear_emitter_fault_on_all_nodes(&emitter);
 }
 
-#[when(expr = "OTEL client for emitter {string} enters unavailable fault mode")]
-async fn when_otel_client_enters_unavailable_fault_mode(
+#[when(expr = "sink client for emitter {string} enters unavailable fault mode")]
+async fn when_sink_client_enters_unavailable_fault_mode(
     world: &mut ScenarioWorld,
     emitter: String,
 ) {
     let emitter = expand_placeholders(world, &emitter);
     world
         .cluster()
-        .fail_otel_client_unavailable_on_all_nodes(&emitter);
+        .fail_sink_client_unavailable_on_all_nodes(&emitter);
 }
 
-#[when(expr = "OTEL client for emitter {string} leaves fault mode")]
-#[then(expr = "OTEL client for emitter {string} leaves fault mode")]
-async fn when_otel_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: String) {
+#[when(expr = "sink client for emitter {string} leaves fault mode")]
+#[then(expr = "sink client for emitter {string} leaves fault mode")]
+async fn when_sink_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: String) {
     let emitter = expand_placeholders(world, &emitter);
     world
         .cluster()
-        .clear_otel_client_fault_on_all_nodes(&emitter);
+        .clear_sink_client_fault_on_all_nodes(&emitter);
 }
 
 #[when(expr = "ingestor {string} enters fault mode")]

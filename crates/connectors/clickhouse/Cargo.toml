@@ -1,0 +1,44 @@
+[package]
+description = "The ClickHouse sink connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-clickhouse"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+clickhouse = { workspace = true, features = ["inserter", "chrono"] }
+error-stack = { workspace = true }
+hyper-rustls = { workspace = true, features = ["http1"] }
+hyper-util = { workspace = true, features = [
+  "client-legacy",
+  "http1",
+  "tokio",
+] }
+meticulous = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+serde_json = { workspace = true }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "sync",
+  "time",
+], optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
