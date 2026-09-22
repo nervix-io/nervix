@@ -21,9 +21,8 @@ use nervix_client_wire::{
     DomainInfo, DomainList, EncodedFrame, InspectTransactionRequest, InspectionOutcome,
     NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, RequestId, RequestRejected,
     RequestRejection, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionLimitSettings,
-    SessionLimits, TransactionInspection, TransactionState, TransactionStatus, TransferAssembly,
-    UploadChunk, UploadDisposition, UploadFrame, UploadMessage, UploadReply, UploadReplyFrame,
-    UploadStart, VerifiedFrame, WireDecodeError,
+    SessionLimits, TransferAssembly, UploadChunk, UploadDisposition, UploadFrame, UploadMessage,
+    UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireDecodeError,
     grpc::{
         ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, SERVICE_NAME,
         ServerExchangeCodec, ServerUploadCodec, UPLOAD_RESOURCE_PATH,
@@ -32,7 +31,8 @@ use nervix_client_wire::{
 use nervix_models::{
     CommandExecutionReference, DomainPace, DomainStatus, ImpactPlanningBasis,
     ImpactReportCompleteness, ResourceUploadIdentity, TransactionImpactReport,
-    TransactionInspectionTarget, TransactionPosition,
+    TransactionInspection, TransactionInspectionTarget, TransactionLifecycle, TransactionPosition,
+    TransactionStatus,
 };
 use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
@@ -245,7 +245,7 @@ fn inspection() -> InspectionOutcome {
         transaction: TransactionStatus::new(
             "transaction".to_string(),
             domain,
-            TransactionState::Open,
+            TransactionLifecycle::Open,
             TransactionPosition::new(0),
             0,
         )

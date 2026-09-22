@@ -2464,7 +2464,7 @@ mod tests {
             subscription::SessionSubscriptions,
             test_fixtures::{
                 TestService, build_test_service, command_transaction_state, create_test_domain,
-                named,
+                named, test_command_request,
             },
         },
         *,
@@ -2496,12 +2496,10 @@ mod tests {
 
         let first = service
             .process_command(
-                CommandRequest {
-                    query: "CREATE IF NOT EXISTS SCHEMA notification ( user_id U32 );".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
+                test_command_request(
+                    "CREATE IF NOT EXISTS SCHEMA notification ( user_id U32 );",
+                    "default",
+                ),
                 &tx,
                 &mut subscriptions,
             )
@@ -2511,12 +2509,10 @@ mod tests {
 
         let duplicate = service
             .process_command(
-                CommandRequest {
-                    query: "CREATE IF NOT EXISTS SCHEMA notification ( user_id U32 );".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
+                test_command_request(
+                    "CREATE IF NOT EXISTS SCHEMA notification ( user_id U32 );",
+                    "default",
+                ),
                 &tx,
                 &mut subscriptions,
             )
@@ -2550,10 +2546,8 @@ mod tests {
         let mut subscriptions = SessionSubscriptions::new();
         let reference = uuid::Uuid::now_v7().to_string();
         let request = CommandRequest {
-            query: "CREATE SCHEMA retained_result ( user_id U32 );".to_string(),
-            domain: "default".to_string(),
             execution_reference: reference.clone(),
-            expected_transaction_position: None,
+            ..test_command_request("CREATE SCHEMA retained_result ( user_id U32 );", "default")
         };
 
         let first = service
@@ -2568,10 +2562,11 @@ mod tests {
         let changed = service
             .process_command(
                 CommandRequest {
-                    query: "CREATE SCHEMA retained_result ( user_id U64 );".to_string(),
-                    domain: "default".to_string(),
                     execution_reference: reference,
-                    expected_transaction_position: None,
+                    ..test_command_request(
+                        "CREATE SCHEMA retained_result ( user_id U64 );",
+                        "default",
+                    )
                 },
                 &tx,
                 &mut subscriptions,
@@ -2600,13 +2595,10 @@ mod tests {
 
         let result = service
             .process_command(
-                CommandRequest {
-                    query: "CREATE DOMAIN prod; CREATE SCHEMA notification ( user_id U32 )"
-                        .to_string(),
-                    domain: "prod".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
+                test_command_request(
+                    "CREATE DOMAIN prod; CREATE SCHEMA notification ( user_id U32 )",
+                    "prod",
+                ),
                 &tx,
                 &mut subscriptions,
             )
@@ -2643,14 +2635,11 @@ mod tests {
 
         let result = service
             .process_command(
-                CommandRequest {
-                    query: "BEGIN; CREATE SCHEMA duplicated ( user_id U32 ); CREATE SCHEMA \
-                            duplicated ( user_id U32 ); COMMIT"
-                        .to_string(),
-                    domain: "prod".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
+                test_command_request(
+                    "BEGIN; CREATE SCHEMA duplicated ( user_id U32 ); CREATE SCHEMA duplicated ( \
+                     user_id U32 ); COMMIT",
+                    "prod",
+                ),
                 &tx,
                 &mut subscriptions,
             )
@@ -2702,14 +2691,11 @@ mod tests {
 
         let result = service
             .process_command(
-                CommandRequest {
-                    query: "BEGIN; CREATE RELAY notifications SCHEMA missing_schema UNBRANCHED; \
-                            CREATE SCHEMA notification ( user_id U32 ); COMMIT"
-                        .to_string(),
-                    domain: "prod".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
-                    expected_transaction_position: None,
-                },
+                test_command_request(
+                    "BEGIN; CREATE RELAY notifications SCHEMA missing_schema UNBRANCHED; CREATE \
+                     SCHEMA notification ( user_id U32 ); COMMIT",
+                    "prod",
+                ),
                 &tx,
                 &mut subscriptions,
             )
@@ -2773,12 +2759,7 @@ mod tests {
         for command in commands {
             let result = service
                 .process_command(
-                    CommandRequest {
-                        query: command.to_string(),
-                        domain: "default".to_string(),
-                        execution_reference: uuid::Uuid::now_v7().to_string(),
-                        expected_transaction_position: None,
-                    },
+                    test_command_request(command, "default"),
                     &tx,
                     &mut subscriptions,
                 )
@@ -2845,12 +2826,7 @@ mod tests {
         ] {
             let result = service
                 .process_command(
-                    CommandRequest {
-                        query: command.to_string(),
-                        domain: "default".to_string(),
-                        execution_reference: uuid::Uuid::now_v7().to_string(),
-                        expected_transaction_position: None,
-                    },
+                    test_command_request(command, "default"),
                     &tx,
                     &mut subscriptions,
                 )
@@ -2913,12 +2889,7 @@ mod tests {
         ] {
             let result = service
                 .process_command(
-                    CommandRequest {
-                        query: command.to_string(),
-                        domain: "default".to_string(),
-                        execution_reference: uuid::Uuid::now_v7().to_string(),
-                        expected_transaction_position: None,
-                    },
+                    test_command_request(command, "default"),
                     &tx,
                     &mut subscriptions,
                 )

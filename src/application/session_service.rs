@@ -56,7 +56,7 @@ use super::{
     service_tasks::ServiceTasks,
     subscription::{SessionSubscriptions, SubscriptionInterestKey},
     tls::HttpsListenerCertificates,
-    transaction::TransactionRecovery,
+    transaction::{TransactionRecovery, transaction_preview_identity},
 };
 use crate::{
     cluster, proto,
@@ -127,7 +127,7 @@ impl SessionEvents {
 /// one `Arc` over the server's state, so handing the service to a spawned task costs a single
 /// refcount rather than one per piece of state the server owns.
 #[derive(Clone)]
-pub(in crate::application) struct SessionServiceImpl {
+pub struct SessionServiceImpl {
     pub(in crate::application) inner: Arc<SessionServiceInner>,
 }
 
@@ -1304,12 +1304,27 @@ impl SessionServiceImpl {
             }
         }
 
+        let expected_preview = match req.expected_preview.clone() {
+            Some(preview) => match transaction_preview_identity(preview) {
+                Ok(preview) => Some(preview),
+                Err(error) => {
+                    return self
+                        .command_with_transaction_status(
+                            command_error(error.current_context().to_string()),
+                            subscriptions,
+                        )
+                        .await;
+                }
+            },
+            None => None,
+        };
         let operations = match subscriptions.plan_commands(
             client_statements,
             &req.query,
             &req.domain,
             execution_reference,
             expected_transaction_position,
+            expected_preview,
         ) {
             Ok(operations) => operations,
             Err(error) => {
@@ -1558,6 +1573,7 @@ mod tests {
                     domain: "default".to_string(),
                     execution_reference: uuid::Uuid::now_v7().to_string(),
                     expected_transaction_position: None,
+                    expected_preview: None,
                 },
                 &tx,
                 &mut subscriptions,

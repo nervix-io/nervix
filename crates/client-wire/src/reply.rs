@@ -2,7 +2,7 @@
 
 use error_stack::Report;
 use flatbuffers::WIPOffset;
-use nervix_models::{DomainName, RelayName, TransactionImpactReport, TransactionOperationNumber};
+use nervix_models::{DomainName, RelayName, TransactionInspection, TransactionInspectionRejection};
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
@@ -10,7 +10,10 @@ use crate::{
     impact::{decode_report, encode_report},
     row::RowSchema,
     subscription::{SubscriptionHandle, SubscriptionType},
-    transaction::{TransactionStatus, decode_operation_number, encode_operation_number},
+    transaction::{
+        decode_operation_number, decode_transaction_status, encode_operation_number,
+        encode_transaction_status,
+    },
     wire,
 };
 
@@ -96,37 +99,22 @@ impl SuggestOutcome {
     }
 }
 
-/// A transaction's impact report, read without attaching or changing the transaction.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransactionInspection {
-    pub transaction: TransactionStatus,
-    /// The inspected operation, when the request selected one.
-    pub operation: Option<TransactionOperationNumber>,
-    pub report: TransactionImpactReport,
-}
-
-/// Why an inspection was refused.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InspectionRejection {
-    NoAttachedTransaction,
-    TransactionNotFound,
-    NotOwner,
-    OperationNotFound,
-}
-
-wire_enum!(ALL_INSPECTION_REJECTIONS: InspectionRejection => wire::InspectionRejection {
-    NoAttachedTransaction,
-    TransactionNotFound,
-    NotOwner,
-    OperationNotFound,
-});
+wire_enum!(
+    ALL_INSPECTION_REJECTIONS: TransactionInspectionRejection => wire::InspectionRejection {
+        NoAttachedTransaction,
+        TransactionNotFound,
+        NotOwner,
+        OperationNotFound,
+        ReportUnavailable,
+    }
+);
 
 /// The outcome of an inspection request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InspectionOutcome {
     Inspected(Box<TransactionInspection>),
     Rejected {
-        rejection: InspectionRejection,
+        rejection: TransactionInspectionRejection,
         message: String,
     },
     NotLeader(LeaderRedirect),
@@ -139,7 +127,7 @@ impl InspectionOutcome {
     ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let disposition = match self {
             Self::Inspected(inspection) => {
-                let transaction = inspection.transaction.encode(encoder)?;
+                let transaction = encode_transaction_status(encoder, &inspection.transaction)?;
                 let report = encode_report(encoder, &inspection.report)?;
                 let operation = inspection.operation.map(encode_operation_number);
                 let inspected = wire::TransactionInspected::create(
@@ -186,7 +174,7 @@ impl InspectionOutcome {
         outcome: wire::InspectionOutcome<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(inspected) = outcome.disposition_as_transaction_inspected() {
-            let transaction = TransactionStatus::decode(decoder, inspected.transaction())?;
+            let transaction = decode_transaction_status(decoder, inspected.transaction())?;
             let operation = match inspected.operation() {
                 Some(operation) => Some(decode_operation_number(
                     decoder,

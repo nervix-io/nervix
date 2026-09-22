@@ -29,8 +29,8 @@ use nervix_models::{
     DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage, ImpactPlanningBasis, Model,
     ModelIndex, OwnershipMoveImpact, RequestedResourceVersion, ResourceId, ResourceName,
     ResourceUploads, Statement, TransactionCommitStepKind, TransactionOperationAdmission,
-    TransactionOperationNumber, TransactionPreviewIdentity, TransactionResolvedDomainStart,
-    UserName,
+    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
+    TransactionResolvedDomainStart, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
@@ -72,7 +72,9 @@ use crate::{
 
 mod application;
 mod impact;
+mod inspection;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
+pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
 
 pub(in crate::application) const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration =
     Duration::from_secs(15 * 60);
@@ -505,16 +507,81 @@ fn api_transaction_operation_admission(
 ) -> proto::TransactionOperationAdmission {
     proto::TransactionOperationAdmission {
         operation: admission.operation.get().arch_into(),
-        preview: Some(proto::TransactionPreviewIdentity {
-            transaction_id: admission.preview.transaction_id.clone(),
-            position: admission.preview.position.accepted_operations().arch_into(),
-            planning_basis: admission
-                .preview
-                .planning_basis
-                .fingerprint()
-                .to_vec()
-                .into(),
+        preview: Some(api_transaction_preview_identity(&admission.preview)),
+    }
+}
+
+/// Why a preview identity a client sent cannot name a transaction revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(in crate::application) enum TransactionPreviewIdentityError {
+    #[error("an expected preview position exceeds this server's address space")]
+    PositionOutOfRange,
+    #[error("an expected preview planning basis is {actual} bytes, not {expected}")]
+    PlanningBasisLength { expected: usize, actual: usize },
+}
+
+/// The preview identity a request carried.
+pub(in crate::application) fn transaction_preview_identity(
+    preview: proto::TransactionPreviewIdentity,
+) -> Result<TransactionPreviewIdentity, Report<TransactionPreviewIdentityError>> {
+    let position = usize::try_from(preview.position)
+        .map_err(|_| Report::new(TransactionPreviewIdentityError::PositionOutOfRange))?;
+    let planning_basis = <[u8; 32]>::try_from(preview.planning_basis.as_ref()).map_err(|_| {
+        Report::new(TransactionPreviewIdentityError::PlanningBasisLength {
+            expected: 32,
+            actual: preview.planning_basis.len(),
+        })
+    })?;
+    Ok(TransactionPreviewIdentity {
+        transaction_id: preview.transaction_id,
+        position: TransactionPosition::new(position),
+        planning_basis: ImpactPlanningBasis::new(planning_basis),
+    })
+}
+
+pub(in crate::application) fn api_transaction_preview_identity(
+    preview: &TransactionPreviewIdentity,
+) -> proto::TransactionPreviewIdentity {
+    proto::TransactionPreviewIdentity {
+        transaction_id: preview.transaction_id.clone(),
+        position: preview.position.accepted_operations().arch_into(),
+        planning_basis: preview.planning_basis.fingerprint().to_vec().into(),
+    }
+}
+
+/// The typed refusal of a commit whose expected preview no longer describes its transaction.
+///
+/// Nothing was applied and the transaction stays open, so the result keeps the session binding it
+/// already had and carries both previews for the caller to compare.
+fn preview_stale_result(
+    expected: &TransactionPreviewIdentity,
+    current: &TransactionPreviewIdentity,
+) -> CommandResult {
+    let message = if expected.position == current.position {
+        format!(
+            "transaction '{}' was planned from different inputs before this commit; it still \
+             holds {} accepted operation(s) and nothing was applied",
+            current.transaction_id,
+            current.position.accepted_operations()
+        )
+    } else {
+        format!(
+            "transaction '{}' moved from {} to {} accepted operation(s) before this commit; \
+             nothing was applied",
+            current.transaction_id,
+            expected.position.accepted_operations(),
+            current.position.accepted_operations()
+        )
+    };
+    CommandResult {
+        success: false,
+        message,
+        kind: i32::from(CommandResultKind::PreviewStale),
+        preview_stale: Some(proto::TransactionPreviewStale {
+            expected: Some(api_transaction_preview_identity(expected)),
+            current: Some(api_transaction_preview_identity(current)),
         }),
+        ..Default::default()
     }
 }
 
@@ -768,6 +835,21 @@ impl SessionServiceImpl {
             }
             _ => command_error(message),
         }
+    }
+
+    /// Answers a commit admission failure, naming a stale preview as its own typed outcome.
+    async fn transaction_commit_admission_response(
+        &self,
+        error: ConsensusTransactionError,
+    ) -> CommandResult {
+        if let ConsensusTransactionError::Mutation(TransactionMutationError::PreviewStale {
+            expected,
+            current,
+        }) = &error
+        {
+            return preview_stale_result(expected, current);
+        }
+        self.transaction_consensus_error_response(error).await
     }
 
     async fn transaction_consensus_report_response(
@@ -1816,10 +1898,18 @@ impl SessionServiceImpl {
         }
     }
 
+    /// Commits the transaction bound to this session.
+    ///
+    /// `expected_preview` is the whole-transaction preview the caller expects this commit to
+    /// apply. When it is present and no longer describes the transaction, the commit is refused
+    /// before any effect applies and the transaction stays open, so the caller can read the
+    /// current preview and decide again. When it is absent the commit applies whatever the
+    /// transaction's own latest preview describes.
     pub(in crate::application) async fn commit_bound_transaction(
         &self,
         _tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
+        expected_preview: Option<TransactionPreviewIdentity>,
     ) -> CommandResult {
         if let Err(error) = self.validate_session_transaction_binding(subscriptions) {
             return error.into_command_result();
@@ -1833,6 +1923,7 @@ impl SessionServiceImpl {
         let started = match &current.state {
             TransactionState::Open(_) => match self.prepare_transaction_commit(&current).await {
                 Ok(prepared) => {
+                    let fenced_preview = expected_preview.unwrap_or(prepared.expected_preview);
                     match self
                         .inner
                         .consensus
@@ -1840,7 +1931,7 @@ impl SessionServiceImpl {
                             id.clone(),
                             subscriptions.user.clone(),
                             self.transaction_activity(),
-                            prepared.expected_preview,
+                            fenced_preview,
                             prepared.report,
                             prepared.plan,
                         )
@@ -1848,7 +1939,7 @@ impl SessionServiceImpl {
                     {
                         Ok(transaction) => transaction,
                         Err(error) => {
-                            return self.transaction_consensus_error_response(error).await;
+                            return self.transaction_commit_admission_response(error).await;
                         }
                     }
                 }

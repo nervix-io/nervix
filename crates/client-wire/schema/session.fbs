@@ -1218,11 +1218,18 @@ table TransactionInspected {
   report: TransactionImpactReport (required);
 }
 
+/// Why an inspection read nothing. Every value means the transaction was left untouched.
 enum InspectionRejection : ubyte {
+  /// The request read the attached transaction, and the session has none.
   NoAttachedTransaction,
+  /// No transaction has that identity, or its retention already reclaimed it.
   TransactionNotFound,
+  /// The transaction belongs to another user.
   NotOwner,
-  OperationNotFound
+  /// The selected operation number is past the operations the transaction accepted.
+  OperationNotFound,
+  /// The transaction exists, but no coherent report can be read for it right now.
+  ReportUnavailable
 }
 
 table InspectionRejected {

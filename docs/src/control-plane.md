@@ -143,6 +143,16 @@ identity while the transaction remains `OPEN`; no gate or external effect has be
 each step uses the stored decisions and captured inputs. A restart or new leader does not replan it
 from newer configuration.
 
+A `COMMIT` request may name the preview it expects to apply. The expected identity covers the
+transaction id, its accepted queue position, and the whole planning basis, whether the client read
+that identity from an accepted append or from an inspection. When the preview no longer describes
+the transaction, the commit is refused with both the expected and the current identity, nothing
+applies, and the transaction stays `OPEN` with its session binding intact. A client that decides to
+proceed anyway commits again against the identity the refusal reported. A `COMMIT` that names no
+expected preview applies whatever the transaction's own latest preview describes. Naming an expected
+preview fences only a commit of a transaction the same request did not change, because an append in
+that request moves the transaction past the preview the client is holding.
+
 The plan records affected topology on both sides of every execution step. The before side retains
 nodes and edges that the step drops or rewires; the after side records the graph that activation
 will install. Edges distinguish configuration dependencies, normal delivery, message-error and
@@ -209,6 +219,33 @@ cannot perform the planned entity swap and rebuilds the domain to recover, the r
 entity attempt and appends the wider domain pause and recovery rebuild effects. Later validation,
 publication, activation, or leadership failure never erases engagement already observed. The
 transaction result derives its aggregate from these actual histories rather than the planned scopes.
+
+### Inspecting A Transaction
+
+Inspection reads one transaction's impact report and changes nothing about that transaction. It
+reads either the transaction bound to the calling session or one named by identity, and may name a
+positive one-based operation to read about. Inspecting by identity never attaches or takes over the
+transaction, adopts its domain, touches its activity time, appends content, or moves its next queue
+position, and it never overwrites the commit basis cached for a different attached transaction.
+Ownership is the same check attach uses: a transaction belonging to another user is refused.
+
+Which report an inspection reads follows the transaction's state. An `OPEN` transaction has no
+frozen revision yet, so it is planned from a coherent read of the control plane and reports the
+planning basis and completeness of that read. A repeated inspection plans again rather than joining
+durable mutation admission, so two reads of an unchanged transaction agree because the inputs agree.
+Inspecting a `COMMITTING` transaction reads the frozen revision its commit admitted, with the
+actual outcomes its steps have recorded so far, including the step that is still applying. A
+committed, failed, reverted, or expired transaction answers with the same frozen revision and its
+recorded outcomes for as long as its tombstone is retained.
+
+An inspection returns the whole report or an explicit refusal; it never truncates topology and never
+mixes revisions from different reads. Naming an operation selects what a reader leads with and does
+not narrow the report that operation belongs to. A refusal says which of these it is: the session
+has no attached transaction, the identity is unknown or already reclaimed, the transaction belongs
+to another user, the operation number is past the operations the transaction accepted, or the
+transaction has no readable report, which is the state of one that ended before any operation was
+planned. The inspected report travels in its own typed envelope; the transaction status a command
+result carries continues to describe the caller's own session binding.
 
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and

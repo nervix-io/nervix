@@ -3707,6 +3707,7 @@ impl RawTestSession {
                 domain: self.domain.clone(),
                 execution_reference: execution_reference.to_string(),
                 expected_transaction_position,
+                expected_preview: None,
             })),
         }
     }

@@ -16,9 +16,9 @@ use nervix_models::{
     ParseAsType, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome,
     RebuildImpact, RebuildReason, RequestedResourceVersion, ResourceBindingImpact,
     ResourceCatalogAction, ResourceCatalogImpact, SchemaField, StatePurge, StateResetImpact,
-    Timestamp, TransactionImpactReport, TransactionInspectionTarget, TransactionOperation,
-    TransactionOperationAdmission, TransactionOperationRange, TransactionPosition,
-    TransactionPreviewIdentity,
+    Timestamp, TransactionImpactReport, TransactionInspectionTarget, TransactionLifecycle,
+    TransactionOperation, TransactionOperationAdmission, TransactionOperationRange,
+    TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 use url::Url;
 
@@ -29,8 +29,7 @@ use crate::{
     InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OutcomeOrigin, RowBranch,
     RowSchema, SelectDomainRequest, ServerFrame, SessionLimits, SourceSpan, StatementDisposition,
     StatementOutcome, SubscribeRequest, SubscriptionHandle, SubscriptionRowsEncoder,
-    SubscriptionType, SuggestRequest, TransactionState, TransactionStatus, UnsubscribeRequest,
-    WireEncodeError,
+    SubscriptionType, SuggestRequest, UnsubscribeRequest, WireEncodeError,
 };
 
 pub(crate) fn leader() -> LeaderEndpoints {
@@ -51,7 +50,7 @@ pub(crate) fn preview(position: usize) -> TransactionPreviewIdentity {
     }
 }
 
-pub(crate) fn transaction(state: TransactionState) -> TransactionStatus {
+pub(crate) fn transaction(state: TransactionLifecycle) -> TransactionStatus {
     TransactionStatus::new(
         "0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44".to_string(),
         name("tenant"),
@@ -183,7 +182,7 @@ pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome
                 diagnostics: Vec::new(),
             },
         ],
-        transaction: Some(transaction(TransactionState::Failed {
+        transaction: Some(transaction(TransactionLifecycle::Failed {
             failing_operation: operation(usize::MAX),
             error: "relay 'orders' references a missing schema".to_string(),
         })),
@@ -235,17 +234,17 @@ pub(crate) fn command_dispositions() -> Vec<CommandDisposition> {
     ]
 }
 
-pub(crate) fn transaction_states() -> Vec<TransactionState> {
+pub(crate) fn transaction_states() -> Vec<TransactionLifecycle> {
     vec![
-        TransactionState::Open,
-        TransactionState::Committing,
-        TransactionState::Committed,
-        TransactionState::Failed {
+        TransactionLifecycle::Open,
+        TransactionLifecycle::Committing,
+        TransactionLifecycle::Committed,
+        TransactionLifecycle::Failed {
             failing_operation: operation(1),
             error: String::new(),
         },
-        TransactionState::Reverted,
-        TransactionState::Expired,
+        TransactionLifecycle::Reverted,
+        TransactionLifecycle::Expired,
     ]
 }
 

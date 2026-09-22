@@ -60,7 +60,10 @@ use mysql_async::{
     prelude::Queryable as MySqlQueryable,
 };
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
-use nervix_client_core::{Client, TransactionState as ClientTransactionState};
+use nervix_client_core::{
+    Client, CommandOutcome as ClientCommandOutcome, CommandOutcomeKind as ClientCommandOutcomeKind,
+    TransactionState as ClientTransactionState,
+};
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, SchedulerMode, WasmStateResetRequestError, application::InternalTransportMode,
@@ -238,6 +241,9 @@ struct ScenarioWorld {
     last_publish_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    /// The whole outcome of the last command a named client ran, for assertions that read more
+    /// than its message.
+    last_client_outcome: Option<ClientCommandOutcome>,
     /// Reused when a coordinated WASM reset is retried after an ambiguous or failed response.
     wasm_state_reset_reference: Option<nervix_models::CommandExecutionReference>,
     /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
@@ -8952,7 +8958,91 @@ async fn then_named_client_transaction_failed_at_step(
         .transaction_status()
         .await
         .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
-    let actual_state = match status.state {
+    assert_eq!(client_transaction_state_name(status.state), expected_state);
+    assert_eq!(status.failing_step, Some(failing_step));
+}
+
+#[when(expr = "client {string} attempts to commit its transaction")]
+async fn when_named_client_attempts_commit(world: &mut ScenarioWorld, name: String) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_client_outcome = None;
+    let name = expand_placeholders(world, &name);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let outcome = client
+        .execute("COMMIT;")
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' COMMIT did not reach the server: {error}"));
+    if outcome.success {
+        world.last_command_output = Some(outcome.message.clone());
+    } else {
+        world.last_command_error = Some(outcome.message.clone());
+    }
+    world.last_client_outcome = Some(outcome);
+}
+
+#[then(expr = "client {string} commit was refused because its expected preview is stale")]
+async fn then_named_client_commit_refused_as_stale(world: &mut ScenarioWorld, name: String) {
+    let name = expand_placeholders(world, &name);
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .unwrap_or_else(|| panic!("client '{name}' has not attempted a commit"));
+    assert!(
+        !outcome.success,
+        "client '{name}' commit must be refused: {}",
+        outcome.message
+    );
+    assert_eq!(
+        outcome.kind,
+        ClientCommandOutcomeKind::PreviewStale,
+        "client '{name}' commit must report a stale preview: {}",
+        outcome.message
+    );
+    let stale = outcome
+        .preview_stale
+        .as_ref()
+        .unwrap_or_else(|| panic!("client '{name}' stale commit must name both previews"));
+    assert_eq!(
+        stale.expected.transaction_id, stale.current.transaction_id,
+        "a stale preview describes the same transaction the commit named"
+    );
+    assert_eq!(
+        stale.expected.position, stale.current.position,
+        "nothing was appended, so only the planning basis moved"
+    );
+    assert_ne!(
+        stale.expected.planning_basis, stale.current.planning_basis,
+        "a stale preview names a planning basis the transaction has outgrown"
+    );
+}
+
+#[then(expr = "client {string} transaction state is {string}")]
+async fn then_named_client_transaction_state_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected_state: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let expected_state = expand_placeholders(world, &expected_state).to_ascii_uppercase();
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let status = client
+        .transaction_status()
+        .await
+        .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
+    assert_eq!(client_transaction_state_name(status.state), expected_state);
+}
+
+fn client_transaction_state_name(state: ClientTransactionState) -> &'static str {
+    match state {
         ClientTransactionState::Unspecified => "UNSPECIFIED",
         ClientTransactionState::Open => "OPEN",
         ClientTransactionState::Committing => "COMMITTING",
@@ -8960,9 +9050,7 @@ async fn then_named_client_transaction_failed_at_step(
         ClientTransactionState::Failed => "FAILED",
         ClientTransactionState::Reverted => "REVERTED",
         ClientTransactionState::Expired => "EXPIRED",
-    };
-    assert_eq!(actual_state, expected_state);
-    assert_eq!(status.failing_step, Some(failing_step));
+    }
 }
 
 #[when(expr = "client {string} attaches to transaction {string}")]
