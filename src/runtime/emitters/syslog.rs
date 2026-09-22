@@ -1,5 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
+use nervix_connector_syslog::{
+    MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogDirection, SyslogFraming, SyslogProtocol,
+};
 use rustls_pki_types::ServerName;
 use thiserror::Error;
 use tokio::{
@@ -9,10 +12,6 @@ use tokio::{
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
 use super::*;
-use crate::runtime::syslog::{
-    MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogDirection, SyslogFraming, SyslogProtocol,
-};
-
 pub(in crate::runtime) struct SyslogEmitter {
     config: SyslogClientConfig,
     sender: SyslogSender,

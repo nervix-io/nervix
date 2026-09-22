@@ -1351,11 +1351,62 @@ impl WasmRoutedOutput {
     }
 }
 
+/// What the guest asked the host to do with this branch's guest-state lifetime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WasmGuestStateLifetime {
+    /// Nothing was asked, so the branch continues in the lifetime its callback ran in.
+    Kept,
+    /// The guest asked the host to replace the branch's complete guest-state lifetime.
+    ResetRequested,
+}
+
+impl WasmGuestStateLifetime {
+    pub const fn is_reset_requested(self) -> bool {
+        matches!(self, Self::ResetRequested)
+    }
+}
+
+/// Whether the guest operation in progress may ask the host to replace this branch's guest-state
+/// lifetime, and what it has asked for.
+///
+/// Only a callback the host completes with a checkpoint owns uncommitted effects a reset can
+/// discard, so only a callback admits a request. Every other operation — initializing, saving,
+/// restoring, draining the emit queue — is refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuestStateResetRequests {
+    /// No callback is running, so a request has nothing to discard.
+    Refused,
+    /// A callback is running and has not asked.
+    Admitted,
+    /// A callback asked, whether or not it is still running. Asking again changes nothing, because
+    /// the host replaces the lifetime once.
+    Requested,
+}
+
+impl GuestStateResetRequests {
+    /// A callback is about to run and owns the effects a request would discard.
+    const fn admitted(self) -> Self {
+        match self {
+            Self::Refused | Self::Admitted => Self::Admitted,
+            Self::Requested => Self::Requested,
+        }
+    }
+
+    /// The callback returned, so the rest of this host call no longer owns those effects.
+    const fn closed(self) -> Self {
+        match self {
+            Self::Refused | Self::Admitted => Self::Refused,
+            Self::Requested => Self::Requested,
+        }
+    }
+}
+
 struct BranchStore {
     memory_limiter: GuestMemoryLimiter,
     timeout_requests: Vec<WasmTimeoutRequest>,
     next_timeout_handle: i64,
     emitted_batch_sender: Option<mpsc::UnboundedSender<WasmEnvelope>>,
+    state_reset_requests: GuestStateResetRequests,
 }
 
 impl BranchStore {
@@ -1368,6 +1419,36 @@ impl BranchStore {
             timeout_requests: Vec::new(),
             next_timeout_handle: 1,
             emitted_batch_sender,
+            state_reset_requests: GuestStateResetRequests::Refused,
+        }
+    }
+
+    fn admit_state_reset_requests(&mut self) {
+        self.state_reset_requests = self.state_reset_requests.admitted();
+    }
+
+    fn close_state_reset_requests(&mut self) {
+        self.state_reset_requests = self.state_reset_requests.closed();
+    }
+
+    /// Records a guest's request to replace this branch's guest-state lifetime and answers it.
+    fn request_state_reset(&mut self) -> i32 {
+        match self.state_reset_requests {
+            GuestStateResetRequests::Refused => protocol::StateResetRequestAnswer::Refused.code(),
+            GuestStateResetRequests::Admitted | GuestStateResetRequests::Requested => {
+                self.state_reset_requests = GuestStateResetRequests::Requested;
+                protocol::StateResetRequestAnswer::Accepted.code()
+            }
+        }
+    }
+
+    fn take_requested_state_reset(&mut self) -> WasmGuestStateLifetime {
+        let requested = self.state_reset_requests == GuestStateResetRequests::Requested;
+        self.state_reset_requests = GuestStateResetRequests::Refused;
+        if requested {
+            WasmGuestStateLifetime::ResetRequested
+        } else {
+            WasmGuestStateLifetime::Kept
         }
     }
 
@@ -1553,6 +1634,34 @@ impl WasmBranchInstance {
             })
     }
 
+    /// Calls one guest callback with state-reset requests admitted.
+    ///
+    /// A callback is the only operation whose effects are still uncommitted while it runs, so it
+    /// is the only operation a request can discard anything from. Requests close again as soon as
+    /// it returns, before the host drains the emit queue.
+    async fn call_guest_callback<Params>(
+        &mut self,
+        callback: &TypedFunc<Params, i32>,
+        params: Params,
+    ) -> wasmtime::Result<i32>
+    where
+        Params: wasmtime::WasmParams + Send + Sync,
+    {
+        self.store.data_mut().admit_state_reset_requests();
+        let called = callback.call_async(&mut self.store, params).await;
+        self.store.data_mut().close_state_reset_requests();
+        called
+    }
+
+    /// What the callback that just ran asked the host to do with this branch's guest-state
+    /// lifetime.
+    ///
+    /// Taken once per callback, whether it succeeded or failed: the request belongs to the
+    /// callback that made it, and a callback that asked and then failed is still asking.
+    pub fn take_requested_state_reset(&mut self) -> WasmGuestStateLifetime {
+        self.store.data_mut().take_requested_state_reset()
+    }
+
     /// Settles a guest callback that reports failure through its return code and the global-error
     /// channel. A reason on that channel explains the failure better than the code or the trap it
     /// ended in, so it wins over both unless an execution limit ended the call.
@@ -1659,10 +1768,8 @@ impl WasmBranchInstance {
             .scope(context.now(), async {
                 self.begin_operation()?;
                 let (ptr, size) = self.write_envelope_to_guest(envelope).await?;
-                let call_result = self
-                    .process_batch
-                    .call_async(&mut self.store, (ptr, size))
-                    .await;
+                let process_batch = self.process_batch.clone();
+                let call_result = self.call_guest_callback(&process_batch, (ptr, size)).await;
                 self.settle_callback("nervix_process_batch", call_result)
                     .await?;
                 self.read_pending_emit().await
@@ -1690,10 +1797,8 @@ impl WasmBranchInstance {
         let callback = INVOCATION_NOW
             .scope(context.now(), async {
                 self.begin_operation()?;
-                let call_result = self
-                    .on_timeout
-                    .call_async(&mut self.store, handle.raw())
-                    .await;
+                let on_timeout = self.on_timeout.clone();
+                let call_result = self.call_guest_callback(&on_timeout, handle.raw()).await;
                 self.settle_callback("nervix_on_timeout", call_result)
                     .await?;
                 self.read_pending_emit().await
@@ -1720,7 +1825,8 @@ impl WasmBranchInstance {
         let flush = INVOCATION_NOW
             .scope(context.now(), async {
                 self.begin_operation()?;
-                let call_result = self.flush.call_async(&mut self.store, ()).await;
+                let flush = self.flush.clone();
+                let call_result = self.call_guest_callback(&flush, ()).await;
                 self.settle_callback("nervix_flush", call_result).await?;
                 self.read_pending_emit().await
             })
@@ -2141,6 +2247,13 @@ fn define_host_functions(linker: &mut Linker<BranchStore>) -> Result<(), WasmPro
             |mut caller: Caller<'_, BranchStore>, delay_nanos: i64| {
                 caller.data_mut().timeout_after(delay_nanos)
             },
+        )
+        .map_err(WasmProcessorError::Link)?;
+    linker
+        .func_wrap(
+            ENV_MODULE,
+            "nervix_request_state_reset",
+            |mut caller: Caller<'_, BranchStore>| caller.data_mut().request_state_reset(),
         )
         .map_err(WasmProcessorError::Link)?;
     Ok(())
@@ -3060,6 +3173,148 @@ mod tests {
             )
             "#
         )
+    }
+
+    /// A guest whose `nervix_process_batch` and `nervix_dump_state` run the given bodies, with the
+    /// `nervix_request_state_reset` host import available to both.
+    fn state_reset_wasm(process_batch_body: &str, dump_state_body: &str) -> String {
+        format!(
+            r#"
+            (module
+                (import "env" "nervix_request_state_reset" (func $request_state_reset (result i32)))
+                (memory (export "memory") 1)
+                (func (export "nervix_buffer_ptr") (result i32) i32.const 1024)
+                (func (export "nervix_alloc") (param i32) (result i32) i32.const 1024)
+                (func (export "nervix_init") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_current_domain_time_nanos") (result i64) i64.const 0)
+                (func (export "nervix_process_batch") (param i32 i32) (result i32) {process_batch_body})
+                (func (export "nervix_on_timeout") (param i64) (result i32) i32.const 0)
+                (func (export "nervix_flush") (result i32) i32.const 0)
+                (func (export "nervix_read_emit") (result i32) i32.const 0)
+                (func (export "nervix_dump_state") (result i32) {dump_state_body})
+                (func (export "nervix_load_state") (param i32 i32) (result i32) i32.const 0)
+                (func (export "nervix_reset_state") (result i32) i32.const 0)
+            )
+            "#
+        )
+    }
+
+    async fn state_reset_branch(wasm: String) -> WasmBranchInstance {
+        let runtime = runtime();
+        let compiled = runtime
+            .compile_processor(wasm.as_bytes())
+            .await
+            .expect("module should compile");
+        compiled
+            .instantiate_branch(
+                limits(),
+                init(),
+                WasmExecutionContext::new(Timestamp::from_unix_nanos(0)),
+                None,
+            )
+            .await
+            .expect("guest branch should instantiate")
+    }
+
+    /// A callback that asks is answered, and the host reads that request back exactly once.
+    #[tokio::test]
+    async fn a_callback_that_asks_for_a_new_state_lifetime_is_accepted_once() {
+        let mut branch =
+            state_reset_branch(state_reset_wasm("call $request_state_reset", "i32.const 0")).await;
+
+        branch
+            .process_batch_in_context(b"input", test_execution_context())
+            .await
+            .expect("an accepted request must not fail the callback");
+
+        assert_eq!(
+            branch.take_requested_state_reset(),
+            WasmGuestStateLifetime::ResetRequested
+        );
+        assert_eq!(
+            branch.take_requested_state_reset(),
+            WasmGuestStateLifetime::Kept,
+            "a request belongs to the callback that made it and is read back once"
+        );
+    }
+
+    /// Asking repeatedly inside one callback is one request, because the host replaces the
+    /// lifetime once.
+    #[tokio::test]
+    async fn repeated_requests_in_one_callback_are_one_request() {
+        let mut branch = state_reset_branch(state_reset_wasm(
+            "call $request_state_reset drop call $request_state_reset drop call              \
+             $request_state_reset",
+            "i32.const 0",
+        ))
+        .await;
+
+        branch
+            .process_batch_in_context(b"input", test_execution_context())
+            .await
+            .expect("repeated requests must not fail the callback");
+
+        assert_eq!(
+            branch.take_requested_state_reset(),
+            WasmGuestStateLifetime::ResetRequested
+        );
+        assert_eq!(
+            branch.take_requested_state_reset(),
+            WasmGuestStateLifetime::Kept
+        );
+    }
+
+    /// A callback that asks and then fails is still asking: its uncommitted effects are exactly
+    /// what the reset discards.
+    #[tokio::test]
+    async fn a_failed_callback_that_asked_still_asks() {
+        let mut branch = state_reset_branch(state_reset_wasm(
+            "call $request_state_reset drop i32.const -6",
+            "i32.const 0",
+        ))
+        .await;
+
+        let error = branch
+            .process_batch_in_context(b"input", test_execution_context())
+            .await
+            .expect_err("the failing callback must be reported");
+
+        assert_eq!(
+            error.current_context().export(),
+            Some("nervix_process_batch")
+        );
+        assert_eq!(
+            branch.take_requested_state_reset(),
+            WasmGuestStateLifetime::ResetRequested
+        );
+    }
+
+    /// Saving is not a callback: it owns no uncommitted effects, so the host refuses the request
+    /// and schedules nothing.
+    #[tokio::test]
+    async fn a_request_outside_a_callback_is_refused() {
+        let mut branch =
+            state_reset_branch(state_reset_wasm("i32.const 0", "call $request_state_reset")).await;
+
+        let error = branch
+            .save_state_in_context(test_execution_context())
+            .await
+            .expect_err("the guest returns the refusal it received");
+
+        match error.current_context() {
+            WasmGuestError::Failed {
+                operation: WasmGuestOperation::StateSnapshot,
+                cause: WasmGuestCallError::ErrorCode { export, code },
+            } => {
+                assert_eq!(*export, "nervix_dump_state");
+                assert_eq!(*code, protocol::StateResetRequestAnswer::Refused.code());
+            }
+            other => panic!("expected a refused state reset request, got {other:?}"),
+        }
+        assert_eq!(
+            branch.take_requested_state_reset(),
+            WasmGuestStateLifetime::Kept
+        );
     }
 
     #[tokio::test]

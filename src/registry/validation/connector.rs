@@ -11,6 +11,7 @@
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use error_stack::Report;
 use meticulous::ResultExt;
+use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
     Assignment, AssignmentTarget, CreateEmitter, CreateIngestor, CreateSchema,
     CreateSignalingProtocol, DomainName, EmitSink, EndpointName, Expression, FieldName,
@@ -24,27 +25,24 @@ use nervix_vm::{
     lower_transforming_route, program::FunctionName,
 };
 
-use crate::{
-    jaq_program::StatefulJaqProgram,
-    registry::{
-        error::{OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError},
-        validation::{
-            branching::relay_declared_branch,
-            expression::{
-                LookupHashMapRewriteResult, lookup_hash_map_bindings, program_uses_header_reads,
-                rewrite_lookup_hash_map_program,
-            },
-            materialized_state::referenced_materialized_stream_bindings,
-            processor::{
-                ModelValidationContext, processor_first_input_relay,
-                validate_where_program_for_internal_schemas,
-            },
-            schema::{
-                arrow_schema_for_internal_schema, readonly_binding_for_internal_schema,
-                schema_sensitivity_for_internal_schema, writable_binding_for_internal_schema,
-            },
-            vm::udf_compile_options,
+use crate::registry::{
+    error::{OtelMappingIssue, OtelMappingSection, OtelMappingSignal, RegistryError},
+    validation::{
+        branching::relay_declared_branch,
+        expression::{
+            LookupHashMapRewriteResult, lookup_hash_map_bindings, program_uses_header_reads,
+            rewrite_lookup_hash_map_program,
         },
+        materialized_state::referenced_materialized_stream_bindings,
+        processor::{
+            ModelValidationContext, processor_first_input_relay,
+            validate_where_program_for_internal_schemas,
+        },
+        schema::{
+            arrow_schema_for_internal_schema, readonly_binding_for_internal_schema,
+            schema_sensitivity_for_internal_schema, writable_binding_for_internal_schema,
+        },
+        vm::udf_compile_options,
     },
 };
 

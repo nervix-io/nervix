@@ -149,6 +149,7 @@ impl Runtime {
                 replicated_branch_aggregated_states: DashMap::default(),
                 wasm_runtime: WasmRuntime::new(WasmRuntimeConfig::default())
                     .assured("wasmtime accepts its own default configuration"),
+                guest_wasm_state_resets: PendingGuestWasmStateResets::default(),
                 branch_instance_expiration_scan_interval,
                 state_store,
                 snapshot_staging: SnapshotStaging::new(

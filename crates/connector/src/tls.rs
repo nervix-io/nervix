@@ -41,6 +41,15 @@ pub struct RustlsClientConfigSource<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
 }
 
+/// Installs the rustls provider connector transports use unless the host already chose one.
+pub fn install_rustls_crypto_provider() {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .discarded(
+            "a provider the host installed first is the one this connector would have installed",
+        );
+}
+
 impl<'a> RustlsClientConfigSource<'a> {
     pub fn new(entries: &'a [nervix_models::ClientConfigEntry]) -> Self {
         Self { entries }
@@ -65,12 +74,7 @@ impl<'a> RustlsClientConfigSource<'a> {
         &self,
         tls: ClientTlsPaths,
     ) -> Result<Arc<RustlsClientConfig>, Report<TlsClientConfigError>> {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .discarded(
-                "a provider the host installed first is the one this connector would have \
-                 installed",
-            );
+        install_rustls_crypto_provider();
 
         let mut roots = Self::root_store_with_default_roots();
         if let Some(ca_file) = tls.ca_file.as_ref() {

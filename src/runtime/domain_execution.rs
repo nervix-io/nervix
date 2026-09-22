@@ -7,6 +7,8 @@
 //!
 //! Existing model-backed execution fields violate the data-plane plan boundary.
 
+use nervix_connector_websockets::CompiledSignalingProtocol;
+
 use super::*;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

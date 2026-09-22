@@ -1,0 +1,39 @@
+[package]
+description = "The MySQL sink connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-mysql"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
+[dependencies]
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+error-stack = { workspace = true }
+meticulous = { workspace = true }
+# This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
+mysql_async = { workspace = true, features = ["default-rustls"] }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+serde_json = { workspace = true }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "sync",
+  "time",
+], optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }

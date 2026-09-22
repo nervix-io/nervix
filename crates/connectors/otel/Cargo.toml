@@ -1,0 +1,57 @@
+[package]
+description = "The OpenTelemetry sink connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-otel"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
+[dependencies]
+ahash = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+error-stack = { workspace = true }
+flate2 = { workspace = true }
+meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+opentelemetry-proto = { workspace = true, features = [
+  "gen-tonic",
+  "logs",
+  "metrics",
+  "trace",
+] }
+otel-prost = { workspace = true }
+otel-tonic = { workspace = true }
+otel-tonic-types = { workspace = true }
+reqwest = { workspace = true, features = [
+  "brotli",
+  "deflate",
+  "gzip",
+  "hickory-dns",
+  "json",
+  "rustls",
+] }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "sync",
+  "time",
+], optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
+url = { workspace = true }

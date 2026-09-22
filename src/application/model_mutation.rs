@@ -2578,7 +2578,7 @@ mod tests {
             )
             .await;
         assert!(!changed.success);
-        assert!(changed.message.contains("bound to a different"));
+        assert!(changed.message.contains("conflicts by content"));
         assert_eq!(
             service.inner.consensus.current_transactions().await.len(),
             1

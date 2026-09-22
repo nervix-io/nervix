@@ -1777,6 +1777,7 @@ impl RelayProcessorNode {
                     ack_map,
                     next_ack_token,
                     pending,
+                    state_reset,
                 } => {
                     pending.push(batch);
                     flush_branch_wasm_processor(
@@ -1801,6 +1802,7 @@ impl RelayProcessorNode {
                         ack_map,
                         next_ack_token,
                         pending,
+                        state_reset,
                     )
                     .await;
                 }
@@ -2065,6 +2067,7 @@ impl RelayProcessorNode {
                     instance,
                     replicated_state,
                     ack_map,
+                    state_reset,
                     ..
                 } => {
                     let Some(live) = instance.as_mut() else {
@@ -2110,6 +2113,23 @@ impl RelayProcessorNode {
                                 nervix_wasm::WasmExecutionContext::new(now),
                             )
                             .await;
+                        // The request belongs to the callback that made it, whether or not the
+                        // callback then failed, so it is taken before the result decides anything.
+                        let requested_lifetime = live.guest.take_requested_state_reset();
+                        if requested_lifetime.is_reset_requested() {
+                            request_wasm_guest_state_reset(
+                                WasmGuestStateResetContext {
+                                    branch,
+                                    processor: &self.processor,
+                                    replicated_state,
+                                },
+                                timeout_result,
+                                instance,
+                                ack_map,
+                                state_reset,
+                            );
+                            break;
+                        }
                         let mut holds = WasmCheckpointHolds::default();
                         match timeout_result {
                             Ok(outputs) => {
@@ -2229,6 +2249,7 @@ impl RelayProcessorNode {
                 instance,
                 replicated_state,
                 ack_map,
+                state_reset,
                 ..
             } = &mut self.operation
             else {
@@ -2249,12 +2270,30 @@ impl RelayProcessorNode {
             ) else {
                 return;
             };
-            let flush_result = instance
+            let live = instance
                 .as_mut()
-                .verified("the is_none check above returned unless this branch holds an instance")
+                .verified("the is_none check above returned unless this branch holds an instance");
+            let flush_result = live
                 .guest
                 .flush_in_context(nervix_wasm::WasmExecutionContext::new(execution_now))
                 .await;
+            // The request belongs to the callback that made it, whether or not the callback then
+            // failed, so it is taken before the result decides anything.
+            let requested_lifetime = live.guest.take_requested_state_reset();
+            if requested_lifetime.is_reset_requested() {
+                request_wasm_guest_state_reset(
+                    WasmGuestStateResetContext {
+                        branch,
+                        processor: &self.processor,
+                        replicated_state,
+                    },
+                    flush_result,
+                    instance,
+                    ack_map,
+                    state_reset,
+                );
+                return;
+            }
             let mut holds = WasmCheckpointHolds::default();
             match flush_result {
                 // A flush that emits nothing decides no input, so no acknowledgement waits for a
