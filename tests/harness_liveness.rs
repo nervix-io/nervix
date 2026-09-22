@@ -2,19 +2,24 @@
 //!
 //! Outside the layer order: a harness test crate.
 //!
-//! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline and
-//!   status-request regressions with Rust's test runner, and the stand-in nodes those regressions
-//!   talk to.
-//! - **Depends on.** The node-liveness, node-startup, phase-deadline and status-request harness
-//!   modules, and the generated session service they send status requests to.
+//! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
+//!   status-request, cluster-teardown and scenario-phase regressions with Rust's test runner, and
+//!   the stand-in nodes those regressions talk to.
+//! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request,
+//!   cluster-teardown and scenario-phase harness modules, and the generated session service they
+//!   send status requests to.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
+#[path = "common/cluster_teardown.rs"]
+mod cluster_teardown;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
 #[path = "common/node_startup.rs"]
 mod node_startup;
 #[path = "common/phase_deadline.rs"]
 mod phase_deadline;
+#[path = "common/scenario_phase.rs"]
+mod scenario_phase;
 #[path = "common/status_request.rs"]
 mod status_request;
 
@@ -42,6 +47,7 @@ mod tests {
     use nervix_models::ClusterNodeName;
     use nervix_recovery::NoReceiver as _;
     use nervix_server::application::AppError;
+    use parking_lot::Mutex;
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     use tempfile::TempDir;
     use tokio::{
@@ -56,6 +62,7 @@ mod tests {
     use triomphe::Arc;
 
     use crate::{
+        cluster_teardown::{ClusterTeardown, TeardownNode},
         node_liveness::{
             LastReadinessOutcome, NodeStartupError, NodeStartupFailure, NodeTaskState,
             NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask, ReadinessProbeOutcome,
@@ -66,6 +73,7 @@ mod tests {
             StartableNode, StartupEnd, StartupRetry, cluster_startup_budget,
         },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
+        scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioPhase},
         status_request::{
             STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint, StatusOperation,
             StatusRequestError, StatusTransport,
@@ -74,6 +82,16 @@ mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
     const TEST_POLL_INTERVAL: Duration = Duration::from_millis(1);
+    /// The cleanup budget the teardown regressions give a cluster. It is long enough that one
+    /// budget and one budget per node are unmistakably different, and every regression that uses
+    /// it runs on a paused clock, so no wall-clock time is spent reaching it.
+    const TEST_TEARDOWN_BUDGET: Duration = Duration::from_secs(60);
+    /// The bound a cleanup that shares one budget stays under and a cleanup that spends one budget
+    /// per node cannot: the first ends one budget after it started, the second three.
+    const TEST_SHARED_TEARDOWN_BOUND: Duration = match TEST_TEARDOWN_BUDGET.checked_mul(2) {
+        Some(bound) => bound,
+        None => panic!("the shared cleanup bound must fit in Duration"),
+    };
     /// A poll interval like the one the harness status waits use.
     const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
     /// How long a request to a stalled stand-in may take. It leaves a loaded machine ample time to
@@ -386,7 +404,7 @@ mod tests {
 
         async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
             self.stop.cancel();
-            AttemptCleanup::from(self.task.wait(cleanup.remaining()).await)
+            AttemptCleanup::from(self.task.wait(cleanup).await)
         }
 
         fn move_to_fresh_ports(&mut self) -> io::Result<()> {
@@ -1060,7 +1078,7 @@ mod tests {
             panic!("the completed task must be terminal when inspected");
         };
         let NodeTaskWaitOutcome::AlreadyObserved(stopped_outcome) =
-            completed.wait(TEST_TIMEOUT).await
+            completed.wait(PhaseDeadline::after(TEST_TIMEOUT)).await
         else {
             panic!("stopping after inspection must reuse the observed terminal outcome");
         };
@@ -1103,16 +1121,470 @@ mod tests {
         assert_eq!(aborted_drops.load(Ordering::SeqCst), 1);
     }
 
+    /// How a stand-in node's task ends once cleanup has asked it to stop.
+    #[derive(Clone, Copy, Debug)]
+    enum StandInEnding {
+        StopsWhenAsked,
+        FailsWhenAsked,
+        PanicsWhenAsked,
+        /// Ignores the stop request, so only the cleanup deadline can end it.
+        NeverStops,
+    }
+
+    impl StandInEnding {
+        /// Whether `outcome` is how a task that ends this way ends.
+        fn ended_as(self, outcome: &NodeTaskTerminalOutcome) -> bool {
+            match self {
+                Self::StopsWhenAsked => {
+                    matches!(outcome, NodeTaskTerminalOutcome::CleanApplicationExit)
+                }
+                Self::FailsWhenAsked => matches!(
+                    outcome,
+                    NodeTaskTerminalOutcome::ApplicationError(error)
+                        if matches!(
+                            error.current_context(),
+                            AppError::MissingGrpcHttpsListenAddress
+                        )
+                ),
+                Self::PanicsWhenAsked => matches!(outcome, NodeTaskTerminalOutcome::Panic(_)),
+                // A task the cleanup deadline aborted is joined for the cancellation it left.
+                Self::NeverStops => matches!(outcome, NodeTaskTerminalOutcome::Cancellation(_)),
+            }
+        }
+    }
+
+    /// What the stand-in nodes of one cleanup did, in the order they did it.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum CleanupEvent {
+        StopRequested {
+            node: String,
+        },
+        TaskEnded {
+            node: String,
+        },
+        Released {
+            node: String,
+            /// The phase the scenario published while this node was releasing, when the node was
+            /// given a registration to read.
+            phase: Option<ScenarioPhase>,
+        },
+    }
+
+    #[derive(Debug, Default)]
+    struct CleanupLog {
+        events: Mutex<Vec<CleanupEvent>>,
+    }
+
+    impl CleanupLog {
+        fn record(&self, event: CleanupEvent) {
+            self.events.lock().push(event);
+        }
+
+        fn events(&self) -> Vec<CleanupEvent> {
+            self.events.lock().clone()
+        }
+
+        fn stop_was_requested(&self, node: &str) -> bool {
+            self.events().iter().any(|event| {
+                matches!(event, CleanupEvent::StopRequested { node: requested } if requested == node)
+            })
+        }
+
+        fn phase_while_releasing(&self, node: &str) -> Option<ScenarioPhase> {
+            self.events().into_iter().find_map(|event| match event {
+                CleanupEvent::Released {
+                    node: released,
+                    phase,
+                } if released == node => phase,
+                _ => None,
+            })
+        }
+
+        /// Whether every node gave its harness state back only once every task had ended.
+        fn released_only_after_every_task_ended(&self) -> bool {
+            let events = self.events();
+            let last_end = events
+                .iter()
+                .rposition(|event| matches!(event, CleanupEvent::TaskEnded { .. }));
+            let first_release = events
+                .iter()
+                .position(|event| matches!(event, CleanupEvent::Released { .. }));
+            let Some(last_end) = last_end else {
+                return false;
+            };
+            let Some(first_release) = first_release else {
+                return false;
+            };
+            last_end < first_release
+        }
+
+        fn released(&self) -> Vec<String> {
+            self.events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    CleanupEvent::Released { node, .. } => Some(node),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    /// Records that a node's task ended, whether it returned, failed, panicked or was aborted.
+    struct TaskEnd {
+        node: String,
+        log: Arc<CleanupLog>,
+    }
+
+    impl Drop for TaskEnd {
+        fn drop(&mut self) {
+            self.log.record(CleanupEvent::TaskEnded {
+                node: self.node.clone(),
+            });
+        }
+    }
+
+    /// A node standing in for a cluster node during cleanup: it records the stop request it was
+    /// given and the harness state it gave back, and its task ends the way the regression asked.
+    struct StandInTeardownNode {
+        name: String,
+        stop: Arc<Notify>,
+        task: OwnedNodeTask,
+        log: Arc<CleanupLog>,
+        scenario: Option<Arc<ActiveScenarioRegistration>>,
+    }
+
+    impl StandInTeardownNode {
+        fn new(name: &str, ending: StandInEnding, log: &Arc<CleanupLog>) -> Self {
+            let stop = Arc::new(Notify::new());
+            let task_stop = stop.clone();
+            let task_end = TaskEnd {
+                node: name.to_string(),
+                log: log.clone(),
+            };
+            let task = OwnedNodeTask::spawn(async move {
+                let _ended = task_end;
+                match ending {
+                    StandInEnding::NeverStops => {
+                        future::pending::<()>().await;
+                        Ok(())
+                    }
+                    StandInEnding::StopsWhenAsked => {
+                        task_stop.notified().await;
+                        Ok(())
+                    }
+                    StandInEnding::FailsWhenAsked => {
+                        task_stop.notified().await;
+                        Err(Report::new(AppError::MissingGrpcHttpsListenAddress))
+                    }
+                    StandInEnding::PanicsWhenAsked => {
+                        task_stop.notified().await;
+                        panic!("intentional stand-in node panic");
+                    }
+                }
+            });
+            Self {
+                name: name.to_string(),
+                stop,
+                task,
+                log: log.clone(),
+                scenario: None,
+            }
+        }
+
+        /// Reads the phase `scenario` publishes while this node releases, so a regression can tell
+        /// what a reader of the registry would have seen during cleanup.
+        fn reading(mut self, scenario: &Arc<ActiveScenarioRegistration>) -> Self {
+            self.scenario = Some(scenario.clone());
+            self
+        }
+    }
+
+    impl TeardownNode for StandInTeardownNode {
+        fn node_name(&self) -> String {
+            self.name.clone()
+        }
+
+        fn request_stop(&mut self) {
+            self.log.record(CleanupEvent::StopRequested {
+                node: self.name.clone(),
+            });
+            self.stop.notify_one();
+        }
+
+        fn owned_task(&mut self) -> &mut OwnedNodeTask {
+            &mut self.task
+        }
+
+        fn release(&mut self) {
+            let phase = self
+                .scenario
+                .as_ref()
+                .map(|scenario| published(scenario).phase);
+            self.log.record(CleanupEvent::Released {
+                node: self.name.clone(),
+                phase,
+            });
+        }
+    }
+
+    /// What the registry publishes for one scenario, read the way a suite watchdog reads it.
+    fn published(scenario: &ActiveScenarioRegistration) -> ActiveScenario {
+        ActiveScenario::active()
+            .into_iter()
+            .find(|active| &active.identity == scenario.identity())
+            .verified("a registered scenario is published until its registration is dropped")
+    }
+
+    fn stand_in_cluster(
+        nodes: &[(&str, StandInEnding)],
+        log: &Arc<CleanupLog>,
+    ) -> Vec<StandInTeardownNode> {
+        nodes
+            .iter()
+            .map(|(name, ending)| StandInTeardownNode::new(name, *ending, log))
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_single_node_cleanup_keeps_how_its_task_ended() {
+        for ending in [
+            StandInEnding::StopsWhenAsked,
+            StandInEnding::FailsWhenAsked,
+            StandInEnding::PanicsWhenAsked,
+        ] {
+            let log = Arc::new(CleanupLog::default());
+            let mut nodes = stand_in_cluster(&[("node-1", ending)], &log);
+
+            let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+            assert!(log.stop_was_requested("node-1"));
+            assert!(
+                teardown.elapsed < TEST_TEARDOWN_BUDGET,
+                "a node that stops when asked must not reach the cleanup deadline: {teardown}"
+            );
+            assert!(!teardown.was_forced(), "{teardown}");
+            let [node] = teardown.nodes.as_slice() else {
+                panic!("a cluster of one reports one node: {teardown}");
+            };
+            let NodeTaskWaitOutcome::Joined(outcome) = &node.stop else {
+                panic!("a node that ends itself must be joined, not forced: {node}");
+            };
+            assert!(
+                ending.ended_as(outcome.as_ref()),
+                "cleanup must keep how the task of a node that {ending:?} ended, got {outcome}"
+            );
+            assert_eq!(log.released(), vec!["node-1".to_string()]);
+            assert!(
+                log.released_only_after_every_task_ended(),
+                "{:?}",
+                log.events()
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports() {
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = stand_in_cluster(
+            &[
+                ("node-1", StandInEnding::StopsWhenAsked),
+                ("node-2", StandInEnding::FailsWhenAsked),
+                ("node-3", StandInEnding::PanicsWhenAsked),
+            ],
+            &log,
+        );
+
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+        assert!(!teardown.was_forced(), "{teardown}");
+        let panicked = teardown
+            .panics()
+            .map(|node| node.node.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(panicked, vec!["node-3".to_string()]);
+        assert_eq!(
+            log.released(),
+            vec![
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string()
+            ]
+        );
+        assert!(
+            log.released_only_after_every_task_ended(),
+            "{:?}",
+            log.events()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn three_stuck_nodes_spend_one_cleanup_budget_rather_than_three() {
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = stand_in_cluster(
+            &[
+                ("node-1", StandInEnding::NeverStops),
+                ("node-2", StandInEnding::NeverStops),
+                ("node-3", StandInEnding::NeverStops),
+            ],
+            &log,
+        );
+
+        let started = Instant::now();
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        let spent = started.elapsed();
+
+        assert!(spent >= TEST_TEARDOWN_BUDGET, "{teardown}");
+        assert!(
+            spent < TEST_SHARED_TEARDOWN_BOUND,
+            "three stuck nodes must share one cleanup budget, but cleanup took {spent:?}: \
+             {teardown}"
+        );
+        for node in &teardown.nodes {
+            assert!(log.stop_was_requested(&node.node));
+            let NodeTaskWaitOutcome::AbortedAtDeadline(outcome) = &node.stop else {
+                panic!("a node that never stops must be aborted at the deadline: {node}");
+            };
+            assert!(
+                StandInEnding::NeverStops.ended_as(outcome.as_ref()),
+                "an aborted node task must be joined for its outcome: {outcome}"
+            );
+        }
+        assert_eq!(teardown.forced().count(), 3, "{teardown}");
+        assert_eq!(log.released().len(), 3);
+        assert!(
+            log.released_only_after_every_task_ended(),
+            "harness state must be given back only once every task has ended: {:?}",
+            log.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_diagnostic_still_reaches_every_node_stop() {
+        let stalled = StandInNode::serve(StandInBehavior::WithholdSession).await;
+        let healthy = StandInNode::serve(StandInBehavior::Answer(command_result(
+            CommandResultKind::Ok,
+            HEALTHY_STATUS,
+        )))
+        .await;
+        let endpoints = BTreeMap::from([
+            ("node-1".to_string(), healthy.endpoint()),
+            ("node-2".to_string(), stalled.endpoint()),
+        ]);
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = stand_in_cluster(
+            &[
+                ("node-1", StandInEnding::StopsWhenAsked),
+                ("node-2", StandInEnding::StopsWhenAsked),
+            ],
+            &log,
+        );
+
+        let started = Instant::now();
+        let snapshots = StatusEndpoint::cluster_statuses(
+            &endpoints,
+            PhaseDeadline::after(STALLED_REQUEST_BUDGET),
+        )
+        .await;
+        let diagnostics_ended = started.elapsed();
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+        assert!(
+            diagnostics_ended >= STALLED_REQUEST_BUDGET,
+            "the stalled diagnostic must run out its own budget before cleanup continues"
+        );
+        assert!(matches!(snapshots.get("node-1"), Some(Ok(status)) if status == HEALTHY_STATUS));
+        let Some(Err(stalled_error)) = snapshots.get("node-2") else {
+            panic!("the stalled node's snapshot must be its timeout: {snapshots:?}");
+        };
+        assert!(deadline_passed_during(
+            stalled_error,
+            StatusOperation::OpenSession
+        ));
+        for node in &teardown.nodes {
+            assert!(
+                log.stop_was_requested(&node.node),
+                "a stalled diagnostic must not keep a node from being asked to stop: {node}"
+            );
+        }
+        assert!(!teardown.was_forced(), "{teardown}");
+        assert_eq!(log.released().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_finished_phase_is_published_only_once_cleanup_has_completed() {
+        let scenario = Arc::new(ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "cleanup publishes truthful phases",
+        ));
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = [
+            StandInTeardownNode::new("node-1", StandInEnding::NeverStops, &log).reading(&scenario),
+        ];
+
+        scenario.enter(ScenarioPhase::BodyComplete);
+        scenario.enter(ScenarioPhase::TeardownStarted);
+        scenario.enter(ScenarioPhase::Diagnostics);
+        scenario.enter(ScenarioPhase::Stopping);
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        assert_eq!(published(&scenario).phase, ScenarioPhase::Stopping);
+        scenario.enter(ScenarioPhase::Finished);
+
+        assert!(teardown.was_forced(), "{teardown}");
+        assert_eq!(
+            log.phase_while_releasing("node-1"),
+            Some(ScenarioPhase::Stopping),
+            "cleanup that is still giving state back must not publish that it has finished"
+        );
+        assert_eq!(published(&scenario).phase, ScenarioPhase::Finished);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_active_scenario_publishes_its_phase_and_the_age_of_that_phase() {
+        let scenario = ActiveScenarioRegistration::start("Harness liveness", "phase ages");
+        let queued = published(&scenario);
+        assert_eq!(&queued.identity, scenario.identity());
+        assert_eq!(queued.phase, ScenarioPhase::Queued);
+        assert_eq!(queued.identity.feature, "Harness liveness");
+        assert_eq!(queued.identity.scenario, "phase ages");
+
+        // A scenario that has not reached its first step ages in the phase it is waiting in.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let waiting = published(&scenario);
+        assert_eq!(waiting.phase, ScenarioPhase::Queued);
+        assert_eq!(waiting.phase_age(), Duration::from_secs(30));
+        assert_eq!(waiting.age(), Duration::from_secs(30));
+
+        let started = scenario.enter(ScenarioPhase::Body);
+        assert_eq!(started.phase, ScenarioPhase::Body);
+        assert_eq!(started.phase_age(), Duration::ZERO);
+        assert_eq!(started.age(), Duration::from_secs(30));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let running = published(&scenario);
+        assert_eq!(running.phase, ScenarioPhase::Body);
+        assert_eq!(running.phase_age(), Duration::from_secs(5));
+        assert_eq!(running.age(), Duration::from_secs(35));
+
+        let identity = queued.identity.clone();
+        drop(scenario);
+        assert!(
+            !ActiveScenario::active()
+                .iter()
+                .any(|active| active.identity == identity),
+            "a scenario whose world is dropped must leave the registry"
+        );
+    }
+
     #[tokio::test]
     async fn forced_cleanup_aborts_and_joins_the_owned_task_once() {
         let mut not_started = OwnedNodeTask::not_started();
         assert!(matches!(
-            not_started.wait(TEST_TIMEOUT).await,
+            not_started.wait(PhaseDeadline::after(TEST_TIMEOUT)).await,
             NodeTaskWaitOutcome::NotStarted
         ));
 
         let mut completed = OwnedNodeTask::spawn(async { Ok(()) });
-        let NodeTaskWaitOutcome::Joined(completed_outcome) = completed.wait(TEST_TIMEOUT).await
+        let NodeTaskWaitOutcome::Joined(completed_outcome) =
+            completed.wait(PhaseDeadline::after(TEST_TIMEOUT)).await
         else {
             panic!("waiting for a clean task must join its terminal outcome");
         };
@@ -1137,7 +1609,8 @@ mod tests {
             .await
             .assured("the forced-cleanup task sends after installing its drop guard");
 
-        let NodeTaskWaitOutcome::AbortedAtDeadline(first_outcome) = task.wait(Duration::ZERO).await
+        let NodeTaskWaitOutcome::AbortedAtDeadline(first_outcome) =
+            task.wait(PhaseDeadline::after(Duration::ZERO)).await
         else {
             panic!("a pending task with an expired deadline must be aborted and joined");
         };
@@ -1147,7 +1620,8 @@ mod tests {
         ));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
 
-        let NodeTaskWaitOutcome::AlreadyObserved(observed_outcome) = task.wait(TEST_TIMEOUT).await
+        let NodeTaskWaitOutcome::AlreadyObserved(observed_outcome) =
+            task.wait(PhaseDeadline::after(TEST_TIMEOUT)).await
         else {
             panic!("a second cleanup must reuse the retained terminal outcome");
         };

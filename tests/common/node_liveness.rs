@@ -210,8 +210,12 @@ impl OwnedNodeTask {
         NodeTaskState::Terminal(outcome)
     }
 
-    /// Wait for the owned task once, aborting and then joining it if the deadline expires.
-    pub(crate) async fn wait(&mut self, deadline: Duration) -> NodeTaskWaitOutcome {
+    /// Wait for the owned task once, aborting and then joining it if `deadline` passes.
+    ///
+    /// The deadline is a value this call receives rather than a timeout wrapped around it: the
+    /// wait takes the join handle out of the owner, so a wait cancelled from outside would drop
+    /// that handle and leave the task running with nothing left that could abort or join it.
+    pub(crate) async fn wait(&mut self, deadline: PhaseDeadline) -> NodeTaskWaitOutcome {
         let previous = std::mem::replace(self, Self::NotStarted);
         let mut task = match previous {
             Self::NotStarted => return NodeTaskWaitOutcome::NotStarted,
@@ -222,7 +226,7 @@ impl OwnedNodeTask {
             Self::Running(task) => task,
         };
 
-        let (outcome, expired) = match timeout(deadline, &mut task).await {
+        let (outcome, expired) = match timeout(deadline.remaining(), &mut task).await {
             Ok(result) => (Arc::new(NodeTaskTerminalOutcome::from_join(result)), false),
             Err(_) => {
                 task.abort();
