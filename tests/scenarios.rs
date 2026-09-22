@@ -13432,6 +13432,43 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
     }
 }
 
+#[then(expr = "within {string} DESCRIBE WASM PROCESSOR {string} on the leader node contains")]
+async fn then_within_duration_describe_wasm_processor_on_leader_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    processor: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let processor = expand_placeholders(world, &processor);
+    let expected = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+
+    loop {
+        tokio::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output = run_nspl_commands_on_node(
+            world,
+            &leader,
+            &format!("DESCRIBE WASM PROCESSOR {processor};"),
+        )
+        .await
+        .expect("describe wasm processor command must succeed");
+        world.last_command_output = Some(output.clone());
+        if output.contains(expected.trim()) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE WASM PROCESSOR {processor} to contain {}. last \
+             output: {output}",
+            expected.trim()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Assert that one of two emitters reports the given text.
 ///
 /// Which of two peers contending for the last connection ends up holding it and which ends up
@@ -17195,6 +17232,59 @@ async fn then_stream_subscription_does_not_receive_a_payload_within(
     let duration =
         humantime::parse_duration(&duration).expect("step duration must be a valid duration");
     assert_no_subscription_payload_within(world, duration).await;
+}
+
+/// Assert that nothing the subscription delivers within `duration` carries every named fragment.
+///
+/// Sibling branches keep publishing while the branch under test must stay silent, so the window
+/// has to be drained rather than closed on the first payload that arrives.
+#[then(
+    expr = "the relay subscription does not receive a payload containing fragments within {string}"
+)]
+async fn then_stream_subscription_does_not_receive_a_payload_containing_fragments_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let fragments = docstring(step)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| expand_placeholders(world, line))
+        .collect::<Vec<_>>();
+    assert!(
+        !fragments.is_empty(),
+        "step docstring must contain at least one forbidden payload fragment"
+    );
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session with subscription must exist");
+    let deadline = Instant::now() + duration;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let wait = deadline.saturating_duration_since(now);
+        let event = session
+            .try_next_subscription(wait)
+            .await
+            .expect("failed while waiting for absence of a subscription payload");
+        let Some(event) = event else {
+            return;
+        };
+        assert!(
+            !fragments
+                .iter()
+                .all(|fragment| event.payload.contains(fragment)),
+            "expected no subscription payload containing {fragments:?}, got: {}",
+            event.payload
+        );
+    }
 }
 
 async fn assert_no_subscription_payload_within(world: &mut ScenarioWorld, duration: Duration) {

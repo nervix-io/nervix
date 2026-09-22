@@ -2297,6 +2297,7 @@ fn wasm_processor_node() -> ScheduledNode {
                 max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: nervix_models::GeneralErrorPolicy::Log,
+            rejected_state_policy: Default::default(),
             mode: nervix_models::AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),

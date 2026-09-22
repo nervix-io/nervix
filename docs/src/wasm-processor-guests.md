@@ -398,7 +398,9 @@ A restore that fails leaves the saved state in place. The next input for that br
 the guest again and hands it the same saved state, so a guest that rejects its state keeps being
 reported with the same saved state revision instead of silently starting fresh. Rejecting the
 state with `-7` or `-8` is the only outcome that classifies the saved bytes as unusable; keep
-`nervix_load_state` strict and use those codes only for a verdict on the state.
+`nervix_load_state` strict and use those codes only for a verdict on the state. A processor can opt
+in to discarding a lifetime its guest rejected; see
+[Recovering A Rejected Snapshot](#recovering-a-rejected-snapshot).
 
 ### State Generations
 
@@ -451,6 +453,43 @@ runs the guest.
 ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are
 not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor
 reacts according to its delivery mode and retry policy.
+
+### Recovering A Rejected Snapshot
+
+`ON REJECTED STATE` is the processor's answer to a guest that refuses the snapshot it is handed. It
+is written between the last `TO` clause and `ON GLOBAL ERROR`, it is optional, and it has two
+values:
+
+- `PRESERVE`, the default. The refused snapshot stays exactly where it is. Every later instance of
+  the branch is handed the same bytes and reports the same
+  [failure](#failure-diagnostics), so the state is still there when an operator decides what to do
+  with it — including running a [coordinated reset](#coordinated-reset) by hand.
+- `RESET`. Nervix replaces that branch's state lifetime once, through the same coordinated reset,
+  and the branch resumes on the fresh lifetime it publishes.
+
+Only the guest's own verdict — `-7` or `-8` from `nervix_load_state` — reaches this policy. A
+module that does not compile, an initialization the guest refuses, an exhausted `MAX FUEL` or
+`MAX MEMORY`, a trap while restoring, and every storage, replication and state-authority failure
+leave the saved bytes as usable as they were, so none of them ever discards state, whichever policy
+the processor declares.
+
+One refused lifetime is worth exactly one recovery attempt. Nervix records that the attempt was
+spent before it resets anything, so the budget survives whatever happens next:
+
+- The reset publishes a fresh lifetime and the branch resumes on it. The branch has moved on, and a
+  guest that later refuses *that* lifetime is a new failure with an attempt of its own.
+- The reset fails before it publishes. The previous lifetime — refused bytes and all — is still
+  there, and the spent attempt means the branch reports its refusal from then on instead of
+  resetting again on every arriving record.
+- The reset is committed but its fresh lifetime is not usable. Admission for the branch stays fenced
+  under the published generation, exactly as it does for an operator-requested reset that ends the
+  same way.
+
+The record is control-plane state, so a process restart, a leader change and an owner change all
+read the same spent attempt. Nothing about the refused guest's memory is kept: the record names the
+branch by its opaque fingerprint, the generation that was refused, which of the two verdicts the
+guest gave, and what the attempt achieved. `DESCRIBE WASM PROCESSOR` reports it as a
+`rejected state recovery` line, beside the `rejected state policy` the processor declares.
 
 ### Checkpoints And Acknowledgements
 
@@ -807,10 +846,21 @@ wasm processor 'sessionizer' application state restoration failed (branch {"tena
 
 `snapshot envelope decoding failed` or `application state restoration failed`
 
-: The guest rejected the saved state it was asked to restore. Nervix keeps that
-  state and reports the rejection again, with the same saved state revision,
-  each time the branch is instantiated. Keep `load_state` strict; rejecting the
-  state is preferred to running with partially decoded state.
+: The guest rejected the saved state it was asked to restore. Under the default
+  `ON REJECTED STATE PRESERVE`, Nervix keeps that state and reports the rejection
+  again, with the same saved state revision, each time the branch is
+  instantiated. Keep `load_state` strict; rejecting the state is preferred to
+  running with partially decoded state. Declare `ON REJECTED STATE RESET` to have
+  the branch's lifetime replaced once instead; see
+  [Recovering A Rejected Snapshot](#recovering-a-rejected-snapshot).
+
+`rejected-state recovery failed`
+
+: A processor that declares `ON REJECTED STATE RESET` could not replace the
+  rejected lifetime, and the one attempt that lifetime was worth is now spent.
+  The branch keeps reporting its rejection until an operator acts.
+  `DESCRIBE WASM PROCESSOR` reports the attempt as a `rejected state recovery`
+  line naming the generation, the verdict and the outcome.
 
 `state restore failed`
 

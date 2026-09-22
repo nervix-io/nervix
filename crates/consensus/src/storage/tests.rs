@@ -236,6 +236,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
                 max_memory_bytes: NonZeroU64::MIN,
             },
             global_error_policy: GeneralErrorPolicy::Log,
+            rejected_state_policy: Default::default(),
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),
