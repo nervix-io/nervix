@@ -60,15 +60,19 @@ use super::{
 const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
 /// What the job spends before the scenario binary starts: its setup steps, the toolchains it
 /// installs, and the builds and earlier test binaries the coverage step runs first. Measured at
-/// 6m28s, 7m50s, 9m25s and 12m21s over four `tests` jobs. A policy input: measure it again when
-/// the job's steps or its build inputs change.
-const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(15 * 60);
+/// 6m28s, 7m50s, 9m25s, 12m21s and 15m26s over five `tests` jobs, and rising with the workspace:
+/// it gained thirteen crates in the week those were measured. A policy input, and the one most
+/// likely to exhaust the job limit first: measure it again when the job's steps or its build
+/// inputs change.
+const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(18 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
-/// follows. The cleanup is bounded by [`WATCHDOG_CLEANUP_WINDOW`], and the upload measured 2 to 3
-/// seconds with 8 seconds of steps after it, so this is several times what has ever been needed
-/// and the rest of the job limit goes to the budget. A policy input.
-const SUITE_CLEANUP_RESERVE: Duration = Duration::from_secs(7 * 60);
+/// follows. The cleanup is bounded by [`WATCHDOG_CLEANUP_WINDOW`], the containers stop in seconds
+/// and the upload measured 2 to 3 seconds with 8 seconds of steps after it, so roughly a minute
+/// and a half is the worst that has been observed and this is some three times that. A policy
+/// input: the conservatism that matters belongs in [`SUITE_SLACK`], which pays for a slow run
+/// rather than for a slow cleanup.
+const SUITE_CLEANUP_RESERVE: Duration = Duration::from_secs(5 * 60);
 /// The one budget a whole scenario run has: what the job limit leaves once the work before the
 /// suite and the reserve after it are both paid for.
 pub(crate) const SUITE_BUDGET: Duration =
