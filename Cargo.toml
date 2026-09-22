@@ -28,6 +28,7 @@ shuttle = [
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
   "nervix-connector-kafka/shuttle",
+  "nervix-connector-sqs/shuttle",
   "nervix-connector-mqtt/shuttle",
   "nervix-connector-nats/shuttle",
   "nervix-connector-rabbitmq/shuttle",
@@ -126,6 +127,7 @@ nervix-connector-pulsar = { workspace = true }
 nervix-connector-rabbitmq = { workspace = true }
 nervix-connector-redis = { workspace = true }
 nervix-connector-sentry = { workspace = true }
+nervix-connector-sqs = { workspace = true }
 nervix-connector-syslog = { workspace = true }
 nervix-connector-zeromq = { workspace = true }
 nervix-consensus = { workspace = true }
@@ -273,6 +275,7 @@ members = [
   "crates/client-wire",
   "crates/connector",
   "crates/connectors/kafka",
+  "crates/connectors/sqs",
   "crates/connectors/mqtt",
   "crates/connectors/nats",
   "crates/connectors/rabbitmq",
@@ -434,6 +437,7 @@ nervix-connector-pulsar = { package = "nervix-connector-pulsar", path = "crates/
 nervix-connector-rabbitmq = { package = "nervix-connector-rabbitmq", path = "crates/connectors/rabbitmq" }
 nervix-connector-redis = { package = "nervix-connector-redis", path = "crates/connectors/redis" }
 nervix-connector-sentry = { package = "nervix-connector-sentry", path = "crates/connectors/sentry" }
+nervix-connector-sqs = { package = "nervix-connector-sqs", path = "crates/connectors/sqs" }
 nervix-connector-syslog = { package = "nervix-connector-syslog", path = "crates/connectors/syslog" }
 nervix-connector-zeromq = { package = "nervix-connector-zeromq", path = "crates/connectors/zeromq" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }

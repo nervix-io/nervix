@@ -6765,6 +6765,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-sqs"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-sqs",
+ "aws-smithy-http-client",
+ "error-stack",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "nervix-connector-syslog"
 version = "0.1.0-dev"
 dependencies = [
@@ -7105,6 +7124,7 @@ dependencies = [
  "nervix-connector-rabbitmq",
  "nervix-connector-redis",
  "nervix-connector-sentry",
+ "nervix-connector-sqs",
  "nervix-connector-syslog",
  "nervix-connector-zeromq",
  "nervix-consensus",

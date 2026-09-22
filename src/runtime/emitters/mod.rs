@@ -24,7 +24,6 @@ mod mongodb;
 mod mysql;
 mod otel;
 mod postgres;
-mod sqs;
 
 use clickhouse::ClickHouseEmitter;
 use iceberg::{IcebergEmitter, IcebergEmitterError, IcebergEmitterInit, IcebergEmitterResult};
@@ -43,13 +42,12 @@ use nervix_connector_redis::{
     RedisPoolHandle, RedisPoolServices, RedisPoolWait, RedisSink, RedisSinkConfig,
 };
 use nervix_connector_sentry::{SentrySink, SentrySinkConfig};
+use nervix_connector_sqs::{SqsSink, SqsSinkConfig};
 use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
 use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
 use otel::{OtelEmitter, OtelEmitterInit};
 use postgres::PostgresEmitter;
 pub(in crate::runtime) use postgres::{PgPool, open_postgres_pool};
-pub(in crate::runtime) use sqs::SqsPublishingMode;
-use sqs::{SqsSink, SqsSinkConfig};
 
 const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
 

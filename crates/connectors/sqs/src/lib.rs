@@ -11,6 +11,9 @@
 //!   connector implementation. A FIFO message group arrives already evaluated for its record, so
 //!   the expression behind it stays with the host.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use std::time::Duration;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
