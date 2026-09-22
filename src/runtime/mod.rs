@@ -246,7 +246,6 @@ mod state_snapshot_exchange;
 mod state_snapshot_transfer;
 mod state_store;
 mod subscription_predicate;
-mod syslog;
 #[cfg(test)]
 mod test_fixtures;
 
