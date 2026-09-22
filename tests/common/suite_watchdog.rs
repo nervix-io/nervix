@@ -60,15 +60,15 @@ use super::{
 const WORKFLOW_JOB_LIMIT: Duration = Duration::from_secs(60 * 60);
 /// What the job spends before the scenario binary starts: its setup steps, the toolchains it
 /// installs, and the builds and earlier test binaries the coverage step runs first. Measured at
-/// 6m28s, 7m50s and 9m25s over three `tests` jobs. A policy input: measure it again when the job's
-/// steps or its build inputs change.
+/// 6m28s, 7m50s, 9m25s and 12m21s over four `tests` jobs. A policy input: measure it again when
+/// the job's steps or its build inputs change.
 const SLOWEST_JOB_WORK_BEFORE_SUITE: Duration = Duration::from_secs(15 * 60);
 /// What the job keeps for itself once the suite budget has expired: the bounded cleanup the
 /// watchdog drives, the dependency containers the suite then stops, and the artifact upload that
-/// follows. Measured at 2 to 3 seconds for the upload and 8 seconds for the steps after it, so
-/// this is almost entirely allowance for a cleanup slower than any that has been observed. A
-/// policy input.
-const SUITE_CLEANUP_RESERVE: Duration = Duration::from_secs(10 * 60);
+/// follows. The cleanup is bounded by [`WATCHDOG_CLEANUP_WINDOW`], and the upload measured 2 to 3
+/// seconds with 8 seconds of steps after it, so this is several times what has ever been needed
+/// and the rest of the job limit goes to the budget. A policy input.
+const SUITE_CLEANUP_RESERVE: Duration = Duration::from_secs(7 * 60);
 /// The one budget a whole scenario run has: what the job limit leaves once the work before the
 /// suite and the reserve after it are both paid for.
 pub(crate) const SUITE_BUDGET: Duration =
@@ -79,10 +79,11 @@ pub(crate) const SUITE_BUDGET: Duration =
         },
         None => panic!("the workflow job limit must cover the work that precedes the suite"),
     };
-/// The slowest a healthy suite ran: 16m47s, against 15m26s and 15m20s over the same three `tests`
-/// jobs, all at the CI concurrency factor of two scenarios per CPU. A policy input: measure it
-/// again when the suite, its concurrency or the runner changes.
-const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(17 * 60);
+/// The slowest a healthy suite ran: 18m53s, against 15m20s, 15m26s and 16m47s over the same four
+/// `tests` jobs, all at the CI concurrency factor of two scenarios per CPU. A policy input, and a
+/// rising one: measure it again when the suite, its concurrency or the runner changes, and
+/// rebalance the reserve below when the headroom assertion stops holding.
+const SLOWEST_HEALTHY_SUITE: Duration = Duration::from_secs(19 * 60);
 /// How many times the slowest healthy suite the budget must fit, so a runner slower than the
 /// measuring one still finishes its own scenarios. A policy input.
 const SUITE_HEADROOM: u32 = 2;
