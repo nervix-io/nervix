@@ -2450,7 +2450,7 @@ impl SinkEmitter {
                 )),
             );
         }
-        if let (Some(codec), Self::Record(emitter)) = (codec.clone(), &mut *self) {
+        if let (Some(codec), Self::Record(emitter)) = (codec, &mut *self) {
             let encoded = encode_broker_records(codec, context, batches).await?;
             let records = sink_records(context, batches, encoded).await?;
             let outcome = emitter.publish(records).await;
