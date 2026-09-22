@@ -32,7 +32,6 @@ mod redis;
 mod sentry;
 mod sqs;
 mod syslog;
-mod zeromq;
 
 use clickhouse::ClickHouseEmitter;
 use iceberg::{IcebergEmitter, IcebergEmitterError, IcebergEmitterInit, IcebergEmitterResult};
@@ -55,7 +54,7 @@ use sentry::{SentrySink, SentrySinkConfig};
 pub(in crate::runtime) use sqs::SqsPublishingMode;
 use sqs::{SqsSink, SqsSinkConfig};
 use syslog::{SyslogSink, SyslogSinkConfig};
-use zeromq::{ZeroMqSink, ZeroMqSinkConfig};
+use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
 
 const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
 

@@ -6664,6 +6664,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-zeromq"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "nervix-connector",
+ "nervix-models",
+ "shuttle-tokio",
+ "tokio",
+ "zeromq",
+]
+
+[[package]]
 name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
@@ -6964,6 +6977,7 @@ dependencies = [
  "nervix-client-wire",
  "nervix-connector",
  "nervix-connector-kafka",
+ "nervix-connector-zeromq",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",
