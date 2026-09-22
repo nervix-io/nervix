@@ -13,18 +13,19 @@ use std::{future, time::Duration};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    SourceAckPolicy, SourceAcknowledgement, SourceAcknowledgementOutcome,
-    SourceAcknowledgementServices, SourceBatch, SourceBatchRequest, SourceConnector, SourceHost,
-    SourceHostServices, SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage,
-    SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourceResume,
-    next_retry_delay, physical_time::actual_utc_now,
+    BrokerSourceConnector, PacedSourceConnector, SourceAckPolicy, SourceAcknowledgement,
+    SourceAcknowledgementOutcome, SourceAcknowledgementServices, SourceBatch, SourceBatchRequest,
+    SourceConnector, SourceHost, SourceHostServices, SourceIntakeBatch, SourceIntakeError,
+    SourceIntakeMessage, SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage,
+    SourcePoll, SourceResume, next_retry_delay, physical_time::actual_utc_now,
 };
+use tokio_util::sync::CancellationToken;
 
-use super::super::*;
+use super::super::{domain_clock::DomainCadence, *};
 
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
-pub(super) struct BrokerSourceHostSpec {
+pub(super) struct RuntimeSourceHostSpec {
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
@@ -40,7 +41,7 @@ pub(super) struct BrokerSourceHostSpec {
     pub(super) metadata_kind: IngestMetadataKind,
 }
 
-pub(super) struct BrokerSourceHost {
+pub(super) struct RuntimeSourceHost {
     runtime: Runtime,
     domain: DomainName,
     ingestor: IngestorName,
@@ -57,8 +58,12 @@ pub(super) struct BrokerSourceHost {
     collector: IngestRouteCollector,
 }
 
-impl BrokerSourceHost {
-    pub(super) fn build(spec: BrokerSourceHostSpec) -> SourceHost {
+impl RuntimeSourceHost {
+    pub(super) fn build(spec: RuntimeSourceHostSpec) -> SourceHost {
+        SourceHost::new(Self::new(spec))
+    }
+
+    pub(super) fn new(spec: RuntimeSourceHostSpec) -> Self {
         let ack_root_trackers = spec
             .runtime
             .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
@@ -67,7 +72,7 @@ impl BrokerSourceHost {
             INGEST_GROUP_MAX_ROWS,
             spec.metrics.clone(),
         );
-        SourceHost::new(Self {
+        Self {
             runtime: spec.runtime,
             domain: spec.domain,
             ingestor: spec.ingestor,
@@ -82,7 +87,77 @@ impl BrokerSourceHost {
             shutdown: spec.shutdown,
             instance_index: spec.instance_index,
             collector,
-        })
+        }
+    }
+
+    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
+        for failure in poll.failures {
+            tokio::task::consume_budget().await;
+            self.report_error(format!(
+                "source poll could not materialize one message: {failure:?}"
+            ));
+        }
+        if poll.messages.is_empty() {
+            return Ok(false);
+        }
+        let entries = poll
+            .messages
+            .into_iter()
+            .map(|message| {
+                (
+                    message.payload,
+                    BufferedIngestMetadata::Headers(message.headers),
+                )
+            })
+            .collect();
+        let payload = BufferedIngestPayload::batch(entries, poll.observed_at);
+        let payload = match self.quiesce.intake(self.instance_index, payload, false) {
+            IngestorQuiesceIntake::Dispatch(payload) => payload,
+            IngestorQuiesceIntake::Buffered
+            | IngestorQuiesceIntake::Dropped
+            | IngestorQuiesceIntake::Rejected { .. } => return Ok(false),
+        };
+        self.dispatch_polled_payload(&payload).await?;
+        Ok(true)
+    }
+
+    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
+        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
+            return Ok(false);
+        };
+        self.dispatch_polled_payload(&payload).await?;
+        Ok(true)
+    }
+
+    async fn dispatch_polled_payload(
+        &mut self,
+        payload: &BufferedIngestPayload,
+    ) -> SourceIntakeResult<()> {
+        self.runtime
+            .dispatch_raw_ingest_payload(RawIngestDispatch {
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                branched_senders: &self.branched_senders,
+                codec: self.codec.clone(),
+                payload,
+                collector: &mut self.collector,
+                flush: false,
+            })
+            .await
+            .change_context(SourceIntakeError::Dispatch)
+    }
+
+    fn should_skip_poll(&self) -> bool {
+        self.quiesce.should_skip_poll()
+    }
+
+    fn record_poll_error(&self, reason: String) {
+        self.runtime
+            .record_ingestor_transient_error(&self.domain, &self.ingestor, reason.clone());
+        self.report_error(reason);
     }
 }
 
@@ -103,7 +178,7 @@ impl SourceAcknowledgementServices for RuntimeSourceAcknowledgement {
 }
 
 #[async_trait]
-impl SourceHostServices for BrokerSourceHost {
+impl SourceHostServices for RuntimeSourceHost {
     async fn intake(
         &mut self,
         batch: SourceIntakeBatch<'_>,
@@ -295,6 +370,198 @@ impl SourceHostServices for BrokerSourceHost {
     }
 }
 
+trait PacedSourceHostServices: SourceHostServices {
+    fn record_poll_error(&self, reason: String);
+}
+
+impl PacedSourceHostServices for RuntimeSourceHost {
+    fn record_poll_error(&self, reason: String) {
+        RuntimeSourceHost::record_poll_error(self, reason);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PacedSourceAction {
+    Poll,
+    Restart,
+    Stop,
+}
+
+async fn prepare_paced_source<C, H>(
+    source: &mut C,
+    host: &mut H,
+    ready: &mut bool,
+    shutdown: &mut watch::Receiver<bool>,
+) -> PacedSourceAction
+where
+    C: SourceConnector,
+    H: PacedSourceHostServices,
+{
+    if !host.wait_until_active().await {
+        return PacedSourceAction::Stop;
+    }
+    if host.should_suspend_intake() {
+        flush_paced_source(host).await;
+        if *ready {
+            if let Err(error) = source.suspend().await {
+                host.report_error(error.to_string());
+            }
+            *ready = false;
+            host.mark_unready();
+        }
+        let keep_running = tokio::select! {
+            changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
+            _ = host.wait_until_not_suspended() => true,
+        };
+        return if keep_running {
+            PacedSourceAction::Restart
+        } else {
+            PacedSourceAction::Stop
+        };
+    }
+
+    if !*ready || source.needs_resume() {
+        flush_paced_source(host).await;
+        match source.resume().await {
+            Ok(SourceResume::Ready) => {
+                *ready = true;
+                host.mark_ready();
+                host.clear_transient_error();
+            }
+            Ok(SourceResume::Waiting { retry_after }) => {
+                *ready = false;
+                host.mark_unready();
+                return if wait_for_paced_retry(host, shutdown, retry_after).await {
+                    PacedSourceAction::Restart
+                } else {
+                    PacedSourceAction::Stop
+                };
+            }
+            Err(error) => {
+                *ready = false;
+                host.mark_unready();
+                host.record_poll_error(error.to_string());
+                return if wait_for_paced_retry(host, shutdown, SOURCE_ERROR_RETRY).await {
+                    PacedSourceAction::Restart
+                } else {
+                    PacedSourceAction::Stop
+                };
+            }
+        }
+    }
+
+    PacedSourceAction::Poll
+}
+
+pub(super) async fn run_paced_source<C>(
+    mut source: C,
+    mut host: RuntimeSourceHost,
+    mut cadence: DomainCadence,
+    mut shutdown: watch::Receiver<bool>,
+) where
+    C: PacedSourceConnector,
+{
+    let cadence_cancellation = CancellationToken::new();
+    let mut ready = false;
+
+    loop {
+        tokio::task::consume_budget().await;
+        match prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await {
+            PacedSourceAction::Poll => {}
+            PacedSourceAction::Restart => continue,
+            PacedSourceAction::Stop => break,
+        }
+
+        match host.replay_buffered_poll().await {
+            Ok(true) => {
+                flush_paced_source(&mut host).await;
+                continue;
+            }
+            Ok(false) => {}
+            Err(error) => host.report_error(error.to_string()),
+        }
+
+        let occurrence = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+            _ = host.wait_for_quiesce_change() => {
+                continue;
+            }
+            occurrence = cadence.next(&cadence_cancellation) => occurrence,
+        };
+        let occurrence = match occurrence {
+            Ok(occurrence) => occurrence,
+            Err(error) => {
+                host.report_error(format!("could not advance source cadence: {error}"));
+                break;
+            }
+        };
+        if host.should_skip_poll() {
+            continue;
+        }
+
+        let poll = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+            _ = host.wait_for_quiesce_change() => {
+                continue;
+            }
+            poll = source.poll(occurrence.due_at()) => poll,
+        };
+        let poll = match poll {
+            Ok(poll) => poll,
+            Err(error) => {
+                host.record_poll_error(error.to_string());
+                continue;
+            }
+        };
+        host.clear_transient_error();
+        match host.intake_poll(poll).await {
+            Ok(true) => flush_paced_source(&mut host).await,
+            Ok(false) => {}
+            Err(error) => host.report_error(error.to_string()),
+        }
+    }
+
+    flush_paced_source(&mut host).await;
+    if let Err(error) = source.close().await {
+        host.report_error(error.to_string());
+    }
+    host.mark_unready();
+}
+
+async fn flush_paced_source<H>(host: &mut H)
+where
+    H: SourceHostServices,
+{
+    if let Err(error) = host.flush().await {
+        host.report_error(error.to_string());
+    }
+}
+
+async fn wait_for_paced_retry<H>(
+    host: &mut H,
+    shutdown: &mut watch::Receiver<bool>,
+    delay: Duration,
+) -> bool
+where
+    H: SourceHostServices,
+{
+    tokio::select! {
+        changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
+        _ = host.wait_for_quiesce_change() => true,
+        _ = sleep(delay) => true,
+    }
+}
+
 enum BatchDisposition {
     Accepted,
     Retry,
@@ -307,7 +574,7 @@ pub(super) async fn run_source_instance<C>(
     acknowledgement: SourceAckPolicy,
     mut shutdown: watch::Receiver<bool>,
 ) where
-    C: SourceConnector,
+    C: BrokerSourceConnector,
 {
     let retry_policy = acknowledgement.retry();
     let mut retry_delay = retry_policy.backoff;
@@ -458,7 +725,7 @@ async fn handle_batch<C>(
     messages: Vec<C::Message>,
 ) -> BatchDisposition
 where
-    C: SourceConnector,
+    C: BrokerSourceConnector,
 {
     let positions = messages
         .iter()
@@ -537,7 +804,7 @@ where
 
 async fn reject_batch<C>(source: &mut C, host: &mut SourceHost, positions: &[C::Position])
 where
-    C: SourceConnector,
+    C: BrokerSourceConnector,
 {
     if let Err(error) = source.reject(positions).await {
         host.report_error(error.to_string());
@@ -577,7 +844,9 @@ async fn wait_for_flush(deadline: Option<Instant>) {
 mod tests {
     use std::{collections::VecDeque, future};
 
-    use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, SourceError, SourceResult};
+    use nervix_connector::{
+        IngestMessageHeaders, IngestMetadataRow, SourceConnector, SourceError, SourceResult,
+    };
     use parking_lot::Mutex;
 
     use super::*;
@@ -588,8 +857,15 @@ mod tests {
         intake: Vec<(SourceIntakeMode, usize)>,
         acknowledged: Vec<Vec<u64>>,
         rejected: Vec<Vec<u64>>,
+        poll_errors: Vec<String>,
+        reported_errors: Vec<String>,
         ack_waits: usize,
         resumes: usize,
+        suspends: usize,
+        flushes: usize,
+        quiesce_waits: usize,
+        suspension_waits: usize,
+        transient_clears: usize,
         ready: usize,
         unready: usize,
     }
@@ -626,18 +902,36 @@ mod tests {
     struct FakeSource {
         messages: VecDeque<FakeMessage>,
         resume_required: bool,
+        resume_results: VecDeque<SourceResult<SourceResume>>,
         observations: Arc<Mutex<SourceLoopObservations>>,
     }
 
     #[async_trait]
     impl SourceConnector for FakeSource {
         type Plan = ();
-        type Message = FakeMessage;
-        type Position = u64;
 
         async fn open(_plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
             Err(Report::new(SourceError::Open { connector: "fake" }))
         }
+
+        async fn resume(&mut self) -> SourceResult<SourceResume> {
+            self.observations.lock().resumes += 1;
+            match self.resume_results.pop_front() {
+                Some(result) => result,
+                None => Ok(SourceResume::Ready),
+            }
+        }
+
+        async fn suspend(&mut self) -> SourceResult<()> {
+            self.observations.lock().suspends += 1;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl BrokerSourceConnector for FakeSource {
+        type Message = FakeMessage;
+        type Position = u64;
 
         async fn next_batch(
             &mut self,
@@ -675,11 +969,6 @@ mod tests {
             self.observations.lock().rejected.push(positions.to_vec());
             Ok(())
         }
-
-        async fn resume(&mut self) -> SourceResult<SourceResume> {
-            self.observations.lock().resumes += 1;
-            Ok(SourceResume::Ready)
-        }
     }
 
     struct ImmediateAcknowledgement {
@@ -696,6 +985,22 @@ mod tests {
 
     struct FakeHost {
         observations: Arc<Mutex<SourceLoopObservations>>,
+        suspend_intake: bool,
+        wake_quiesce: bool,
+        wake_suspension: bool,
+        active: bool,
+    }
+
+    impl FakeHost {
+        fn running(observations: Arc<Mutex<SourceLoopObservations>>) -> Self {
+            Self {
+                observations,
+                suspend_intake: false,
+                wake_quiesce: false,
+                wake_suspension: false,
+                active: true,
+            }
+        }
     }
 
     #[async_trait]
@@ -720,6 +1025,7 @@ mod tests {
         }
 
         async fn flush(&mut self) -> SourceIntakeResult<()> {
+            self.observations.lock().flushes += 1;
             Ok(())
         }
 
@@ -728,19 +1034,27 @@ mod tests {
         }
 
         fn should_suspend_intake(&self) -> bool {
-            false
+            self.suspend_intake
         }
 
         async fn wait_for_quiesce_change(&mut self) {
+            if self.wake_quiesce {
+                self.observations.lock().quiesce_waits += 1;
+                return;
+            }
             future::pending().await
         }
 
         async fn wait_until_not_suspended(&mut self) {
+            if self.wake_suspension {
+                self.observations.lock().suspension_waits += 1;
+                return;
+            }
             future::pending().await
         }
 
         async fn wait_until_active(&mut self) -> bool {
-            true
+            self.active
         }
 
         fn mark_ready(&self) {
@@ -752,12 +1066,21 @@ mod tests {
         }
 
         fn record_transient_error(&self, _reason: String, _retry_after: Duration) {}
-        fn clear_transient_error(&self) {}
+        fn clear_transient_error(&self) {
+            self.observations.lock().transient_clears += 1;
+        }
         fn report_error(&self, message: String) {
-            panic!("unexpected source loop error: {message}");
+            self.observations.lock().reported_errors.push(message);
         }
         fn handle_ack_failure(&self, reason: String) {
-            panic!("unexpected source ACK failure: {reason}");
+            self.observations.lock().reported_errors.push(reason);
+        }
+    }
+
+    impl PacedSourceHostServices for FakeHost {
+        fn record_poll_error(&self, reason: String) {
+            self.observations.lock().poll_errors.push(reason.clone());
+            self.report_error(reason);
         }
     }
 
@@ -776,11 +1099,10 @@ mod tests {
                 })
                 .collect(),
             resume_required,
+            resume_results: VecDeque::new(),
             observations: observations.clone(),
         };
-        let host = SourceHost::new(FakeHost {
-            observations: observations.clone(),
-        });
+        let host = SourceHost::new(FakeHost::running(observations.clone()));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         run_source_instance(source, host, policy, shutdown_rx).await;
         drop(shutdown_tx);
@@ -796,6 +1118,110 @@ mod tests {
             backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(2),
         }
+    }
+
+    fn empty_source(observations: Arc<Mutex<SourceLoopObservations>>) -> FakeSource {
+        FakeSource {
+            messages: VecDeque::new(),
+            resume_required: false,
+            resume_results: VecDeque::new(),
+            observations,
+        }
+    }
+
+    #[tokio::test]
+    async fn paced_source_preparation_suspends_a_ready_source_until_quiesce_releases() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let mut source = empty_source(observations.clone());
+        let mut host = FakeHost::running(observations.clone());
+        host.suspend_intake = true;
+        host.wake_suspension = true;
+        let (_shutdown_tx, mut shutdown) = watch::channel(false);
+        let mut ready = true;
+
+        let action = prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await;
+
+        assert_eq!(action, PacedSourceAction::Restart);
+        assert!(!ready);
+        let observations = observations.lock();
+        assert_eq!(observations.flushes, 1);
+        assert_eq!(observations.suspends, 1);
+        assert_eq!(observations.suspension_waits, 1);
+        assert_eq!(observations.unready, 1);
+    }
+
+    #[tokio::test]
+    async fn paced_source_preparation_retries_resume_until_the_source_is_ready() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let mut source = empty_source(observations.clone());
+        source.resume_results = VecDeque::from([
+            Ok(SourceResume::Waiting {
+                retry_after: Duration::from_secs(60),
+            }),
+            Err(Report::new(SourceError::Resume { connector: "fake" })),
+            Ok(SourceResume::Ready),
+        ]);
+        let mut host = FakeHost::running(observations.clone());
+        host.wake_quiesce = true;
+        let (_shutdown_tx, mut shutdown) = watch::channel(false);
+        let mut ready = false;
+
+        assert_eq!(
+            prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+            PacedSourceAction::Restart
+        );
+        assert_eq!(
+            prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+            PacedSourceAction::Restart
+        );
+        assert_eq!(
+            prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+            PacedSourceAction::Poll
+        );
+
+        assert!(ready);
+        let observations = observations.lock();
+        assert_eq!(observations.resumes, 3);
+        assert_eq!(observations.flushes, 3);
+        assert_eq!(observations.quiesce_waits, 2);
+        assert_eq!(observations.ready, 1);
+        assert_eq!(observations.unready, 2);
+        assert_eq!(observations.transient_clears, 1);
+        assert_eq!(observations.poll_errors.len(), 1);
+        assert_eq!(observations.reported_errors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn paced_source_preparation_stops_when_the_host_is_inactive() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let mut source = empty_source(observations.clone());
+        let mut host = FakeHost::running(observations.clone());
+        host.active = false;
+        let (_shutdown_tx, mut shutdown) = watch::channel(false);
+        let mut ready = false;
+
+        assert_eq!(
+            prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+            PacedSourceAction::Stop
+        );
+        assert_eq!(observations.lock().resumes, 0);
+    }
+
+    #[tokio::test]
+    async fn paced_source_preparation_stops_suspended_intake_after_shutdown_closes() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let mut source = empty_source(observations.clone());
+        let mut host = FakeHost::running(observations.clone());
+        host.suspend_intake = true;
+        let (shutdown_tx, mut shutdown) = watch::channel(false);
+        drop(shutdown_tx);
+        let mut ready = false;
+
+        assert_eq!(
+            prepare_paced_source(&mut source, &mut host, &mut ready, &mut shutdown).await,
+            PacedSourceAction::Stop
+        );
+        assert_eq!(observations.lock().flushes, 1);
     }
 
     #[tokio::test]
