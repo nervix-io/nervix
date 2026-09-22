@@ -298,9 +298,11 @@ jobs:
   # behind it, and a slow one no longer pushes the suite's job toward its own timeout.
   extra-tests:
     name: extra-tests
-    # Fewer cores than the suite's job on purpose: this one is compilation-bound rather than
-    # concurrency-bound, most of that compilation comes back from the shared cache, and it only
-    # has to finish before the suite's job does to stay off the critical path.
+    # Half the suite job's cores on purpose. This job is compilation-bound, so it takes about
+    # twice as long here as the same steps took inside that job on sixteen: measured at 26m51s
+    # against the suite job's 39m33s. It only has to finish before the suite's job to stay off the
+    # critical path, and it does so with minutes to spare, so the cheaper runner is the one to use.
+    # Raise this if the suite's job gets faster or these steps get slower.
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 45
     permissions:
