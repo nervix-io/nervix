@@ -3,7 +3,9 @@
 use flatbuffers::FlatBufferBuilder;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    DomainClockPeriod, DomainClockSkew, DomainPace, DomainStatus, TransactionPosition,
+    DomainClockPeriod, DomainClockSkew, DomainPace, DomainStatus, TransactionInspection,
+    TransactionInspectionRejection, TransactionLifecycle, TransactionPosition, TransactionStatus,
+    TransactionStatusError,
 };
 
 use super::{
@@ -17,11 +19,11 @@ use super::{
 };
 use crate::{
     AttachDisposition, AttachOutcome, CancelOutcome, CancelState, CancellationStage, DomainInfo,
-    DomainList, DomainSelection, InspectionOutcome, InspectionRejection, LeaderRedirect, Reply,
-    ReplyBody, RequestCancelled, RequestRejected, RequestRejection, ServerMessage, SourceSpan,
+    DomainList, DomainSelection, InspectionOutcome, LeaderRedirect, Reply, ReplyBody,
+    RequestCancelled, RequestRejected, RequestRejection, ServerMessage, SourceSpan,
     SubscribeDisposition, SubscribeOutcome, SubscriptionOpened, SubscriptionType, SuggestOutcome,
-    Suggestion, SuggestionKind, TransactionInspection, TransactionState, TransactionStatus,
-    UnsubscribeDisposition, UnsubscribeOutcome, WireDecodeError, WireValueError, wire,
+    Suggestion, SuggestionKind, UnsubscribeDisposition, UnsubscribeOutcome, WireDecodeError,
+    WireValueError, wire,
 };
 
 fn reply(body: ReplyBody) -> Reply {
@@ -71,7 +73,7 @@ fn transaction_counts_span_their_range_and_stay_consistent() {
     let full = TransactionStatus::new(
         "id".to_string(),
         domain(),
-        TransactionState::Open,
+        TransactionLifecycle::Open,
         TransactionPosition::new(usize::MAX),
         usize::MAX,
     )
@@ -80,13 +82,13 @@ fn transaction_counts_span_their_range_and_stay_consistent() {
     let empty = TransactionStatus::new(
         String::new(),
         domain(),
-        TransactionState::Committing,
+        TransactionLifecycle::Committing,
         TransactionPosition::new(0),
         0,
     )
     .assured("an empty transaction is consistent");
     assert_eq!(empty.accepted_operations().accepted_operations(), 0);
-    let committing = transaction(TransactionState::Committing);
+    let committing = transaction(TransactionLifecycle::Committing);
     assert_eq!(committing.pending_operations(), 1);
     assert_eq!(committing.applied_operations(), 2);
     assert_eq!(
@@ -94,10 +96,10 @@ fn transaction_counts_span_their_range_and_stay_consistent() {
         "0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44"
     );
     assert_eq!(committing.domain().as_str(), "tenant");
-    assert!(committing.state().is_active());
-    let finished = transaction(TransactionState::Committed);
+    assert!(committing.lifecycle().is_active());
+    let finished = transaction(TransactionLifecycle::Committed);
     assert_eq!(finished.pending_operations(), 0);
-    assert!(!finished.state().is_active());
+    assert!(!finished.lifecycle().is_active());
 
     for status in [full, empty] {
         let mut outcome = command_outcome(crate::CommandDisposition::Failed);
@@ -108,14 +110,14 @@ fn transaction_counts_span_their_range_and_stay_consistent() {
     let error = TransactionStatus::new(
         "id".to_string(),
         domain(),
-        TransactionState::Open,
+        TransactionLifecycle::Open,
         TransactionPosition::new(1),
         2,
     )
     .expect_err("more applied than accepted operations");
     assert_eq!(
         error.current_context(),
-        &WireValueError::AppliedOperationsExceedAccepted {
+        &TransactionStatusError::AppliedOperationsExceedAccepted {
             applied: 2,
             accepted: 1,
         }
@@ -231,8 +233,8 @@ fn inconsistent_transaction_status_is_refused() {
 #[test]
 fn every_attach_disposition_round_trips() {
     let dispositions = [
-        AttachDisposition::Attached(transaction(TransactionState::Open)),
-        AttachDisposition::AlreadyFinished(transaction(TransactionState::Expired)),
+        AttachDisposition::Attached(transaction(TransactionLifecycle::Open)),
+        AttachDisposition::AlreadyFinished(transaction(TransactionLifecycle::Expired)),
         AttachDisposition::Failed,
         AttachDisposition::NotLeader(LeaderRedirect {
             leader: Some(leader()),
@@ -359,7 +361,7 @@ fn every_inspection_outcome_round_trips() {
     for operation_number in [None, Some(operation(1)), Some(operation(usize::MAX))] {
         assert_round_trips(ReplyBody::Inspection(InspectionOutcome::Inspected(
             Box::new(TransactionInspection {
-                transaction: transaction(TransactionState::Failed {
+                transaction: transaction(TransactionLifecycle::Failed {
                     failing_operation: operation(1),
                     error: "failed".to_string(),
                 }),
@@ -369,10 +371,10 @@ fn every_inspection_outcome_round_trips() {
         )));
     }
     for rejection in [
-        InspectionRejection::NoAttachedTransaction,
-        InspectionRejection::TransactionNotFound,
-        InspectionRejection::NotOwner,
-        InspectionRejection::OperationNotFound,
+        TransactionInspectionRejection::NoAttachedTransaction,
+        TransactionInspectionRejection::TransactionNotFound,
+        TransactionInspectionRejection::NotOwner,
+        TransactionInspectionRejection::OperationNotFound,
     ] {
         assert_round_trips(ReplyBody::Inspection(InspectionOutcome::Rejected {
             rejection,

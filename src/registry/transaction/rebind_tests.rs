@@ -3,18 +3,20 @@
 //! Test harness outside the product layer order.
 
 use nervix_models::{
-    ClusterNodeName, ModelKind, NodeRef, RebindResource, RebindResourceMembers,
-    RebindResourceSelection, ResourceId,
+    ClusterNodeName, ConcreteBranchCoverage, ModelKind, NodeRef, ParseAsType, RebindResource,
+    RebindResourceMembers, RebindResourceSelection, ResourceId, StatePurge, StateResetImpact,
 };
 
 use super::{
     tests::{
-        FixtureUploadOutcome, node_ref, preserve_schedule, scheduled_snapshot, snapshot,
-        stored_tls_vhost, tls_bundle_uploads,
+        FixtureUploadOutcome, fixture_uploads, node_ref, preserve_schedule, scheduled_snapshot,
+        snapshot, stored_tls_vhost, tls_bundle_uploads,
     },
     *,
 };
-use crate::registry::test_fixtures::{named, schema};
+use crate::registry::test_fixtures::{
+    branch, branch_schema_with_types, named, relay_branched_by, schema, wasm_processor_branched_by,
+};
 
 fn rebind_tls(version: RequestedResourceVersion, members: Option<Vec<NodeRef>>) -> Statement {
     let selection = match members {
@@ -333,4 +335,127 @@ fn a_tls_rebinding_refreshes_the_https_listener_without_pausing_a_running_domain
         unreachable!("a rebind produces a model plan");
     };
     assert!(model_plan.model_gate.affected_entities().is_empty());
+}
+
+/// Rebinding a WASM processor's module is the state effect the impact report has to carry: the
+/// batch replaces the guest state of every concrete branch the processor executes, so the report
+/// names the reset over that whole branch and the batch pauses the processor to activate it.
+#[test]
+fn a_wasm_rebinding_reports_a_guest_state_reset_over_every_concrete_branch() {
+    let domain = named("default");
+    let node = ClusterNodeName::parse("node-a")
+        .assured("the scheduler fixture node is an identifier-shaped literal");
+    let mut snapshot = scheduled_snapshot(
+        DomainStatus::Running,
+        [
+            schema("event_schema"),
+            branch_schema_with_types("tenant_schema", &[("tenant", ParseAsType::String)]),
+            branch("by_tenant", "tenant_schema"),
+            relay_branched_by("raw_events", "event_schema", "by_tenant"),
+            relay_branched_by("filtered_events", "event_schema", "by_tenant"),
+            wasm_processor_branched_by(
+                "filter_events",
+                "raw_events",
+                "filtered_events",
+                "by_tenant",
+            ),
+        ],
+    );
+    snapshot.resources.insert(named("wasm_filter"));
+    snapshot.resource_uploads = fixture_uploads(
+        "wasm_filter",
+        &[
+            (1, FixtureUploadOutcome::Completed),
+            (2, FixtureUploadOutcome::Completed),
+        ],
+    );
+
+    let plan = Registry::plan_transaction(
+        snapshot,
+        &[Statement::RebindResource(RebindResource {
+            resource: named("wasm_filter"),
+            version: RequestedResourceVersion::Number(2),
+            selection: RebindResourceSelection::All,
+        })],
+        0,
+        false,
+        move |graph, placement, _current, _attribution| TransactionScheduleDecision {
+            schedule: graph.map(|graph| {
+                graph.schedule_for_domain(&domain, std::slice::from_ref(&node), 0, placement)
+            }),
+            ownership_moves: CanonicalImpactSet::default(),
+        },
+    )
+    .assured("the WASM module binding can move to a completed version");
+
+    let step = plan.first_step().verified("the rebind forms one model run");
+    let planned = step.impact.planned();
+    assert_eq!(planned.pause.level(), QuiesceLevel::EntityPause);
+    assert_eq!(
+        planned.effects.state_resets.as_slice(),
+        &[StateResetImpact {
+            node: ImpactNodeCoverage::execution(
+                node_ref(ModelKind::WasmProcessor, "filter_events"),
+                ConcreteBranchCoverage::AllOfBranch {
+                    branch: named("by_tenant"),
+                },
+            ),
+            state: StatePurge::WasmGuestState,
+            attribution: ImpactAttribution::single(
+                TransactionOperationNumber::from_index(0)
+                    .assured("the first operation of a transaction is addressable"),
+            ),
+        }]
+    );
+}
+
+/// A WASM processor whose module binding is untouched keeps its guest state, so a rebinding that
+/// leaves it at the version it already holds reports no reset at all.
+#[test]
+fn a_wasm_rebinding_to_the_bound_version_reports_no_guest_state_reset() {
+    let mut snapshot = scheduled_snapshot(
+        DomainStatus::Running,
+        [
+            schema("event_schema"),
+            branch_schema_with_types("tenant_schema", &[("tenant", ParseAsType::String)]),
+            branch("by_tenant", "tenant_schema"),
+            relay_branched_by("raw_events", "event_schema", "by_tenant"),
+            relay_branched_by("filtered_events", "event_schema", "by_tenant"),
+            wasm_processor_branched_by(
+                "filter_events",
+                "raw_events",
+                "filtered_events",
+                "by_tenant",
+            ),
+        ],
+    );
+    snapshot.resources.insert(named("wasm_filter"));
+    snapshot.resource_uploads = fixture_uploads(
+        "wasm_filter",
+        &[
+            (1, FixtureUploadOutcome::Completed),
+            (2, FixtureUploadOutcome::Completed),
+        ],
+    );
+
+    let plan = Registry::plan_transaction(
+        snapshot,
+        &[Statement::RebindResource(RebindResource {
+            resource: named("wasm_filter"),
+            version: RequestedResourceVersion::Number(1),
+            selection: RebindResourceSelection::All,
+        })],
+        0,
+        false,
+        preserve_schedule,
+    )
+    .assured("rebinding to the version already bound changes nothing");
+
+    let planned = plan
+        .first_step()
+        .verified("the rebind forms one model run")
+        .impact
+        .planned();
+    assert_eq!(planned.pause.level(), QuiesceLevel::Dynamic);
+    assert!(planned.effects.state_resets.is_empty());
 }

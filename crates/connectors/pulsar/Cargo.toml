@@ -1,0 +1,36 @@
+[package]
+description = "The Pulsar sink connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-pulsar"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
+[dependencies]
+async-trait = { workspace = true }
+error-stack = { workspace = true }
+futures-util = { workspace = true }
+humantime = { workspace = true }
+meticulous = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+pulsar = { workspace = true }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "time",
+], optional = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

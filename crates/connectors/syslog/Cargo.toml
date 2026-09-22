@@ -1,5 +1,5 @@
 [package]
-description = "The Syslog source transport and shared transport configuration for Nervix"
+description = "The Syslog source and sink transports and their shared client configuration for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-syslog"
@@ -7,6 +7,14 @@ version.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
 
 [dependencies]
 ahash = { workspace = true }
@@ -18,6 +26,13 @@ nervix-models = { workspace = true }
 nonzero_ext = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
+shuttle-tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "net",
+  "rt",
+  "sync",
+], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",

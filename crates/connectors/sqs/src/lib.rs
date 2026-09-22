@@ -1,23 +1,64 @@
+//! SQS sink connector.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The SQS client a configuration declares, queue-URL lookup, protocol validation of
+//!   each message body, attribute and FIFO group, request batching, and per-entry response
+//!   classification.
+//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and the AWS
+//!   SQS SDK.
+//! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
+//!   connector implementation. A FIFO message group arrives already evaluated for its record, so
+//!   the expression behind it stays with the host.
+
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
+use std::time::Duration;
+
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_sqs::{
     Client as SqsClient,
     types::{MessageAttributeValue, SendMessageBatchRequestEntry},
 };
-use nervix_connector::{client_tls_paths, optional_client_config_value};
+use error_stack::Report;
+use meticulous::OptionExt as _;
+use nervix_connector::{
+    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost, SinkLifecycle, SinkPublishError,
+    SinkRecord, SinkRecordPosition, SinkStartError, SinkStartResult, client_config_value,
+    client_tls_paths, optional_client_config_value, read_tls_file,
+};
+use nervix_models::{ClientConfigEntry, Timestamp};
+use thiserror::Error;
 
-use super::*;
-
+const SQS: &str = "sqs";
 const SQS_MAX_BATCH_ENTRIES: usize = 10;
 const SQS_MAX_REQUEST_BYTES: usize = 256 * 1024;
 
-pub(in crate::runtime) struct SqsEmitter {
+/// Whether an SQS sink sends one message per request or batches them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqsPublishingMode {
+    Single,
+    Batch,
+}
+
+/// What one SQS sink sends to: its client entries, queue name and request shape.
+pub struct SqsSinkConfig {
+    pub config: Vec<ClientConfigEntry>,
+    pub queue: String,
+    pub mode: SqsPublishingMode,
+}
+
+pub struct SqsSink {
     client: SqsClient,
     queue_url: String,
     mode: SqsPublishingMode,
 }
 
+/// Why one record is not a message this sink can send.
 #[derive(Debug, PartialEq, Eq, Error)]
 enum SqsRecordError {
     #[error("SQS message body is not valid UTF-8")]
@@ -36,8 +77,6 @@ enum SqsRecordError {
     ForbiddenAttributeCharacter { name: String },
     #[error("invalid SQS message attribute '{name}'")]
     BuildAttribute { name: String },
-    #[error(transparent)]
-    MessageGroup(SqsMessageGroupError),
     #[error("SQS FIFO message group must contain 1 to 128 characters")]
     MessageGroupLength,
     #[error("SQS FIFO message group contains an unsupported character")]
@@ -51,27 +90,29 @@ type SqsRecordResult<T> = Result<T, Report<SqsRecordError>>;
 #[derive(Debug)]
 struct PreparedSqsRecord {
     position: SinkRecordPosition,
+    occurred_at: Timestamp,
     body: String,
     attributes: HashMap<String, MessageAttributeValue>,
     group_id: Option<String>,
     encoded_bytes: usize,
-    acks: AckSet,
 }
 
 impl PreparedSqsRecord {
-    fn new(
-        position: SinkRecordPosition,
-        payload: Vec<u8>,
-        headers: EmitterHeaders,
-        group_id: Result<Option<String>, SqsMessageGroupError>,
-        acks: AckSet,
-    ) -> SqsRecordResult<Self> {
+    fn new(record: SinkRecord) -> SqsRecordResult<Self> {
         const ENCODED_IN_MEMORY: &str =
             "every term counts bytes of a record this node already holds in memory";
 
+        let SinkRecord {
+            position,
+            key: _,
+            payload,
+            headers,
+            message_group: group_id,
+            occurred_at,
+        } = record;
         let body = String::from_utf8(payload)
             .map_err(|_| Report::new(SqsRecordError::InvalidBodyEncoding))?;
-        if !SqsEmitter::has_valid_message_characters(&body) {
+        if !SqsSink::has_valid_message_characters(&body) {
             return Err(Report::new(SqsRecordError::ForbiddenBodyCharacter));
         }
         if headers.len() > 10 {
@@ -82,7 +123,7 @@ impl PreparedSqsRecord {
         }
         let mut attributes = HashMap::with_capacity(headers.len());
         for (name, value) in headers {
-            SqsEmitter::validate_attribute(&name, &value)?;
+            SqsSink::validate_attribute(&name, &value)?;
             let attribute = MessageAttributeValue::builder()
                 .data_type("String")
                 .string_value(&value)
@@ -93,10 +134,8 @@ impl PreparedSqsRecord {
                 })?;
             attributes.insert(name, attribute);
         }
-        let group_id =
-            group_id.map_err(|error| Report::new(SqsRecordError::MessageGroup(error)))?;
         if let Some(group_id) = group_id.as_deref() {
-            SqsEmitter::validate_group_id(group_id)?;
+            SqsSink::validate_group_id(group_id)?;
         }
         let body_bytes = body.len();
         let mut attribute_bytes = 0_usize;
@@ -136,30 +175,32 @@ impl PreparedSqsRecord {
         }
         Ok(Self {
             position,
+            occurred_at,
             body,
             attributes,
             group_id,
             encoded_bytes,
-            acks,
         })
+    }
+
+    fn rejected(&self, reason: String) -> RejectedSinkRecord {
+        RejectedSinkRecord::external(self.position, self.occurred_at, reason)
     }
 }
 
-impl SqsEmitter {
-    pub(in crate::runtime) async fn new(plan: &SqsSinkPlan) -> EmitterRuntimeResult<Self> {
-        let client = Self::client_from_config(&plan.client.config.entries).await?;
-        let queue_url = Self::queue_url(&client, &plan.queue).await?;
+impl SqsSink {
+    pub async fn new(config: SqsSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+        let client = Self::client_from_config(&config.config).await?;
+        let queue_url = Self::queue_url(&client, &config.queue).await?;
         Ok(Self {
             client,
             queue_url,
-            mode: plan.mode,
+            mode: config.mode,
         })
     }
 
-    async fn client_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<SqsClient> {
-        let endpoint = emitter_config_value(config, "endpoint", "SQS")?;
+    async fn client_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<SqsClient> {
+        let endpoint = Self::config_value(config, "endpoint")?;
         let region = optional_client_config_value(config, "region")
             .unwrap_or("us-east-1")
             .to_string();
@@ -176,7 +217,7 @@ impl SqsEmitter {
                     .parse::<u64>()
                     .map(Duration::from_millis)
                     .map_err(|_| {
-                        emitter_config_error(format!("invalid SQS timeout_ms '{timeout_ms}'"))
+                        Self::config_error(format!("invalid SQS timeout_ms '{timeout_ms}'"))
                     })
             })
             .transpose()?;
@@ -201,13 +242,18 @@ impl SqsEmitter {
             );
         }
         if let Some(ca_file) = client_tls_paths(config).ca_file.as_ref() {
-            let ca_pem = emitter_read_tls_file(ca_file, "TLS CA certificate")?;
+            let ca_pem = read_tls_file(ca_file, "TLS CA certificate").map_err(|error| {
+                let message = error.current_context().to_string();
+                error
+                    .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
+                    .attach_printable(message)
+            })?;
             let tls_context = aws_smithy_http_client::tls::TlsContext::builder()
                 .with_trust_store(
                     aws_smithy_http_client::tls::TrustStore::empty().with_pem_certificate(ca_pem),
                 )
                 .build()
-                .map_err(emitter_init_error)?;
+                .map_err(Self::start_error)?;
             let http_client = aws_smithy_http_client::Builder::new()
                 .tls_provider(aws_smithy_http_client::tls::Provider::Rustls(
                     aws_smithy_http_client::tls::rustls_provider::CryptoMode::AwsLc,
@@ -220,7 +266,7 @@ impl SqsEmitter {
         Ok(SqsClient::new(&sdk_config))
     }
 
-    async fn queue_url(client: &SqsClient, queue: &str) -> EmitterRuntimeResult<String> {
+    async fn queue_url(client: &SqsClient, queue: &str) -> SinkStartResult<String> {
         let queue_url = client
             .get_queue_url()
             .queue_name(queue)
@@ -237,61 +283,29 @@ impl SqsEmitter {
         Self::require_queue_url(queue, queue_url)
     }
 
-    fn queue_lookup_error(
-        queue: &str,
-        missing: bool,
-        reason: String,
-    ) -> Report<EmitterRuntimeError> {
+    fn queue_lookup_error(queue: &str, missing: bool, reason: String) -> Report<SinkStartError> {
         if missing {
-            return Report::new(EmitterRuntimeError::MissingExternalEntity {
+            return Report::new(SinkStartError::MissingExternalEntity {
+                sink: SQS,
                 kind: "SQS queue",
                 name: queue.to_string(),
             })
             .attach_printable(reason);
         }
-        emitter_init_error(reason)
+        Self::start_error(reason)
     }
 
-    fn require_queue_url(queue: &str, queue_url: Option<String>) -> EmitterRuntimeResult<String> {
+    fn require_queue_url(queue: &str, queue_url: Option<String>) -> SinkStartResult<String> {
         match queue_url {
             Some(queue_url) => Ok(queue_url),
-            None => Err(emitter_init_error(format!(
-                "SQS queue '{queue}' has no URL"
-            ))),
+            None => Err(Self::start_error(format!("SQS queue '{queue}' has no URL"))),
         }
-    }
-
-    pub(super) async fn publish(
-        &mut self,
-        records: Vec<EncodedBrokerRecord>,
-    ) -> PerRecordPublishOutcome {
-        let mut outcome = PerRecordPublishOutcome::empty();
-        let mut prepared = Vec::with_capacity(records.len());
-        for record in records {
-            tokio::task::consume_budget().await;
-            let position = record.position();
-            match PreparedSqsRecord::new(
-                position,
-                record.payload,
-                record.headers,
-                record.sqs_message_group,
-                record.acks,
-            ) {
-                Ok(record) => prepared.push(record),
-                Err(error) => outcome.reject(position, error.to_string()),
-            }
-        }
-        match self.mode {
-            SqsPublishingMode::Single => self.publish_single(prepared, &mut outcome).await,
-            SqsPublishingMode::Batch => self.publish_batches(prepared, &mut outcome).await,
-        }
-        outcome
     }
 
     async fn publish_single(
         &self,
         records: Vec<PreparedSqsRecord>,
-        outcome: &mut PerRecordPublishOutcome,
+        outcome: &mut PerRecordOutcome,
     ) {
         for record in records {
             tokio::task::consume_budget().await;
@@ -307,17 +321,17 @@ impl SqsEmitter {
             if let Some(group_id) = record.group_id.as_deref() {
                 request = request.message_group_id(group_id);
             }
-            match await_emitter_confirmation(&record.acks, request.send()).await {
+            match request.send().await {
                 Ok(_) => outcome.deliver(record.position),
                 Err(error)
                     if error
                         .as_service_error()
                         .is_some_and(|error| error.is_invalid_message_contents()) =>
                 {
-                    outcome.reject(record.position, format!("SQS rejected the record: {error}"));
+                    outcome.reject(record.rejected(format!("SQS rejected the record: {error}")));
                 }
                 Err(error) => {
-                    outcome.fail(emitter_publish_error(format!(
+                    outcome.fail(Self::publish_error(format!(
                         "SQS SendMessage failed: {error}"
                     )));
                     return;
@@ -329,7 +343,7 @@ impl SqsEmitter {
     async fn publish_batches(
         &self,
         records: Vec<PreparedSqsRecord>,
-        outcome: &mut PerRecordPublishOutcome,
+        outcome: &mut PerRecordOutcome,
     ) {
         for records in Self::batch_chunks(records) {
             tokio::task::consume_budget().await;
@@ -348,7 +362,7 @@ impl SqsEmitter {
                 let entry = match entry.build() {
                     Ok(entry) => entry,
                     Err(error) => {
-                        outcome.fail(emitter_publish_error(format!(
+                        outcome.fail(Self::publish_error(format!(
                             "failed to build SQS batch request entry: {error}"
                         )));
                         return;
@@ -356,18 +370,17 @@ impl SqsEmitter {
                 };
                 request = request.entries(entry);
             }
-            let acks = AckSet::merged(records.iter().map(|record| record.acks.clone()));
-            let response = match await_emitter_confirmation(&acks, request.send()).await {
+            let response = match request.send().await {
                 Ok(response) => response,
                 Err(error) => {
-                    outcome.fail(emitter_publish_error(format!(
+                    outcome.fail(Self::publish_error(format!(
                         "SQS SendMessageBatch failed: {error}"
                     )));
                     return;
                 }
             };
             if let Some(reason) = Self::apply_batch_response(&records, &response, outcome) {
-                outcome.fail(emitter_publish_error(reason));
+                outcome.fail(Self::publish_error(reason));
                 return;
             }
         }
@@ -412,7 +425,7 @@ impl SqsEmitter {
     fn apply_batch_response(
         records: &[PreparedSqsRecord],
         response: &aws_sdk_sqs::operation::send_message_batch::SendMessageBatchOutput,
-        outcome: &mut PerRecordPublishOutcome,
+        outcome: &mut PerRecordOutcome,
     ) -> Option<String> {
         let mut accounted = vec![false; records.len()];
         let mut infrastructure_reasons = Vec::new();
@@ -442,7 +455,7 @@ impl SqsEmitter {
                         failure.code(),
                         failure.message(),
                     ) {
-                        outcome.reject(records[index].position, reason);
+                        outcome.reject(records[index].rejected(reason));
                     } else {
                         infrastructure_reasons.push(reason);
                     }
@@ -583,71 +596,108 @@ impl SqsEmitter {
         }
         Ok(())
     }
+
+    fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
+        client_config_value(config, key, "SQS").map_err(|error| {
+            let message = error.current_context().to_string();
+            error
+                .change_context(SinkStartError::InvalidConfiguration { sink: SQS })
+                .attach_printable(message)
+        })
+    }
+
+    fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
+        Report::new(SinkStartError::InvalidConfiguration { sink: SQS })
+            .attach_printable(error.to_string())
+    }
+
+    fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
+        Report::new(SinkStartError::Initialize { sink: SQS }).attach_printable(error.to_string())
+    }
+
+    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
+        Report::new(SinkPublishError::Publish { sink: SQS }).attach_printable(error.to_string())
+    }
+}
+
+#[async_trait]
+impl SinkLifecycle for SqsSink {}
+
+#[async_trait]
+impl RecordSink for SqsSink {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
+        let mut prepared = Vec::with_capacity(records.len());
+        for record in records {
+            tokio::task::consume_budget().await;
+            let position = record.position;
+            let occurred_at = record.occurred_at;
+            match PreparedSqsRecord::new(record) {
+                Ok(record) => prepared.push(record),
+                Err(error) => outcome.reject(RejectedSinkRecord::external(
+                    position,
+                    occurred_at,
+                    error.to_string(),
+                )),
+            }
+        }
+        match self.mode {
+            SqsPublishingMode::Single => self.publish_single(prepared, &mut outcome).await,
+            SqsPublishingMode::Batch => self.publish_batches(prepared, &mut outcome).await,
+        }
+        outcome
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn client_config(timeout_ms: &str) -> Vec<nervix_models::ClientConfigEntry> {
+    fn client_config(timeout_ms: &str) -> Vec<ClientConfigEntry> {
         vec![
-            nervix_models::ClientConfigEntry {
+            ClientConfigEntry {
                 key: "endpoint".to_string(),
                 value: "http://127.0.0.1:9324".to_string(),
             },
-            nervix_models::ClientConfigEntry {
+            ClientConfigEntry {
                 key: "timeout_ms".to_string(),
                 value: timeout_ms.to_string(),
             },
         ]
     }
 
-    fn prepared(payload_bytes: usize) -> PreparedSqsRecord {
-        PreparedSqsRecord::new(
+    fn record(row_index: usize, payload: Vec<u8>) -> SinkRecord {
+        SinkRecord::new(
             SinkRecordPosition {
                 batch_index: 0,
-                row_index: 0,
+                row_index,
             },
-            vec![b'x'; payload_bytes],
+            None,
+            payload,
             Vec::new(),
-            Ok(None),
-            AckSet::empty(),
+            Timestamp::from_unix_nanos(0),
         )
-        .expect("test SQS record should be valid")
     }
 
-    fn prepared_in_group(row: usize, group: &str) -> PreparedSqsRecord {
-        let mut record = PreparedSqsRecord::new(
-            SinkRecordPosition {
-                batch_index: 0,
-                row_index: row,
-            },
-            vec![b'x'],
-            Vec::new(),
-            Ok(Some(group.to_string())),
-            AckSet::empty(),
-        )
-        .expect("test SQS FIFO record should be valid");
-        record.position = SinkRecordPosition {
-            batch_index: 0,
-            row_index: row,
-        };
-        record
+    fn prepared(payload_bytes: usize) -> PreparedSqsRecord {
+        PreparedSqsRecord::new(record(0, vec![b'x'; payload_bytes]))
+            .expect("test SQS record should be valid")
+    }
+
+    fn prepared_in_row(row_index: usize, payload_bytes: usize) -> PreparedSqsRecord {
+        PreparedSqsRecord::new(record(row_index, vec![b'x'; payload_bytes]))
+            .expect("test SQS record should be valid")
+    }
+
+    fn prepared_in_group(row_index: usize, group: &str) -> PreparedSqsRecord {
+        PreparedSqsRecord::new(record(row_index, vec![b'x']).with_message_group(group.to_string()))
+            .expect("test SQS FIFO record should be valid")
     }
 
     #[test]
     fn rejects_a_record_larger_than_the_declared_sqs_protocol_limit() {
-        let error = PreparedSqsRecord::new(
-            SinkRecordPosition {
-                batch_index: 0,
-                row_index: 0,
-            },
-            vec![b'x'; SQS_MAX_REQUEST_BYTES + 1],
-            Vec::new(),
-            Ok(None),
-            AckSet::empty(),
-        )
-        .expect_err("oversized SQS record should be rejected");
+        let error = PreparedSqsRecord::new(record(0, vec![b'x'; SQS_MAX_REQUEST_BYTES + 1]))
+            .expect_err("oversized SQS record should be rejected");
 
         assert_eq!(
             *error.current_context(),
@@ -660,12 +710,10 @@ mod tests {
 
     #[test]
     fn rejects_invalid_sqs_body_and_attribute_shapes_with_typed_errors() {
-        let position = SinkRecordPosition {
-            batch_index: 0,
-            row_index: 0,
-        };
-        let build = |payload, headers| {
-            PreparedSqsRecord::new(position, payload, headers, Ok(None), AckSet::empty())
+        let build = |payload: Vec<u8>, headers: Vec<(String, String)>| {
+            let mut record = record(0, payload);
+            record.headers = headers;
+            PreparedSqsRecord::new(record)
         };
 
         let body =
@@ -725,36 +773,37 @@ mod tests {
 
     #[test]
     fn sqs_queue_lookup_distinguishes_missing_entities_from_connection_failures() {
-        let missing = SqsEmitter::queue_lookup_error(
+        let missing = SqsSink::queue_lookup_error(
             "missing-queue",
             true,
             "service reported a missing queue".to_string(),
         );
         assert!(matches!(
             missing.current_context(),
-            EmitterRuntimeError::MissingExternalEntity {
+            SinkStartError::MissingExternalEntity {
+                sink: SQS,
                 kind: "SQS queue",
                 name,
             } if name == "missing-queue"
         ));
 
         let connection =
-            SqsEmitter::queue_lookup_error("orders", false, "connection refused".to_string());
+            SqsSink::queue_lookup_error("orders", false, "connection refused".to_string());
         assert_eq!(
             connection.current_context(),
-            &EmitterRuntimeError::InitializeSink
+            &SinkStartError::Initialize { sink: SQS }
         );
 
         assert_eq!(
-            SqsEmitter::require_queue_url("orders", Some("queue-url".to_string()))
+            SqsSink::require_queue_url("orders", Some("queue-url".to_string()))
                 .expect("a returned queue URL should be accepted"),
             "queue-url"
         );
-        let no_url = SqsEmitter::require_queue_url("orders", None)
+        let no_url = SqsSink::require_queue_url("orders", None)
             .expect_err("a successful response without a queue URL must fail");
         assert_eq!(
             no_url.current_context(),
-            &EmitterRuntimeError::InitializeSink
+            &SinkStartError::Initialize { sink: SQS }
         );
     }
 
@@ -764,37 +813,25 @@ mod tests {
         const ATTRIBUTE_VALUE: &str = "acme";
         const GROUP_ID: &str = "orders";
 
-        // Every attribute the emitter builds declares the "String" data type, so those bytes
-        // count against the protocol limit alongside the attribute name and value.
+        // Every attribute the sink builds declares the "String" data type, so those bytes count
+        // against the protocol limit alongside the attribute name and value.
         let attribute_bytes = ATTRIBUTE_NAME.len() + "String".len() + ATTRIBUTE_VALUE.len();
         let body_bytes = SQS_MAX_REQUEST_BYTES - attribute_bytes - GROUP_ID.len();
         let headers = vec![(ATTRIBUTE_NAME.to_string(), ATTRIBUTE_VALUE.to_string())];
+        let fitting = |payload_bytes: usize| {
+            let mut record =
+                record(0, vec![b'x'; payload_bytes]).with_message_group(GROUP_ID.to_string());
+            record.headers = headers.clone();
+            PreparedSqsRecord::new(record)
+        };
 
-        let record = PreparedSqsRecord::new(
-            SinkRecordPosition {
-                batch_index: 0,
-                row_index: 0,
-            },
-            vec![b'x'; body_bytes],
-            headers.clone(),
-            Ok(Some(GROUP_ID.to_string())),
-            AckSet::empty(),
-        )
-        .expect("a record that exactly fills the protocol limit should be accepted");
+        let record = fitting(body_bytes)
+            .expect("a record that exactly fills the protocol limit should be accepted");
 
         assert_eq!(record.encoded_bytes, SQS_MAX_REQUEST_BYTES);
 
-        let error = PreparedSqsRecord::new(
-            SinkRecordPosition {
-                batch_index: 0,
-                row_index: 0,
-            },
-            vec![b'x'; body_bytes + 1],
-            headers,
-            Ok(Some(GROUP_ID.to_string())),
-            AckSet::empty(),
-        )
-        .expect_err("one byte past the protocol limit should be rejected");
+        let error = fitting(body_bytes + 1)
+            .expect_err("one byte past the protocol limit should be rejected");
 
         assert_eq!(
             *error.current_context(),
@@ -808,19 +845,12 @@ mod tests {
     #[test]
     fn batch_chunks_respect_entry_and_byte_limits_without_reordering() {
         let mut records = (0..11)
-            .map(|row| {
-                let mut record = prepared(1);
-                record.position = SinkRecordPosition {
-                    batch_index: 0,
-                    row_index: row,
-                };
-                record
-            })
+            .map(|row| prepared_in_row(row, 1))
             .collect::<Vec<_>>();
         records.push(prepared(SQS_MAX_REQUEST_BYTES));
         records.push(prepared(2));
 
-        let chunks = SqsEmitter::batch_chunks(records);
+        let chunks = SqsSink::batch_chunks(records);
         let positions = chunks
             .iter()
             .flatten()
@@ -844,7 +874,7 @@ mod tests {
             prepared_in_group(3, "beta"),
         ];
 
-        let chunks = SqsEmitter::batch_chunks(records);
+        let chunks = SqsSink::batch_chunks(records);
         let rows = chunks
             .iter()
             .map(|chunk| {
@@ -860,27 +890,27 @@ mod tests {
 
     #[test]
     fn only_definitive_per_entry_failures_are_record_rejections() {
-        assert!(SqsEmitter::is_record_failure(
+        assert!(SqsSink::is_record_failure(
             true,
             "InvalidMessageContents",
             Some("message contains an invalid character")
         ));
-        assert!(SqsEmitter::is_record_failure(
+        assert!(SqsSink::is_record_failure(
             true,
             "InvalidParameterValue",
             Some("MessageGroupId contains an invalid character")
         ));
-        assert!(!SqsEmitter::is_record_failure(
+        assert!(!SqsSink::is_record_failure(
             true,
             "InvalidParameterValue",
             Some("ContentBasedDeduplication is not enabled")
         ));
-        assert!(!SqsEmitter::is_record_failure(
+        assert!(!SqsSink::is_record_failure(
             false,
             "ThrottlingException",
             None
         ));
-        assert!(!SqsEmitter::is_record_failure(
+        assert!(!SqsSink::is_record_failure(
             true,
             "UnknownSenderFault",
             None
@@ -889,15 +919,15 @@ mod tests {
 
     #[test]
     fn fifo_group_ids_accept_branch_json_and_reject_invalid_values() {
-        assert!(SqsEmitter::validate_group_id(r#"{"tenant":"acme"}"#).is_ok());
-        assert!(SqsEmitter::validate_group_id("").is_err());
-        assert!(SqsEmitter::validate_group_id(&"x".repeat(129)).is_err());
-        assert!(SqsEmitter::validate_group_id("contains space").is_err());
+        assert!(SqsSink::validate_group_id(r#"{"tenant":"acme"}"#).is_ok());
+        assert!(SqsSink::validate_group_id("").is_err());
+        assert!(SqsSink::validate_group_id(&"x".repeat(129)).is_err());
+        assert!(SqsSink::validate_group_id("contains space").is_err());
     }
 
     #[tokio::test]
     async fn client_timeout_bounds_each_request_while_sdk_retries_stay_disabled() {
-        let client = SqsEmitter::client_from_config(&client_config("275"))
+        let client = SqsSink::client_from_config(&client_config("275"))
             .await
             .expect("SQS client config should be valid");
         let timeout = client
@@ -925,7 +955,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_rejects_an_invalid_request_timeout() {
-        let error = SqsEmitter::client_from_config(&client_config("later"))
+        let error = SqsSink::client_from_config(&client_config("later"))
             .await
             .expect_err("invalid SQS timeout should fail client initialization");
 

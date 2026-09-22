@@ -1053,16 +1053,12 @@ impl IngestorRouteTask {
             self.template.branch.source_kind,
             ModelName::from(&self.template.branch.source),
         );
-        let ownership_handoff_freeze_changed = self
-            .runtime_handle
-            .inner
-            .ownership_handoff_freeze_changed
-            .clone();
+        let ownership_freeze =
+            OwnershipHandoffFreezeWatch::new(&self.runtime_handle, ownership_entity);
         loop {
             tokio::task::consume_budget().await;
-            let ownership_frozen = self
-                .runtime_handle
-                .ownership_handoff_entity_is_frozen(&ownership_entity);
+            let freeze = ownership_freeze.observe();
+            let ownership_frozen = freeze.is_frozen();
             let flush_deadlines = self.flush_deadlines();
             let has_flush_deadlines = !flush_deadlines.is_empty();
             tokio::select! {
@@ -1087,7 +1083,7 @@ impl IngestorRouteTask {
                 // A frozen entity keeps its obligation outstanding rather than publishing into a
                 // branch runtime whose state is being captured. Waking on the freeze change is
                 // what re-enables the arm above.
-                _ = ownership_handoff_freeze_changed.notified(), if ownership_frozen => {}
+                _ = freeze.changed(), if ownership_frozen => {}
                 result = wait_for_branch_buffer_deadlines(&domain_clock, flush_deadlines),
                     if has_flush_deadlines =>
                 {
@@ -1570,10 +1566,12 @@ impl BranchExecutionRuntime {
             let mut checkpoint_requests_open = true;
             let mut lanes = BranchDispatchLanes::default();
 
+            let ownership_freeze =
+                OwnershipHandoffFreezeWatch::new(&runtime_handle, ownership_entity);
             loop {
                 tokio::task::consume_budget().await;
-                let ownership_frozen =
-                    runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
+                let freeze = ownership_freeze.observe();
+                let ownership_frozen = freeze.is_frozen();
                 let snapshot = match domain_clock.snapshot() {
                     Ok(snapshot) => snapshot,
                     Err(error) => {
@@ -1777,7 +1775,7 @@ impl BranchExecutionRuntime {
                             break;
                         }
                     }
-                    _ = runtime_handle.inner.ownership_handoff_freeze_changed.notified(), if ownership_frozen => {}
+                    _ = freeze.changed(), if ownership_frozen => {}
                     result = wait_for_branch_deadline(
                         &domain_clock,
                         awaited_branch_deadline.clone(),
@@ -2158,8 +2156,6 @@ pub(super) async fn flush_branch_junction(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
-
     use nervix_interconnect::EntityGatePurpose;
     use nervix_models::{IngestorName, ModelKind, ModelName, NodeRef, ParseAsType, RelayName};
     use tokio::time::timeout;
@@ -2197,8 +2193,8 @@ mod tests {
 
         gauges.observe(&branch, &processor);
 
-        assert_eq!(counters.collected_inputs.load(Ordering::Acquire), 0);
-        assert_eq!(counters.pending_materialized.load(Ordering::Acquire), 1);
+        assert_eq!(counters.admitted_work(), 0);
+        assert_eq!(counters.parked_work(), 1);
         let status = runtime.entity_drain_status(
             &domain,
             &[],
@@ -2242,8 +2238,8 @@ mod tests {
         );
 
         work.park_for_required_materialized_state();
-        assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 0);
-        assert_eq!(counters.pending_materialized.load(Ordering::Acquire), 1);
+        assert_eq!(counters.admitted_work(), 0);
+        assert_eq!(counters.parked_work(), 1);
         assert_eq!(
             counters.outstanding_work_for(EntityGatePurpose::ModelAlteration),
             1
@@ -2254,8 +2250,8 @@ mod tests {
         );
 
         work.resume_from_required_materialized_state();
-        assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 1);
-        assert_eq!(counters.pending_materialized.load(Ordering::Acquire), 0);
+        assert_eq!(counters.admitted_work(), 1);
+        assert_eq!(counters.parked_work(), 0);
         drop(work);
         assert_eq!(counters.outstanding_work(), 0);
     }
@@ -2384,7 +2380,7 @@ mod tests {
             .await
             .expect("the route task should accept input");
         timeout(Duration::from_secs(1), async {
-            while counters.output_buffers.load(Ordering::Acquire) != 1 {
+            while counters.admitted_work() != 1 {
                 tokio::task::consume_budget().await;
                 tokio::task::yield_now().await;
             }
@@ -2430,7 +2426,7 @@ mod tests {
         })
         .await
         .expect("the route obligation should clear once its output is published");
-        assert_eq!(counters.output_buffers.load(Ordering::Acquire), 0);
+        assert_eq!(counters.admitted_work(), 0);
 
         shutdown.send_replace(true);
         timeout(Duration::from_secs(1), task)

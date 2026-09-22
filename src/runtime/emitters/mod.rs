@@ -7,50 +7,43 @@
 
 use error_stack::{AttachmentKind, FrameKind, Report, ResultExt as _};
 use nervix_connector::{
-    AckConfirmation, BrokerPublishingMode, MappedSinkRows, PerRecordOutcome, RecordSink, RowSink,
-    ServiceUrl, SinkAcknowledgementServices, SinkAcknowledgements, SinkDeadline, SinkEventReporter,
-    SinkGeneralErrorHandler, SinkHost, SinkPublishError, SinkRecord, SinkRecordPosition,
-    SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkTransientErrorStatus,
-    client_config_value, optional_bool_client_config_value,
+    MappedSinkRows, PerRecordOutcome, RecordSink, RowSink, SinkAcknowledgementServices,
+    SinkAcknowledgements, SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost,
+    SinkPublishError, SinkRecord, SinkRecordPosition, SinkRetryDelay, SinkStagingDirectory,
+    SinkStartError, SinkTransientErrorStatus,
     physical_time::{PhysicalDeadline, PhysicalDeadlineCapability, actual_utc_now},
-    read_tls_file,
 };
 use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
 use nervix_connector_kafka::{KafkaSink, KafkaSinkConfig};
 use nervix_connector_mongodb::{MongoDbSink, MongoDbSinkConfig};
+use nervix_connector_mqtt::{MqttSink, MqttSinkConfig};
 use nervix_connector_mysql::{MySqlSink, MySqlSinkConfig};
+use nervix_connector_nats::{NatsSink, NatsSinkConfig};
 use nervix_connector_otel::{OtelLiteral, OtelResourceAttribute, OtelSink, OtelSinkConfig};
 use nervix_connector_postgres::{PostgresSink, PostgresSinkConfig};
+use nervix_connector_pulsar::{PulsarSink, PulsarSinkConfig};
+use nervix_connector_rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
+pub(in crate::runtime) use nervix_connector_redis::{
+    RedisClientError, RedisCommandPool, open_redis_command_pool,
+};
+use nervix_connector_redis::{
+    RedisPoolHandle, RedisPoolServices, RedisPoolWait, RedisSink, RedisSinkConfig,
+};
+use nervix_connector_sentry::{SentrySink, SentrySinkConfig};
+use nervix_connector_sqs::{SqsSink, SqsSinkConfig};
+use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
+use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
 use thiserror::Error;
 
 use super::*;
 
 mod iceberg;
 mod mapped_values;
-mod mqtt;
-mod nats;
 mod pooled_clients;
-pub(in crate::runtime) mod pulsar;
-mod rabbitmq;
-mod redis;
-mod sentry;
-mod sqs;
-mod syslog;
-mod zeromq;
 
 use iceberg::{IcebergEmitter, IcebergEmitterError, IcebergEmitterInit, IcebergEmitterResult};
 use mapped_values::{MappedValuesProjection, MappedValuesProjectionInit};
-use mqtt::MqttEmitter;
-use nats::NatsEmitter;
 use pooled_clients::PooledSinkClient;
-use pulsar::PulsarEmitter;
-use rabbitmq::RabbitMqEmitter;
-use redis::RedisEmitter;
-pub(in crate::runtime) use redis::{RedisCommandPool, open_redis_command_pool};
-use sentry::SentryEmitter;
-use sqs::SqsEmitter;
-use syslog::SyslogEmitter;
-use zeromq::ZeroMqEmitter;
 
 const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
 
@@ -380,8 +373,7 @@ struct EncodedBrokerRecord {
     key: Option<String>,
     payload: Vec<u8>,
     headers: EmitterHeaders,
-    sqs_message_group: Result<Option<String>, SqsMessageGroupError>,
-    acks: AckSet,
+    message_group: Result<Option<String>, SqsMessageGroupError>,
     execution_now: Timestamp,
 }
 
@@ -392,67 +384,12 @@ impl EncodedBrokerRecord {
             row_index: self.row_index,
         }
     }
-
-    fn into_sink_record(self) -> SinkRecord {
-        let Self {
-            batch_index,
-            row_index,
-            key,
-            payload,
-            headers,
-            sqs_message_group: _,
-            acks: _,
-            execution_now,
-        } = self;
-        SinkRecord::new(
-            SinkRecordPosition {
-                batch_index,
-                row_index,
-            },
-            key,
-            payload,
-            headers,
-            execution_now,
-        )
-    }
 }
 
 pub(super) struct RejectedEmitterRecord {
     pub(super) position: SinkRecordPosition,
     pub(super) reason: String,
     pub(super) structured_error: Option<StructuredMessageError>,
-}
-
-pub(super) struct PerRecordPublishOutcome {
-    pub(super) delivered: Vec<SinkRecordPosition>,
-    pub(super) rejected: Vec<RejectedEmitterRecord>,
-    pub(super) infrastructure_error: Option<Report<EmitterRuntimeError>>,
-}
-
-impl PerRecordPublishOutcome {
-    pub(super) fn empty() -> Self {
-        Self {
-            delivered: Vec::new(),
-            rejected: Vec::new(),
-            infrastructure_error: None,
-        }
-    }
-
-    pub(super) fn fail(&mut self, error: Report<EmitterRuntimeError>) {
-        self.infrastructure_error = Some(error);
-    }
-
-    pub(super) fn deliver(&mut self, position: SinkRecordPosition) {
-        self.delivered.push(position);
-    }
-
-    pub(super) fn reject(&mut self, position: SinkRecordPosition, reason: impl Into<String>) {
-        self.rejected.push(RejectedEmitterRecord {
-            position,
-            reason: reason.into(),
-            structured_error: None,
-        });
-    }
 }
 
 pub(in crate::runtime) struct PublishReport {
@@ -560,8 +497,6 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     InvalidSinkConfig,
     #[error("failed to initialize emitter sink")]
     InitializeSink,
-    #[error("{kind} '{name}' does not exist")]
-    MissingExternalEntity { kind: &'static str, name: String },
     #[error("emitter sink client is not initialized")]
     SinkNotInitialized,
     #[error("emitter flush policy is not initialized")]
@@ -617,7 +552,6 @@ impl EmitterRuntimeError {
             | Self::InvalidSinkConfig
             | Self::InvalidOtelResource { .. }
             | Self::InitializeSink
-            | Self::MissingExternalEntity { .. }
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
             | Self::StopDeadlineElapsed
@@ -1262,23 +1196,8 @@ fn emitter_report(
     Report::new(context).attach_printable(error.to_string())
 }
 
-fn emitter_config_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
-    emitter_report(EmitterRuntimeError::InvalidSinkConfig, error)
-}
-
 fn emitter_init_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
     emitter_report(EmitterRuntimeError::InitializeSink, error)
-}
-
-fn emitter_publish_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
-    emitter_report(EmitterRuntimeError::PublishBatch, error)
-}
-
-fn emitter_publish_error_with_minimum_retry_delay(
-    error: impl std::fmt::Display,
-    delay: Duration,
-) -> Report<EmitterRuntimeError> {
-    emitter_publish_error(error).attach(SinkRetryDelay(delay))
 }
 
 /// How long the sink asked this emitter to wait, which bounds its next attempt from below.
@@ -1313,58 +1232,40 @@ where
     }
 }
 
-fn emitter_config_value(
-    config: &[nervix_models::ClientConfigEntry],
-    key: &str,
-    connector: &'static str,
-) -> EmitterRuntimeResult<String> {
-    client_config_value(config, key, connector).map_err(|error| {
-        let message = error.current_context().to_string();
-        error
-            .change_context(EmitterRuntimeError::InvalidSinkConfig)
-            .attach_printable(message)
-    })
-}
-
-fn emitter_optional_bool_client_config_value(
-    config: &[nervix_models::ClientConfigEntry],
-    key: &str,
-) -> EmitterRuntimeResult<Option<bool>> {
-    optional_bool_client_config_value(config, key).map_err(|error| {
-        let message = error.current_context().to_string();
-        error
-            .change_context(EmitterRuntimeError::InvalidSinkConfig)
-            .attach_printable(message)
-    })
-}
-
-fn emitter_read_tls_file(path: &PathBuf, label: &str) -> EmitterRuntimeResult<Vec<u8>> {
-    read_tls_file(path, label).map_err(|error| {
-        let message = error.current_context().to_string();
-        error
-            .change_context(EmitterRuntimeError::InvalidSinkConfig)
-            .attach_printable(message)
-    })
-}
-
-fn emitter_service_url_has_scheme(
-    raw: &str,
-    label: &'static str,
-    expected_scheme: &str,
-) -> EmitterRuntimeResult<bool> {
-    ServiceUrl::new(raw, label)
-        .has_scheme(expected_scheme)
-        .map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(EmitterRuntimeError::InvalidSinkConfig)
-                .attach_printable(message)
-        })
-}
-
 impl EmitterSinkContext {
     fn sink_host(&self) -> SinkHost {
         SinkHost::new(self.clone())
+    }
+
+    /// Leases this node's shared Redis command pool for `plan`'s client.
+    ///
+    /// The lease travels with the handle the sink holds, so the pool stays open for exactly as
+    /// long as the sink publishes through it.
+    async fn lease_redis_pool(
+        &self,
+        plan: &RedisSinkPlan,
+    ) -> EmitterRuntimeResult<RedisPoolHandle> {
+        let lease = self
+            .runtime
+            .lease_shared_client(&self.domain, &plan.client, plan.pooled_client())
+            .await
+            .map_err(|error| emitter_init_error(error.to_string()))?;
+        let pool = lease
+            .client()
+            .redis(&plan.client.name)
+            .map_err(|error| emitter_init_error(error.to_string()))?
+            .clone();
+        Ok(RedisPoolHandle::new(LeasedRedisPool {
+            _lease: lease,
+            pool,
+            runtime: self.runtime.clone(),
+            client: plan.client.name.clone(),
+            waiter: DomainNodeRef::node_in(
+                self.domain.clone(),
+                ModelKind::Emitter,
+                self.emitter.clone(),
+            ),
+        }))
     }
 
     fn report_init_error(&self, sink: &str, error: &str) {
@@ -1433,6 +1334,30 @@ impl EmitterSinkContext {
     }
 }
 
+/// One emitter's interest in this node's shared Redis pool, and the wait it records while that
+/// pool hands a connection over.
+struct LeasedRedisPool {
+    /// Held for as long as the sink publishes: releasing it gives back this emitter's interest in
+    /// the shared client, which closes the pool once its last local user leaves.
+    _lease: SharedClientLease,
+    pool: RedisCommandPool,
+    runtime: Runtime,
+    /// The client borrowed from, named in this emitter's pool wait.
+    client: ClientName,
+    /// This emitter, as the key its pool wait is recorded under for `DESCRIBE` to read.
+    waiter: DomainNodeRef,
+}
+
+impl RedisPoolServices for LeasedRedisPool {
+    fn pool(&self) -> RedisCommandPool {
+        self.pool.clone()
+    }
+
+    fn begin_pool_wait(&self) -> RedisPoolWait {
+        RedisPoolWait::new(self.runtime.pool_wait_guard(&self.waiter, &self.client))
+    }
+}
+
 impl SinkAcknowledgementServices for AckSet {
     fn acknowledge(&self) {
         self.ack_success();
@@ -1469,7 +1394,11 @@ impl SinkTransientErrorStatus for EmitterSinkContext {
 
 impl SinkEventReporter for EmitterSinkContext {
     fn report_error(&self, message: String) {
-        self.runtime.events().report_error(message);
+        self.runtime.events().report_error(format!(
+            "sink error for emitter '{}' in domain '{}': {message}",
+            self.emitter.as_str(),
+            self.domain.as_str(),
+        ));
     }
 }
 
@@ -1505,17 +1434,6 @@ impl SinkGeneralErrorHandler for EmitterSinkContext {
 enum SinkEmitter {
     Record(Box<dyn RecordSink>),
     Row(RowSinkEmitter),
-    /// Boxed because the Pulsar sink carries its producer and connection state, which would
-    /// otherwise set the size of every sink variant.
-    Pulsar(Box<PulsarEmitter>),
-    RabbitMq(RabbitMqEmitter),
-    Redis(RedisEmitter),
-    Mqtt(MqttEmitter),
-    Nats(NatsEmitter),
-    ZeroMq(ZeroMqEmitter),
-    Syslog(SyslogEmitter),
-    Sqs(SqsEmitter),
-    Sentry(SentryEmitter),
     /// Boxed because the Iceberg sink carries its catalog client, staging directory, mapped
     /// schema, and both cadence timers, which would otherwise set the size of every sink variant.
     Iceberg(Box<IcebergEmitter>),
@@ -1634,43 +1552,123 @@ impl SinkEmitter {
                     context.sink_host(),
                 ),
             ),
-            EmitterSinkPlan::Pulsar(sink) => match PulsarEmitter::new(sink).await {
-                Ok(emitter) => Self::Pulsar(Box::new(emitter)),
-                Err(error) => Self::missing_after_emitter_init_error("pulsar", context, &error),
-            },
-            EmitterSinkPlan::RabbitMq(sink) => match RabbitMqEmitter::new(sink).await {
-                Ok(emitter) => Self::RabbitMq(emitter),
-                Err(error) => Self::missing_after_emitter_init_error("rabbitmq", context, &error),
-            },
-            EmitterSinkPlan::Redis(sink) => match RedisEmitter::new(sink, context).await {
-                Ok(emitter) => Self::Redis(emitter),
+            EmitterSinkPlan::Pulsar(sink) => Self::from_record_sink_result(
+                "pulsar",
+                context,
+                PulsarSink::new(
+                    PulsarSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                        topic: sink.topic.clone(),
+                        mode: sink.mode,
+                    },
+                    context.sink_host(),
+                )
+                .await,
+            ),
+            EmitterSinkPlan::RabbitMq(sink) => Self::from_record_sink_result(
+                "rabbitmq",
+                context,
+                RabbitMqSink::new(
+                    RabbitMqSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                        queue: sink.queue.clone(),
+                        mode: sink.mode,
+                    },
+                    context.sink_host(),
+                )
+                .await,
+            ),
+            EmitterSinkPlan::Redis(sink) => match context.lease_redis_pool(sink).await {
+                Ok(pool) => Self::from_record_sink_result(
+                    "redis",
+                    context,
+                    RedisSink::new(
+                        RedisSinkConfig {
+                            pool,
+                            channel: sink.channel.clone(),
+                        },
+                        context.sink_host(),
+                    ),
+                ),
                 Err(error) => Self::missing_after_emitter_init_error("redis", context, &error),
             },
-            EmitterSinkPlan::Mqtt(sink) => Self::from_result(
+            EmitterSinkPlan::Mqtt(sink) => Self::from_record_sink_result(
                 "mqtt",
                 context,
-                MqttEmitter::new(sink, context, plan.retry_policy),
-            )
-            .map(Self::Mqtt),
-            EmitterSinkPlan::Nats(sink) => match NatsEmitter::new(sink, plan.retry_policy).await {
-                Ok(emitter) => Self::Nats(emitter),
-                Err(error) => Self::missing_after_emitter_init_error("nats", context, &error),
-            },
-            EmitterSinkPlan::ZeroMq(sink) => match ZeroMqEmitter::new(sink).await {
-                Ok(emitter) => Self::ZeroMq(emitter),
-                Err(error) => Self::missing_after_emitter_init_error("zeromq", context, &error),
-            },
-            EmitterSinkPlan::Syslog(sink) => match SyslogEmitter::new(sink).await {
-                Ok(emitter) => Self::Syslog(emitter),
-                Err(error) => Self::missing_after_emitter_init_error("syslog", context, &error),
-            },
-            EmitterSinkPlan::Sqs(sink) => match SqsEmitter::new(sink).await {
-                Ok(emitter) => Self::Sqs(emitter),
-                Err(error) => Self::missing_after_emitter_init_error("sqs", context, &error),
-            },
-            EmitterSinkPlan::Sentry(sink) => {
-                Self::from_result("sentry", context, SentryEmitter::new(sink)).map(Self::Sentry)
-            }
+                MqttSink::new(
+                    MqttSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                        topic: sink.topic.clone(),
+                        mode: sink.mode,
+                        retry_policy: plan.retry_policy,
+                        default_client_id: format!(
+                            "{}-{}",
+                            context.domain.as_str(),
+                            context.emitter.as_str()
+                        ),
+                    },
+                    context.sink_host(),
+                ),
+            ),
+            EmitterSinkPlan::Nats(sink) => Self::from_record_sink_result(
+                "nats",
+                context,
+                NatsSink::new(
+                    NatsSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                        subject: sink.subject.clone(),
+                        mode: sink.mode,
+                        retry_policy: plan.retry_policy,
+                    },
+                    context.sink_host(),
+                )
+                .await,
+            ),
+            EmitterSinkPlan::ZeroMq(sink) => Self::from_record_sink_result(
+                "zeromq",
+                context,
+                ZeroMqSink::new(
+                    ZeroMqSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                    },
+                    context.sink_host(),
+                )
+                .await,
+            ),
+            EmitterSinkPlan::Syslog(sink) => Self::from_record_sink_result(
+                "syslog",
+                context,
+                SyslogSink::new(
+                    SyslogSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                    },
+                    context.sink_host(),
+                )
+                .await,
+            ),
+            EmitterSinkPlan::Sqs(sink) => Self::from_record_sink_result(
+                "sqs",
+                context,
+                SqsSink::new(
+                    SqsSinkConfig {
+                        config: sink.client.config.entries.clone(),
+                        queue: sink.queue.clone(),
+                        mode: sink.mode,
+                    },
+                    context.sink_host(),
+                )
+                .await,
+            ),
+            EmitterSinkPlan::Sentry(sink) => Self::from_record_sink_result(
+                "sentry",
+                context,
+                SentrySink::new(
+                    SentrySinkConfig {
+                        config: sink.client.config.entries.clone(),
+                    },
+                    context.sink_host(),
+                ),
+            ),
             EmitterSinkPlan::Otel(sink) => {
                 // The signal's own values and its attributes are mapped as one program, so the
                 // attribute columns follow the signal's own in the batch the host projects.
@@ -1903,21 +1901,6 @@ impl SinkEmitter {
         }
     }
 
-    fn from_result<T>(
-        sink: &str,
-        context: &EmitterSinkContext,
-        result: EmitterRuntimeResult<T>,
-    ) -> SinkEmitterResult<T> {
-        match result {
-            Ok(value) => SinkEmitterResult::Ready(value),
-            Err(error) => {
-                let reason = emitter_error_message(&error);
-                context.report_init_error(sink, &reason);
-                SinkEmitterResult::Missing { reason }
-            }
-        }
-    }
-
     fn from_record_sink_result<T>(
         sink: &str,
         context: &EmitterSinkContext,
@@ -2046,16 +2029,7 @@ impl SinkEmitter {
         match self {
             Self::Record(sink) => !sink.keeps_client_on_publish_failure(),
             Self::Row(row) => !row.sink.keeps_client_on_publish_failure(),
-            Self::Mqtt(_) | Self::Nats(_) => false,
-            Self::Pulsar(_)
-            | Self::RabbitMq(_)
-            | Self::Redis(_)
-            | Self::ZeroMq(_)
-            | Self::Syslog(_)
-            | Self::Sqs(_)
-            | Self::Sentry(_)
-            | Self::Iceberg(_)
-            | Self::Missing { .. } => true,
+            Self::Iceberg(_) | Self::Missing { .. } => true,
         }
     }
 
@@ -2082,17 +2056,7 @@ impl SinkEmitter {
                 .finish(deadline)
                 .await
                 .map_err(sink_publish_failure),
-            Self::Pulsar(_)
-            | Self::RabbitMq(_)
-            | Self::Redis(_)
-            | Self::Mqtt(_)
-            | Self::Nats(_)
-            | Self::ZeroMq(_)
-            | Self::Syslog(_)
-            | Self::Sqs(_)
-            | Self::Sentry(_)
-            | Self::Iceberg(_)
-            | Self::Missing { .. } => Ok(()),
+            Self::Iceberg(_) | Self::Missing { .. } => Ok(()),
         }
     }
 
@@ -2490,88 +2454,11 @@ impl SinkEmitter {
         if let Self::Row(emitter) = &mut *self {
             return emitter.publish_batches(context, batches).await;
         }
-        if let (Some(codec), EmitterSinkPlan::Kafka(_), Self::Record(emitter)) =
-            (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let records = records
-                .into_iter()
-                .map(EncodedBrokerRecord::into_sink_record)
-                .collect();
+        if let (Some(codec), Self::Record(emitter)) = (codec, &mut *self) {
+            let encoded = encode_broker_records(codec, context, batches).await?;
+            let records = sink_records(context, batches, encoded).await?;
             let outcome = emitter.publish(records).await;
             return finish_record_sink_publish(context, batches, outcome).await;
-        }
-        if let (Some(codec), EmitterSinkPlan::Pulsar(_), Self::Pulsar(emitter)) =
-            (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish(records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
-        }
-        if let (
-            Some(codec),
-            EmitterSinkPlan::RabbitMq(RabbitMqSinkPlan { queue, .. }),
-            Self::RabbitMq(emitter),
-        ) = (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish_records(queue, records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
-        }
-        if let (
-            Some(codec),
-            EmitterSinkPlan::Mqtt(MqttSinkPlan { topic, .. }),
-            Self::Mqtt(emitter),
-        ) = (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish_records(topic, records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
-        }
-        if let (Some(codec), EmitterSinkPlan::Nats(_), Self::Nats(emitter)) =
-            (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish_records(records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
-        }
-        if let (
-            Some(codec),
-            EmitterSinkPlan::Redis(RedisSinkPlan { channel, .. }),
-            Self::Redis(emitter),
-        ) = (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish_records(channel, records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
-        }
-        if let (Some(codec), EmitterSinkPlan::ZeroMq(_), Self::ZeroMq(emitter)) =
-            (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish_records(records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
-        }
-        if let (Some(codec), EmitterSinkPlan::Syslog(_), Self::Syslog(emitter)) =
-            (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish_records(records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
-        }
-        if let (Some(codec), EmitterSinkPlan::Sqs(_), Self::Sqs(emitter)) =
-            (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish(records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
-        }
-        if let (Some(codec), EmitterSinkPlan::Sentry(_), Self::Sentry(emitter)) =
-            (codec.clone(), sink, &mut *self)
-        {
-            let records = encode_broker_records(codec, context, batches).await?;
-            let outcome = emitter.publish(records).await;
-            return finish_per_record_publish(context, batches, outcome).await;
         }
 
         Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
@@ -2852,7 +2739,7 @@ async fn encode_broker_records(
                 Report::new(EmitterRuntimeError::EncodeBatch)
                     .attach_printable(format!("emitter batch row {row_index} has no header entry"))
             })?;
-            let sqs_message_group = batch
+            let message_group = batch
                 .sqs_message_groups
                 .get(row_index)
                 .cloned()
@@ -2861,11 +2748,6 @@ async fn encode_broker_records(
                         "emitter batch row {row_index} has no SQS FIFO group entry"
                     ))
                 })?;
-            let acks = batch.batch.acks.get(row_index).cloned().ok_or_else(|| {
-                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                    "emitter batch row {row_index} has no acknowledgment entry"
-                ))
-            })?;
             let payload = match payload {
                 Ok(payload) => payload,
                 Err(error) => {
@@ -2889,14 +2771,55 @@ async fn encode_broker_records(
                 key,
                 payload,
                 headers,
-                sqs_message_group,
-                acks,
+                message_group,
                 execution_now: batch.execution_now,
             });
         }
     }
     finish_rejected_records(context, batches, rejected, MessageErrorOperation::Encode).await?;
     Ok(encoded)
+}
+
+/// The records a sink publishes, once every record whose ordering group could not be evaluated
+/// has been rejected here.
+///
+/// A sink that orders records per group receives the group already evaluated for its record, so
+/// the expression that produced it, and the reason a record has none, both stay with the host.
+async fn sink_records(
+    context: &EmitterSinkContext,
+    batches: &mut [EmitterPublishBatch],
+    encoded: Vec<EncodedBrokerRecord>,
+) -> EmitterRuntimeResult<Vec<SinkRecord>> {
+    let mut records = Vec::with_capacity(encoded.len());
+    let mut rejected = Vec::new();
+    for record in encoded {
+        tokio::task::consume_budget().await;
+        let position = record.position();
+        let message_group = match record.message_group {
+            Ok(message_group) => message_group,
+            Err(error) => {
+                rejected.push(RejectedEmitterRecord {
+                    position,
+                    reason: error.to_string(),
+                    structured_error: None,
+                });
+                continue;
+            }
+        };
+        let sink_record = SinkRecord::new(
+            position,
+            record.key,
+            record.payload,
+            record.headers,
+            record.execution_now,
+        );
+        records.push(match message_group {
+            Some(message_group) => sink_record.with_message_group(message_group),
+            None => sink_record,
+        });
+    }
+    finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
+    Ok(records)
 }
 
 async fn finish_record_sink_publish(
@@ -2945,35 +2868,6 @@ fn sink_publish_failure(error: Report<SinkPublishError>) -> Report<EmitterRuntim
         | SinkPublishError::Finish { .. } => {
             error.change_context(EmitterRuntimeError::PublishBatch)
         }
-    }
-}
-
-async fn finish_per_record_publish(
-    context: &EmitterSinkContext,
-    batches: &mut [EmitterPublishBatch],
-    outcome: PerRecordPublishOutcome,
-) -> EmitterRuntimeResult<()> {
-    let PerRecordPublishOutcome {
-        delivered,
-        rejected,
-        infrastructure_error,
-    } = outcome;
-    for SinkRecordPosition {
-        batch_index,
-        row_index,
-    } in delivered
-    {
-        let batch = batches.get_mut(batch_index).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "broker confirmation references missing emitter batch {batch_index}"
-            ))
-        })?;
-        batch.mark_delivered(row_index)?;
-    }
-    finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
-    match infrastructure_error {
-        Some(error) => Err(error),
-        None => Ok(()),
     }
 }
 
@@ -3248,8 +3142,9 @@ impl EmitterTask {
         let buffered_messages =
             Arc::new(EmitterBufferedMessages::new(emitter_buffer_count.clone()));
         if let EmitterSinkPlan::Syslog(sink) = &plan.sink
-            && let Err(error) = SyslogEmitter::check_client_config(sink)
+            && let Err(error) = SyslogSink::check_client_config(&sink.client.config.entries)
         {
+            let error = error.change_context(EmitterRuntimeError::InvalidSinkConfig);
             return Err(RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
@@ -4367,9 +4262,9 @@ mod publishing_tests {
             backoff: Duration::from_millis(10),
             max_backoff: Duration::from_millis(100),
         });
-        let error = emitter_publish_error_with_minimum_retry_delay(
-            "receiver requested a longer retry",
-            Duration::from_secs(2),
+        let error = sink_publish_failure(
+            Report::new(SinkPublishError::Publish { sink: "test" })
+                .attach(SinkRetryDelay(Duration::from_secs(2))),
         );
 
         assert_eq!(
@@ -4533,6 +4428,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use nervix_connector::ResolvedClientConfig;
+    use nervix_connector_nats::{NatsPublishingMode, NatsSink};
     use nervix_models::{
         ClientName, CreateSchema, DomainName, EmitterName, ModelName, ParseAsType, SchemaName,
         SubjectName,
@@ -4706,24 +4602,24 @@ mod tests {
         );
     }
 
+    /// A connector decides why its own configuration is unusable, so the host states only that the
+    /// sink could not be initialized and reports the connector's message as the reason it is
+    /// missing.
     #[test]
-    fn emitter_config_adapters_preserve_typed_context() {
-        let missing = emitter_read_tls_file(
-            &PathBuf::from("/definitely/missing/nervix-emitter-ca.pem"),
-            "TLS CA certificate",
-        )
-        .expect_err("a missing TLS file must fail");
-        assert_eq!(
-            missing.current_context(),
-            &EmitterRuntimeError::InvalidSinkConfig
+    fn a_connector_start_failure_becomes_a_missing_sink_with_its_own_message() {
+        let sink = SinkEmitter::from_record_sink_result::<NatsSink>(
+            "NATS",
+            &sink_context(),
+            Err(
+                Report::new(SinkStartError::InvalidConfiguration { sink: "NATS" })
+                    .attach_printable("missing NATS client config key 'servers'"),
+            ),
         );
 
-        let invalid_url = emitter_service_url_has_scheme("not a URL", "test addr", "https")
-            .expect_err("an invalid service URL must fail");
-        assert_eq!(
-            invalid_url.current_context(),
-            &EmitterRuntimeError::InvalidSinkConfig
-        );
+        let SinkEmitter::Missing { reason } = sink else {
+            panic!("a start failure must leave the sink missing")
+        };
+        assert_eq!(reason, "missing NATS client config key 'servers'");
     }
 
     #[tokio::test]
@@ -5651,7 +5547,10 @@ mod tests {
             .recv()
             .await
             .expect("the host must publish the event");
-        assert_eq!(message, "connector background error");
+        assert_eq!(
+            message,
+            "sink error for emitter 'output' in domain 'emitter_tests': connector background error"
+        );
         assert_eq!(host.staging_directory(), context.runtime.temp_dir());
 
         let (logged_acks, logged_completion) = AckSet::root();

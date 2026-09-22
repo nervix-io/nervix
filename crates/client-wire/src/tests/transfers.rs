@@ -3,6 +3,7 @@
 use bytes::Bytes;
 use flatbuffers::FlatBufferBuilder;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{TransactionInspection, TransactionLifecycle};
 
 use super::{
     fixtures::{checked, decode_error, finish_raw, raw_server, request, settings, size},
@@ -10,9 +11,8 @@ use super::{
 };
 use crate::{
     CommandDisposition, InspectionOutcome, Reply, ReplyBody, ReplyDelivery, ServerFrame,
-    ServerMessage, SessionLimitSettings, SessionLimits, TransactionInspection, TransactionState,
-    TransferAssembly, TransferError, TransferPart, VerifiedFrame, WireDecodeError, WireEncodeError,
-    wire,
+    ServerMessage, SessionLimitSettings, SessionLimits, TransferAssembly, TransferError,
+    TransferPart, VerifiedFrame, WireDecodeError, WireEncodeError, wire,
 };
 
 fn small_limits(frame_bytes: usize) -> SessionLimits {
@@ -87,7 +87,7 @@ fn an_inspection_report_is_transferred_intact() {
         request_id: request(u64::MAX),
         body: ReplyBody::Inspection(InspectionOutcome::Inspected(Box::new(
             TransactionInspection {
-                transaction: transaction(TransactionState::Open),
+                transaction: transaction(TransactionLifecycle::Open),
                 operation: None,
                 report: impact_report(),
             },

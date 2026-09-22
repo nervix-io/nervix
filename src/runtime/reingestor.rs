@@ -1455,7 +1455,7 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc as StdArc, atomic::Ordering};
+    use std::sync::Arc as StdArc;
 
     use ahash::HashMap;
     use nervix_execution::sync::ArcSwapOption;
@@ -1902,7 +1902,7 @@ mod tests {
             .expect("acme message should broadcast");
         acme_acks.ack_success();
         timeout(Duration::from_secs(1), async {
-            while output_counters.output_buffers.load(Ordering::Acquire) != 1 {
+            while output_counters.admitted_work() != 1 {
                 tokio::task::consume_budget().await;
                 tokio::task::yield_now().await;
             }
@@ -1917,7 +1917,7 @@ mod tests {
             .expect("beta message should broadcast");
         beta_acks.ack_success();
         timeout(Duration::from_secs(1), async {
-            while output_counters.output_buffers.load(Ordering::Acquire) != 2 {
+            while output_counters.admitted_work() != 2 {
                 tokio::task::consume_budget().await;
                 tokio::task::yield_now().await;
             }
@@ -2187,8 +2187,7 @@ mod tests {
         assert_eq!(
             runtime
                 .node_quiesce_counters(&domain, NodeRef::new(ModelKind::Reingestor, &reingestor))
-                .output_buffers
-                .load(Ordering::Acquire),
+                .admitted_work(),
             0,
             "reingestor output gauge must be cleared when the task exits"
         );

@@ -793,6 +793,13 @@ enforced as the maximum documents in each write. MongoDB reports per-document ou
 documents acknowledge and poison documents follow `ON MESSAGE ERROR` without a separate isolation
 pass. Transient or infrastructure failures retry only the undelivered documents.
 
+Every mapped integer is written as a BSON 64-bit signed integer, and a `U64` value above that range
+has no BSON integer at all. Such a record is rejected before its document is written: it follows
+`ON MESSAGE ERROR` with a `validation` error whose affected field is `mongodb.<column>`, it is never
+inserted, and its value is never used as an `ON CONFLICT` target. The rejection is permanent, so the
+record does not retry. Every other record in the same write is unaffected, and a mapped value that
+is genuinely NULL is still written as BSON null.
+
 MongoDB emitters may include an insert conflict policy before `WITH MAX BATCH`:
 
 ```nspl,ignore

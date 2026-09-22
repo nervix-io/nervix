@@ -5,7 +5,7 @@ use bytes::Bytes;
 use error_stack::Report;
 use flatbuffers::FlatBufferBuilder;
 use meticulous::ResultExt as _;
-use nervix_models::{ParseAsType, SchemaField};
+use nervix_models::{ParseAsType, SchemaField, TransactionInspection, TransactionLifecycle};
 
 use super::{
     fixtures::{checked, frame_error, limits, name, position_of, request, settings, size},
@@ -18,9 +18,9 @@ use crate::{
     CommandRequest, FrameError, FrameViolation, InspectionOutcome, NoticeLevel, Reply, ReplyBody,
     ReplyDelivery, RowBranch, RowSchema, ServerEvent, ServerFrame, ServerMessage, ServerNotice,
     SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
-    SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, TransactionInspection,
-    TransactionState, UploadChunk, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
-    UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame, WireEncodeError,
+    SubscriptionOpened, SubscriptionRowsEncoder, SubscriptionType, UploadChunk, UploadDisposition,
+    UploadFailure, UploadFrame, UploadMessage, UploadReply, UploadReplyFrame, UploadStart,
+    VerifiedFrame, WireEncodeError,
     limits::{MAX_NESTING_DEPTH, MIN_NESTING_DEPTH},
     wire,
 };
@@ -65,7 +65,7 @@ fn inspection_reply_bytes() -> Bytes {
         request_id: request(4),
         body: ReplyBody::Inspection(InspectionOutcome::Inspected(Box::new(
             TransactionInspection {
-                transaction: transaction(TransactionState::Committing),
+                transaction: transaction(TransactionLifecycle::Committing),
                 operation: None,
                 report: impact_report(),
             },
@@ -753,7 +753,7 @@ fn every_fixed_structure_fits_the_smallest_nesting_limit() {
         request_id: request(1),
         body: ReplyBody::Inspection(InspectionOutcome::Inspected(Box::new(
             TransactionInspection {
-                transaction: transaction(TransactionState::Open),
+                transaction: transaction(TransactionLifecycle::Open),
                 operation: None,
                 report: impact_report(),
             },

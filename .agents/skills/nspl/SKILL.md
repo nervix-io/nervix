@@ -56,7 +56,10 @@ Build configuration in dependency order:
    provisional at queue admission and resolved again at `COMMIT`. Rotating a VHOST certificate
    this way is dynamic: every node's HTTPS listener presents the new bundle and ingestion does not
    pause. Changing VHOST hostnames, adding or removing `WITH TLS`, or binding another TLS resource
-   pauses the domain.
+   pauses the domain. Moving a WASM processor usage also discards the saved guest state of every one
+   of its branches, because a new module cannot restore what the module it replaces wrote; an
+   uncompilable candidate module rejects the whole rebinding with every binding and its saved state
+   still in place.
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
 4. Define clients, signaling protocols, virtual hosts/endpoints, lookup models, and trusted Roto
    UDFs as needed.
@@ -77,7 +80,10 @@ applying effects. Consecutive model mutations form one atomic run and report the
 base-to-final quiesce level at the current prefix; a lifecycle, domain, or resource statement ends
 that run, and a later run cannot repair it. `COMMIT` reports only the maximum level actually
 executed and does not repeat statement outputs. Correct a rejected statement and continue the same
-transaction. Do not imply that one undivided request can mix those phases.
+transaction. A `COMMIT` refused because the preview it expected no longer describes the transaction
+applies nothing and leaves the transaction open; commit again against the identity that refusal
+reports instead of starting the transaction over. Do not imply that one undivided request can mix
+those phases.
 
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
 lookup creation, `START`, `STOP`, placement changes, or `COMMIT` returns `OK`, issue the dependent
@@ -157,14 +163,16 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   There is no context-free engine clock. Guest initialization, input, timeout, flush, and state
   lifecycle operations each use the snapshot selected for that operation; guest timeout delays are
   logical, while Wasmtime fuel and epoch yielding are physical safety controls.
-- Do not simulate a WASM guest-state reset with `ALTER`, resource rebinding, or a stop/start cycle.
-  A coordinated reset is a control-plane state-lifetime operation with an explicit unbranched,
-  concrete-branch, or all-branches target and a stable execution reference. Apart from the
-  `ON REJECTED STATE RESET` policy, which triggers it for one refused branch lifetime, it is not an
-  NSPL graph statement, so say that no other public NSPL reset syntax exists rather than inventing
+- Do not simulate a targeted WASM guest-state reset with `ALTER`, resource rebinding, or a
+  stop/start cycle. A coordinated reset is a control-plane state-lifetime operation with an explicit
+  unbranched, concrete-branch, or all-branches target and a stable execution reference. Apart from
+  the `ON REJECTED STATE RESET` policy, which triggers it for one refused branch lifetime, it is not
+  an NSPL graph statement, so say that no other public NSPL reset syntax exists rather than inventing
   one. Guest code reaches the same operation for its own branch through the SDK's
   `request_state_reset` or the raw `nervix_request_state_reset` import, which discards that
-  callback's uncommitted output and input and never re-enters the guest.
+  callback's uncommitted output and input and never re-enters the guest. `REBIND RESOURCE` does
+  start a fresh lifetime for every branch of each WASM processor it moves, but only as the
+  consequence of changing the module, and it cannot select a branch.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every

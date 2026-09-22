@@ -68,23 +68,24 @@ use nervix_models::{
     ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CommandExecutionReference,
     CoordinationIdentity, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateCodec,
     CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSignalingProtocol, CreateUdf, DomainClockAuthority, DomainConfig, DomainName,
-    DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow, EmitterName,
-    EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName, FieldPath,
-    FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog, IcebergStorageBackend,
-    IcebergValueMapping, InferencerExecutionMode, InferencerTensorDeclaration, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
-    KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
-    MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelIndex, ModelKind, ModelName, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlValueMapping, NodeRef, OtelValueMapping, OutputBranch, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
-    PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
-    RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
-    ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SchemaFingerprint, SignalingProtocolName, SignalingWireFormat,
-    SqsFifoGroup, SqsIngestMode, StructuredMessageError, SubscriptionName, Timestamp,
-    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    CreateSignalingProtocol, CreateUdf, CreateWasmProcessor, DomainClockAuthority, DomainConfig,
+    DomainName, DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow,
+    EmitterName, EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName,
+    FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog,
+    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
+    InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
+    IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
+    MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
+    MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlValueMapping, NodeRef,
+    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, PostgresValueMapping,
+    ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId,
+    ResourceName, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
+    SchemaFingerprint, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    StructuredMessageError, SubscriptionName, Timestamp, WasmRejectedStatePolicy,
+    WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -305,6 +306,7 @@ pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVA
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
     NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
+    OwnershipHandoffFreezeWatch,
 };
 pub(in crate::runtime) use events::RuntimeEvents;
 use filter_map::{
@@ -442,9 +444,7 @@ use scheduled_node::{
     EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, ScheduledNodePlacement,
     ScheduledNodeTask,
 };
-pub(in crate::runtime) use shared_clients::{
-    OpenClientError, SharedClientError, SharedClientLease,
-};
+pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
 use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
@@ -510,9 +510,9 @@ use wasm_guest_state_reset::{
     refuse_fenced_wasm_branch_input, request_wasm_guest_state_reset,
 };
 use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
+pub(crate) use wasm_processor::WasmInstanceError;
 use wasm_processor::{
-    WasmBranchModule, WasmInstanceError, WasmLiveInstance, WasmModuleFile,
-    flush_branch_wasm_processor,
+    WasmBranchModule, WasmLiveInstance, WasmModuleFile, flush_branch_wasm_processor,
 };
 use wasm_state::{
     CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,

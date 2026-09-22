@@ -634,14 +634,8 @@ Feature: Resource version bindings
       provisionally resolved VERSION LATEST of resource 'tls_bundle' to version 1 for vhost 'edge'
       """
     When client "uploader" uploads resource "tls_bundle" from "{{tls_v2}}" with identity "after-queue"
-    And client "owner" fails to execute these NSPL commands
-      """
-      COMMIT;
-      """
-    Then the last command error contains
-      """
-      transaction preview is stale
-      """
+    And client "owner" attempts to commit its transaction
+    Then client "owner" commit was refused because its expected preview is stale
     And transaction "{{transaction_id}}" eventually has state "OPEN"
     When client "owner" executes these NSPL commands
       """

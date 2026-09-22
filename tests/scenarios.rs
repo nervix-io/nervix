@@ -60,7 +60,10 @@ use mysql_async::{
     prelude::Queryable as MySqlQueryable,
 };
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
-use nervix_client_core::{Client, TransactionState as ClientTransactionState};
+use nervix_client_core::{
+    Client, CommandOutcome as ClientCommandOutcome, CommandOutcomeKind as ClientCommandOutcomeKind,
+    TransactionState as ClientTransactionState,
+};
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, SchedulerMode, WasmStateResetRequestError, application::InternalTransportMode,
@@ -239,6 +242,9 @@ struct ScenarioWorld {
     last_publish_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    /// The whole outcome of the last command a named client ran, for assertions that read more
+    /// than its message.
+    last_client_outcome: Option<ClientCommandOutcome>,
     /// Reused when a coordinated WASM reset is retried after an ambiguous or failed response.
     wasm_state_reset_reference: Option<nervix_models::CommandExecutionReference>,
     /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
@@ -4295,14 +4301,7 @@ async fn when_unbranched_wasm_processor_state_is_reset(
 
 #[given("a branched state-counting WASM reset graph is running")]
 async fn given_branched_state_counting_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
-    configure_wasm_state_reset_graph(
-        world,
-        true,
-        false,
-        WasmStateResetGraphPlacement::Unconstrained,
-        true,
-    )
-    .await;
+    configure_wasm_state_reset_graph(world, WasmStateResetGraph::branched()).await;
 }
 
 #[given("a branched state-counting WASM reset graph is running in the existing domain")]
@@ -4311,10 +4310,10 @@ async fn given_branched_state_counting_wasm_reset_graph_is_running_in_the_existi
 ) {
     configure_wasm_state_reset_graph(
         world,
-        true,
-        false,
-        WasmStateResetGraphPlacement::Unconstrained,
-        false,
+        WasmStateResetGraph {
+            create_domain: false,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4325,10 +4324,10 @@ async fn given_node_one_owned_branched_state_counting_wasm_reset_graph_is_runnin
 ) {
     configure_wasm_state_reset_graph(
         world,
-        true,
-        false,
-        WasmStateResetGraphPlacement::NodeOne,
-        true,
+        WasmStateResetGraph {
+            placement: WasmStateResetGraphPlacement::NodeOne,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4339,10 +4338,10 @@ async fn given_non_node_one_owned_branched_state_counting_wasm_reset_graph_is_ru
 ) {
     configure_wasm_state_reset_graph(
         world,
-        true,
-        false,
-        WasmStateResetGraphPlacement::AwayFromNodeOne,
-        true,
+        WasmStateResetGraph {
+            placement: WasmStateResetGraphPlacement::AwayFromNodeOne,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4351,10 +4350,10 @@ async fn given_non_node_one_owned_branched_state_counting_wasm_reset_graph_is_ru
 async fn given_unbranched_state_counting_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
     configure_wasm_state_reset_graph(
         world,
-        false,
-        false,
-        WasmStateResetGraphPlacement::Unconstrained,
-        true,
+        WasmStateResetGraph {
+            branched: false,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4363,10 +4362,26 @@ async fn given_unbranched_state_counting_wasm_reset_graph_is_running(world: &mut
 async fn given_branched_timeout_buffering_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
     configure_wasm_state_reset_graph(
         world,
-        true,
-        true,
-        WasmStateResetGraphPlacement::Unconstrained,
-        true,
+        WasmStateResetGraph {
+            timeout_buffering: true,
+            ..WasmStateResetGraph::branched()
+        },
+    )
+    .await;
+}
+
+#[given(
+    "a branched state-counting WASM reset graph with a second usage of its resource is running"
+)]
+async fn given_branched_state_counting_wasm_reset_graph_with_a_second_usage_is_running(
+    world: &mut ScenarioWorld,
+) {
+    configure_wasm_state_reset_graph(
+        world,
+        WasmStateResetGraph {
+            second_wasm_usage: true,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4375,10 +4390,11 @@ async fn given_branched_timeout_buffering_wasm_reset_graph_is_running(world: &mu
 async fn given_unbranched_timeout_buffering_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
     configure_wasm_state_reset_graph(
         world,
-        false,
-        true,
-        WasmStateResetGraphPlacement::Unconstrained,
-        true,
+        WasmStateResetGraph {
+            branched: false,
+            timeout_buffering: true,
+            ..WasmStateResetGraph::branched()
+        },
     )
     .await;
 }
@@ -4390,13 +4406,39 @@ enum WasmStateResetGraphPlacement {
     AwayFromNodeOne,
 }
 
-async fn configure_wasm_state_reset_graph(
-    world: &mut ScenarioWorld,
+/// The shape of the guest-state graph a WASM reset or rebind scenario runs on.
+#[derive(Clone, Copy)]
+struct WasmStateResetGraph {
     branched: bool,
     timeout_buffering: bool,
     placement: WasmStateResetGraphPlacement,
     create_domain: bool,
-) {
+    /// Also bind the processor's resource version from a second WASM processor, so a rebinding of
+    /// that resource moves more than one usage in one batch. The second processor filters every
+    /// row away, so it holds no guest state of its own.
+    second_wasm_usage: bool,
+}
+
+impl WasmStateResetGraph {
+    fn branched() -> Self {
+        Self {
+            branched: true,
+            timeout_buffering: false,
+            placement: WasmStateResetGraphPlacement::Unconstrained,
+            create_domain: true,
+            second_wasm_usage: false,
+        }
+    }
+}
+
+async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: WasmStateResetGraph) {
+    let WasmStateResetGraph {
+        branched,
+        timeout_buffering,
+        placement,
+        create_domain,
+        second_wasm_usage,
+    } = graph;
     let leader = current_leader_node(world).await;
     if create_domain {
         let domain_commands = format!("CREATE UNPACED DOMAIN {};", world.domain);
@@ -4497,6 +4539,27 @@ async fn configure_wasm_state_reset_graph(
     } else {
         "\"unbranched\""
     };
+    let second_usage_commands = if second_wasm_usage {
+        format!(
+            r#"
+        CREATE RELAY counted_secondary_events SCHEMA counted_output_event{relay_branching};
+        CREATE WASM PROCESSOR secondary_guest FROM counted_input_events
+          FILTER WHERE input.sequence < 0 AS I32
+          USING RESOURCE wasm_reset_guest VERSION 1
+          FILE 'processors/filter_even.wasm'
+          MAX FUEL 1000000000
+          MAX MEMORY 64MiB
+          {processor_branching}
+          TO counted_secondary_events
+          SET tenant = {tenant_expression},
+              note = coalesce(note, "{output_note}")
+          ON MESSAGE ERROR LOG
+          ON GLOBAL ERROR LOG;
+        "#
+        )
+    } else {
+        String::new()
+    };
     let commands = format!(
         r#"
         CREATE SCHEMA counted_input_event ( tenant STRING, sequence I32 );
@@ -4528,6 +4591,7 @@ async fn configure_wasm_state_reset_graph(
               note = coalesce(note, "{output_note}")
           ON MESSAGE ERROR LOG
           ON GLOBAL ERROR LOG;
+        {second_usage_commands}
         CREATE SUBSCRIPTION {subscription} TO {output_relay};
         START;
         "#
@@ -9236,7 +9300,91 @@ async fn then_named_client_transaction_failed_at_step(
         .transaction_status()
         .await
         .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
-    let actual_state = match status.state {
+    assert_eq!(client_transaction_state_name(status.state), expected_state);
+    assert_eq!(status.failing_step, Some(failing_step));
+}
+
+#[when(expr = "client {string} attempts to commit its transaction")]
+async fn when_named_client_attempts_commit(world: &mut ScenarioWorld, name: String) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_client_outcome = None;
+    let name = expand_placeholders(world, &name);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let outcome = client
+        .execute("COMMIT;")
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' COMMIT did not reach the server: {error}"));
+    if outcome.success {
+        world.last_command_output = Some(outcome.message.clone());
+    } else {
+        world.last_command_error = Some(outcome.message.clone());
+    }
+    world.last_client_outcome = Some(outcome);
+}
+
+#[then(expr = "client {string} commit was refused because its expected preview is stale")]
+async fn then_named_client_commit_refused_as_stale(world: &mut ScenarioWorld, name: String) {
+    let name = expand_placeholders(world, &name);
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .unwrap_or_else(|| panic!("client '{name}' has not attempted a commit"));
+    assert!(
+        !outcome.success,
+        "client '{name}' commit must be refused: {}",
+        outcome.message
+    );
+    assert_eq!(
+        outcome.kind,
+        ClientCommandOutcomeKind::PreviewStale,
+        "client '{name}' commit must report a stale preview: {}",
+        outcome.message
+    );
+    let stale = outcome
+        .preview_stale
+        .as_ref()
+        .unwrap_or_else(|| panic!("client '{name}' stale commit must name both previews"));
+    assert_eq!(
+        stale.expected.transaction_id, stale.current.transaction_id,
+        "a stale preview describes the same transaction the commit named"
+    );
+    assert_eq!(
+        stale.expected.position, stale.current.position,
+        "nothing was appended, so only the planning basis moved"
+    );
+    assert_ne!(
+        stale.expected.planning_basis, stale.current.planning_basis,
+        "a stale preview names a planning basis the transaction has outgrown"
+    );
+}
+
+#[then(expr = "client {string} transaction state is {string}")]
+async fn then_named_client_transaction_state_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected_state: String,
+) {
+    let name = expand_placeholders(world, &name);
+    let expected_state = expand_placeholders(world, &expected_state).to_ascii_uppercase();
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let status = client
+        .transaction_status()
+        .await
+        .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
+    assert_eq!(client_transaction_state_name(status.state), expected_state);
+}
+
+fn client_transaction_state_name(state: ClientTransactionState) -> &'static str {
+    match state {
         ClientTransactionState::Unspecified => "UNSPECIFIED",
         ClientTransactionState::Open => "OPEN",
         ClientTransactionState::Committing => "COMMITTING",
@@ -9244,9 +9392,7 @@ async fn then_named_client_transaction_failed_at_step(
         ClientTransactionState::Failed => "FAILED",
         ClientTransactionState::Reverted => "REVERTED",
         ClientTransactionState::Expired => "EXPIRED",
-    };
-    assert_eq!(actual_state, expected_state);
-    assert_eq!(status.failing_step, Some(failing_step));
+    }
 }
 
 #[when(expr = "client {string} attaches to transaction {string}")]
@@ -18965,6 +19111,21 @@ async fn then_mysql_table_eventually_contains_rows_from_insert_commands(
     }
 }
 
+/// The identifier one MongoDB document carries, keeping a written BSON null distinct from a number
+/// so a scenario can assert that a genuine null was published as null.
+fn mongodb_document_user_id(document: &MongoDbDocument) -> serde_json::Value {
+    match document.get("mongodb_user_id") {
+        Some(MongoDbBson::Int32(value)) => serde_json::json!(i64::from(*value)),
+        Some(MongoDbBson::Int64(value)) => serde_json::json!(*value),
+        Some(MongoDbBson::Double(value)) => {
+            let value: i64 = (*value).checked_approx_into().unwrap_or_default();
+            serde_json::json!(value)
+        }
+        Some(MongoDbBson::Null) => serde_json::Value::Null,
+        _ => serde_json::json!(0),
+    }
+}
+
 #[then("the MongoDB collection eventually contains a document")]
 async fn then_mongodb_collection_eventually_contains_document(
     world: &mut ScenarioWorld,
@@ -18995,14 +19156,7 @@ async fn then_mongodb_collection_eventually_contains_document(
         let observed = documents
             .into_iter()
             .map(|document| {
-                let user_id = match document.get("mongodb_user_id") {
-                    Some(MongoDbBson::Int32(value)) => i64::from(*value),
-                    Some(MongoDbBson::Int64(value)) => *value,
-                    Some(MongoDbBson::Double(value)) => {
-                        (*value).checked_approx_into().unwrap_or_default()
-                    }
-                    _ => 0,
-                };
+                let user_id = mongodb_document_user_id(&document);
                 let action = document.get_str("mongodb_action").unwrap_or_default();
                 serde_json::json!({
                     "mongodb_user_id": user_id,

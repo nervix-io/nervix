@@ -34,6 +34,60 @@ Feature: NSPL transactions
       | 1            |
       | 3            |
 
+  @transaction_stale_preview
+  Scenario Outline: A commit fenced to a preview the transaction outgrew is refused and stays open
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    And client "contender" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA staged_event ( user_id U32 );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "contender" executes these NSPL commands
+      """
+      CREATE SCHEMA unrelated_event ( order_id U32 );
+      """
+    And client "owner" attempts to commit its transaction
+    Then client "owner" commit was refused because its expected preview is stale
+    And client "owner" transaction state is "OPEN"
+    And transaction "{{transaction_id}}" eventually has state "OPEN"
+    When client "contender" fails to execute these NSPL commands
+      """
+      SHOW CREATE SCHEMA staged_event;
+      """
+    Then the last command error contains
+      """
+      schema 'staged_event' does not exist in domain '{{domain}}'
+      """
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    Then client "owner" transaction state is "COMMITTED"
+    And transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA staged_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA staged_event (
+        user_id U32
+      );
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @standalone_transaction_refresh
   Scenario: An ordinary command refreshes a frozen plan that loses its planning inputs
     Given a 1 node nervix cluster is started
@@ -85,14 +139,8 @@ Feature: NSPL transactions
     When the cluster is restarted
     Given client "resumed" is connected to the leader node
     When client "resumed" attaches to transaction "{{transaction_id}}"
-    And client "resumed" fails to execute these NSPL commands
-      """
-      COMMIT;
-      """
-    Then the last command error contains
-      """
-      transaction preview is stale
-      """
+    And client "resumed" attempts to commit its transaction
+    Then client "resumed" commit was refused because its expected preview is stale
     And transaction "{{transaction_id}}" eventually has state "OPEN"
     When client "resumed" executes these NSPL commands
       """

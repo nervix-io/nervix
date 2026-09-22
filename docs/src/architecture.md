@@ -58,14 +58,16 @@ The runtime resolves resource mounts and projects metadata into its own columns;
 carries only the results.
 
 On the sink side, the contract separates codec records from mapped Arrow rows. A record sink
-receives one batch of encoded keys, payloads, headers, and host positions; a row sink receives a
+receives one batch of encoded keys, payloads, headers, host positions, and, where the emitter
+declares one, the ordering group the runtime evaluated for each record; a row sink receives a
 mapped Arrow batch, its target columns, selected rows, and host-derived chunk ranges. Both return
 per-record delivery or structured-rejection outcomes and at most one infrastructure failure. The
 runtime retains batching, retry cadence, acknowledgement keepalive, stop deadlines, and fault
 injection. Connectors reach transient status, events, staging storage, and general-error handling
 only through an opaque host handle, so neither runtime types nor ACK maps cross the boundary.
-Kafka implements this record-sink contract in `crates/connectors/kafka`; its driver and raw client
-configuration no longer belong to the server runtime.
+Every record sink implements this contract in its own crate under `crates/connectors`: Kafka,
+Pulsar, RabbitMQ, NATS, MQTT, Redis, ZeroMQ, Syslog, SQS, and Sentry. Each crate owns its driver
+and the raw client configuration that driver reads, neither of which belongs to the server runtime.
 
 A row sink writes values rather than encoded payloads, so the runtime evaluates its `VALUES`
 mapping itself. The mapping compiles once when the emitter starts and runs once per batch,

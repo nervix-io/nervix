@@ -1,4 +1,4 @@
-//! Transaction status, the preview identity a commit expects, and the target an inspection reads.
+//! Encoding the transaction status, preview identity and inspection target of the vocabulary.
 
 use std::num::NonZeroUsize;
 
@@ -6,233 +6,135 @@ use error_stack::Report;
 use flatbuffers::WIPOffset;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    DomainName, ImpactPlanningBasis, TransactionInspectionTarget, TransactionOperationNumber,
-    TransactionPosition, TransactionPreviewIdentity,
+    ImpactPlanningBasis, TransactionInspectionTarget, TransactionLifecycle,
+    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_size},
-    common::WireValueError,
     wire,
 };
 
-/// Where a replicated transaction is in its lifecycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransactionState {
-    Open,
-    Committing,
-    Committed,
-    Failed {
-        /// The operation whose execution step failed.
-        failing_operation: TransactionOperationNumber,
-        error: String,
-    },
-    Reverted,
-    Expired,
-}
-
-impl TransactionState {
-    /// Whether the transaction can still change: it is open or committing.
-    pub const fn is_active(&self) -> bool {
-        matches!(self, Self::Open | Self::Committing)
-    }
-
-    fn encode(
-        &self,
-        encoder: &mut Encoder<'_>,
-    ) -> Result<EncodedUnion<wire::TransactionState>, Report<WireEncodeError>> {
-        let union = match self {
-            Self::Open => EncodedUnion::new(
-                wire::TransactionState::TransactionOpen,
-                wire::TransactionOpen::create(encoder.fbb(), &wire::TransactionOpenArgs {}),
-            ),
-            Self::Committing => EncodedUnion::new(
-                wire::TransactionState::TransactionCommitting,
-                wire::TransactionCommitting::create(
-                    encoder.fbb(),
-                    &wire::TransactionCommittingArgs {},
-                ),
-            ),
-            Self::Committed => EncodedUnion::new(
-                wire::TransactionState::TransactionCommitted,
-                wire::TransactionCommitted::create(
-                    encoder.fbb(),
-                    &wire::TransactionCommittedArgs {},
-                ),
-            ),
-            Self::Failed {
-                failing_operation,
-                error,
-            } => {
-                let error = encoder.text("TransactionFailed.error", error)?;
-                let failed = wire::TransactionFailed::create(
-                    encoder.fbb(),
-                    &wire::TransactionFailedArgs {
-                        failing_operation: wire_size(failing_operation.get()),
-                        error: Some(error),
-                    },
-                );
-                EncodedUnion::new(wire::TransactionState::TransactionFailed, failed)
-            }
-            Self::Reverted => EncodedUnion::new(
-                wire::TransactionState::TransactionReverted,
-                wire::TransactionReverted::create(encoder.fbb(), &wire::TransactionRevertedArgs {}),
-            ),
-            Self::Expired => EncodedUnion::new(
-                wire::TransactionState::TransactionExpired,
-                wire::TransactionExpired::create(encoder.fbb(), &wire::TransactionExpiredArgs {}),
-            ),
-        };
-        Ok(union)
-    }
-
-    fn decode(
-        decoder: Decoder<'_>,
-        status: wire::TransactionStatus<'_>,
-    ) -> Result<Self, Report<WireDecodeError>> {
-        let state = status.state_type();
-        if let Some(failed) = status.state_as_transaction_failed() {
-            let failing_operation = decode_operation_number(
-                decoder,
-                "TransactionFailed.failing_operation",
-                failed.failing_operation(),
-            )?;
-            let error = decoder.text("TransactionFailed.error", failed.error())?;
-            return Ok(Self::Failed {
-                failing_operation,
-                error,
-            });
-        }
-        match state {
-            wire::TransactionState::TransactionOpen => Ok(Self::Open),
-            wire::TransactionState::TransactionCommitting => Ok(Self::Committing),
-            wire::TransactionState::TransactionCommitted => Ok(Self::Committed),
-            wire::TransactionState::TransactionReverted => Ok(Self::Reverted),
-            wire::TransactionState::TransactionExpired => Ok(Self::Expired),
-            undeclared => Err(decoder.unknown_union("TransactionStatus.state", undeclared.0)),
-        }
-    }
-}
-
-/// A replicated transaction as the serving leader records it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TransactionStatus {
-    transaction_id: String,
-    domain: DomainName,
-    state: TransactionState,
-    accepted_operations: TransactionPosition,
-    applied_operations: usize,
-}
-
-impl TransactionStatus {
-    pub fn new(
-        transaction_id: String,
-        domain: DomainName,
-        state: TransactionState,
-        accepted_operations: TransactionPosition,
-        applied_operations: usize,
-    ) -> Result<Self, Report<WireValueError>> {
-        if applied_operations > accepted_operations.accepted_operations() {
-            return Err(Report::new(
-                WireValueError::AppliedOperationsExceedAccepted {
-                    applied: applied_operations,
-                    accepted: accepted_operations.accepted_operations(),
+/// Encodes the lifecycle of a transaction status.
+fn encode_lifecycle(
+    lifecycle: &TransactionLifecycle,
+    encoder: &mut Encoder<'_>,
+) -> Result<EncodedUnion<wire::TransactionState>, Report<WireEncodeError>> {
+    let union = match lifecycle {
+        TransactionLifecycle::Open => EncodedUnion::new(
+            wire::TransactionState::TransactionOpen,
+            wire::TransactionOpen::create(encoder.fbb(), &wire::TransactionOpenArgs {}),
+        ),
+        TransactionLifecycle::Committing => EncodedUnion::new(
+            wire::TransactionState::TransactionCommitting,
+            wire::TransactionCommitting::create(encoder.fbb(), &wire::TransactionCommittingArgs {}),
+        ),
+        TransactionLifecycle::Committed => EncodedUnion::new(
+            wire::TransactionState::TransactionCommitted,
+            wire::TransactionCommitted::create(encoder.fbb(), &wire::TransactionCommittedArgs {}),
+        ),
+        TransactionLifecycle::Failed {
+            failing_operation,
+            error,
+        } => {
+            let error = encoder.text("TransactionFailed.error", error)?;
+            let failed = wire::TransactionFailed::create(
+                encoder.fbb(),
+                &wire::TransactionFailedArgs {
+                    failing_operation: wire_size(failing_operation.get()),
+                    error: Some(error),
                 },
-            ));
+            );
+            EncodedUnion::new(wire::TransactionState::TransactionFailed, failed)
         }
-        Ok(Self {
-            transaction_id,
-            domain,
-            state,
-            accepted_operations,
-            applied_operations,
-        })
-    }
+        TransactionLifecycle::Reverted => EncodedUnion::new(
+            wire::TransactionState::TransactionReverted,
+            wire::TransactionReverted::create(encoder.fbb(), &wire::TransactionRevertedArgs {}),
+        ),
+        TransactionLifecycle::Expired => EncodedUnion::new(
+            wire::TransactionState::TransactionExpired,
+            wire::TransactionExpired::create(encoder.fbb(), &wire::TransactionExpiredArgs {}),
+        ),
+    };
+    Ok(union)
+}
 
-    pub fn transaction_id(&self) -> &str {
-        &self.transaction_id
-    }
-
-    pub fn domain(&self) -> &DomainName {
-        &self.domain
-    }
-
-    pub fn state(&self) -> &TransactionState {
-        &self.state
-    }
-
-    /// Operations accepted into the transaction, which is also the position the next append
-    /// expects.
-    pub const fn accepted_operations(&self) -> TransactionPosition {
-        self.accepted_operations
-    }
-
-    /// Accepted operations whose execution steps have applied.
-    pub const fn applied_operations(&self) -> usize {
-        self.applied_operations
-    }
-
-    /// Accepted operations still waiting to apply. A finished transaction has none.
-    pub fn pending_operations(&self) -> usize {
-        if !self.state.is_active() {
-            return 0;
-        }
-        self.accepted_operations
-            .accepted_operations()
-            .checked_sub(self.applied_operations)
-            .assured("construction rejects applied operations above accepted operations")
-    }
-
-    pub(crate) fn encode<'fbb>(
-        &self,
-        encoder: &mut Encoder<'fbb>,
-    ) -> Result<WIPOffset<wire::TransactionStatus<'fbb>>, Report<WireEncodeError>> {
-        let transaction_id =
-            encoder.text("TransactionStatus.transaction_id", &self.transaction_id)?;
-        let domain = encoder.text("TransactionStatus.domain", self.domain.as_str())?;
-        let state = self.state.encode(encoder)?;
-        Ok(wire::TransactionStatus::create(
-            encoder.fbb(),
-            &wire::TransactionStatusArgs {
-                transaction_id: Some(transaction_id),
-                domain: Some(domain),
-                state_type: state.discriminant,
-                state: Some(state.value),
-                accepted_operations: wire_size(self.accepted_operations.accepted_operations()),
-                applied_operations: wire_size(self.applied_operations),
-            },
-        ))
-    }
-
-    pub(crate) fn decode(
-        decoder: Decoder<'_>,
-        status: wire::TransactionStatus<'_>,
-    ) -> Result<Self, Report<WireDecodeError>> {
-        let transaction_id =
-            decoder.text("TransactionStatus.transaction_id", status.transaction_id())?;
-        let domain = decoder.name("TransactionStatus.domain", status.domain())?;
-        let state = TransactionState::decode(decoder, status)?;
-        let accepted_operations = decoder.size(
-            "TransactionStatus.accepted_operations",
-            status.accepted_operations(),
+/// Decodes the lifecycle of a transaction status.
+fn decode_lifecycle(
+    decoder: Decoder<'_>,
+    status: wire::TransactionStatus<'_>,
+) -> Result<TransactionLifecycle, Report<WireDecodeError>> {
+    if let Some(failed) = status.state_as_transaction_failed() {
+        let failing_operation = decode_operation_number(
+            decoder,
+            "TransactionFailed.failing_operation",
+            failed.failing_operation(),
         )?;
-        let applied_operations = decoder.size(
-            "TransactionStatus.applied_operations",
-            status.applied_operations(),
-        )?;
-        match Self::new(
-            transaction_id,
-            domain,
-            state,
-            TransactionPosition::new(accepted_operations),
-            applied_operations,
-        ) {
-            Ok(status) => Ok(status),
-            Err(error) => Err(error.change_context(WireDecodeError::InvalidValue {
-                field: "TransactionStatus.applied_operations",
-                kind: "operation count",
-            })),
-        }
+        let error = decoder.text("TransactionFailed.error", failed.error())?;
+        return Ok(TransactionLifecycle::Failed {
+            failing_operation,
+            error,
+        });
+    }
+    match status.state_type() {
+        wire::TransactionState::TransactionOpen => Ok(TransactionLifecycle::Open),
+        wire::TransactionState::TransactionCommitting => Ok(TransactionLifecycle::Committing),
+        wire::TransactionState::TransactionCommitted => Ok(TransactionLifecycle::Committed),
+        wire::TransactionState::TransactionReverted => Ok(TransactionLifecycle::Reverted),
+        wire::TransactionState::TransactionExpired => Ok(TransactionLifecycle::Expired),
+        undeclared => Err(decoder.unknown_union("TransactionStatus.state", undeclared.0)),
+    }
+}
+
+pub(crate) fn encode_transaction_status<'fbb>(
+    encoder: &mut Encoder<'fbb>,
+    status: &TransactionStatus,
+) -> Result<WIPOffset<wire::TransactionStatus<'fbb>>, Report<WireEncodeError>> {
+    let transaction_id =
+        encoder.text("TransactionStatus.transaction_id", status.transaction_id())?;
+    let domain = encoder.text("TransactionStatus.domain", status.domain().as_str())?;
+    let lifecycle = encode_lifecycle(status.lifecycle(), encoder)?;
+    Ok(wire::TransactionStatus::create(
+        encoder.fbb(),
+        &wire::TransactionStatusArgs {
+            transaction_id: Some(transaction_id),
+            domain: Some(domain),
+            state_type: lifecycle.discriminant,
+            state: Some(lifecycle.value),
+            accepted_operations: wire_size(status.accepted_operations().accepted_operations()),
+            applied_operations: wire_size(status.applied_operations()),
+        },
+    ))
+}
+
+pub(crate) fn decode_transaction_status(
+    decoder: Decoder<'_>,
+    status: wire::TransactionStatus<'_>,
+) -> Result<TransactionStatus, Report<WireDecodeError>> {
+    let transaction_id =
+        decoder.text("TransactionStatus.transaction_id", status.transaction_id())?;
+    let domain = decoder.name("TransactionStatus.domain", status.domain())?;
+    let lifecycle = decode_lifecycle(decoder, status)?;
+    let accepted_operations = decoder.size(
+        "TransactionStatus.accepted_operations",
+        status.accepted_operations(),
+    )?;
+    let applied_operations = decoder.size(
+        "TransactionStatus.applied_operations",
+        status.applied_operations(),
+    )?;
+    match TransactionStatus::new(
+        transaction_id,
+        domain,
+        lifecycle,
+        TransactionPosition::new(accepted_operations),
+        applied_operations,
+    ) {
+        Ok(status) => Ok(status),
+        Err(error) => Err(error.change_context(WireDecodeError::InvalidValue {
+            field: "TransactionStatus.applied_operations",
+            kind: "operation count",
+        })),
     }
 }
 

@@ -284,16 +284,21 @@ sees models that earlier statements of the same transaction create or drop.
 4. The planner rebuilds each selected model with the target number. A usage that already binds the
    target contributes no change and is reported as `unchanged`.
 5. The rebuilt models pass the same checks as `CREATE`: registry validation of the complete
-   candidate graph, and the leader's content checks for each changed VHOST, hash map, and
-   inferencer against the target version. One failing model rejects the whole statement, and the
-   error names it, for example `invalid INFERENCER '<name>': ...`.
+   candidate graph, and the leader's content checks for each changed VHOST, hash map, inferencer,
+   and WASM processor against the target version. One failing model rejects the whole statement, and
+   the error names it, for example `invalid INFERENCER '<name>': ...`.
 
 A rejection at any of these steps happens before any effect: no model is stored, nothing pauses,
 and every usage keeps its version.
 
-The content that only a consumer can prove is proven when the nodes build the consumers from the
-committed models: the protobuf sources a codec or signaling protocol compiles, a WASM module, and
-every line of a hash-map file. A client mount only needs the version's directory; the connector
+A WASM processor's module is compiled before the statement can commit, because activating a module
+binding also replaces the guest state of every branch: a module discovered to be uncompilable
+afterwards has already invalidated the state its predecessor saved. The compiled module the check
+produces is the one activation installs, so nothing is compiled twice.
+
+The remaining content that only a consumer can prove is proven when the nodes build the consumers
+from the committed models: the protobuf sources a codec or signaling protocol compiles, and every
+line of a hash-map file. A client mount only needs the version's directory; the connector
 reads the files it names when it uses them. A version that fails during activation fails the
 command after its models were committed, as described in
 [Failure Semantics And Recovery](#failure-semantics-and-recovery). A stopped domain builds only its
@@ -312,7 +317,7 @@ highest level among the usages it changes:
 | `HASH MAP` | `DOMAIN_PAUSE` | The domain pauses and every live node builds the index of the new version before the command succeeds. |
 | `CLIENT` mount | `DOMAIN_PAUSE` | The domain pauses and rebuilds; its ingestors and emitters instantiate their clients with a mount of the new version. |
 | `INFERENCER` | `ENTITY_PAUSE` | The inferencer and its downstream pause. The replacement's branch instances load new inference sessions from the new model file. |
-| `WASM PROCESSOR` | `ENTITY_PAUSE` | The processor and its downstream pause, and each branch is flushed. Every branch starts a new guest-state generation, so the replacement instances, created from the new module, initialize without guest state. |
+| `WASM PROCESSOR` | `ENTITY_PAUSE` | The processor and its downstream pause, and each branch is flushed. Every branch starts a new guest-state generation, so the replacement instances, created from the new module, initialize without guest state. The candidate module is compiled before the statement commits. |
 
 [Control Plane](./control-plane.md#alter-lock-and-quiesce-classification) defines what each level
 pauses and drains. A rebinding in a stopped domain has no running work to pause, so it runs and
@@ -493,10 +498,10 @@ Nervix does not provide:
 | Failure | Outcome |
 | --- | --- |
 | A statement binds a missing, applying, or failed version, uses `LATEST` with no completed version, names an unknown resource, or lists a missing or non-binding `FOR` member | The statement is rejected before any effect. No model is stored, nothing pauses, and every usage keeps its version. |
-| A VHOST's TLS bundle does not load, a hash map's file is missing, or an ONNX model does not match its inferencer | The leader's content checks reject the statement before any effect. |
+| A VHOST's TLS bundle does not load, a hash map's file is missing, an ONNX model does not match its inferencer, or a WASM module does not compile | The leader's content checks reject the statement before any effect. |
 | An upload completes in the domain between capture and apply | The step is rejected as stale before any model is committed, and whatever it engaged is released. An ordinary command plans again as another attempt under the same execution reference; an explicit transaction reports the conflict instead of replanning. |
 | An HTTPS listener cannot install a VHOST change in a step that did not pause | The failure record restores the previous models and schedule, and every listener presents the restored certificates before the command reports the failure. |
-| A consumer cannot load the version during activation, such as protobuf sources that do not compile, a WASM module that does not compile, or a hash-map line that does not decode | The step releases any pause it engaged, the committed models remain, and the command or transaction reports the activation failure. Nothing returns the models to their previous versions; a later model change, such as a rebinding to a usable version, repairs the binding. |
+| A consumer cannot load the version during activation, such as protobuf sources that do not compile or a hash-map line that does not decode | The step releases any pause it engaged, the committed models remain, and the command or transaction reports the activation failure. Nothing returns the models to their previous versions; a later model change, such as a rebinding to a usable version, repairs the binding. |
 | One node cannot install a version during its upload, including a transfer that is interrupted | The upload fails with that node's reason. The number stays assigned and is never bindable. |
 | A node lacks a published version | Its reconciliation fetches the version from a live node that holds it, from the beginning of the archive. Until it holds the version, that node cannot build a domain that needs it. |
 

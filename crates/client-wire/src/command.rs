@@ -4,14 +4,15 @@ use error_stack::Report;
 use flatbuffers::WIPOffset;
 use nervix_models::{
     CommandExecutionReference, TransactionOperationAdmission, TransactionPreviewIdentity,
+    TransactionStatus,
 };
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, OutcomeOrigin},
     transaction::{
-        TransactionStatus, decode_operation_number, decode_preview_identity,
-        encode_operation_number, encode_preview_identity,
+        decode_operation_number, decode_preview_identity, decode_transaction_status,
+        encode_operation_number, encode_preview_identity, encode_transaction_status,
     },
     wire,
 };
@@ -346,7 +347,7 @@ impl CommandOutcome {
             StatementOutcome::encode,
         )?;
         let transaction = match &self.transaction {
-            Some(transaction) => Some(transaction.encode(encoder)?),
+            Some(transaction) => Some(encode_transaction_status(encoder, transaction)?),
             None => None,
         };
         let transaction_admission = match &self.transaction_admission {
@@ -407,7 +408,7 @@ impl CommandOutcome {
             |statement| StatementOutcome::decode(decoder, statement),
         )?;
         let transaction = match outcome.transaction() {
-            Some(transaction) => Some(TransactionStatus::decode(decoder, transaction)?),
+            Some(transaction) => Some(decode_transaction_status(decoder, transaction)?),
             None => None,
         };
         let transaction_admission = match outcome.transaction_admission() {
@@ -461,7 +462,7 @@ impl AttachOutcome {
     ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let disposition = match &self.disposition {
             AttachDisposition::Attached(transaction) => {
-                let transaction = transaction.encode(encoder)?;
+                let transaction = encode_transaction_status(encoder, transaction)?;
                 let attached = wire::TransactionAttached::create(
                     encoder.fbb(),
                     &wire::TransactionAttachedArgs {
@@ -471,7 +472,7 @@ impl AttachOutcome {
                 EncodedUnion::new(wire::AttachDisposition::TransactionAttached, attached)
             }
             AttachDisposition::AlreadyFinished(transaction) => {
-                let transaction = transaction.encode(encoder)?;
+                let transaction = encode_transaction_status(encoder, transaction)?;
                 let finished = wire::TransactionAlreadyFinished::create(
                     encoder.fbb(),
                     &wire::TransactionAlreadyFinishedArgs {
@@ -512,9 +513,9 @@ impl AttachOutcome {
         outcome: wire::AttachOutcome<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
         let disposition = if let Some(attached) = outcome.disposition_as_transaction_attached() {
-            AttachDisposition::Attached(TransactionStatus::decode(decoder, attached.transaction())?)
+            AttachDisposition::Attached(decode_transaction_status(decoder, attached.transaction())?)
         } else if let Some(finished) = outcome.disposition_as_transaction_already_finished() {
-            AttachDisposition::AlreadyFinished(TransactionStatus::decode(
+            AttachDisposition::AlreadyFinished(decode_transaction_status(
                 decoder,
                 finished.transaction(),
             )?)

@@ -6712,6 +6712,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-mqtt"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "rumqttc-next",
+ "shuttle-tokio",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "nervix-connector-mysql"
 version = "0.1.0-dev"
 dependencies = [
@@ -6729,6 +6747,22 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "nervix-connector-nats"
+version = "0.1.0-dev"
+dependencies = [
+ "async-nats",
+ "async-trait",
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "shuttle-tokio",
+ "tokio",
 ]
 
 [[package]]
@@ -6800,6 +6834,92 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-pulsar"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "pulsar",
+ "shuttle-tokio",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "nervix-connector-rabbitmq"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "lapin",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "shuttle-tokio",
+ "tokio",
+]
+
+[[package]]
+name = "nervix-connector-redis"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "bb8",
+ "error-stack",
+ "nervix-connector",
+ "nervix-models",
+ "redis",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "triomphe",
+]
+
+[[package]]
+name = "nervix-connector-sentry"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "error-stack",
+ "nervix-connector",
+ "nervix-models",
+ "reqwest 0.13.4",
+ "sentry-types",
+ "serde_json",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "nervix-connector-sqs"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-sdk-sqs",
+ "aws-smithy-http-client",
+ "error-stack",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "nervix-connector-syslog"
 version = "0.1.0-dev"
 dependencies = [
@@ -6812,6 +6932,7 @@ dependencies = [
  "nonzero_ext",
  "rustls",
  "rustls-pki-types",
+ "shuttle-tokio",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -6840,6 +6961,19 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.24.0",
  "triomphe",
+]
+
+[[package]]
+name = "nervix-connector-zeromq"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "nervix-connector",
+ "nervix-models",
+ "shuttle-tokio",
+ "tokio",
+ "zeromq",
 ]
 
 [[package]]
@@ -7156,12 +7290,20 @@ dependencies = [
  "nervix-connector-http",
  "nervix-connector-kafka",
  "nervix-connector-mongodb",
+ "nervix-connector-mqtt",
  "nervix-connector-mysql",
+ "nervix-connector-nats",
  "nervix-connector-otel",
  "nervix-connector-postgres",
  "nervix-connector-prometheus",
+ "nervix-connector-pulsar",
+ "nervix-connector-rabbitmq",
+ "nervix-connector-redis",
+ "nervix-connector-sentry",
+ "nervix-connector-sqs",
  "nervix-connector-syslog",
  "nervix-connector-websockets",
+ "nervix-connector-zeromq",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",
@@ -7202,7 +7344,6 @@ dependencies = [
  "rumqttc-next",
  "rustls",
  "rustls-pki-types",
- "sentry-types",
  "serde",
  "serde_json",
  "shuttle",

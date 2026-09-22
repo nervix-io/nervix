@@ -227,9 +227,7 @@ impl RelayInputCollection {
             .checked_add(1)
             .assured("the pending batches counted here are already held in memory");
         if let Some(counters) = &self.quiesce_counters {
-            counters
-                .collected_inputs
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            counters.admit(1);
         }
         if size_boundary_reached {
             return self.take(&key).map(Some);
@@ -301,10 +299,7 @@ impl RelayInputCollection {
             .checked_sub(collection.pending_len())
             .verified("every batch in this collection raised the pending count when it arrived");
         if let Some(counters) = &self.quiesce_counters {
-            counters.collected_inputs.fetch_sub(
-                collection.pending_len(),
-                std::sync::atomic::Ordering::AcqRel,
-            );
+            counters.withdraw_admitted(collection.pending_len());
         }
         RelayRecordBatch::concat_preserving(collection.take_pending()).map_err(|error| {
             let error = *error;
@@ -328,9 +323,7 @@ impl RelayInputCollection {
 impl Drop for RelayInputCollection {
     fn drop(&mut self) {
         if let Some(counters) = &self.quiesce_counters {
-            counters
-                .collected_inputs
-                .fetch_sub(self.pending_batches, std::sync::atomic::Ordering::AcqRel);
+            counters.withdraw_admitted(self.pending_batches);
         }
         for collection in self.pending.values() {
             collection.no_ack_pending("relay interaction dropped collected input");
