@@ -307,11 +307,13 @@ publication restores the old branch instance with its existing logical deadlines
 publication, recovery completes the fresh lifetime and never recreates the old instance or its
 timers.
 
-Recurring domain cadence is anchored to its initial logical schedule. HTTP polling and generator
-cadence begin immediately, while Prometheus polling begins after one interval. When work misses
-multiple occurrences, the cadence returns the newest due instant once and advances directly to the
-first future boundary. Consumers that need both meanings keep the scheduled due instant separate
-from the fresh execution snapshot taken when work actually runs.
+Recurring domain cadence is anchored to its initial logical schedule. The source host waits for
+each HTTP or Prometheus polling occurrence and passes its scheduled logical instant into the
+connector's poll operation; connector crates never bind or wait on a domain clock. HTTP polling and
+generator cadence begin immediately, while Prometheus polling begins after one interval. When work
+misses multiple occurrences, the cadence returns the newest due instant once and advances directly
+to the first future boundary. Consumers that need both meanings keep the scheduled due instant
+separate from the fresh execution snapshot taken when work actually runs.
 
 The architecture keeps four time classes distinct:
 

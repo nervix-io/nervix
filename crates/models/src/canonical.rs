@@ -2035,6 +2035,10 @@ impl<Version: Display> CreateWasmProcessor<Version> {
             &self.materialized_state,
             &self.output_routes,
         )?);
+        clauses.push(Clause::line(format!(
+            "ON REJECTED STATE {}",
+            self.rejected_state_policy.as_ref()
+        )));
         clauses.push(Clause::line(
             general_error_policy_to_nspl(&self.global_error_policy).replace("GENERAL", "GLOBAL"),
         ));

@@ -384,6 +384,7 @@ mod tests {
                             max_memory_bytes: nonzero!(67_108_864u64),
                         },
                         global_error_policy: GeneralErrorPolicy::Log,
+                        rejected_state_policy: Default::default(),
                         mode: AckMode::Attached,
                         filter_where: None,
                         materialized_state: Vec::new(),

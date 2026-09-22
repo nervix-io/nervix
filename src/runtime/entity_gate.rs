@@ -1183,6 +1183,18 @@ impl Runtime {
             .await;
     }
 
+    #[cfg(feature = "testing")]
+    pub(crate) async fn pause_entity_gate_response_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        self.inner
+            .fault_injection
+            .pause_entity_gate_response_if_armed(node, domain)
+            .await;
+    }
+
     pub(crate) fn domain_drain_status(&self, domain: &DomainName) -> DomainDrainStatus {
         let active_ingestors = self
             .inner

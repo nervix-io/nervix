@@ -110,6 +110,24 @@ pub(crate) enum WasmLifecycleStage {
 }
 
 impl WasmLifecycleStage {
+    /// The guest's verdict on the saved state it was handed, when this stage is one.
+    ///
+    /// Only a verdict classifies saved bytes as unusable. Compiling the module, initializing the
+    /// guest, an exhausted limit, storage, replication and the state's authority all leave the
+    /// saved state exactly as usable as it was, so none of them answers here.
+    pub(super) const fn saved_state_rejection(self) -> Option<WasmSavedStateRejection> {
+        match self {
+            Self::SnapshotEnvelopeDecoding => Some(WasmSavedStateRejection::SnapshotEnvelope),
+            Self::ApplicationStateRestoration => Some(WasmSavedStateRejection::ApplicationState),
+            Self::ModuleCompilation
+            | Self::Guest(_)
+            | Self::OutputEmission
+            | Self::LocalPersistence
+            | Self::Replication
+            | Self::AuthorityRejection => None,
+        }
+    }
+
     /// The stage a failed guest operation belongs to. A verdict on saved state and output the host
     /// cannot decode are stages of their own; every other failure belongs to its operation.
     pub(super) fn of_guest_failure(failure: &nervix_wasm::WasmGuestError) -> Self {
@@ -137,6 +155,21 @@ impl WasmLifecycleStage {
             return Self::AuthorityRejection;
         }
         Self::Replication
+    }
+}
+
+impl WasmInstanceError {
+    /// The guest's verdict on the saved state this failure was restoring, when it gave one.
+    pub(super) const fn saved_state_rejection(&self) -> Option<WasmSavedStateRejection> {
+        match self {
+            Self::Lifecycle { stage, .. } => stage.saved_state_rejection(),
+            Self::ResourceStoreDetached
+            | Self::ResolveFile { .. }
+            | Self::ReadModule { .. }
+            | Self::CompileModule { .. }
+            | Self::EncodeInput
+            | Self::InputRowCount { .. } => None,
+        }
     }
 }
 
@@ -312,6 +345,7 @@ pub(super) async fn flush_branch_wasm_processor(
         resource_version,
         file,
         limits,
+        rejected_state_policy,
         replicated_state,
         execution_now,
     } = context;
@@ -408,6 +442,7 @@ pub(super) async fn flush_branch_wasm_processor(
             resource_version,
             file,
             limits,
+            rejected_state_policy,
             guest_input_relay: primary_input_relay,
             input_schema: &input_schema,
             output_schemas: &output_schemas,
@@ -542,6 +577,7 @@ pub(super) struct WasmInstanceContext<'a> {
     pub(super) resource_version: u64,
     pub(super) file: &'a str,
     pub(super) limits: nervix_models::WasmProcessorLimits,
+    pub(super) rejected_state_policy: WasmRejectedStatePolicy,
     pub(super) guest_input_relay: &'a RelayName,
     pub(super) input_schema: &'a Arc<CompiledSchema>,
     pub(super) output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
@@ -694,6 +730,7 @@ pub(super) async fn ensure_wasm_processor_instance(
         resource_version,
         file,
         limits,
+        rejected_state_policy,
         guest_input_relay,
         input_schema,
         output_schemas,
@@ -741,9 +778,23 @@ pub(super) async fn ensure_wasm_processor_instance(
             file: file.to_string(),
         };
         let saved = replicated_state.restore_guest_state();
-        let live = compiled_module
+        let instantiation = compiled_module
             .instantiate_branch(module, limits, init, execution_now, saved.restorable())
-            .await?;
+            .await;
+        let live = match instantiation {
+            Ok(live) => live,
+            Err(failure) => {
+                let rejection = failure.current_context().saved_state_rejection();
+                if let Some(rejection) = rejection
+                    && rejected_state_policy == WasmRejectedStatePolicy::Reset
+                {
+                    branch
+                        .runtime
+                        .raise_wasm_state_recovery(&replicated_state.placement, rejection);
+                }
+                return Err(failure);
+            }
+        };
         *instance = Some(Box::new(live));
     }
     Ok(())
@@ -1279,6 +1330,7 @@ mod tests {
                     max_memory_bytes: nonzero!(67_108_864u64),
                 },
                 global_error_policy: GeneralErrorPolicy::Log,
+                rejected_state_policy: Default::default(),
                 mode: AckMode::Attached,
                 filter_where: None,
                 materialized_state: Vec::new(),

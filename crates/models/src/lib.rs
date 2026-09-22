@@ -163,12 +163,13 @@ pub use statement::{
     SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
     SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,
     UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
-    WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound, WireSchemaLookup, ZeroMqConfigEntry,
-    ZeroMqIngestMode, default_relay_buffer,
+    WasmRejectedStatePolicy, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
+    WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
 pub use wasm_state_generation::{
-    InvalidWasmStateGeneration, WasmStateGeneration, WasmStateGenerations, WasmStateReset,
-    WasmStateResetPhase, WasmStateResetScope,
+    InvalidWasmStateGeneration, WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations,
+    WasmStateRecoveries, WasmStateRecovery, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
+    WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
 };

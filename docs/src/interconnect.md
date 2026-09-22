@@ -137,6 +137,18 @@ tasks. Responses carry the complete classified failure chain. A transport succes
 the receiver performed the requested action; the Raft-backed `Publishing` and `Ready` schedule
 phases remain the durability and usability boundaries.
 
+One more management request belongs to the same operation. A processor that declares
+`ON REJECTED STATE RESET` raises a refused guest-state lifetime from the node that owns the branch,
+and that node forwards it to the current leader as a typed recovery request naming the domain, the
+processor, the refused branch or the explicit unbranched instance, the generation whose snapshot was
+refused, and which of the two guest verdicts it gave. It carries no reset reference: the leader
+derives one from that identity, so a request that is retried, forwarded again after a leadership
+change, or raised by a new owner drives the very same coordinated reset instead of a second one. A
+leader that finds the branch already past the reported generation answers that the lifetime is gone
+rather than resetting the one that replaced it. The response carries the classified failure chain
+and is not itself the durability boundary; the recovery's spent attempt and the reset's schedule
+phases are.
+
 The coordinator records every destination as an attempted participant before sending its prepare
 request. A timeout, cancellation, or missing response after the destination persisted the request
 therefore remains explicit cleanup work. A participant that refuses capture, preparation, forced

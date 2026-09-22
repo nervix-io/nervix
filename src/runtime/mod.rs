@@ -46,7 +46,8 @@ use arrow_select::{
     concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array,
     take::take as take_arrow_array,
 };
-use chrono::{TimeZone, Utc};
+#[cfg(test)]
+use chrono::TimeZone as _;
 use error_stack::Report;
 use fjall::Database;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
@@ -59,7 +60,7 @@ use nervix_execution::{
 use nervix_interconnect::{
     EntityGatePurpose, Envelope, InterconnectRequest, RelayAdmission, RelayAdmissionDecision,
     RelayAdmissionStatus, RelayCancellationGuard, RelayDelivery, RelayPayload, RelayPayloadKind,
-    Transport,
+    Transport, WasmStateResetTarget,
 };
 use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
@@ -85,7 +86,8 @@ use nervix_models::{
     RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
     RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
     SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmStateResetScope,
+    StructuredMessageError, SubscriptionName, Timestamp, WasmRejectedStatePolicy,
+    WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -516,6 +518,8 @@ use wasm_state::{
     ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary,
     WasmCheckpointProgress, WasmGuestState,
 };
+use wasm_state_recovery::RaisedWasmStateRecoveries;
+pub(crate) use wasm_state_recovery::WasmStateRecoveryRequest;
 pub(crate) use wasm_state_reset::WasmStateResetPreparation;
 use wasm_state_reset::{
     PreparedWasmStateReset, PreparedWasmStateResetBranch, WasmStateResetRuntimeError,
@@ -543,6 +547,7 @@ pub mod wasm_checkpoint_benchmark;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;
+mod wasm_state_recovery;
 mod wasm_state_reset;
 mod websocket_signaling;
 mod window_accumulator;

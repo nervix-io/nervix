@@ -539,6 +539,7 @@ pub(in crate::registry) fn wasm_processor(name: &str, from_relay: &str, into_rel
             max_memory_bytes: nonzero!(67_108_864u64),
         },
         global_error_policy: GeneralErrorPolicy::Log,
+        rejected_state_policy: Default::default(),
         mode: AckMode::Attached,
         filter_where: None,
         materialized_state: Vec::new(),

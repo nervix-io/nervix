@@ -289,7 +289,7 @@ impl fmt::Display for LastReadinessOutcome {
 )]
 pub(crate) struct NodeStartupError {
     pub(crate) node: ClusterNodeName,
-    pub(crate) attempt: usize,
+    pub(crate) attempt: u32,
     pub(crate) elapsed: Duration,
     pub(crate) failure: NodeStartupFailure,
     pub(crate) task_state: NodeTaskState,
@@ -299,7 +299,7 @@ pub(crate) struct NodeStartupError {
 impl NodeStartupError {
     fn report(
         node: &ClusterNodeName,
-        attempt: usize,
+        attempt: u32,
         deadline: PhaseDeadline,
         failure: NodeStartupFailure,
         task_state: NodeTaskState,
@@ -324,7 +324,7 @@ impl OwnedNodeTask {
     pub(crate) async fn wait_until_ready<P, Probe>(
         &mut self,
         node: &ClusterNodeName,
-        attempt: usize,
+        attempt: u32,
         deadline: PhaseDeadline,
         poll_interval: Duration,
         mut probe: P,

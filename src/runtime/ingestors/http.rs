@@ -1,40 +1,23 @@
-//! HTTP polling ingestor execution.
+//! HTTP paced-source runtime composition.
 //!
 //! Layer: data plane.
-//! - **Owns.** HTTP polling, response capture and source-boundary timestamp observation.
-//! - **Depends on.** Typed HTTP plans, connector clients and installed domain cadence.
-//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+//!
+//! - **Owns.** Composing the HTTP connector with host-owned cadence, intake, quiescence and
+//!   readiness.
+//! - **Depends on.** The connector source contract, typed HTTP plans and pre-resolved runtime
+//!   handles.
+//! - **Must not know.** HTTP request or response details, NSPL parsing, registry validation, or
+//!   placement computation.
 
-use nervix_connector::{
-    ClientConfigResult, HttpClientConfig, HttpClientConfigError, IngestMessageHeaders,
-    RetainedIngestHeaders, client_config_value, optional_client_config_value,
-    physical_time::actual_utc_now,
+use nervix_connector::{SourceAckPolicy, SourceCapabilities, SourceConnector, SourcePlan};
+use nervix_connector_http::{HttpSource, HttpSourcePlan};
+
+use super::{
+    super::*,
+    source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_paced_source},
 };
-use reqwest::Client as HttpClient;
-use tokio_util::sync::CancellationToken;
-
-use super::super::*;
 
 pub(in crate::runtime) struct HttpIngestor;
-
-#[derive(Debug, Error)]
-pub(in crate::runtime) enum HttpIngestorError {
-    #[error("invalid HTTP method")]
-    InvalidMethod,
-}
-
-/// The headers of one borrowed HTTP response, skipping values that are not UTF-8.
-struct HttpResponseHeaders<'a>(&'a reqwest::header::HeaderMap);
-
-impl IngestMessageHeaders for HttpResponseHeaders<'_> {
-    fn visit(&self, visit: &mut dyn FnMut(&str, &str)) {
-        for (name, value) in self.0 {
-            if let Ok(value) = value.to_str() {
-                visit(name.as_str(), value);
-            }
-        }
-    }
-}
 
 impl HttpIngestor {
     pub(in crate::runtime) async fn start(
@@ -57,295 +40,90 @@ impl HttpIngestor {
         }
 
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
-
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-            .map_err(|reason| RuntimeError::StartIngestor {
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason: reason.to_string(),
+                reason: error.to_string(),
             })?;
-        let endpoint = Self::endpoint_from_config(&resolved_client.entries).map_err(|error| {
-            RuntimeError::StartIngestor {
+        let acknowledgement = SourceAckPolicy::None;
+        let source_plan = SourcePlan {
+            connector: HttpSourcePlan {
+                config: resolved_client.entries,
+            },
+            capabilities: SourceCapabilities::new(
+                ingestor.allow_header_reads,
+                ingestor.metadata_kind.source_scope(),
+                ingestor.quiesce.supports(ingestor.quiesce.mode()),
+                NonZeroU64::MIN,
+                acknowledgement.support(),
+            ),
+            acknowledgement,
+        };
+        let source = HttpSource::open(&source_plan.connector, 0)
+            .await
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
                 reason: error.to_string(),
-            }
-        })?;
-        let method = Self::method_from_config(&resolved_client.entries).map_err(|error| {
-            RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: error.to_string(),
-            }
-        })?;
-        let http_client = Self::client_from_config(&resolved_client.entries).map_err(|error| {
-            RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: error.to_string(),
-            }
-        })?;
+            })?;
         let cadence = runtime
             .bind_domain_cadence(domain, every, DomainCadenceStart::Immediate)
-            .map_err(|source| RuntimeError::StartIngestor {
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
-                reason: source.to_string(),
+                reason: error.to_string(),
             })?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
             &ingestor.name,
             dependencies.branched_templates,
         );
-        let branched_senders = branched_runtime.senders.clone();
-        let output_routes = dependencies.output_routes;
-        let filter_where = dependencies.filter_where;
-        let codec = dependencies.codec;
-        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
                 "the runtime registers quiesce control for an ingestor before it starts the task",
             );
+        runtime.prepare_ingestor_readiness(
+            domain,
+            &ingestor.name,
+            source_plan.capabilities.instances(),
+        );
 
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let task_runtime = runtime.clone();
+        let (shutdown_tx, _) = watch::channel(false);
+        let host = RuntimeSourceHost::new(RuntimeSourceHostSpec {
+            runtime: runtime.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.name.clone(),
+            timestamp_source: ingestor.timestamp_source,
+            output_routes: dependencies.output_routes,
+            filter_where: dependencies.filter_where,
+            codec: dependencies.codec,
+            metrics: dependencies.metrics,
+            branched_senders: branched_runtime.senders.clone(),
+            quiesce,
+            shutdown: shutdown_tx.subscribe(),
+            instance_index: 0,
+            metadata_kind: ingestor.metadata_kind,
+        });
+        let shutdown = shutdown_tx.subscribe();
         let task_domain = domain.clone();
         let task_ingestor = ingestor.name.clone();
-        let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_events = runtime.events().clone();
-        let task_client_mounts = resolved_client.mounts.clone();
-        let task_quiesce = quiesce.clone();
+        let client_mounts = resolved_client.mounts;
         let task = tokio::spawn(async move {
-            let _client_mounts = task_client_mounts;
-            let mut cadence = cadence;
-            let cadence_cancellation = CancellationToken::new();
-
+            let _client_mounts = client_mounts;
             info!(
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),
-                endpoint = endpoint.as_str(),
                 every = %every,
-                "started http ingestor"
+                "started HTTP ingestor"
             );
-
-            loop {
-                tokio::task::consume_budget().await;
-                if task_runtime
-                    .wait_if_ingestor_faulted(&task_domain, &task_ingestor, &mut shutdown_rx)
-                    .await
-                {
-                    break;
-                }
-                if task_runtime
-                    .inner
-                    .fault_injection
-                    .ingestor_is_failed(&task_ingestor)
-                {
-                    continue;
-                }
-                if let Some(payload) = task_quiesce.pop_buffered(0) {
-                    let mut collector = IngestRouteCollector::new(
-                        IngestMetadataKind::Headers,
-                        payload.len(),
-                        metrics.clone(),
-                    );
-                    if let Err(error) = task_runtime
-                        .dispatch_raw_ingest_payload(RawIngestDispatch {
-                            domain: &task_domain,
-                            ingestor: &task_ingestor,
-                            timestamp_source: task_timestamp_source.as_ref(),
-                            output_routes: &output_routes,
-                            filter_where: filter_where.as_ref(),
-                            branched_senders: &branched_senders,
-                            codec: codec.clone(),
-                            payload: &payload,
-                            collector: &mut collector,
-                            flush: true,
-                        })
-                        .await
-                    {
-                        task_events.report_error(format!(
-                            "failed to dispatch buffered http payload for ingestor '{}' in domain \
-                             '{}': {}",
-                            task_ingestor.as_str(),
-                            task_domain.as_str(),
-                            error
-                        ));
-                    }
-                    continue;
-                }
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break;
-                        }
-                    }
-                    occurrence = cadence.next(&cadence_cancellation) => {
-                        if let Err(error) = occurrence {
-                            task_events.report_error(format!(
-                                "http ingestor '{}' in domain '{}' could not advance its cadence: {error}",
-                                task_ingestor.as_str(),
-                                task_domain.as_str(),
-                            ));
-                            break;
-                        }
-                        if task_quiesce.should_skip_poll() {
-                            continue;
-                        }
-                        let request = http_client.request(method.clone(), endpoint.as_str()).send();
-                        tokio::pin!(request);
-                        let response = tokio::select! {
-                            biased;
-                            changed = shutdown_rx.changed() => {
-                                if changed.is_err() || *shutdown_rx.borrow() {
-                                    break;
-                                }
-                                continue;
-                            }
-                            _ = task_quiesce.wait_for_change() => continue,
-                            response = &mut request => response,
-                        };
-                        match response {
-                            Ok(response) => {
-                                if response.status() == reqwest::StatusCode::NO_CONTENT {
-                                    task_runtime
-                                        .clear_ingestor_transient_error(&task_domain, &task_ingestor);
-                                    continue;
-                                }
-
-                                if !response.status().is_success() {
-                                    let status = response.status();
-                                    task_runtime.record_ingestor_transient_error(
-                                        &task_domain,
-                                        &task_ingestor,
-                                        format!("http source returned status {status}"),
-                                    );
-                                    task_events.report_error(format!(
-                                        "http ingestor '{}' in domain '{}' received unexpected status {}",
-                                        task_ingestor.as_str(),
-                                        task_domain.as_str(),
-                                        status
-                                    ));
-                                    warn!(
-                                        domain = task_domain.as_str(),
-                                        ingestor = task_ingestor.as_str(),
-                                        status = %status,
-                                        "http ingestor received unexpected status"
-                                    );
-                                    continue;
-                                }
-
-                                let headers = RetainedIngestHeaders::capture(
-                                    &HttpResponseHeaders(response.headers()),
-                                );
-                                let body = response.bytes();
-                                tokio::pin!(body);
-                                let payload = tokio::select! {
-                                    biased;
-                                    changed = shutdown_rx.changed() => {
-                                        if changed.is_err() || *shutdown_rx.borrow() {
-                                            break;
-                                        }
-                                        continue;
-                                    }
-                                    _ = task_quiesce.wait_for_change() => continue,
-                                    payload = &mut body => payload,
-                                };
-                                match payload {
-                                    Ok(payload) => {
-                                        task_runtime.clear_ingestor_transient_error(
-                                            &task_domain,
-                                            &task_ingestor,
-                                        );
-                                        let payload = BufferedIngestPayload::new(
-                                            payload.as_ref(),
-                                            BufferedIngestMetadata::Headers(headers),
-                                            actual_utc_now(),
-                                        );
-                                        if let IngestorQuiesceIntake::Dispatch(payload) =
-                                            task_quiesce.intake(0, payload, false)
-                                        {
-                                            let mut collector = IngestRouteCollector::new(
-                                                IngestMetadataKind::Headers,
-                                                payload.len(),
-                                                metrics.clone(),
-                                            );
-                                            if let Err(error) = task_runtime
-                                                .dispatch_raw_ingest_payload(RawIngestDispatch {
-                                                    domain: &task_domain,
-                                                    ingestor: &task_ingestor,
-                                                    timestamp_source: task_timestamp_source.as_ref(),
-                                                    output_routes: &output_routes,
-                                                    filter_where: filter_where.as_ref(),
-                                                    branched_senders: &branched_senders,
-                                                    codec: codec.clone(),
-                                                    payload: &payload,
-                                                    collector: &mut collector,
-                                                    flush: true,
-                                                })
-                                                .await
-                                            {
-                                                task_events.report_error(format!(
-                                                    "failed to dispatch http payload for ingestor '{}' in domain '{}': {}",
-                                                    task_ingestor.as_str(),
-                                                    task_domain.as_str(),
-                                                    error
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    Err(error) => {
-                                        task_runtime.record_ingestor_transient_error(
-                                            &task_domain,
-                                            &task_ingestor,
-                                            format!("http response body read failed: {error}"),
-                                        );
-                                        task_events.report_error(format!(
-                                            "failed to read http response body for ingestor '{}' in domain '{}': {}",
-                                            task_ingestor.as_str(),
-                                            task_domain.as_str(),
-                                            error
-                                        ));
-                                        warn!(
-                                            domain = task_domain.as_str(),
-                                            ingestor = task_ingestor.as_str(),
-                                            error = %error,
-                                            "failed to read http response body"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                task_runtime.record_ingestor_transient_error(
-                                    &task_domain,
-                                    &task_ingestor,
-                                    format!("http request failed: {error}"),
-                                );
-                                task_events.report_error(format!(
-                                    "failed to request http source for ingestor '{}' in domain '{}': {}",
-                                    task_ingestor.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                ));
-                                warn!(
-                                    domain = task_domain.as_str(),
-                                    ingestor = task_ingestor.as_str(),
-                                    error = %error,
-                                    "failed to request http source"
-                                );
-                            }
-                        }
-                    }
-                    _ = task_quiesce.wait_for_change() => {}
-                }
-            }
-
+            run_paced_source(source, host, cadence, shutdown).await;
             info!(
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),
-                "stopped http ingestor"
+                "stopped HTTP ingestor"
             );
         });
 
@@ -357,27 +135,6 @@ impl HttpIngestor {
                 tasks: vec![task],
             },
         );
-
         Ok(())
-    }
-
-    pub(in crate::runtime) fn endpoint_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> ClientConfigResult<String> {
-        client_config_value(config, "endpoint", "HTTP")
-    }
-
-    pub(in crate::runtime) fn method_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<reqwest::Method, Report<HttpIngestorError>> {
-        let method = optional_client_config_value(config, "method").unwrap_or("GET");
-        reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|_| Report::new(HttpIngestorError::InvalidMethod))
-    }
-
-    fn client_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> Result<HttpClient, Report<HttpClientConfigError>> {
-        HttpClientConfig::new(config, "HTTP").build()
     }
 }

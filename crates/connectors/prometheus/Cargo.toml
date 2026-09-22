@@ -1,0 +1,27 @@
+[package]
+description = "The Prometheus source connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-prometheus"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+error-stack = { workspace = true }
+meticulous = { workspace = true }
+nervix-approx-into = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
