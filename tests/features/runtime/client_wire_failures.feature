@@ -36,7 +36,7 @@ Feature: Client wire failure regressions
       );
       """
 
-  @client_wire_expected_failure @client_wire_missing_command
+  @client_wire_missing_command
   Scenario Outline: A command missing from a committed transaction cannot report aggregate success
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -73,7 +73,7 @@ Feature: Client wire failure regressions
       | 1            |
       | 3            |
 
-  @client_wire_expected_failure @client_wire_lost_begin
+  @client_wire_lost_begin
   Scenario Outline: Replaying a BEGIN whose response was lost returns the original transaction
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
@@ -109,8 +109,8 @@ Feature: Client wire failure regressions
       | 1            |
       | 3            |
 
-  @client_wire_expected_failure @client_wire_duplicate_append
-  Scenario Outline: Replaying an admitted append does not preflight or append it again
+  @client_wire_duplicate_append
+  Scenario Outline: Replaying an accepted <append_kind> append does not preflight or append it again
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
@@ -130,17 +130,13 @@ Feature: Client wire failure regressions
     Given command response delivery on node "{{leader}}" pauses after execution
     When the active session sends this NSPL command request with execution reference "append-{{test_id}}" without reading its response
       """
-      CREATE SCHEMA replayed_append_record (
-        value STRING
-      );
+      <append>
       """
     Then the command response delivery pause on node "{{leader}}" is reached
     When the command response delivery pause on node "{{leader}}" is released
-    And a new session attaches to transaction "{{transaction_id}}" and executes this NSPL command with execution reference "append-{{test_id}}"
+    And a new session attaches to transaction "{{transaction_id}}" and executes this NSPL command with execution reference "append-{{test_id}}" at transaction position 0
       """
-      CREATE SCHEMA replayed_append_record (
-        value STRING
-      );
+      <append>
       """
     Then the last command request succeeded
     When this NSPL command request is executed on the leader node
@@ -155,11 +151,147 @@ Feature: Client wire failure regressions
       """
       pending=1
       """
+    When these NSPL commands are executed on the active session
+      """
+      REVERT;
+      """
 
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | append_kind  | append                             |
+      | 1            | resource     | CREATE RESOURCE replayed_resource; |
+      | 1            | domain start | START;                             |
+      | 3            | resource     | CREATE RESOURCE replayed_resource; |
+      | 3            | domain start | START;                             |
+
+  @client_wire_transaction_batch_leader_recovery
+  Scenario: An exact transaction batch retry survives a leader change without repeating effects
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given command response delivery on node "{{old_leader}}" pauses after execution
+    When the active session begins this NSPL command request with execution reference "leader-batch-{{test_id}}" in the background
+      """
+      BEGIN;
+      CREATE RESOURCE leader_batch_resource;
+      START;
+      COMMIT;
+      """
+    Then the command response delivery pause on node "{{old_leader}}" is reached
+    When the background command request connection is dropped
+    And the command response delivery pause on node "{{old_leader}}" is released
+    And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    When this NSPL command request with execution reference "leader-batch-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      CREATE RESOURCE leader_batch_resource;
+      START;
+      COMMIT;
+      """
+    Then the last command request succeeded
+    When this NSPL command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE leader_batch_resource;
+      """
+    Then the last command output contains
+      """
+      resource: leader_batch_resource
+      """
+
+  @client_wire_transaction_batch_restart
+  Scenario: An exact transaction batch retry survives a full durable restart without repeating effects
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given command response delivery on node "{{leader}}" pauses after execution
+    When the active session begins this NSPL command request with execution reference "restart-batch-{{test_id}}" in the background
+      """
+      BEGIN;
+      CREATE RESOURCE restart_batch_resource;
+      START;
+      COMMIT;
+      """
+    Then the command response delivery pause on node "{{leader}}" is reached
+    When the background command request connection is dropped
+    And the command response delivery pause on node "{{leader}}" is released
+    And the cluster is restarted
+    And this NSPL command request with execution reference "restart-batch-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      CREATE RESOURCE restart_batch_resource;
+      START;
+      COMMIT;
+      """
+    Then the last command request succeeded
+    When this NSPL command request is executed on the leader node
+      """
+      DESCRIBE RESOURCE restart_batch_resource;
+      """
+    Then the last command output contains
+      """
+      resource: restart_batch_resource
+      """
+
+  @client_wire_concurrent_transaction_retry
+  Scenario: Concurrent exact BEGIN retries join one durable execution
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    Given command execution on node "{{leader}}" pauses after durable admission
+    When the active session begins this NSPL command request with execution reference "concurrent-begin-{{test_id}}" in the background
+      """
+      BEGIN;
+      """
+    Then the durable command admission pause on node "{{leader}}" is reached
+    When an exact retry of this NSPL command request with execution reference "concurrent-begin-{{test_id}}" begins in parallel on the leader node
+      """
+      BEGIN;
+      """
+    And the durable command admission pause on node "{{leader}}" is released
+    Then the background command request succeeds
+    And the background NSPL execution succeeds
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only transaction id is saved as placeholder "transaction_id"
+
+  @client_wire_transaction_identity_conflict
+  Scenario: Reusing a durable transaction identity with different content fails semantically
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When this NSPL command request with execution reference "conflicting-transaction-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      """
+    Then the last command request succeeded
+    When this NSPL command request with execution reference "conflicting-transaction-{{test_id}}" is executed on the leader node
+      """
+      BEGIN;
+      CREATE RESOURCE conflicting_resource;
+      COMMIT;
+      """
+    Then the last command error contains
+      """
+      conflicts by content
+      """
 
   @client_wire_stalled_commit
   Scenario: A stalled commit cannot block expiry, another domain, or tombstone cleanup

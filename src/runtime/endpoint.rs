@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use nervix_connector::{
     IngestMessageHeaders, RetainedIngestHeaders, physical_time::actual_utc_now,
 };
+use nervix_connector_websockets::CompiledSignalingProtocol;
 
 use super::*;
 

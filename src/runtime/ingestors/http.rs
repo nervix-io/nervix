@@ -106,6 +106,8 @@ impl HttpIngestor {
             shutdown: shutdown_tx.subscribe(),
             instance_index: 0,
             metadata_kind: ingestor.metadata_kind,
+            buffered_intake: false,
+            flush_each_intake: false,
         });
         let shutdown = shutdown_tx.subscribe();
         let task_domain = domain.clone();

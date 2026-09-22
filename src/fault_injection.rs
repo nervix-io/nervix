@@ -64,7 +64,7 @@ pub struct FaultInjection {
 struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
-    unavailable_otel_clients: DashMap<String, (), RandomState>,
+    unavailable_sink_clients: DashMap<String, (), RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
@@ -246,7 +246,7 @@ impl Default for FaultInjection {
             inner: Arc::new(FaultInjectionState {
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
-                unavailable_otel_clients: DashMap::default(),
+                unavailable_sink_clients: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
@@ -572,15 +572,15 @@ impl FaultInjection {
             .remove(&ingestor.to_ascii_lowercase());
     }
 
-    pub fn fail_otel_client_unavailable(&self, emitter: &str) {
+    pub fn fail_sink_client_unavailable(&self, emitter: &str) {
         self.inner
-            .unavailable_otel_clients
+            .unavailable_sink_clients
             .insert(emitter.to_ascii_lowercase(), ());
     }
 
-    pub fn clear_otel_client_fault(&self, emitter: &str) {
+    pub fn clear_sink_client_fault(&self, emitter: &str) {
         self.inner
-            .unavailable_otel_clients
+            .unavailable_sink_clients
             .remove(&emitter.to_ascii_lowercase());
     }
 
@@ -1181,9 +1181,9 @@ impl FaultInjection {
             .contains_key(&ingestor.as_str().to_ascii_lowercase())
     }
 
-    pub(crate) fn otel_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
+    pub(crate) fn sink_client_is_unavailable(&self, emitter: &EmitterName) -> bool {
         self.inner
-            .unavailable_otel_clients
+            .unavailable_sink_clients
             .contains_key(&emitter.as_str().to_ascii_lowercase())
     }
 

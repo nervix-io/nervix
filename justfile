@@ -27,7 +27,12 @@ test: tests-deps
     shuttle_packages=(
         nervix-client-core
         nervix-connector
+        nervix-connector-clickhouse
         nervix-connector-kafka
+        nervix-connector-mongodb
+        nervix-connector-mysql
+        nervix-connector-otel
+        nervix-connector-postgres
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -43,7 +48,12 @@ test: tests-deps
     cargo test --all-targets \
         --package nervix-client-core \
         --package nervix-connector \
+        --package nervix-connector-clickhouse \
         --package nervix-connector-kafka \
+        --package nervix-connector-mongodb \
+        --package nervix-connector-mysql \
+        --package nervix-connector-otel \
+        --package nervix-connector-postgres \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -253,7 +263,12 @@ test-coverage: tests-deps
     shuttle_packages=(
         nervix-client-core
         nervix-connector
+        nervix-connector-clickhouse
         nervix-connector-kafka
+        nervix-connector-mongodb
+        nervix-connector-mysql
+        nervix-connector-otel
+        nervix-connector-postgres
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -271,7 +286,12 @@ test-coverage: tests-deps
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
         --package nervix-connector \
+        --package nervix-connector-clickhouse \
         --package nervix-connector-kafka \
+        --package nervix-connector-mongodb \
+        --package nervix-connector-mysql \
+        --package nervix-connector-otel \
+        --package nervix-connector-postgres \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -444,7 +464,12 @@ cargo-clippy-all:
     shuttle_packages=(
         nervix-client-core
         nervix-connector
+        nervix-connector-clickhouse
         nervix-connector-kafka
+        nervix-connector-mongodb
+        nervix-connector-mysql
+        nervix-connector-otel
+        nervix-connector-postgres
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -460,7 +485,12 @@ cargo-clippy-all:
     cargo clippy --all-targets --features autocomplete --package nervix-client-core
     cargo clippy --all-targets \
         --package nervix-connector \
-        --package nervix-connector-kafka
+        --package nervix-connector-clickhouse \
+        --package nervix-connector-kafka \
+        --package nervix-connector-mongodb \
+        --package nervix-connector-mysql \
+        --package nervix-connector-otel \
+        --package nervix-connector-postgres
     cargo clippy --all-targets --features testing --package nervix-consensus
     cargo clippy --all-targets \
         --package nervix-execution \
@@ -469,7 +499,12 @@ cargo-clippy-all:
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
         --package nervix-connector \
+        --package nervix-connector-clickhouse \
         --package nervix-connector-kafka \
+        --package nervix-connector-mongodb \
+        --package nervix-connector-mysql \
+        --package nervix-connector-otel \
+        --package nervix-connector-postgres \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
