@@ -18,12 +18,12 @@ use super::{
     phase_deadline::PhaseDeadline,
 };
 
-/// The slowest a whole cluster stopped itself after cleanup asked it to, rounded up, over the
-/// cleanups of the cluster scenarios run at the CI concurrency factor of two scenarios per CPU
-/// beside a second full suite on the same machine: a median of 0.2 seconds, 1.6 at the ninetieth
-/// percentile and 10.6 at the slowest. A policy input: measure it again when the suite or its
-/// concurrency changes.
-const SLOWEST_HEALTHY_CLUSTER_STOP: Duration = Duration::from_secs(12);
+/// The slowest a whole cluster stopped itself after cleanup asked it to, rounded up, over 163
+/// cleanups of the cluster scenarios, most of them run beside a second full suite on the same
+/// machine: a median of 0.15 seconds, 1.6 at the ninetieth percentile and 12.2 at the slowest,
+/// which was a graceful-shutdown scenario whose nodes drain. A policy input: measure it again when
+/// the suite or its concurrency changes.
+const SLOWEST_HEALTHY_CLUSTER_STOP: Duration = Duration::from_secs(15);
 /// How many times the slowest healthy stop cleanup waits before it treats a cluster as wedged and
 /// takes its tasks apart, so a runner slower than the measuring one still stops its own nodes.
 /// A policy input.
