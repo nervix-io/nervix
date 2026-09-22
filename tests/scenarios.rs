@@ -4018,6 +4018,62 @@ fn wasm_state_reset_reference(
         .clone()
 }
 
+/// The prefix every guest-requested reset is coordinated under, which is what tells a guest's
+/// request apart from an operator's in the committed schedule.
+const GUEST_WASM_STATE_RESET_PREFIX: &str = "wasm-guest-reset.";
+
+/// Whether the committed schedule reports a completed guest-requested reset for `processor`.
+async fn completed_guest_wasm_state_reset(world: &ScenarioWorld, processor: &str) -> bool {
+    let leader = running_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    let schedule = observer.current_schedule().await;
+    let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+        .expect("the scenario domain name must be valid");
+    let entity = nervix_models::NodeRef::new(
+        nervix_models::ModelKind::WasmProcessor,
+        nervix_models::ModelName::try_from(processor).expect("the processor name must be valid"),
+    );
+    let Some(domain_schedule) = schedule.domains.get(&domain) else {
+        return false;
+    };
+    let Some(node) = domain_schedule.nodes.get(&entity) else {
+        return false;
+    };
+    let Some(reset) = node.wasm_state_reset() else {
+        return false;
+    };
+    reset
+        .request()
+        .as_str()
+        .starts_with(GUEST_WASM_STATE_RESET_PREFIX)
+        && reset.phase() == nervix_models::WasmStateResetPhase::Ready
+}
+
+#[then(expr = "within {string} WASM processor {string} completes a guest-requested state reset")]
+async fn then_wasm_processor_completes_a_guest_requested_state_reset(
+    world: &mut ScenarioWorld,
+    timeout: String,
+    processor: String,
+) {
+    let timeout =
+        humantime::parse_duration(&timeout).expect("step duration must be a valid duration");
+    let deadline = Instant::now() + timeout;
+    loop {
+        tokio::task::consume_budget().await;
+        if completed_guest_wasm_state_reset(world, &processor).await {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "wasm processor '{processor}' did not complete a guest-requested state reset within \
+             {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 fn wasm_state_reset_branch(step: &Step) -> Vec<nervix_models::RemoteRuntimeField> {
     let value = serde_json::from_str::<serde_json::Value>(docstring(step))
         .expect("WASM reset branch must be a JSON object");
@@ -4296,6 +4352,18 @@ async fn given_branched_timeout_buffering_wasm_reset_graph_is_running(world: &mu
     configure_wasm_state_reset_graph(
         world,
         true,
+        true,
+        WasmStateResetGraphPlacement::Unconstrained,
+        true,
+    )
+    .await;
+}
+
+#[given("an unbranched timeout-buffering WASM reset graph is running")]
+async fn given_unbranched_timeout_buffering_wasm_reset_graph_is_running(world: &mut ScenarioWorld) {
+    configure_wasm_state_reset_graph(
+        world,
+        false,
         true,
         WasmStateResetGraphPlacement::Unconstrained,
         true,
@@ -5200,6 +5268,24 @@ async fn given_node_has_state_counting_wasm_processor_fixture_resource_directory
 }
 
 #[given(
+    expr = "node {string} has guest-requested-reset WASM processor fixture resource directory \
+            {string}"
+)]
+async fn given_node_has_guest_requested_reset_wasm_processor_fixture_resource_directory(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    placeholder: String,
+) {
+    place_generated_wasm_processor_fixture(
+        world,
+        &node_id,
+        &placeholder,
+        guest_requested_reset_wasm_fixture("released_events"),
+    )
+    .await;
+}
+
+#[given(
     expr = "node {string} has timeout-buffering WASM processor fixture resource directory {string}"
 )]
 async fn given_node_has_timeout_buffering_wasm_processor_fixture_resource_directory(
@@ -5571,6 +5657,138 @@ fn state_counting_wasm_fixture(output_relay: &str) -> Vec<u8> {
           (func (export "nervix_reset_state") (result i32)
             i32.const 0
             global.set $count
+            i32.const 0
+            global.set $emitted
+            i32.const 0)
+        )"#,
+        rejected = nervix_wasm::SavedStateRejection::ApplicationState.code()
+    )
+    .into_bytes()
+}
+
+/// A guest that buffers one output behind a logical timeout. An instance the host created without
+/// saved state asks, from that timeout callback, for a new guest-state lifetime instead of
+/// releasing what it buffered; an instance restored from saved state releases it. The buffered
+/// output belongs to the callback that asked, so nothing the asking instance holds may ever reach
+/// the relay, and a payload can only come from an instance restored from the lifetime the reset
+/// published.
+fn guest_requested_reset_wasm_fixture(output_relay: &str) -> Vec<u8> {
+    let encoded = WasmEnvelope::output(
+        Vec::new(),
+        vec![WasmRoutedOutput::new(
+            output_relay,
+            vec![
+                WasmOutputColumnRef::uninitialized(),
+                WasmOutputColumnRef::uninitialized(),
+            ],
+            WasmAckSidecar {
+                rows: vec![WasmOutputRow::default()],
+                ..WasmAckSidecar::default()
+            },
+        )],
+    )
+    .encode()
+    .expect("guest-requested reset WASM output fixture must encode");
+    let encoded_wat = encoded
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let encoded_len = encoded.len();
+
+    format!(
+        r#"(module
+          (import "env" "nervix_timeout_after_nanos" (func $timeout (param i64) (result i64)))
+          (import "env" "nervix_request_state_reset" (func $request_state_reset (result i32)))
+          (memory (export "memory") 1)
+          (global $count (mut i32) (i32.const 0))
+          (global $restored (mut i32) (i32.const 0))
+          (global $pending (mut i32) (i32.const 0))
+          (global $emitted (mut i32) (i32.const 0))
+          (global $read_ptr (mut i32) (i32.const 0))
+          (data (i32.const 32768) "{encoded_wat}")
+          (func (export "nervix_buffer_ptr") (result i32) global.get $read_ptr)
+          (func (export "nervix_buffer_len") (result i32) (i32.const {encoded_len}))
+          (func (export "nervix_buffer_capacity") (result i32) (i32.const 16384))
+          (func (export "nervix_alloc") (param i32) (result i32)
+            i32.const 0
+            global.set $read_ptr
+            i32.const 0)
+          (func (export "nervix_init") (param i32 i32) (result i32) (i32.const 0))
+          (func (export "nervix_current_domain_time_nanos") (result i64) (i64.const 0))
+          (func (export "nervix_process_batch") (param i32 i32) (result i32)
+            global.get $count
+            i32.const 1
+            i32.add
+            global.set $count
+            i32.const 1
+            global.set $pending
+            i64.const 1000000000
+            call $timeout
+            drop
+            i32.const 0)
+          (func $release (result i32)
+            global.get $pending
+            if
+              i32.const 0
+              global.set $pending
+              i32.const 1
+              global.set $emitted
+            end
+            i32.const 0)
+          (func (export "nervix_on_timeout") (param i64) (result i32)
+            global.get $restored
+            if (result i32)
+              call $release
+            else
+              ;; The counter this lifetime saved is unusable, so instead of releasing what it
+              ;; buffered this instance asks for the whole state lifetime. Asking twice in one
+              ;; callback must still replace that lifetime exactly once.
+              call $request_state_reset
+              drop
+              call $request_state_reset
+              drop
+              i32.const 0
+            end)
+          (func (export "nervix_flush") (result i32) call $release)
+          (func (export "nervix_read_emit") (result i32)
+            global.get $emitted
+            if (result i32)
+              i32.const 0
+              global.set $emitted
+              i32.const 32768
+              global.set $read_ptr
+              i32.const {encoded_len}
+            else
+              i32.const 0
+            end)
+          (func (export "nervix_dump_state") (result i32)
+            i32.const 16
+            global.get $count
+            i32.store
+            i32.const 16
+            global.set $read_ptr
+            i32.const 4)
+          (func (export "nervix_load_state") (param $ptr i32) (param $len i32) (result i32)
+            local.get $len
+            i32.const 4
+            i32.ne
+            if (result i32)
+              i32.const {rejected}
+            else
+              local.get $ptr
+              i32.load
+              global.set $count
+              i32.const 1
+              global.set $restored
+              i32.const 0
+            end)
+          (func (export "nervix_reset_state") (result i32)
+            i32.const 0
+            global.set $count
+            i32.const 0
+            global.set $restored
+            i32.const 0
+            global.set $pending
             i32.const 0
             global.set $emitted
             i32.const 0)
