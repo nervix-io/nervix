@@ -11,9 +11,9 @@
 //! with its ACK tokens, so a quiesce flush releases it and it is never saved.
 //!
 //! Sentinel first values exercise the error paths: `-100` routes a message
-//! error, `-200` reports a global error, `-300` latches guest error state, and
+//! error, `-200` reports a global error, `-300` latches guest error state,
 //! `-400` is filtered like any other value but leaves the guest unable to
-//! serialize its state.
+//! serialize its state, and `-500` asks the host for a new state lifetime.
 
 use std::{sync::Arc, time::Duration};
 
@@ -22,12 +22,13 @@ use arrow_schema::ArrowError;
 use nervix_wasm_sdk::{
     AckSidecar, AckTokenSet, BranchContext, GuestContext, GuestError, InputBatch, MessageErrorSet,
     OutputColumnRef, OutputEnvelope, Processor, ProcessorField, ProcessorSchema, ProcessorType,
-    TimeoutHandle,
+    StateResetRequestAnswer, TimeoutHandle,
 };
 
 const FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 const FLUSH_EVERY_BATCHES: u64 = 2;
 const UNSERIALIZABLE_STATE_VALUE: i32 = -400;
+const REQUEST_STATE_RESET_VALUE: i32 = -500;
 
 struct EvenRowFilter {
     /// Rows this branch has accepted. Saved and restored, it numbers the rows that follow.
@@ -99,6 +100,19 @@ impl Processor for EvenRowFilter {
                     "guest message error for value -100".to_string(),
                 )?;
                 ctx.emit(output)?;
+                return Ok(());
+            }
+            Some(REQUEST_STATE_RESET_VALUE) => {
+                // The row ordinal this guest counts is unusable, so it asks for the whole state
+                // lifetime rather than clearing the field. The host replaces it after this
+                // callback returns: the batch still buffered here and the one that asked are both
+                // left to their sources, and the instance that asked runs nothing more.
+                let answer = ctx.request_state_reset();
+                if answer == StateResetRequestAnswer::Refused {
+                    return Err(GuestError::failed(
+                        "host refused a state reset request from process_batch",
+                    ));
+                }
                 return Ok(());
             }
             Some(UNSERIALIZABLE_STATE_VALUE) => {

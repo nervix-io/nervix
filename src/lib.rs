@@ -47,7 +47,6 @@ pub mod cluster;
 mod domain_clock_authority;
 #[cfg(feature = "testing")]
 mod fault_injection;
-pub mod jaq_program;
 pub mod memory_pressure;
 pub mod metrics;
 pub(crate) mod registry;

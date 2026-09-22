@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
     HttpClientConfig, PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRetryAfter, SinkStartError, SinkStartResult, client_config_value,
+    SinkRecord, SinkRetryDelay, SinkStartError, SinkStartResult, client_config_value,
     physical_time::actual_utc_now,
 };
 use nervix_models::{ClientConfigEntry, Timestamp};
@@ -284,7 +284,7 @@ impl RecordSink for SentrySink {
                 "Sentry envelope request returned HTTP status {status}"
             ));
             outcome.fail(match retry_delay {
-                Some(delay) => error.attach(SinkRetryAfter(delay)),
+                Some(delay) => error.attach(SinkRetryDelay(delay)),
                 None => error,
             });
             return outcome;

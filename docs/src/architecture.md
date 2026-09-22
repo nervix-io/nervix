@@ -68,9 +68,21 @@ only through an opaque host handle, so neither runtime types nor ACK maps cross 
 Every record sink implements this contract in its own crate under `crates/connectors`: Kafka,
 Pulsar, RabbitMQ, NATS, MQTT, Redis, ZeroMQ, Syslog, SQS, and Sentry. Each crate owns its driver
 and the raw client configuration that driver reads, neither of which belongs to the server runtime.
-A pooled transport is the one division: the crate owns the pool type and the connection it
-publishes through, while the runtime keeps the lease that holds the pool open, the declared bounds
-it is sized by, and the wait it records while a connection is handed over.
+
+A row sink writes values rather than encoded payloads, so the runtime evaluates its `VALUES`
+mapping itself. The mapping compiles once when the emitter starts and runs once per batch,
+producing one Arrow column per target column together with the rows that still have to be written;
+a row whose expression failed is rejected with its structured message error and never reaches the
+sink. Sensitivity is unchanged by that projection: a mapped value still requires explicit leakage to
+leave the domain. Each row sink then encodes from those columns at its own boundary — OTLP protobuf
+for OpenTelemetry in `crates/connectors/otel`, `JSONEachRow` lines for ClickHouse in
+`crates/connectors/clickhouse`, bound parameters for Postgres and MySQL in
+`crates/connectors/postgres` and `crates/connectors/mysql`, and BSON documents for MongoDB in
+`crates/connectors/mongodb`. No mapped row is ever materialized as a scalar between the two.
+
+The pooled sinks keep the same split. A crate owns its driver's pool and the connection it hands
+out, and the runtime owns the lease on the node's one instance of a named client, the wait a graph
+node reports while it holds no connection, and the bounds the client declared.
 
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and

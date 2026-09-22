@@ -1957,7 +1957,7 @@ impl Application {
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
-        service.register_wasm_state_reset_interconnect_handler()?;
+        service.register_wasm_state_reset_service(shutdown.clone())?;
         service.register_wasm_state_recovery_interconnect_handler()?;
         service.register_wasm_state_recovery_coordinator(shutdown.clone());
 

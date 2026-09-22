@@ -34,6 +34,8 @@ pub const SERIALIZATION_NAME: &str = "FlatBuffers";
 
 const SNAPSHOT_ENVELOPE_REJECTED: i32 = -7;
 const APPLICATION_STATE_REJECTED: i32 = -8;
+const STATE_RESET_ACCEPTED: i32 = 0;
+const STATE_RESET_REFUSED: i32 = -9;
 
 /// A guest's verdict that the saved state `nervix_load_state` handed it cannot be restored.
 ///
@@ -64,6 +66,43 @@ impl SavedStateRejection {
         match code {
             SNAPSHOT_ENVELOPE_REJECTED => Some(Self::SnapshotEnvelope),
             APPLICATION_STATE_REJECTED => Some(Self::ApplicationState),
+            _ => None,
+        }
+    }
+}
+
+/// The host's answer to a guest that asked it to replace this branch's guest-state lifetime.
+///
+/// A guest asks with the `nervix_request_state_reset` host import and reads the answer from its
+/// return code. An accepted request is scheduled for after the callback returns and is scoped to
+/// the calling branch and the state generation it runs in; a guest cannot name another processor,
+/// domain, branch, or generation. Acceptance says the host took the request, never that the new
+/// lifetime is durable: the guest learns that only by being asked to initialize again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StateResetRequestAnswer {
+    /// The host took the request and replaces the lifetime once the callback returns.
+    Accepted,
+    /// The guest operation in progress cannot carry a request, so nothing was scheduled. Only the
+    /// callbacks that the host completes with a checkpoint — processing a batch, a timeout, and a
+    /// quiesce flush — have uncommitted effects a reset can discard.
+    Refused,
+}
+
+impl StateResetRequestAnswer {
+    /// The `nervix_request_state_reset` return code that reports this answer.
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Accepted => STATE_RESET_ACCEPTED,
+            Self::Refused => STATE_RESET_REFUSED,
+        }
+    }
+
+    /// The answer a `nervix_request_state_reset` return code reports, or `None` for every code
+    /// that is not one.
+    pub const fn from_code(code: i32) -> Option<Self> {
+        match code {
+            STATE_RESET_ACCEPTED => Some(Self::Accepted),
+            STATE_RESET_REFUSED => Some(Self::Refused),
             _ => None,
         }
     }
@@ -1047,6 +1086,35 @@ mod tests {
         for code in [0, -1, -2, -3, -4, -5, -6] {
             assert_eq!(SavedStateRejection::from_code(code), None);
         }
+    }
+
+    #[test]
+    fn every_state_reset_request_answer_is_read_back_from_its_own_code() {
+        let answers = [
+            StateResetRequestAnswer::Accepted,
+            StateResetRequestAnswer::Refused,
+        ];
+
+        for answer in answers {
+            assert_eq!(
+                StateResetRequestAnswer::from_code(answer.code()),
+                Some(answer)
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_reset_request_answer_never_shares_a_code_with_a_saved_state_rejection() {
+        for rejection in [
+            SavedStateRejection::SnapshotEnvelope,
+            SavedStateRejection::ApplicationState,
+        ] {
+            assert_eq!(StateResetRequestAnswer::from_code(rejection.code()), None);
+        }
+        assert_eq!(
+            SavedStateRejection::from_code(StateResetRequestAnswer::Refused.code()),
+            None
+        );
     }
 
     #[test]

@@ -1,23 +1,39 @@
-//! OpenTelemetry emission at the external data-plane boundary.
+//! OpenTelemetry sink connector.
 //!
-//! Layer: data plane.
-//! - **Owns.** OTLP value mapping, request encoding and export-observation timestamps.
-//! - **Depends on.** Validated emitter plans, Arrow batches and OpenTelemetry protocols.
-//! - **Must not know.** NSPL parsing, placement decisions or control-plane transactions.
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** OTLP client and TLS configuration, the exact types each signal accepts, the OTLP
+//!   record every mapped row becomes, its resource and scope, gzip request encoding, the
+//!   export-observation timestamp, and OTLP status classification.
+//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
+//!   and the OpenTelemetry protocol crates.
+//! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
+//!   connector implementation.
 
-use std::{io::Write, num::NonZeroU64, str::FromStr};
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
 
+use std::{io::Write, num::NonZeroU64, str::FromStr, sync::Arc as StdArc, time::Duration};
+
+use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use arrow_array::{
     Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, ListArray, StringArray, TimestampNanosecondArray,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::{DataType, TimeUnit};
+use async_trait::async_trait;
+use error_stack::Report;
 use flate2::{Compression as GzipLevel, write::GzEncoder};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_connector::{
-    HttpClientConfig, client_tls_paths, optional_client_config_value, read_tls_file,
+    HttpClientConfig, MappedSinkRows, PerRecordOutcome, RejectedSinkRecord, RowSink, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkRetryDelay,
+    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    optional_client_config_value, read_tls_file,
 };
-use nervix_models::EmitterName;
+use nervix_models::{ClientConfigEntry, FieldPath, Timestamp};
 use opentelemetry_proto::tonic::{
     collector::{
         logs::v1::{
@@ -54,22 +70,126 @@ use reqwest::{
     Client as HttpClient, StatusCode,
     header::{CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, RETRY_AFTER},
 };
+use thiserror::Error;
+use tracing::warn;
 
-use super::*;
+const OTEL: &str = "otel";
 
 const OTLP_PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
-pub(in crate::runtime) struct OtelEmitter {
-    client: Option<OtelClient>,
-    program: Option<CompiledSqlValuesProgram>,
-    resource: Option<Resource>,
+/// The OpenTelemetry sink, which exports each mapped row as one OTLP record.
+pub struct OtelSink {
+    client: OtelClient,
+    signal: OtelSignal,
+    /// Where each signal key sits among the mapped columns, resolved once at start.
+    value_columns: HashMap<String, usize>,
+    /// The attribute keys, in the order their columns follow the signal's own.
+    attributes: Vec<String>,
+    /// The first mapped column an attribute occupies, which is the number of signal values.
+    attribute_offset: usize,
+    resource: Resource,
     scope: Option<InstrumentationScope>,
 }
 
-pub(super) struct OtelEmitterInit<'a> {
-    pub(super) plan: &'a OtelSinkPlan,
-    pub(super) context: &'a EmitterSinkContext,
-    pub(super) input_schema: StdArc<arrow_schema::Schema>,
+/// What one OTEL emitter exports with, from its typed sink plan.
+pub struct OtelSinkConfig {
+    pub config: Vec<ClientConfigEntry>,
+    pub signal: OtelSignal,
+    /// The signal keys this emitter maps, in the order of its mapped columns.
+    pub values: Vec<String>,
+    /// The attribute keys this emitter maps, whose columns follow the signal's own.
+    pub attributes: Vec<String>,
+    pub resource: Vec<OtelResourceAttribute>,
+    pub scope: Option<OtelScope>,
+    /// The mapped columns the host projects, whose exact types this sink validates before it
+    /// accepts its first batch.
+    pub mapped_schema: StdArc<arrow_schema::Schema>,
+}
+
+/// The OTLP signal one emitter exports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OtelSignal {
+    Logs,
+    Traces,
+    Metric(OtelMetric),
+}
+
+/// The metric one emitter exports, with the aggregation its data points carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtelMetric {
+    pub name: String,
+    pub unit: String,
+    pub description: Option<String>,
+    pub kind: OtelMetricKind,
+}
+
+/// The shape of a metric's data points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OtelMetricKind {
+    Gauge,
+    Sum {
+        monotonic: bool,
+        temporality: OtelAggregationTemporality,
+    },
+    Histogram {
+        temporality: OtelAggregationTemporality,
+    },
+}
+
+/// Whether a metric's data points measure a delta or a cumulative total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtelAggregationTemporality {
+    Delta,
+    Cumulative,
+}
+
+/// The instrumentation scope every exported record carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtelScope {
+    pub name: String,
+    pub version: Option<String>,
+}
+
+/// One `RESOURCE` attribute, whose value is fixed for as long as this emitter runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OtelResourceAttribute {
+    pub key: String,
+    pub value: OtelLiteral,
+}
+
+/// A value a `RESOURCE` attribute carries, which never depends on a record.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OtelLiteral {
+    I64(i64),
+    F64(f64),
+    Bool(bool),
+    String(String),
+    Array(Vec<OtelLiteral>),
+    Null,
+}
+
+impl OtelLiteral {
+    /// This literal as OTLP carries it, or nothing for a null the resource simply omits.
+    fn any_value(&self) -> OtelValueResult<Option<AnyValue>> {
+        let value = match self {
+            Self::I64(value) => any_value::Value::IntValue(*value),
+            Self::F64(value) => any_value::Value::DoubleValue(*value),
+            Self::Bool(value) => any_value::Value::BoolValue(*value),
+            Self::String(value) => any_value::Value::StringValue(value.clone()),
+            Self::Null => return Ok(None),
+            Self::Array(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    let value = item
+                        .any_value()?
+                        .ok_or_else(|| Report::new(OtelValueError::NullResourceArrayElement))?;
+                    values.push(value);
+                }
+                any_value::Value::ArrayValue(ArrayValue { values })
+            }
+        };
+        Ok(Some(AnyValue { value: Some(value) }))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,8 +229,6 @@ enum OtelTransport {
 
 struct OtelClient {
     transport: OtelTransport,
-    fault_injection: ConfiguredFaultInjection,
-    emitter: EmitterName,
 }
 
 enum OtelExportRequest {
@@ -127,7 +245,7 @@ struct OtelPartialSuccess {
 enum OtelTransportOutcome {
     Accepted(Option<OtelPartialSuccess>),
     Rejected(String),
-    Failed(Report<EmitterRuntimeError>),
+    Failed(Report<SinkPublishError>),
 }
 
 #[derive(Debug)]
@@ -144,13 +262,12 @@ impl OtelRecordError {
         }
     }
 
-    fn structured(self, execution_now: Timestamp) -> StructuredMessageError {
-        structured_message_error(
-            execution_now,
-            MessageErrorCode::Validation,
+    /// The rejection the host delivers for the row this value came from.
+    fn rejected(self, position: SinkRecordPosition, occurred_at: Timestamp) -> RejectedSinkRecord {
+        RejectedSinkRecord::invalid(
+            position,
+            occurred_at,
             self.reason,
-            MessageErrorOperation::Values,
-            None,
             [FieldPath::new(format!("otel.{}", self.key))],
         )
     }
@@ -169,8 +286,6 @@ enum OtelValueError {
     InvalidAttributeMappingType { key: String, actual: DataType },
     #[error("OTEL RESOURCE arrays do not support NULL elements")]
     NullResourceArrayElement,
-    #[error("OTEL RESOURCE values must contain only literal values or literal arrays")]
-    InvalidResourceExpression,
     #[error("OTEL array value has an invalid Arrow representation")]
     InvalidArrayRepresentation,
     #[error("OTEL value requires ARRAY or VEC, found {actual}")]
@@ -191,12 +306,38 @@ enum OtelValueError {
     NullAttributeArrayElement,
     #[error("OTEL attribute type {actual} is unsupported")]
     UnsupportedAttributeType { actual: DataType },
+    #[error("OTEL VALUES and ATTRIBUTES map {expected} columns, and the host projected {actual}")]
+    MappedColumnCount { expected: usize, actual: usize },
 }
 
 type OtelValueResult<T> = Result<T, Report<OtelValueError>>;
 
+/// A configuration this sink cannot start with.
+fn invalid_configuration(reason: impl std::fmt::Display) -> Report<SinkStartError> {
+    Report::new(SinkStartError::InvalidConfiguration { sink: OTEL })
+        .attach_printable(reason.to_string())
+}
+
+/// A failed export the host retries on its declared backoff.
+fn publish_failure(reason: impl std::fmt::Display) -> Report<SinkPublishError> {
+    Report::new(SinkPublishError::Publish { sink: OTEL }).attach_printable(reason.to_string())
+}
+
+/// A failed export the host retries no sooner than the receiver asked it to.
+fn publish_failure_after(
+    reason: impl std::fmt::Display,
+    delay: Duration,
+) -> Report<SinkPublishError> {
+    publish_failure(reason).attach(SinkRetryDelay(delay))
+}
+
+/// A refused export that no retry would change, such as a receiver that rejects this endpoint.
+fn misconfigured(reason: impl std::fmt::Display) -> Report<SinkPublishError> {
+    Report::new(SinkPublishError::Misconfigured { sink: OTEL }).attach_printable(reason.to_string())
+}
+
 impl OtelClientSettings {
-    fn parse(config: &[ClientConfigEntry]) -> EmitterRuntimeResult<Self> {
+    fn parse(config: &[ClientConfigEntry]) -> SinkStartResult<Self> {
         const ALLOWED_KEYS: &[&str] = &[
             "endpoint",
             "protocol",
@@ -207,42 +348,44 @@ impl OtelClientSettings {
             "tls_cert_file",
             "tls_key_file",
         ];
-        let mut seen = HashSet::default();
+        let mut seen = HashSet::new();
         for entry in config {
             let key = entry.key.to_ascii_lowercase();
             if !ALLOWED_KEYS.contains(&key.as_str()) {
-                return Err(emitter_config_error(format!(
+                return Err(invalid_configuration(format!(
                     "unsupported OTEL client config key '{}'",
                     entry.key
                 )));
             }
             if !seen.insert(key) {
-                return Err(emitter_config_error(format!(
+                return Err(invalid_configuration(format!(
                     "duplicate OTEL client config key '{}'",
                     entry.key
                 )));
             }
         }
 
-        let endpoint = emitter_config_value(config, "endpoint", "OTEL")?;
+        let endpoint =
+            client_config_value(config, "endpoint", "OTEL").map_err(invalid_configuration)?;
         let endpoint = url::Url::parse(&endpoint)
-            .map_err(|error| emitter_config_error(format!("invalid OTEL endpoint: {error}")))?;
+            .map_err(|error| invalid_configuration(format!("invalid OTEL endpoint: {error}")))?;
         if endpoint.scheme() != "http" && endpoint.scheme() != "https" {
-            return Err(emitter_config_error(format!(
+            return Err(invalid_configuration(format!(
                 "OTEL endpoint must use http or https, found '{}'",
                 endpoint.scheme()
             )));
         }
         if endpoint.host_str().is_none() {
-            return Err(emitter_config_error("OTEL endpoint must include a host"));
+            return Err(invalid_configuration("OTEL endpoint must include a host"));
         }
 
-        let protocol = emitter_config_value(config, "protocol", "OTEL")?;
+        let protocol =
+            client_config_value(config, "protocol", "OTEL").map_err(invalid_configuration)?;
         let protocol = match protocol.as_str() {
             "grpc" => OtelProtocol::Grpc,
             "http/protobuf" => OtelProtocol::HttpProtobuf,
             _ => {
-                return Err(emitter_config_error(format!(
+                return Err(invalid_configuration(format!(
                     "invalid OTEL protocol '{protocol}'; expected 'grpc' or 'http/protobuf'"
                 )));
             }
@@ -252,17 +395,17 @@ impl OtelClientSettings {
             None => OtelCompression::None,
             Some("gzip") => OtelCompression::Gzip,
             Some(compression) => {
-                return Err(emitter_config_error(format!(
+                return Err(invalid_configuration(format!(
                     "invalid OTEL compression '{compression}'; expected 'gzip'"
                 )));
             }
         };
         let timeout = optional_client_config_value(config, "timeout_ms")
-            .map(|raw| -> EmitterRuntimeResult<Duration> {
+            .map(|raw| -> SinkStartResult<Duration> {
                 // `NonZeroU64` rejects both a non-number and a zero, so a request budget that
                 // could never allow a request is not representable past this point.
                 let millis = raw.parse::<NonZeroU64>().map_err(|_| {
-                    emitter_config_error(format!(
+                    invalid_configuration(format!(
                         "invalid OTEL timeout_ms '{raw}'; expected a positive integer"
                     ))
                 })?;
@@ -283,19 +426,19 @@ impl OtelClientSettings {
         })
     }
 
-    fn parse_headers(raw: &str) -> EmitterRuntimeResult<Vec<(String, String)>> {
+    fn parse_headers(raw: &str) -> SinkStartResult<Vec<(String, String)>> {
         if raw.trim().is_empty() {
             return Ok(Vec::new());
         }
         raw.split(',')
             .map(|entry| {
                 let (key, value) = entry.split_once('=').ok_or_else(|| {
-                    emitter_config_error("invalid OTEL headers entry; expected k=v")
+                    invalid_configuration("invalid OTEL headers entry; expected k=v")
                 })?;
                 let key = key.trim().to_ascii_lowercase();
                 let value = value.trim().to_string();
                 if key.is_empty() {
-                    return Err(emitter_config_error(
+                    return Err(invalid_configuration(
                         "OTEL headers entries require a non-empty key",
                     ));
                 }
@@ -305,83 +448,69 @@ impl OtelClientSettings {
     }
 }
 
-impl OtelEmitter {
-    pub(in crate::runtime) fn new(init: OtelEmitterInit<'_>) -> Self {
-        let OtelEmitterInit {
-            plan,
-            context,
-            input_schema,
-        } = init;
-        let client = match Self::transport_from_config(&plan.client.config.entries) {
-            Ok(transport) => Some(OtelClient {
-                transport,
-                fault_injection: context.runtime.inner.fault_injection.clone(),
-                emitter: context.emitter.clone(),
-            }),
-            Err(error) => {
-                context.report_init_error("otel", &emitter_error_message(&error));
-                None
-            }
+impl OtelSink {
+    pub fn new(config: OtelSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+        let OtelSinkConfig {
+            config,
+            signal,
+            values,
+            attributes,
+            resource,
+            scope,
+            mapped_schema,
+        } = config;
+        let client = OtelClient {
+            transport: Self::transport_from_config(&config)?,
         };
-
-        let mut mappings = Vec::with_capacity(plan.values.len() + plan.attributes.len());
-        mappings.extend_from_slice(&plan.values);
-        mappings.extend_from_slice(&plan.attributes);
-        let program = match compile_sql_values_program(
-            "OTEL",
-            "otel",
-            &context.domain,
-            &context.emitter,
-            &mappings,
-            input_schema,
-            context.udfs.as_ref(),
-        ) {
-            Ok(program) => match Self::validate_program_types(
-                &plan.signal,
-                &plan.values,
-                &plan.attributes,
-                &program,
-            ) {
-                Ok(()) => Some(program),
-                Err(error) => {
-                    context.report_init_error("otel", &error.to_string());
-                    None
-                }
-            },
-            Err(error) => {
-                context.report_init_error("otel", &error.to_string());
-                None
+        Self::validate_mapped_types(&signal, &values, &attributes, &mapped_schema)
+            .map_err(|error| invalid_configuration(format!("{error:?}")))?;
+        // A key mapped twice keeps its first column, which is the one the signal reads.
+        let mut value_columns = HashMap::with_capacity(values.len());
+        for (index, key) in values.iter().enumerate() {
+            value_columns.entry(key.clone()).or_insert(index);
+        }
+        let mut attribute_values = Vec::with_capacity(resource.len());
+        for attribute in resource {
+            let value = attribute
+                .value
+                .any_value()
+                .map_err(|error| invalid_configuration(format!("{error:?}")))?;
+            if let Some(value) = value {
+                attribute_values.push(KeyValue {
+                    key: attribute.key,
+                    value: Some(value),
+                });
             }
+        }
+        let resource = Resource {
+            attributes: attribute_values,
+            dropped_attributes_count: 0,
+            entity_refs: Vec::new(),
         };
-        let resource = match Self::resource_from_mappings(&plan.resource) {
-            Ok(resource) => Some(resource),
-            Err(error) => {
-                context.report_init_error("otel", &error.to_string());
-                None
-            }
-        };
-        let scope = plan.scope.as_ref().map(|scope| InstrumentationScope {
-            name: scope.name.clone(),
-            version: scope.version.clone().unwrap_or_default(),
+        let scope = scope.map(|scope| InstrumentationScope {
+            name: scope.name,
+            version: scope.version.unwrap_or_default(),
             attributes: Vec::new(),
             dropped_attributes_count: 0,
         });
-
-        Self {
+        Ok(Self {
             client,
-            program,
+            signal,
+            attribute_offset: values.len(),
+            value_columns,
+            attributes,
             resource,
             scope,
-        }
+        })
     }
 
-    fn transport_from_config(config: &[ClientConfigEntry]) -> EmitterRuntimeResult<OtelTransport> {
+    fn transport_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<OtelTransport> {
         let settings = OtelClientSettings::parse(config)?;
         match settings.protocol {
             OtelProtocol::Grpc => {
                 let mut endpoint =
                     Endpoint::from_shared(settings.endpoint.to_string()).map_err(|error| {
-                        emitter_config_error(format!("invalid OTEL endpoint: {error}"))
+                        invalid_configuration(format!("invalid OTEL endpoint: {error}"))
                     })?;
                 if let Some(timeout) = settings.timeout {
                     endpoint = endpoint.timeout(timeout).connect_timeout(timeout);
@@ -397,30 +526,30 @@ impl OtelEmitter {
                         .domain_name(host.to_string());
                     if let Some(ca_file) = tls.ca_file.as_ref() {
                         let ca = read_tls_file(ca_file, "OTEL TLS CA certificate")
-                            .map_err(emitter_config_error)?;
+                            .map_err(invalid_configuration)?;
                         tls_config = tls_config.ca_certificate(Certificate::from_pem(ca));
                     }
                     match (&tls.cert_file, &tls.key_file) {
                         (Some(cert_file), Some(key_file)) => {
                             let cert = read_tls_file(cert_file, "OTEL TLS certificate")
-                                .map_err(emitter_config_error)?;
+                                .map_err(invalid_configuration)?;
                             let key = read_tls_file(key_file, "OTEL TLS private key")
-                                .map_err(emitter_config_error)?;
+                                .map_err(invalid_configuration)?;
                             tls_config = tls_config.identity(Identity::from_pem(cert, key));
                         }
                         (None, None) => {}
                         _ => {
-                            return Err(emitter_config_error(
+                            return Err(invalid_configuration(
                                 "OTEL TLS client authentication requires both 'tls_cert_file' and \
                                  'tls_key_file'",
                             ));
                         }
                     }
                     endpoint = endpoint.tls_config(tls_config).map_err(|error| {
-                        emitter_config_error(format!("invalid OTEL TLS configuration: {error}"))
+                        invalid_configuration(format!("invalid OTEL TLS configuration: {error}"))
                     })?;
                 } else if !tls.is_empty() {
-                    return Err(emitter_config_error(
+                    return Err(invalid_configuration(
                         "OTEL TLS files require an https endpoint",
                     ));
                 }
@@ -435,7 +564,7 @@ impl OtelEmitter {
             OtelProtocol::HttpProtobuf => {
                 let client = HttpClientConfig::new(config, "OTEL")
                     .build()
-                    .map_err(emitter_config_error)?;
+                    .map_err(invalid_configuration)?;
                 let headers = Self::http_headers(&settings.headers)?;
                 Ok(OtelTransport::HttpProtobuf {
                     client,
@@ -447,58 +576,75 @@ impl OtelEmitter {
         }
     }
 
-    fn grpc_metadata(headers: &[(String, String)]) -> EmitterRuntimeResult<MetadataMap> {
+    fn grpc_metadata(headers: &[(String, String)]) -> SinkStartResult<MetadataMap> {
         let mut metadata = MetadataMap::new();
         for (key, value) in headers {
             let key = MetadataKey::<Ascii>::from_bytes(key.as_bytes()).map_err(|error| {
-                emitter_config_error(format!("invalid OTEL gRPC header name '{key}': {error}"))
+                invalid_configuration(format!("invalid OTEL gRPC header name '{key}': {error}"))
             })?;
             let value = MetadataValue::<Ascii>::from_str(value).map_err(|error| {
-                emitter_config_error(format!("invalid OTEL gRPC header value: {error}"))
+                invalid_configuration(format!("invalid OTEL gRPC header value: {error}"))
             })?;
             metadata.insert(key, value);
         }
         Ok(metadata)
     }
 
-    fn http_headers(headers: &[(String, String)]) -> EmitterRuntimeResult<HeaderMap> {
+    fn http_headers(headers: &[(String, String)]) -> SinkStartResult<HeaderMap> {
         let mut parsed = HeaderMap::new();
         for (key, value) in headers {
             let name = HeaderName::from_bytes(key.as_bytes()).map_err(|error| {
-                emitter_config_error(format!("invalid OTEL HTTP header name '{key}': {error}"))
+                invalid_configuration(format!("invalid OTEL HTTP header name '{key}': {error}"))
             })?;
             let value = HeaderValue::from_str(value).map_err(|error| {
-                emitter_config_error(format!("invalid OTEL HTTP header value: {error}"))
+                invalid_configuration(format!("invalid OTEL HTTP header value: {error}"))
             })?;
             parsed.insert(name, value);
         }
         Ok(parsed)
     }
 
-    fn validate_program_types(
+    /// Checks the exact type of every mapped column before the first batch arrives.
+    ///
+    /// The signal's own keys come first and its attributes follow, in the order the host projects
+    /// them, so a column is read by position rather than by a name a mapping may have used twice.
+    fn validate_mapped_types(
         signal: &OtelSignal,
-        values: &[OtelValueMapping],
-        attributes: &[OtelValueMapping],
-        program: &CompiledSqlValuesProgram,
+        values: &[String],
+        attributes: &[String],
+        mapped_schema: &StdArc<arrow_schema::Schema>,
     ) -> OtelValueResult<()> {
-        for (index, mapping) in values.iter().enumerate() {
-            let field = program.program.output_schema.field(index);
-            let (valid, expected) =
-                Self::valid_value_type(signal, &mapping.column, field.data_type());
+        let expected = values
+            .len()
+            .checked_add(attributes.len())
+            .assured("an emitter maps fewer columns than usize can count");
+        if mapped_schema.fields().len() != expected {
+            return Err(Report::new(OtelValueError::MappedColumnCount {
+                expected,
+                actual: mapped_schema.fields().len(),
+            }));
+        }
+        for (index, key) in values.iter().enumerate() {
+            let field = mapped_schema.field(index);
+            let (valid, expected) = Self::valid_value_type(signal, key, field.data_type());
             if !valid {
                 return Err(Report::new(OtelValueError::InvalidMappedType {
                     signal: Self::signal_label(signal),
-                    key: mapping.column.clone(),
+                    key: key.clone(),
                     expected,
                     actual: field.data_type().clone(),
                 }));
             }
         }
-        for (offset, mapping) in attributes.iter().enumerate() {
-            let field = program.program.output_schema.field(values.len() + offset);
+        for (offset, key) in attributes.iter().enumerate() {
+            let index = values
+                .len()
+                .checked_add(offset)
+                .assured("an emitter maps fewer columns than usize can count");
+            let field = mapped_schema.field(index);
             if !Self::valid_attribute_type(field.data_type()) {
                 return Err(Report::new(OtelValueError::InvalidAttributeMappingType {
-                    key: mapping.column.clone(),
+                    key: key.clone(),
                     actual: field.data_type().clone(),
                 }));
             }
@@ -596,135 +742,63 @@ impl OtelEmitter {
             || Self::list_element_type(ty).is_some_and(Self::valid_attribute_type)
     }
 
-    fn resource_from_mappings(mappings: &[OtelValueMapping]) -> OtelValueResult<Resource> {
-        let mut attributes = Vec::with_capacity(mappings.len());
-        for mapping in mappings {
-            if let Some(value) = Self::literal_any_value(&mapping.expression)? {
-                attributes.push(KeyValue {
-                    key: mapping.column.clone(),
-                    value: Some(value),
-                });
-            }
-        }
-        Ok(Resource {
-            attributes,
-            dropped_attributes_count: 0,
-            entity_refs: Vec::new(),
+    fn timestamp_to_unix_nano(value: i64, key: &str) -> Result<u64, OtelRecordError> {
+        u64::try_from(value).map_err(|_| {
+            OtelRecordError::new(key, format!("OTEL {key} cannot be before the Unix epoch"))
         })
     }
 
-    fn literal_any_value(
-        expression: &nervix_models::Expression,
-    ) -> OtelValueResult<Option<AnyValue>> {
-        let value = match expression {
-            nervix_models::Expression::Literal(ModelLiteral::I64(value)) => {
-                Some(any_value::Value::IntValue(*value))
-            }
-            nervix_models::Expression::Literal(ModelLiteral::F64(value)) => {
-                Some(any_value::Value::DoubleValue(value.value()))
-            }
-            nervix_models::Expression::Literal(ModelLiteral::Bool(value)) => {
-                Some(any_value::Value::BoolValue(*value))
-            }
-            nervix_models::Expression::Literal(ModelLiteral::String(value)) => {
-                Some(any_value::Value::StringValue(value.clone()))
-            }
-            nervix_models::Expression::Literal(ModelLiteral::Null) => return Ok(None),
-            nervix_models::Expression::Array(items) => {
-                let mut values = Vec::with_capacity(items.len());
-                for item in items {
-                    let value = Self::literal_any_value(item)?
-                        .ok_or_else(|| Report::new(OtelValueError::NullResourceArrayElement))?;
-                    values.push(value);
-                }
-                Some(any_value::Value::ArrayValue(ArrayValue { values }))
-            }
-            _ => {
-                return Err(Report::new(OtelValueError::InvalidResourceExpression));
-            }
-        };
-        Ok(Some(AnyValue { value }))
+    fn observation_time_unix_nano() -> Result<u64, OtelRecordError> {
+        Self::timestamp_to_unix_nano(
+            nervix_connector::physical_time::actual_utc_now().unix_nanos(),
+            "observed_time",
+        )
     }
+}
 
-    pub(super) async fn publish_pending_rows(
-        &self,
-        context: EmitterBatchExecutionContext<'_>,
-        signal: &OtelSignal,
-        values: &[OtelValueMapping],
-        attributes: &[OtelValueMapping],
-        pending_rows: &[usize],
-    ) -> PerRecordPublishOutcome {
-        let EmitterBatchExecutionContext {
-            batch_index,
-            batch,
-            execution_now,
-        } = context;
-        let mut outcome = PerRecordPublishOutcome::empty();
-        if pending_rows.is_empty() {
-            return outcome;
-        }
-        let (Some(client), Some(program), Some(resource)) = (
-            self.client.as_ref(),
-            self.program.as_ref(),
-            self.resource.as_ref(),
-        ) else {
-            outcome.fail(
-                Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("no initialized OTEL sink client"),
-            );
-            return outcome;
+#[async_trait]
+impl SinkLifecycle for OtelSink {}
+
+#[async_trait]
+impl RowSink for OtelSink {
+    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome {
+        let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
+        let mapped = OtelMappedBatch {
+            batch: rows.batch,
+            value_columns: &self.value_columns,
+            attributes: &self.attributes,
+            attribute_offset: self.attribute_offset,
         };
-        let output = match execute_sql_values_program(program, batch, execution_now).await {
-            Ok(output) => output,
-            Err(error) => {
-                outcome.fail(error);
-                return outcome;
-            }
-        };
-        let mapped = OtelMappedBatch::new(&output, values, attributes);
-        let observed_time = match Self::observation_time_unix_nano() {
+        let observed_time = match OtelSink::observation_time_unix_nano() {
             Ok(value) => value,
             Err(error) => {
-                outcome.fail(emitter_publish_error(error.reason));
+                outcome.fail(publish_failure(error.reason));
                 return outcome;
             }
         };
-        let mut positions = Vec::with_capacity(pending_rows.len());
-        let request = match signal {
+        let position = |row: usize| SinkRecordPosition {
+            batch_index: rows.batch_index,
+            row_index: row,
+        };
+        let mut positions = Vec::with_capacity(rows.selected_rows.len());
+        let request = match &self.signal {
             OtelSignal::Logs => {
-                let mut records = Vec::with_capacity(pending_rows.len());
-                for row in pending_rows {
+                let mut records = Vec::with_capacity(rows.selected_rows.len());
+                for row in rows.selected_rows {
                     tokio::task::consume_budget().await;
-                    if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
-                        outcome.reject_structured(
-                            SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            },
-                            error,
-                        );
-                        continue;
-                    }
                     match mapped.log_record(*row, observed_time) {
                         Ok(record) => {
                             records.push(record);
-                            positions.push(SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            });
+                            positions.push(position(*row));
                         }
-                        Err(error) => outcome.reject_structured(
-                            SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            },
-                            error.structured(execution_now),
-                        ),
+                        Err(error) => {
+                            outcome.reject(error.rejected(position(*row), rows.occurred_at))
+                        }
                     }
                 }
                 OtelExportRequest::Logs(ExportLogsServiceRequest {
                     resource_logs: vec![ResourceLogs {
-                        resource: Some(resource.clone()),
+                        resource: Some(self.resource.clone()),
                         scope_logs: vec![ScopeLogs {
                             scope: self.scope.clone(),
                             log_records: records,
@@ -735,39 +809,22 @@ impl OtelEmitter {
                 })
             }
             OtelSignal::Traces => {
-                let mut spans = Vec::with_capacity(pending_rows.len());
-                for row in pending_rows {
+                let mut spans = Vec::with_capacity(rows.selected_rows.len());
+                for row in rows.selected_rows {
                     tokio::task::consume_budget().await;
-                    if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
-                        outcome.reject_structured(
-                            SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            },
-                            error,
-                        );
-                        continue;
-                    }
                     match mapped.span(*row) {
                         Ok(span) => {
                             spans.push(span);
-                            positions.push(SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            });
+                            positions.push(position(*row));
                         }
-                        Err(error) => outcome.reject_structured(
-                            SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            },
-                            error.structured(execution_now),
-                        ),
+                        Err(error) => {
+                            outcome.reject(error.rejected(position(*row), rows.occurred_at))
+                        }
                     }
                 }
                 OtelExportRequest::Traces(ExportTraceServiceRequest {
                     resource_spans: vec![ResourceSpans {
-                        resource: Some(resource.clone()),
+                        resource: Some(self.resource.clone()),
                         scope_spans: vec![ScopeSpans {
                             scope: self.scope.clone(),
                             spans,
@@ -777,35 +834,20 @@ impl OtelEmitter {
                     }],
                 })
             }
-            OtelSignal::Metric(metric_model) => {
-                let mut metric_rows = Vec::with_capacity(pending_rows.len());
-                for row in pending_rows {
-                    tokio::task::consume_budget().await;
-                    if let Some(error) = Self::side_error(program, &output, *row, execution_now) {
-                        outcome.reject_structured(
-                            SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            },
-                            error,
-                        );
-                    } else {
-                        metric_rows.push(*row);
-                    }
-                }
+            OtelSignal::Metric(metric) => {
                 let metric = mapped
                     .metric(
-                        metric_model,
-                        &metric_rows,
-                        batch_index,
+                        metric,
+                        rows.selected_rows,
+                        rows.batch_index,
+                        rows.occurred_at,
                         &mut positions,
                         &mut outcome,
-                        execution_now,
                     )
                     .await;
                 OtelExportRequest::Metrics(ExportMetricsServiceRequest {
                     resource_metrics: vec![ResourceMetrics {
-                        resource: Some(resource.clone()),
+                        resource: Some(self.resource.clone()),
                         scope_metrics: vec![ScopeMetrics {
                             scope: self.scope.clone(),
                             metrics: vec![metric],
@@ -820,7 +862,7 @@ impl OtelEmitter {
             return outcome;
         }
 
-        match client.export(request).await {
+        match self.client.export(request).await {
             OtelTransportOutcome::Accepted(partial_success) => {
                 if let Some(partial) = partial_success
                     && (partial.rejected != 0 || !partial.error_message.is_empty())
@@ -838,64 +880,21 @@ impl OtelEmitter {
             }
             OtelTransportOutcome::Rejected(reason) => {
                 for position in positions {
-                    outcome.reject(position, reason.clone());
+                    outcome.reject(RejectedSinkRecord::external(
+                        position,
+                        rows.occurred_at,
+                        reason.clone(),
+                    ));
                 }
             }
             OtelTransportOutcome::Failed(error) => outcome.fail(error),
         }
         outcome
     }
-
-    fn side_error(
-        program: &CompiledSqlValuesProgram,
-        output: &VmTypedBatch,
-        row: usize,
-        execution_now: Timestamp,
-    ) -> Option<StructuredMessageError> {
-        output.errors().get(row)?.first().map(|side_error| {
-            program.structured_side_error(
-                execution_now,
-                format!(
-                    "OTEL VALUES side error {}: {} at {}",
-                    side_error.code().as_str(),
-                    side_error.reason,
-                    side_error.span
-                ),
-                side_error.span,
-            )
-        })
-    }
-
-    fn timestamp_to_unix_nano(value: i64, key: &str) -> Result<u64, OtelRecordError> {
-        u64::try_from(value).map_err(|_| {
-            OtelRecordError::new(key, format!("OTEL {key} cannot be before the Unix epoch"))
-        })
-    }
-
-    fn observation_time_unix_nano() -> Result<u64, OtelRecordError> {
-        Self::timestamp_to_unix_nano(
-            nervix_connector::physical_time::actual_utc_now().unix_nanos(),
-            "observed_time",
-        )
-    }
 }
 
 impl OtelClient {
     async fn export(&self, request: OtelExportRequest) -> OtelTransportOutcome {
-        if self
-            .fault_injection
-            .otel_client_is_unavailable(&self.emitter)
-        {
-            let reason = match &self.transport {
-                OtelTransport::Grpc { .. } => {
-                    "OTEL client fault injector returned gRPC UNAVAILABLE"
-                }
-                OtelTransport::HttpProtobuf { .. } => {
-                    "OTEL client fault injector returned HTTP 503 Service Unavailable"
-                }
-            };
-            return OtelTransportOutcome::Failed(emitter_publish_error(reason));
-        }
         self.transport.export(request).await
     }
 }
@@ -991,11 +990,11 @@ impl OtelTransport {
                 .get_details_retry_info()
                 .and_then(|info| info.retry_delay);
             return OtelTransportOutcome::Failed(match retry_delay {
-                Some(delay) => emitter_publish_error_with_minimum_retry_delay(message, delay),
-                None => emitter_publish_error(message),
+                Some(delay) => publish_failure_after(message, delay),
+                None => publish_failure(message),
             });
         }
-        OtelTransportOutcome::Failed(emitter_config_error(format!(
+        OtelTransportOutcome::Failed(misconfigured(format!(
             "OTEL gRPC export failed with non-retryable {}",
             status.code()
         )))
@@ -1054,7 +1053,7 @@ impl OtelTransport {
         let response = match request.body(body).send().await {
             Ok(response) => response,
             Err(error) => {
-                return OtelTransportOutcome::Failed(emitter_publish_error(format!(
+                return OtelTransportOutcome::Failed(publish_failure(format!(
                     "OTEL HTTP export request failed: {error}"
                 )));
             }
@@ -1075,47 +1074,41 @@ impl OtelTransport {
             );
             let message = format!("OTEL HTTP export returned status {status}");
             return OtelTransportOutcome::Failed(match delay {
-                Some(delay) => emitter_publish_error_with_minimum_retry_delay(message, delay),
-                None => emitter_publish_error(message),
+                Some(delay) => publish_failure_after(message, delay),
+                None => publish_failure(message),
             });
         }
         if !status.is_success() {
-            return OtelTransportOutcome::Failed(emitter_config_error(format!(
+            return OtelTransportOutcome::Failed(misconfigured(format!(
                 "OTEL HTTP export returned non-retryable status {status}"
             )));
         }
         let body = match response.bytes().await {
             Ok(body) => body,
             Err(error) => {
-                return OtelTransportOutcome::Failed(emitter_publish_error(format!(
+                return OtelTransportOutcome::Failed(publish_failure(format!(
                     "failed to read OTEL HTTP response: {error}"
                 )));
             }
         };
         match response_kind.decode(&body) {
             Ok(partial) => OtelTransportOutcome::Accepted(partial),
-            Err(error) => OtelTransportOutcome::Failed(emitter_publish_error(format!(
+            Err(error) => OtelTransportOutcome::Failed(publish_failure(format!(
                 "failed to decode OTEL HTTP protobuf response: {error}"
             ))),
         }
     }
 
-    fn http_body(body: Vec<u8>, compression: OtelCompression) -> EmitterRuntimeResult<Vec<u8>> {
+    fn http_body(body: Vec<u8>, compression: OtelCompression) -> SinkPublishResult<Vec<u8>> {
         if compression == OtelCompression::None {
             return Ok(body);
         }
         let mut encoder = GzEncoder::new(Vec::new(), GzipLevel::default());
         encoder.write_all(&body).map_err(|error| {
-            emitter_report(
-                EmitterRuntimeError::EncodeBatch,
-                format!("failed to gzip OTEL HTTP request: {error}"),
-            )
+            publish_failure(format!("failed to gzip OTEL HTTP request: {error}"))
         })?;
         encoder.finish().map_err(|error| {
-            emitter_report(
-                EmitterRuntimeError::EncodeBatch,
-                format!("failed to finish OTEL HTTP gzip request: {error}"),
-            )
+            publish_failure(format!("failed to finish OTEL HTTP gzip request: {error}"))
         })
     }
 
@@ -1178,41 +1171,26 @@ declare_otel_http_response_kinds! {
     Metrics => ExportMetricsServiceResponse, ExportMetricsPartialSuccess, rejected_data_points;
 }
 
+/// The mapped columns of one batch, read by the position the host projected them in.
 struct OtelMappedBatch<'a> {
-    output: &'a VmTypedBatch,
-    values: &'a [OtelValueMapping],
-    attributes: &'a [OtelValueMapping],
-    value_columns: HashMap<&'a str, usize>,
+    batch: &'a RecordBatch,
+    /// Where each signal key sits among the mapped columns.
+    value_columns: &'a HashMap<String, usize>,
+    /// The attribute keys, in the order their columns follow the signal's own.
+    attributes: &'a [String],
+    attribute_offset: usize,
 }
 
-impl<'a> OtelMappedBatch<'a> {
-    fn new(
-        output: &'a VmTypedBatch,
-        values: &'a [OtelValueMapping],
-        attributes: &'a [OtelValueMapping],
-    ) -> Self {
-        let mut value_columns = HashMap::with_capacity(values.len());
-        for (index, mapping) in values.iter().enumerate() {
-            value_columns
-                .entry(mapping.column.as_str())
-                .or_insert(index);
-        }
-        Self {
-            output,
-            values,
-            attributes,
-            value_columns,
-        }
-    }
-
+impl OtelMappedBatch<'_> {
+    /// The column one signal key was mapped to, or nothing when the emitter does not map it.
     fn value_array(&self, key: &str) -> Result<Option<ArrayRef>, OtelRecordError> {
         let Some(index) = self.value_columns.get(key).copied() else {
             return Ok(None);
         };
-        let array = self.output.columns().get(index).ok_or_else(|| {
+        let array = self.batch.columns().get(index).ok_or_else(|| {
             OtelRecordError::new(key, format!("OTEL VALUES output omitted key '{key}'"))
         })?;
-        Ok(Some(array.to_array_ref()))
+        Ok(Some(array.clone()))
     }
 
     fn required_string(&self, key: &str, row: usize) -> Result<String, OtelRecordError> {
@@ -1256,24 +1234,27 @@ impl<'a> OtelMappedBatch<'a> {
             .ok_or_else(|| {
                 OtelRecordError::new(key, format!("OTEL VALUES key '{key}' is not DATETIME"))
             })?;
-        OtelEmitter::timestamp_to_unix_nano(array.value(row), key).map(Some)
+        OtelSink::timestamp_to_unix_nano(array.value(row), key).map(Some)
     }
 
     fn attributes(&self, row: usize) -> Result<Vec<KeyValue>, OtelRecordError> {
         let mut values = Vec::with_capacity(self.attributes.len());
-        for (offset, mapping) in self.attributes.iter().enumerate() {
-            let index = self.values.len() + offset;
-            let array = self.output.columns().get(index).ok_or_else(|| {
+        for (offset, key) in self.attributes.iter().enumerate() {
+            let index = self
+                .attribute_offset
+                .checked_add(offset)
+                .assured("an emitter maps fewer columns than usize can count");
+            let array = self.batch.columns().get(index).ok_or_else(|| {
                 OtelRecordError::new(
-                    mapping.column.clone(),
-                    format!("OTEL ATTRIBUTES output omitted key '{}'", mapping.column),
+                    key.clone(),
+                    format!("OTEL ATTRIBUTES output omitted key '{key}'"),
                 )
             })?;
-            if let Some(value) = any_value_at(&array.to_array_ref(), row)
-                .map_err(|error| OtelRecordError::new(mapping.column.clone(), error.to_string()))?
+            if let Some(value) = any_value_at(array, row)
+                .map_err(|error| OtelRecordError::new(key.clone(), error.to_string()))?
             {
                 values.push(KeyValue {
-                    key: mapping.column.clone(),
+                    key: key.clone(),
                     value: Some(value),
                 });
             }
@@ -1388,12 +1369,16 @@ impl<'a> OtelMappedBatch<'a> {
     async fn metric(
         &self,
         model: &OtelMetric,
-        pending_rows: &[usize],
+        selected_rows: &[usize],
         batch_index: usize,
+        occurred_at: Timestamp,
         positions: &mut Vec<SinkRecordPosition>,
-        outcome: &mut PerRecordPublishOutcome,
-        execution_now: Timestamp,
+        outcome: &mut PerRecordOutcome,
     ) -> Metric {
+        let position = |row: usize| SinkRecordPosition {
+            batch_index,
+            row_index: row,
+        };
         let data = match &model.kind {
             OtelMetricKind::Gauge | OtelMetricKind::Sum { .. } => {
                 let require_start_time = matches!(
@@ -1403,24 +1388,15 @@ impl<'a> OtelMappedBatch<'a> {
                         ..
                     }
                 );
-                let mut points = Vec::with_capacity(pending_rows.len());
-                for row in pending_rows {
+                let mut points = Vec::with_capacity(selected_rows.len());
+                for row in selected_rows {
                     tokio::task::consume_budget().await;
                     match self.number_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
-                            positions.push(SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            });
+                            positions.push(position(*row));
                         }
-                        Err(error) => outcome.reject_structured(
-                            SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            },
-                            error.structured(execution_now),
-                        ),
+                        Err(error) => outcome.reject(error.rejected(position(*row), occurred_at)),
                     }
                 }
                 match &model.kind {
@@ -1435,29 +1411,22 @@ impl<'a> OtelMappedBatch<'a> {
                         aggregation_temporality: aggregation_temporality(*temporality),
                         is_monotonic: *monotonic,
                     }),
-                    OtelMetricKind::Histogram { .. } => unreachable!(),
+                    OtelMetricKind::Histogram { .. } => {
+                        unreachable!("the enclosing match arm accepted only a gauge or a sum")
+                    }
                 }
             }
             OtelMetricKind::Histogram { temporality } => {
                 let require_start_time = *temporality == OtelAggregationTemporality::Delta;
-                let mut points = Vec::with_capacity(pending_rows.len());
-                for row in pending_rows {
+                let mut points = Vec::with_capacity(selected_rows.len());
+                for row in selected_rows {
                     tokio::task::consume_budget().await;
                     match self.histogram_point(*row, require_start_time) {
                         Ok(point) => {
                             points.push(point);
-                            positions.push(SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            });
+                            positions.push(position(*row));
                         }
-                        Err(error) => outcome.reject_structured(
-                            SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            },
-                            error.structured(execution_now),
-                        ),
+                        Err(error) => outcome.reject(error.rejected(position(*row), occurred_at)),
                     }
                 }
                 metric::Data::Histogram(Histogram {
@@ -1986,7 +1955,7 @@ fn number_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<number_data_
                 )
                 .value(row),
         )),
-        ty if OtelEmitter::is_integer_type(ty) => {
+        ty if OtelSink::is_integer_type(ty) => {
             integer_as_i64(array, row).map(number_data_point::Value::AsInt)
         }
         ty => Err(Report::new(OtelValueError::ExpectedMetricNumeric {
@@ -2042,7 +2011,7 @@ fn any_value_at(array: &ArrayRef, row: usize) -> OtelValueResult<Option<AnyValue
                 )
                 .value(row),
         ),
-        ty if OtelEmitter::is_integer_type(ty) => {
+        ty if OtelSink::is_integer_type(ty) => {
             any_value::Value::IntValue(integer_as_i64(array, row)?)
         }
         DataType::Timestamp(TimeUnit::Nanosecond, _) => {
@@ -2096,7 +2065,7 @@ mod tests {
         let missing_protocol =
             OtelClientSettings::parse(&config(&[("endpoint", "http://127.0.0.1:4317")]))
                 .expect_err("protocol must be explicit");
-        assert!(emitter_error_message(&missing_protocol).contains("protocol"));
+        assert!(format!("{missing_protocol:?}").contains("protocol"));
 
         let unknown = OtelClientSettings::parse(&config(&[
             ("endpoint", "http://127.0.0.1:4317"),
@@ -2104,21 +2073,18 @@ mod tests {
             ("future", "value"),
         ]))
         .expect_err("unknown config keys must be rejected");
-        assert!(emitter_error_message(&unknown).contains("unsupported"));
+        assert!(format!("{unknown:?}").contains("unsupported"));
     }
 
     #[tokio::test]
     async fn grpc_transport_initialization_does_not_require_a_reachable_endpoint() {
-        let transport = OtelEmitter::transport_from_config(&config(&[
+        let transport = OtelSink::transport_from_config(&config(&[
             ("endpoint", "http://127.0.0.1:0"),
             ("protocol", "grpc"),
             ("timeout_ms", "1"),
         ]))
         .unwrap_or_else(|error| {
-            panic!(
-                "an unavailable endpoint must initialize for publish-time retry: {}",
-                emitter_error_message(&error)
-            )
+            panic!("an unavailable endpoint must initialize for publish-time retry: {error:?}")
         });
         let outcome = transport
             .export(OtelExportRequest::Logs(ExportLogsServiceRequest {
@@ -2128,38 +2094,10 @@ mod tests {
         let OtelTransportOutcome::Failed(error) = outcome else {
             panic!("an unavailable endpoint must fail as infrastructure");
         };
-        assert!(emitter_publish_error_is_retryable(&error));
-    }
-
-    #[cfg(feature = "testing")]
-    #[tokio::test]
-    async fn client_fault_injection_returns_retryable_unavailable_without_a_server() {
-        let emitter = EmitterName::parse("otel_output").expect("valid emitter name");
-        let fault_injection = ConfiguredFaultInjection::default();
-        fault_injection.fail_otel_client_unavailable(emitter.as_str());
-        let client = OtelClient {
-            transport: OtelEmitter::transport_from_config(&config(&[
-                ("endpoint", "http://127.0.0.1:0"),
-                ("protocol", "grpc"),
-                ("timeout_ms", "1"),
-            ]))
-            .expect("lazy gRPC client must initialize"),
-            fault_injection,
-            emitter,
-        };
-
-        let outcome = client
-            .export(OtelExportRequest::Logs(ExportLogsServiceRequest {
-                resource_logs: Vec::new(),
-            }))
-            .await;
-        let OtelTransportOutcome::Failed(error) = outcome else {
-            panic!("injected unavailability must fail the client request");
-        };
-        assert!(emitter_publish_error_is_retryable(&error));
         assert_eq!(
-            emitter_error_message(&error),
-            "OTEL client fault injector returned gRPC UNAVAILABLE"
+            error.current_context(),
+            &SinkPublishError::Publish { sink: OTEL },
+            "an unreachable receiver is a failure the host retries"
         );
     }
 
@@ -2187,24 +2125,12 @@ mod tests {
 
     #[test]
     fn typed_otel_value_errors_classify_invalid_exact_types_and_ranges() {
-        let null_resource_array =
-            nervix_models::Expression::Array(vec![nervix_models::Expression::Literal(
-                ModelLiteral::Null,
-            )]);
-        let error = OtelEmitter::literal_any_value(&null_resource_array)
+        let error = OtelLiteral::Array(vec![OtelLiteral::Null])
+            .any_value()
             .expect_err("resource arrays cannot contain nulls");
         assert!(matches!(
             error.current_context(),
             OtelValueError::NullResourceArrayElement
-        ));
-
-        let dynamic_resource =
-            nervix_models::Expression::Field(nervix_models::FieldReference::bare(named("dynamic")));
-        let error = OtelEmitter::literal_any_value(&dynamic_resource)
-            .expect_err("resource expressions must be literal");
-        assert!(matches!(
-            error.current_context(),
-            OtelValueError::InvalidResourceExpression
         ));
 
         let unsigned: ArrayRef = StdArc::new(UInt64Array::from(vec![u64::MAX]));
@@ -2298,14 +2224,14 @@ mod tests {
 
     #[test]
     fn observation_timestamp_samples_actual_utc() {
-        let before = OtelEmitter::timestamp_to_unix_nano(
+        let before = OtelSink::timestamp_to_unix_nano(
             nervix_connector::physical_time::actual_utc_now().unix_nanos(),
             "before",
         )
         .expect("actual UTC must be after the Unix epoch");
-        let observed = OtelEmitter::observation_time_unix_nano()
+        let observed = OtelSink::observation_time_unix_nano()
             .expect("actual UTC observation time must be after the Unix epoch");
-        let after = OtelEmitter::timestamp_to_unix_nano(
+        let after = OtelSink::timestamp_to_unix_nano(
             nervix_connector::physical_time::actual_utc_now().unix_nanos(),
             "after",
         )

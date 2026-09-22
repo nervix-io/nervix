@@ -7,32 +7,20 @@
 
 use error_stack::{AttachmentKind, FrameKind, Report, ResultExt as _};
 use nervix_connector::{
-    PerRecordOutcome, RecordSink, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
-    SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkRecord,
-    SinkRecordPosition, SinkRetryAfter, SinkStagingDirectory, SinkStartError,
-    SinkTransientErrorStatus, client_config_value,
+    MappedSinkRows, PerRecordOutcome, RecordSink, RowSink, SinkAcknowledgementServices,
+    SinkAcknowledgements, SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost,
+    SinkPublishError, SinkRecord, SinkRecordPosition, SinkRetryDelay, SinkStagingDirectory,
+    SinkStartError, SinkTransientErrorStatus,
     physical_time::{PhysicalDeadline, PhysicalDeadlineCapability, actual_utc_now},
 };
+use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
 use nervix_connector_kafka::{KafkaSink, KafkaSinkConfig};
-use thiserror::Error;
-
-use super::*;
-
-pub(in crate::runtime) mod clickhouse;
-mod iceberg;
-mod mongodb;
-mod mysql;
-mod otel;
-mod postgres;
-
-use clickhouse::ClickHouseEmitter;
-use iceberg::{IcebergEmitter, IcebergEmitterError, IcebergEmitterInit, IcebergEmitterResult};
-use mongodb::MongoDbEmitter;
-pub(in crate::runtime) use mongodb::{MongoDbClient, open_mongodb_client};
-use mysql::MySqlEmitter;
-pub(in crate::runtime) use mysql::{MySqlPool, MySqlSharedPool, open_mysql_pool};
+use nervix_connector_mongodb::{MongoDbSink, MongoDbSinkConfig};
 use nervix_connector_mqtt::{MqttSink, MqttSinkConfig};
+use nervix_connector_mysql::{MySqlSink, MySqlSinkConfig};
 use nervix_connector_nats::{NatsSink, NatsSinkConfig};
+use nervix_connector_otel::{OtelLiteral, OtelResourceAttribute, OtelSink, OtelSinkConfig};
+use nervix_connector_postgres::{PostgresSink, PostgresSinkConfig};
 use nervix_connector_pulsar::{PulsarSink, PulsarSinkConfig};
 use nervix_connector_rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
 pub(in crate::runtime) use nervix_connector_redis::{
@@ -45,9 +33,17 @@ use nervix_connector_sentry::{SentrySink, SentrySinkConfig};
 use nervix_connector_sqs::{SqsSink, SqsSinkConfig};
 use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
 use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
-use otel::{OtelEmitter, OtelEmitterInit};
-use postgres::PostgresEmitter;
-pub(in crate::runtime) use postgres::{PgPool, open_postgres_pool};
+use thiserror::Error;
+
+use super::*;
+
+mod iceberg;
+mod mapped_values;
+mod pooled_clients;
+
+use iceberg::{IcebergEmitter, IcebergEmitterError, IcebergEmitterInit, IcebergEmitterResult};
+use mapped_values::{MappedValuesProjection, MappedValuesProjectionInit};
+use pooled_clients::PooledSinkClient;
 
 const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
 
@@ -208,12 +204,6 @@ struct EmitterPublishBatch {
     delivered: Vec<bool>,
 }
 
-pub(super) struct EmitterBatchExecutionContext<'a> {
-    pub(super) batch_index: usize,
-    pub(super) batch: &'a RelayRecordBatch,
-    pub(super) execution_now: Timestamp,
-}
-
 /// The bound every byte estimate in this module relies on: each term counts bytes of a batch,
 /// header, or group identifier this node already holds in memory, so their total is bounded by the
 /// address space those values occupy.
@@ -369,13 +359,6 @@ impl EmitterPublishBatch {
         self.mark_rejected(row)
     }
 
-    fn pending_record_chunks(&self, max_batch: NonZeroU64) -> Vec<Vec<usize>> {
-        self.pending_record_rows()
-            .chunks(addressable_count(max_batch).get())
-            .map(<[usize]>::to_vec)
-            .collect()
-    }
-
     fn pending_record_rows(&self) -> Vec<usize> {
         (0..self.batch.batch.batch().num_rows())
             .filter(|row| !self.delivered.get(*row).copied().unwrap_or(false))
@@ -407,88 +390,6 @@ pub(super) struct RejectedEmitterRecord {
     pub(super) position: SinkRecordPosition,
     pub(super) reason: String,
     pub(super) structured_error: Option<StructuredMessageError>,
-}
-
-pub(super) struct PerRecordPublishOutcome {
-    pub(super) delivered: Vec<SinkRecordPosition>,
-    pub(super) rejected: Vec<RejectedEmitterRecord>,
-    pub(super) infrastructure_error: Option<Report<EmitterRuntimeError>>,
-}
-
-impl PerRecordPublishOutcome {
-    pub(super) fn empty() -> Self {
-        Self {
-            delivered: Vec::new(),
-            rejected: Vec::new(),
-            infrastructure_error: None,
-        }
-    }
-
-    pub(super) fn fail(&mut self, error: Report<EmitterRuntimeError>) {
-        self.infrastructure_error = Some(error);
-    }
-
-    pub(super) fn deliver(&mut self, position: SinkRecordPosition) {
-        self.delivered.push(position);
-    }
-
-    pub(super) fn reject(&mut self, position: SinkRecordPosition, reason: impl Into<String>) {
-        self.rejected.push(RejectedEmitterRecord {
-            position,
-            reason: reason.into(),
-            structured_error: None,
-        });
-    }
-
-    pub(super) fn reject_structured(
-        &mut self,
-        position: SinkRecordPosition,
-        error: StructuredMessageError,
-    ) {
-        self.rejected.push(RejectedEmitterRecord {
-            position,
-            reason: String::new(),
-            structured_error: Some(error),
-        });
-    }
-
-    pub(super) fn filter_mapped_chunks<T>(
-        &mut self,
-        batch_index: usize,
-        rows: &[Result<T, StructuredMessageError>],
-        pending_chunks: &[Vec<usize>],
-        sink: &str,
-    ) -> EmitterRuntimeResult<Vec<Vec<usize>>> {
-        let mut filtered = Vec::with_capacity(pending_chunks.len());
-        for chunk in pending_chunks {
-            let mut filtered_chunk = Vec::with_capacity(chunk.len());
-            for row in chunk {
-                match rows.get(*row) {
-                    Some(Ok(_)) => filtered_chunk.push(*row),
-                    Some(Err(error)) => {
-                        self.reject_structured(
-                            SinkRecordPosition {
-                                batch_index,
-                                row_index: *row,
-                            },
-                            error.clone(),
-                        );
-                    }
-                    None => {
-                        return Err(Report::new(EmitterRuntimeError::EncodeBatch)
-                            .attach_printable(format!(
-                                "{sink} pending row {row} is outside mapped batch with {} rows",
-                                rows.len()
-                            )));
-                    }
-                }
-            }
-            if !filtered_chunk.is_empty() {
-                filtered.push(filtered_chunk);
-            }
-        }
-        Ok(filtered)
-    }
 }
 
 pub(in crate::runtime) struct PublishReport {
@@ -628,6 +529,8 @@ pub(in crate::runtime) enum EmitterRuntimeError {
     StopDeadlineElapsed,
     #[error("emitter final flush failed")]
     FinalFlush,
+    #[error("OTEL RESOURCE attribute '{attribute}' must be a literal value or a literal array")]
+    InvalidOtelResource { attribute: String },
     #[error("failed to encode emitter batch")]
     EncodeBatch,
     #[error("failed to publish emitter batch")]
@@ -647,6 +550,7 @@ impl EmitterRuntimeError {
             | Self::AcknowledgementRowOutOfBounds { .. }
             | Self::RejectionRowOutOfBounds { .. }
             | Self::InvalidSinkConfig
+            | Self::InvalidOtelResource { .. }
             | Self::InitializeSink
             | Self::FaultInjected
             | Self::ShutdownWhileStalled
@@ -1211,78 +1115,6 @@ fn compile_sql_values_program(
     })
 }
 
-fn compile_clickhouse_values_program(
-    domain: &DomainName,
-    emitter: &EmitterName,
-    values: &[ClickHouseValueMapping],
-    input_schema: StdArc<arrow_schema::Schema>,
-    udfs: Option<&UdfExecutor>,
-) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program(
-        "ClickHouse",
-        "clickhouse",
-        domain,
-        emitter,
-        values,
-        input_schema,
-        udfs,
-    )
-}
-
-fn compile_postgres_values_program(
-    domain: &DomainName,
-    emitter: &EmitterName,
-    values: &[PostgresValueMapping],
-    input_schema: StdArc<arrow_schema::Schema>,
-    udfs: Option<&UdfExecutor>,
-) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program(
-        "Postgres",
-        "postgres",
-        domain,
-        emitter,
-        values,
-        input_schema,
-        udfs,
-    )
-}
-
-fn compile_mysql_values_program(
-    domain: &DomainName,
-    emitter: &EmitterName,
-    values: &[MySqlValueMapping],
-    input_schema: StdArc<arrow_schema::Schema>,
-    udfs: Option<&UdfExecutor>,
-) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program(
-        "MySQL",
-        "mysql",
-        domain,
-        emitter,
-        values,
-        input_schema,
-        udfs,
-    )
-}
-
-fn compile_mongodb_values_program(
-    domain: &DomainName,
-    emitter: &EmitterName,
-    values: &[MongoDbValueMapping],
-    input_schema: StdArc<arrow_schema::Schema>,
-    udfs: Option<&UdfExecutor>,
-) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program(
-        "MongoDB",
-        "mongodb",
-        domain,
-        emitter,
-        values,
-        input_schema,
-        udfs,
-    )
-}
-
 fn compile_iceberg_values_program(
     domain: &DomainName,
     emitter: &EmitterName,
@@ -1301,132 +1133,59 @@ fn compile_iceberg_values_program(
     )
 }
 
-async fn sql_mapped_batch_values(
-    program: &CompiledSqlValuesProgram,
-    mappings: &[ClickHouseValueMapping],
-    batch: &RelayRecordBatch,
-    execution_now: Timestamp,
-) -> EmitterRuntimeResult<Vec<Result<Vec<serde_json::Value>, StructuredMessageError>>> {
-    let output = execute_sql_values_program(program, batch, execution_now).await?;
-    let row_count = output.row_count();
-    let mut rows = Vec::with_capacity(row_count);
-    for row in 0..row_count {
-        if let Some(side_error) = output.errors().row(row).first() {
-            rows.push(Err(program.structured_side_error(
-                execution_now,
-                format!(
-                    "{} VALUES side error {}: {} at {}",
-                    program.label,
-                    side_error.code().as_str(),
-                    side_error.reason,
-                    side_error.span
-                ),
-                side_error.span,
-            )));
-            continue;
-        }
-        let mapped = mappings
-            .iter()
-            .enumerate()
-            .map(|(index, _mapping)| {
-                let field = format!("c{index}");
-                vm_output_value(&output, row, &field).map(|value| match value.as_ref() {
-                    Some(value) => runtime_value_to_json(value),
-                    None => serde_json::Value::Null,
-                })
+fn mapped_column_names(mappings: &[ClickHouseValueMapping]) -> Vec<String> {
+    mappings
+        .iter()
+        .map(|mapping| mapping.column.clone())
+        .collect()
+}
+
+/// The `RESOURCE` attributes an OTEL emitter exports with, which are fixed for its lifetime.
+///
+/// A resource value describes the emitting service rather than a record, so only a literal or a
+/// literal array can supply one.
+fn otel_resource_attributes(
+    resource: &[OtelValueMapping],
+) -> EmitterRuntimeResult<Vec<OtelResourceAttribute>> {
+    let mut attributes = Vec::with_capacity(resource.len());
+    for mapping in resource {
+        let value = otel_literal(&mapping.expression).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::InvalidOtelResource {
+                attribute: mapping.column.clone(),
             })
-            .collect::<Result<Vec<_>, _>>();
-        let mapped = match mapped {
-            Ok(mapped) => mapped,
-            Err(error) => {
-                rows.push(Err(structured_message_error(
-                    execution_now,
-                    MessageErrorCode::Validation,
-                    format!(
-                        "{} VALUES failed to decode output row: {error}",
-                        program.label
-                    ),
-                    MessageErrorOperation::Values,
-                    None,
-                    std::iter::empty(),
-                )));
-                continue;
-            }
-        };
-        rows.push(Ok(mapped));
+        })?;
+        attributes.push(OtelResourceAttribute {
+            key: mapping.column.clone(),
+            value,
+        });
     }
-    Ok(rows)
+    Ok(attributes)
 }
 
-async fn execute_sql_values_program(
-    program: &CompiledSqlValuesProgram,
-    batch: &RelayRecordBatch,
-    execution_now: Timestamp,
-) -> EmitterRuntimeResult<VmTypedBatch> {
-    let side_inputs = HashMap::default();
-    let lookup_columns = HashMap::default();
-    let input = project_vm_input_batch(
-        &program.program.input_schema,
-        &VmInputProjectionSources {
-            carrier: &batch.batch,
-            namespace_batches: &[],
-            strict_namespaces: &[],
-            keys: &batch.keys,
-            side_inputs: &side_inputs,
-            ingest_metadata: None,
-            lookup_columns: &lookup_columns,
-            uninitialized: None,
-        },
-        None,
-    )
-    .map_err(|error| Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(error))?;
-    let result = execute_program_with_selection_in_context(
-        &program.program,
-        &input,
-        &VmExecutionContext {
-            now: execution_now,
-            injector: None,
-        },
-    )
-    .await
-    .map_err(|error| {
-        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-            "{} VALUES execution failed: {error}",
-            program.label
-        ))
-    })?;
-    let row_count = batch.batch.batch().num_rows();
-    if result.batch.row_count() != row_count {
-        return Err(
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "{} VALUES produced {} rows for {} input records",
-                program.label,
-                result.batch.row_count(),
-                row_count
-            )),
-        );
-    }
-    Ok(result.batch)
-}
-
-fn runtime_value_to_json(value: &RuntimeValue) -> serde_json::Value {
-    match value {
-        RuntimeValue::U8(value) => serde_json::Value::from(*value),
-        RuntimeValue::I8(value) => serde_json::Value::from(*value),
-        RuntimeValue::U16(value) => serde_json::Value::from(*value),
-        RuntimeValue::I16(value) => serde_json::Value::from(*value),
-        RuntimeValue::U32(value) => serde_json::Value::from(*value),
-        RuntimeValue::I32(value) => serde_json::Value::from(*value),
-        RuntimeValue::U64(value) => serde_json::Value::from(*value),
-        RuntimeValue::I64(value) => serde_json::Value::from(*value),
-        RuntimeValue::Bool(value) => serde_json::Value::from(*value),
-        RuntimeValue::String(value) => serde_json::Value::from(value.clone()),
-        RuntimeValue::Datetime(value) => serde_json::Value::from(value.to_rfc3339()),
-        RuntimeValue::F32(value) => serde_json::Value::from(value.into_inner()),
-        RuntimeValue::F64(value) => serde_json::Value::from(value.into_inner()),
-        RuntimeValue::Array(values) | RuntimeValue::Vec(values) => {
-            serde_json::Value::Array(values.iter().map(runtime_value_to_json).collect())
+/// The literal a `RESOURCE` value carries, or nothing for an expression that reads a record.
+fn otel_literal(expression: &nervix_models::Expression) -> Option<OtelLiteral> {
+    match expression {
+        nervix_models::Expression::Literal(ModelLiteral::I64(value)) => {
+            Some(OtelLiteral::I64(*value))
         }
+        nervix_models::Expression::Literal(ModelLiteral::F64(value)) => {
+            Some(OtelLiteral::F64(value.value()))
+        }
+        nervix_models::Expression::Literal(ModelLiteral::Bool(value)) => {
+            Some(OtelLiteral::Bool(*value))
+        }
+        nervix_models::Expression::Literal(ModelLiteral::String(value)) => {
+            Some(OtelLiteral::String(value.clone()))
+        }
+        nervix_models::Expression::Literal(ModelLiteral::Null) => Some(OtelLiteral::Null),
+        nervix_models::Expression::Array(items) => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(otel_literal(item)?);
+            }
+            Some(OtelLiteral::Array(values))
+        }
+        _ => None,
     }
 }
 
@@ -1437,27 +1196,13 @@ fn emitter_report(
     Report::new(context).attach_printable(error.to_string())
 }
 
-fn emitter_config_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
-    emitter_report(EmitterRuntimeError::InvalidSinkConfig, error)
-}
-
 fn emitter_init_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
     emitter_report(EmitterRuntimeError::InitializeSink, error)
 }
 
-fn emitter_publish_error(error: impl std::fmt::Display) -> Report<EmitterRuntimeError> {
-    emitter_report(EmitterRuntimeError::PublishBatch, error)
-}
-
-fn emitter_publish_error_with_minimum_retry_delay(
-    error: impl std::fmt::Display,
-    delay: Duration,
-) -> Report<EmitterRuntimeError> {
-    emitter_publish_error(error).attach(SinkRetryAfter(delay))
-}
-
+/// How long the sink asked this emitter to wait, which bounds its next attempt from below.
 fn emitter_minimum_retry_delay(error: &Report<EmitterRuntimeError>) -> Duration {
-    match error.downcast_ref::<SinkRetryAfter>() {
+    match error.downcast_ref::<SinkRetryDelay>() {
         Some(attachment) => attachment.0,
         None => Duration::ZERO,
     }
@@ -1485,19 +1230,6 @@ where
             _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
         }
     }
-}
-
-fn emitter_config_value(
-    config: &[nervix_models::ClientConfigEntry],
-    key: &str,
-    connector: &'static str,
-) -> EmitterRuntimeResult<String> {
-    client_config_value(config, key, connector).map_err(|error| {
-        let message = error.current_context().to_string();
-        error
-            .change_context(EmitterRuntimeError::InvalidSinkConfig)
-            .attach_printable(message)
-    })
 }
 
 impl EmitterSinkContext {
@@ -1701,12 +1433,7 @@ impl SinkGeneralErrorHandler for EmitterSinkContext {
 
 enum SinkEmitter {
     Record(Box<dyn RecordSink>),
-    Row(Box<dyn RowSink>),
-    Otel(OtelEmitter),
-    ClickHouse(ClickHouseEmitter),
-    Postgres(PostgresEmitter),
-    MySql(MySqlEmitter),
-    MongoDb(MongoDbEmitter),
+    Row(RowSinkEmitter),
     /// Boxed because the Iceberg sink carries its catalog client, staging directory, mapped
     /// schema, and both cadence timers, which would otherwise set the size of every sink variant.
     Iceberg(Box<IcebergEmitter>),
@@ -1721,9 +1448,56 @@ impl From<Box<dyn RecordSink>> for SinkEmitter {
     }
 }
 
-impl From<Box<dyn RowSink>> for SinkEmitter {
-    fn from(sink: Box<dyn RowSink>) -> Self {
+impl From<RowSinkEmitter> for SinkEmitter {
+    fn from(sink: RowSinkEmitter) -> Self {
         Self::Row(sink)
+    }
+}
+
+/// A row sink and the host projection whose mapped columns it writes.
+///
+/// The mapping is evaluated here, once per batch, so the sink receives Arrow columns and the rows
+/// it must write and never learns what produced them.
+struct RowSinkEmitter {
+    sink: Box<dyn RowSink>,
+    projection: MappedValuesProjection,
+}
+
+impl RowSinkEmitter {
+    /// Writes every buffered batch, one projection and one virtual call per batch.
+    async fn publish_batches(
+        &mut self,
+        context: &EmitterSinkContext,
+        batches: &mut [EmitterPublishBatch],
+    ) -> EmitterRuntimeResult<()> {
+        for batch_index in 0..batches.len() {
+            tokio::task::consume_budget().await;
+            let mut projected = {
+                let batch = &batches[batch_index];
+                let pending_rows = batch.pending_record_rows();
+                // A batch whose rows a previous attempt already delivered has nothing left to map.
+                if pending_rows.is_empty() {
+                    continue;
+                }
+                self.projection
+                    .project(
+                        batch_index,
+                        &batch.batch,
+                        batch.execution_now,
+                        &pending_rows,
+                    )
+                    .await?
+            };
+            let rejected = projected.take_rejected();
+            finish_rejected_records(context, batches, rejected, MessageErrorOperation::Values)
+                .await?;
+            if projected.is_empty() {
+                continue;
+            }
+            let outcome = self.sink.publish(projected.rows()).await;
+            finish_record_sink_publish(context, batches, outcome).await?;
+        }
+        Ok(())
     }
 }
 
@@ -1895,24 +1669,223 @@ impl SinkEmitter {
                     context.sink_host(),
                 ),
             ),
-            EmitterSinkPlan::Otel(sink) => Self::Otel(OtelEmitter::new(OtelEmitterInit {
-                plan: sink,
+            EmitterSinkPlan::Otel(sink) => {
+                // The signal's own values and its attributes are mapped as one program, so the
+                // attribute columns follow the signal's own in the batch the host projects.
+                let mut mappings = Vec::with_capacity(
+                    sink.values
+                        .len()
+                        .checked_add(sink.attributes.len())
+                        .assured("an emitter maps fewer columns than usize can count"),
+                );
+                mappings.extend_from_slice(&sink.values);
+                mappings.extend_from_slice(&sink.attributes);
+                match Self::values_projection(
+                    context,
+                    MappedValuesProjectionInit {
+                        label: "OTEL",
+                        namespace: "otel",
+                        domain: &context.domain,
+                        emitter: &context.emitter,
+                        values: &mappings,
+                        input_schema: input_schema.arrow_schema(),
+                        udfs: context.udfs.as_ref(),
+                        max_batch: None,
+                    },
+                ) {
+                    SinkEmitterResult::Missing { reason } => Self::Missing { reason },
+                    SinkEmitterResult::Ready(projection) => {
+                        let resource = match otel_resource_attributes(&sink.resource) {
+                            Ok(resource) => resource,
+                            Err(error) => {
+                                let reason = error.current_context().to_string();
+                                context.report_init_error("otel", &reason);
+                                return Self::Missing { reason };
+                            }
+                        };
+                        let config = OtelSinkConfig {
+                            config: sink.client.config.entries.clone(),
+                            signal: sink.signal.clone(),
+                            values: mapped_column_names(&sink.values),
+                            attributes: mapped_column_names(&sink.attributes),
+                            resource,
+                            scope: sink.scope.clone(),
+                            mapped_schema: projection.mapped_schema().clone(),
+                        };
+                        Self::from_row_sink_result(
+                            "otel",
+                            context,
+                            projection,
+                            OtelSink::new(config, context.sink_host()),
+                        )
+                    }
+                }
+            }
+            EmitterSinkPlan::ClickHouse(sink) => Self::values_projection(
                 context,
-                input_schema: input_schema.arrow_schema(),
-            })),
-            EmitterSinkPlan::ClickHouse(sink) => Self::ClickHouse(ClickHouseEmitter::new(
-                sink,
-                context,
-                input_schema.arrow_schema(),
-            )),
-            EmitterSinkPlan::Postgres(sink) => Self::Postgres(
-                PostgresEmitter::new(sink, context, input_schema.arrow_schema()).await,
-            ),
+                MappedValuesProjectionInit {
+                    label: "ClickHouse",
+                    namespace: "clickhouse",
+                    domain: &context.domain,
+                    emitter: &context.emitter,
+                    values: &sink.values,
+                    input_schema: input_schema.arrow_schema(),
+                    udfs: context.udfs.as_ref(),
+                    max_batch: Some(sink.max_batch),
+                },
+            )
+            .map(|projection| {
+                Self::from_row_sink_result(
+                    "clickhouse",
+                    context,
+                    projection,
+                    ClickHouseSink::new(
+                        ClickHouseSinkConfig {
+                            config: sink.client.config.entries.clone(),
+                            table: sink.table.clone(),
+                        },
+                        context.sink_host(),
+                    ),
+                )
+            }),
+            EmitterSinkPlan::Postgres(sink) => {
+                match Self::values_projection(
+                    context,
+                    MappedValuesProjectionInit {
+                        label: "Postgres",
+                        namespace: "postgres",
+                        domain: &context.domain,
+                        emitter: &context.emitter,
+                        values: &sink.values,
+                        input_schema: input_schema.arrow_schema(),
+                        udfs: context.udfs.as_ref(),
+                        max_batch: Some(sink.max_batch),
+                    },
+                ) {
+                    SinkEmitterResult::Missing { reason } => Self::Missing { reason },
+                    SinkEmitterResult::Ready(projection) => {
+                        let connections = match PooledSinkClient::lease(
+                            context,
+                            &sink.client,
+                            sink.pooled_client(),
+                        )
+                        .await
+                        {
+                            Ok(connections) => connections,
+                            Err(error) => {
+                                let reason = error.to_string();
+                                context.report_init_error("postgres", &reason);
+                                return Self::Missing { reason };
+                            }
+                        };
+                        Self::from_row_sink_result(
+                            "postgres",
+                            context,
+                            projection,
+                            PostgresSink::new(
+                                PostgresSinkConfig {
+                                    table: sink.table.clone(),
+                                    conflict_action: sink.conflict_action.clone(),
+                                },
+                                Box::new(connections),
+                                context.sink_host(),
+                            ),
+                        )
+                    }
+                }
+            }
             EmitterSinkPlan::MySql(sink) => {
-                Self::MySql(MySqlEmitter::new(sink, context, input_schema.arrow_schema()).await)
+                match Self::values_projection(
+                    context,
+                    MappedValuesProjectionInit {
+                        label: "MySQL",
+                        namespace: "mysql",
+                        domain: &context.domain,
+                        emitter: &context.emitter,
+                        values: &sink.values,
+                        input_schema: input_schema.arrow_schema(),
+                        udfs: context.udfs.as_ref(),
+                        max_batch: Some(sink.max_batch),
+                    },
+                ) {
+                    SinkEmitterResult::Missing { reason } => Self::Missing { reason },
+                    SinkEmitterResult::Ready(projection) => {
+                        let connections = match PooledSinkClient::lease(
+                            context,
+                            &sink.client,
+                            sink.pooled_client(),
+                        )
+                        .await
+                        {
+                            Ok(connections) => connections,
+                            Err(error) => {
+                                let reason = error.to_string();
+                                context.report_init_error("mysql", &reason);
+                                return Self::Missing { reason };
+                            }
+                        };
+                        Self::from_row_sink_result(
+                            "mysql",
+                            context,
+                            projection,
+                            MySqlSink::new(
+                                MySqlSinkConfig {
+                                    table: sink.table.clone(),
+                                    conflict_action: sink.conflict_action,
+                                },
+                                Box::new(connections),
+                                context.sink_host(),
+                            ),
+                        )
+                    }
+                }
             }
             EmitterSinkPlan::MongoDb(sink) => {
-                Self::MongoDb(MongoDbEmitter::new(sink, context, input_schema.arrow_schema()).await)
+                match Self::values_projection(
+                    context,
+                    MappedValuesProjectionInit {
+                        label: "MongoDB",
+                        namespace: "mongodb",
+                        domain: &context.domain,
+                        emitter: &context.emitter,
+                        values: &sink.values,
+                        input_schema: input_schema.arrow_schema(),
+                        udfs: context.udfs.as_ref(),
+                        max_batch: Some(sink.max_batch),
+                    },
+                ) {
+                    SinkEmitterResult::Missing { reason } => Self::Missing { reason },
+                    SinkEmitterResult::Ready(projection) => {
+                        let client = match PooledSinkClient::lease(
+                            context,
+                            &sink.client,
+                            sink.pooled_client(),
+                        )
+                        .await
+                        {
+                            Ok(client) => client,
+                            Err(error) => {
+                                let reason = error.to_string();
+                                context.report_init_error("mongodb", &reason);
+                                return Self::Missing { reason };
+                            }
+                        };
+                        Self::from_row_sink_result(
+                            "mongodb",
+                            context,
+                            projection,
+                            MongoDbSink::new(
+                                MongoDbSinkConfig {
+                                    config: sink.client.config.entries.clone(),
+                                    collection: sink.collection.clone(),
+                                    conflict_action: sink.conflict_action.clone(),
+                                },
+                                Box::new(client),
+                                context.sink_host(),
+                            ),
+                        )
+                    }
+                }
             }
             EmitterSinkPlan::Iceberg(sink) => Self::from_iceberg_result(
                 context,
@@ -1941,6 +1914,48 @@ impl SinkEmitter {
                 let sink: Box<dyn RecordSink> = Box::new(value);
                 Self::from(sink)
             }
+            Err(error) => {
+                let error = error.change_context(EmitterRuntimeError::InitializeSink);
+                let reason = emitter_error_message(&error);
+                context.report_init_error(sink, &reason);
+                Self::Missing { reason }
+            }
+        }
+    }
+
+    /// Compiles one row sink's `VALUES` mapping before the sink it feeds is opened.
+    ///
+    /// A mapping that cannot compile never produces a column, so the emitter reports the failure
+    /// the same way it reports a client it could not open and recompiles on its next attempt.
+    fn values_projection(
+        context: &EmitterSinkContext,
+        init: MappedValuesProjectionInit<'_>,
+    ) -> SinkEmitterResult<MappedValuesProjection> {
+        let sink = init.namespace;
+        match MappedValuesProjection::compile(init) {
+            Ok(projection) => SinkEmitterResult::Ready(projection),
+            Err(error) => {
+                let reason = error.to_string();
+                context.report_init_error(sink, &reason);
+                SinkEmitterResult::Missing { reason }
+            }
+        }
+    }
+
+    fn from_row_sink_result<T>(
+        sink: &str,
+        context: &EmitterSinkContext,
+        projection: MappedValuesProjection,
+        result: Result<T, Report<SinkStartError>>,
+    ) -> Self
+    where
+        T: RowSink + 'static,
+    {
+        match result {
+            Ok(value) => Self::from(RowSinkEmitter {
+                sink: Box::new(value),
+                projection,
+            }),
             Err(error) => {
                 let error = error.change_context(EmitterRuntimeError::InitializeSink);
                 let reason = emitter_error_message(&error);
@@ -1990,7 +2005,7 @@ impl SinkEmitter {
                 Some(SinkDeadline::Physical(deadline)) => wake.with_physical(deadline),
                 None => wake,
             },
-            Self::Row(sink) => match sink.commit_deadline() {
+            Self::Row(row) => match row.sink.commit_deadline() {
                 Some(SinkDeadline::Domain(due_at)) => wake.with_buffer(
                     clock,
                     BranchBufferDeadline::Logical(clock.deadline_at(due_at)),
@@ -2013,14 +2028,8 @@ impl SinkEmitter {
     fn requires_publish_failure_reinitialization(&self) -> bool {
         match self {
             Self::Record(sink) => !sink.keeps_client_on_publish_failure(),
-            Self::Row(sink) => !sink.keeps_client_on_publish_failure(),
-            Self::Otel(_)
-            | Self::ClickHouse(_)
-            | Self::Postgres(_)
-            | Self::MySql(_)
-            | Self::MongoDb(_)
-            | Self::Iceberg(_)
-            | Self::Missing { .. } => true,
+            Self::Row(row) => !row.sink.keeps_client_on_publish_failure(),
+            Self::Iceberg(_) | Self::Missing { .. } => true,
         }
     }
 
@@ -2033,7 +2042,7 @@ impl SinkEmitter {
         };
         let sink = match self {
             Self::Record(sink) => sink.pending_acks(),
-            Self::Row(sink) => sink.pending_acks(),
+            Self::Row(row) => row.sink.pending_acks(),
             _ => None,
         };
         EmitterAcknowledgements { runtime, sink }
@@ -2041,21 +2050,13 @@ impl SinkEmitter {
 
     async fn finish_transport(&mut self, deadline: Instant) -> EmitterRuntimeResult<()> {
         match self {
-            Self::Record(sink) => sink
+            Self::Record(sink) => sink.finish(deadline).await.map_err(sink_publish_failure),
+            Self::Row(row) => row
+                .sink
                 .finish(deadline)
                 .await
-                .map_err(|error| error.change_context(EmitterRuntimeError::PublishBatch)),
-            Self::Row(sink) => sink
-                .finish(deadline)
-                .await
-                .map_err(|error| error.change_context(EmitterRuntimeError::PublishBatch)),
-            Self::Otel(_)
-            | Self::ClickHouse(_)
-            | Self::Postgres(_)
-            | Self::MySql(_)
-            | Self::MongoDb(_)
-            | Self::Iceberg(_)
-            | Self::Missing { .. } => Ok(()),
+                .map_err(sink_publish_failure),
+            Self::Iceberg(_) | Self::Missing { .. } => Ok(()),
         }
     }
 
@@ -2450,175 +2451,14 @@ impl SinkEmitter {
                 )),
             );
         }
+        if let Self::Row(emitter) = &mut *self {
+            return emitter.publish_batches(context, batches).await;
+        }
         if let (Some(codec), Self::Record(emitter)) = (codec, &mut *self) {
             let encoded = encode_broker_records(codec, context, batches).await?;
             let records = sink_records(context, batches, encoded).await?;
             let outcome = emitter.publish(records).await;
             return finish_record_sink_publish(context, batches, outcome).await;
-        }
-
-        match (&mut *self, sink) {
-            (
-                Self::Otel(emitter),
-                EmitterSinkPlan::Otel(OtelSinkPlan {
-                    signal,
-                    values,
-                    attributes,
-                    ..
-                }),
-            ) => {
-                for batch_index in 0..batches.len() {
-                    tokio::task::consume_budget().await;
-                    let outcome = {
-                        let batch = &batches[batch_index];
-                        let pending_rows = batch.pending_record_rows();
-                        emitter
-                            .publish_pending_rows(
-                                EmitterBatchExecutionContext {
-                                    batch_index,
-                                    batch: &batch.batch,
-                                    execution_now: batch.execution_now,
-                                },
-                                signal,
-                                values,
-                                attributes,
-                                &pending_rows,
-                            )
-                            .await
-                    };
-                    finish_per_record_publish(context, batches, outcome).await?;
-                }
-                return Ok(());
-            }
-            (
-                Self::ClickHouse(emitter),
-                EmitterSinkPlan::ClickHouse(ClickHouseSinkPlan {
-                    table,
-                    values,
-                    max_batch,
-                    ..
-                }),
-            ) => {
-                for batch_index in 0..batches.len() {
-                    tokio::task::consume_budget().await;
-                    let outcome = {
-                        let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch);
-                        emitter
-                            .publish_pending_chunks(
-                                batch_index,
-                                table,
-                                values,
-                                &batch.batch,
-                                &pending_chunks,
-                                batch.execution_now,
-                            )
-                            .await
-                    };
-                    finish_per_record_publish(context, batches, outcome).await?;
-                }
-                return Ok(());
-            }
-            (
-                Self::Postgres(emitter),
-                EmitterSinkPlan::Postgres(PostgresSinkPlan {
-                    table,
-                    values,
-                    conflict_action,
-                    max_batch,
-                    ..
-                }),
-            ) => {
-                for batch_index in 0..batches.len() {
-                    tokio::task::consume_budget().await;
-                    let outcome = {
-                        let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch);
-                        emitter
-                            .publish_pending_chunks(
-                                EmitterBatchExecutionContext {
-                                    batch_index,
-                                    batch: &batch.batch,
-                                    execution_now: batch.execution_now,
-                                },
-                                table,
-                                values,
-                                conflict_action,
-                                &pending_chunks,
-                            )
-                            .await
-                    };
-                    finish_per_record_publish(context, batches, outcome).await?;
-                }
-                return Ok(());
-            }
-            (
-                Self::MySql(emitter),
-                EmitterSinkPlan::MySql(MySqlSinkPlan {
-                    table,
-                    values,
-                    conflict_action,
-                    max_batch,
-                    ..
-                }),
-            ) => {
-                for batch_index in 0..batches.len() {
-                    tokio::task::consume_budget().await;
-                    let outcome = {
-                        let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch);
-                        emitter
-                            .publish_pending_chunks(
-                                EmitterBatchExecutionContext {
-                                    batch_index,
-                                    batch: &batch.batch,
-                                    execution_now: batch.execution_now,
-                                },
-                                table,
-                                values,
-                                conflict_action,
-                                &pending_chunks,
-                            )
-                            .await
-                    };
-                    finish_per_record_publish(context, batches, outcome).await?;
-                }
-                return Ok(());
-            }
-            (
-                Self::MongoDb(emitter),
-                EmitterSinkPlan::MongoDb(MongoDbSinkPlan {
-                    collection,
-                    values,
-                    conflict_action,
-                    max_batch,
-                    ..
-                }),
-            ) => {
-                for batch_index in 0..batches.len() {
-                    tokio::task::consume_budget().await;
-                    let outcome = {
-                        let batch = &batches[batch_index];
-                        let pending_chunks = batch.pending_record_chunks(*max_batch);
-                        emitter
-                            .publish_pending_chunks(
-                                EmitterBatchExecutionContext {
-                                    batch_index,
-                                    batch: &batch.batch,
-                                    execution_now: batch.execution_now,
-                                },
-                                collection,
-                                values,
-                                conflict_action,
-                                &pending_chunks,
-                            )
-                            .await
-                    };
-                    finish_per_record_publish(context, batches, outcome).await?;
-                }
-                return Ok(());
-            }
-            _ => {}
         }
 
         Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
@@ -2655,6 +2495,16 @@ impl SinkEmitter {
         {
             return Err(Report::new(EmitterRuntimeError::PublishStalled)
                 .attach_printable("fault injector stalled emitter publish"));
+        }
+        // An unavailable client is the one injected fault a sink recovers from on its own: the
+        // publish fails the way an unreachable external system does, and the emitter retries it on
+        // its declared backoff until the fault clears.
+        if control
+            .fault_injection
+            .sink_client_is_unavailable(&context.emitter)
+        {
+            return Err(Report::new(EmitterRuntimeError::PublishBatch)
+                .attach_printable("sink fault injector returned an unavailable client"));
         }
         Ok(())
     }
@@ -2787,6 +2637,11 @@ async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Receiver<bool>
             return;
         }
     }
+}
+
+enum SinkEmitterResult<T> {
+    Ready(T),
+    Missing { reason: String },
 }
 
 async fn encode_pending_broker_payloads(
@@ -2996,37 +2851,23 @@ async fn finish_record_sink_publish(
         .collect();
     finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
     match outcome.infrastructure_error {
-        Some(error) => Err(error.change_context(EmitterRuntimeError::PublishBatch)),
+        Some(error) => Err(sink_publish_failure(error)),
         None => Ok(()),
     }
 }
 
-async fn finish_per_record_publish(
-    context: &EmitterSinkContext,
-    batches: &mut [EmitterPublishBatch],
-    outcome: PerRecordPublishOutcome,
-) -> EmitterRuntimeResult<()> {
-    let PerRecordPublishOutcome {
-        delivered,
-        rejected,
-        infrastructure_error,
-    } = outcome;
-    for SinkRecordPosition {
-        batch_index,
-        row_index,
-    } in delivered
-    {
-        let batch = batches.get_mut(batch_index).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "broker confirmation references missing emitter batch {batch_index}"
-            ))
-        })?;
-        batch.mark_delivered(row_index)?;
-    }
-    finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
-    match infrastructure_error {
-        Some(error) => Err(error),
-        None => Ok(()),
+/// A connector's publish failure as this emitter's own, keeping a misconfigured sink out of the
+/// retry loop it would never leave.
+fn sink_publish_failure(error: Report<SinkPublishError>) -> Report<EmitterRuntimeError> {
+    match error.current_context() {
+        SinkPublishError::Misconfigured { .. } => {
+            error.change_context(EmitterRuntimeError::InvalidSinkConfig)
+        }
+        SinkPublishError::NotInitialized { .. }
+        | SinkPublishError::Publish { .. }
+        | SinkPublishError::Finish { .. } => {
+            error.change_context(EmitterRuntimeError::PublishBatch)
+        }
     }
 }
 
@@ -3095,6 +2936,15 @@ async fn finish_rejected_records(
             .await?;
     }
     Ok(())
+}
+
+impl<T> SinkEmitterResult<T> {
+    fn map(self, f: impl FnOnce(T) -> SinkEmitter) -> SinkEmitter {
+        match self {
+            Self::Ready(value) => f(value),
+            Self::Missing { reason } => SinkEmitter::Missing { reason },
+        }
+    }
 }
 
 fn emitter_publish_error_is_retryable(error: &Report<EmitterRuntimeError>) -> bool {
@@ -4412,9 +4262,9 @@ mod publishing_tests {
             backoff: Duration::from_millis(10),
             max_backoff: Duration::from_millis(100),
         });
-        let error = emitter_publish_error_with_minimum_retry_delay(
-            "receiver requested a longer retry",
-            Duration::from_secs(2),
+        let error = sink_publish_failure(
+            Report::new(SinkPublishError::Publish { sink: "test" })
+                .attach(SinkRetryDelay(Duration::from_secs(2))),
         );
 
         assert_eq!(
@@ -4422,16 +4272,6 @@ mod publishing_tests {
             Duration::from_secs(2)
         );
         assert_eq!(backoff.next_delay(), Duration::from_millis(20));
-    }
-
-    #[test]
-    fn a_retry_delay_a_connector_requested_survives_the_host_error_conversion() {
-        let error = Report::new(nervix_connector::SinkPublishError::Publish { sink: "sentry" })
-            .attach(SinkRetryAfter(Duration::from_secs(45)))
-            .change_context(EmitterRuntimeError::PublishBatch);
-
-        assert!(emitter_publish_error_is_retryable(&error));
-        assert_eq!(emitter_minimum_retry_delay(&error), Duration::from_secs(45));
     }
 
     #[tokio::test]
@@ -4588,7 +4428,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use nervix_connector::ResolvedClientConfig;
-    use nervix_connector_nats::NatsPublishingMode;
+    use nervix_connector_nats::{NatsPublishingMode, NatsSink};
     use nervix_models::{
         ClientName, CreateSchema, DomainName, EmitterName, ModelName, ParseAsType, SchemaName,
         SubjectName,
@@ -4762,19 +4602,24 @@ mod tests {
         );
     }
 
+    /// A connector decides why its own configuration is unusable, so the host states only that the
+    /// sink could not be initialized and reports the connector's message as the reason it is
+    /// missing.
     #[test]
-    fn emitter_config_adapters_preserve_typed_context() {
-        let missing = emitter_config_value(&[], "endpoint", "OpenTelemetry")
-            .expect_err("a missing client config key must fail");
+    fn a_connector_start_failure_becomes_a_missing_sink_with_its_own_message() {
+        let sink = SinkEmitter::from_record_sink_result::<NatsSink>(
+            "NATS",
+            &sink_context(),
+            Err(
+                Report::new(SinkStartError::InvalidConfiguration { sink: "NATS" })
+                    .attach_printable("missing NATS client config key 'servers'"),
+            ),
+        );
 
-        assert_eq!(
-            missing.current_context(),
-            &EmitterRuntimeError::InvalidSinkConfig
-        );
-        assert_eq!(
-            emitter_error_message(&missing),
-            "missing OpenTelemetry client config key 'endpoint'"
-        );
+        let SinkEmitter::Missing { reason } = sink else {
+            panic!("a start failure must leave the sink missing")
+        };
+        assert_eq!(reason, "missing NATS client config key 'servers'");
     }
 
     #[tokio::test]
@@ -5634,51 +5479,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runtime_values_convert_to_json_without_losing_exact_scalar_types() {
-        let datetime =
-            chrono::DateTime::parse_from_rfc3339("2026-08-04T12:34:56Z").expect("valid datetime");
-        let cases = [
-            (RuntimeValue::U8(1), serde_json::json!(1)),
-            (RuntimeValue::I8(-2), serde_json::json!(-2)),
-            (RuntimeValue::U16(3), serde_json::json!(3)),
-            (RuntimeValue::I16(-4), serde_json::json!(-4)),
-            (RuntimeValue::U32(5), serde_json::json!(5)),
-            (RuntimeValue::I32(-6), serde_json::json!(-6)),
-            (RuntimeValue::U64(7), serde_json::json!(7)),
-            (RuntimeValue::I64(-8), serde_json::json!(-8)),
-            (RuntimeValue::Bool(true), serde_json::json!(true)),
-            (
-                RuntimeValue::String("value".to_string()),
-                serde_json::json!("value"),
-            ),
-            (
-                RuntimeValue::Datetime(datetime),
-                serde_json::json!("2026-08-04T12:34:56+00:00"),
-            ),
-            (
-                RuntimeValue::F32(OrderedFloat(1.25)),
-                serde_json::json!(1.25),
-            ),
-            (
-                RuntimeValue::F64(OrderedFloat(-2.5)),
-                serde_json::json!(-2.5),
-            ),
-            (
-                RuntimeValue::Array(vec![RuntimeValue::I64(1)]),
-                serde_json::json!([1]),
-            ),
-            (
-                RuntimeValue::Vec(vec![RuntimeValue::String("x".to_string())]),
-                serde_json::json!(["x"]),
-            ),
-        ];
-
-        for (value, expected) in cases {
-            assert_eq!(runtime_value_to_json(&value), expected);
-        }
-    }
-
     #[tokio::test]
     async fn sink_context_reports_configuration_and_publish_failures() {
         let context = sink_context();
@@ -5749,11 +5549,7 @@ mod tests {
             .expect("the host must publish the event");
         assert_eq!(
             message,
-            format!(
-                "sink error for emitter '{}' in domain '{}': connector background error",
-                context.emitter.as_str(),
-                context.domain.as_str()
-            )
+            "sink error for emitter 'output' in domain 'emitter_tests': connector background error"
         );
         assert_eq!(host.staging_directory(), context.runtime.temp_dir());
 
@@ -5800,14 +5596,21 @@ mod tests {
         let schema = input_schema().arrow_schema();
 
         let errors = [
-            compile_clickhouse_values_program(&domain, &emitter, &[], schema.clone(), None),
-            compile_postgres_values_program(&domain, &emitter, &[], schema.clone(), None),
-            compile_mysql_values_program(&domain, &emitter, &[], schema.clone(), None),
-            compile_mongodb_values_program(&domain, &emitter, &[], schema.clone(), None),
-            compile_iceberg_values_program(&domain, &emitter, &[], schema, None),
+            compile_iceberg_values_program(&domain, &emitter, &[], schema.clone(), None).err(),
+            MappedValuesProjection::compile(MappedValuesProjectionInit {
+                label: "ClickHouse",
+                namespace: "clickhouse",
+                domain: &domain,
+                emitter: &emitter,
+                values: &[],
+                input_schema: schema,
+                udfs: None,
+                max_batch: None,
+            })
+            .err(),
         ];
         for result in errors {
-            let Err(error) = result else {
+            let Some(error) = result else {
                 panic!("empty VALUES mappings must fail before compilation")
             };
             assert!(

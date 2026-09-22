@@ -2094,12 +2094,12 @@ impl Cluster {
         self.fault_injection.clear_emitter_fault(emitter);
     }
 
-    pub(crate) fn fail_otel_client_unavailable_on_all_nodes(&self, emitter: &str) {
-        self.fault_injection.fail_otel_client_unavailable(emitter);
+    pub(crate) fn fail_sink_client_unavailable_on_all_nodes(&self, emitter: &str) {
+        self.fault_injection.fail_sink_client_unavailable(emitter);
     }
 
-    pub(crate) fn clear_otel_client_fault_on_all_nodes(&self, emitter: &str) {
-        self.fault_injection.clear_otel_client_fault(emitter);
+    pub(crate) fn clear_sink_client_fault_on_all_nodes(&self, emitter: &str) {
+        self.fault_injection.clear_sink_client_fault(emitter);
     }
 
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
@@ -3642,6 +3642,25 @@ impl TestSession {
         }
     }
 
+    pub(crate) async fn run_command_result_with_reference_at_position(
+        &mut self,
+        query: &str,
+        execution_reference: &str,
+        expected_transaction_position: u64,
+    ) -> io::Result<proto::CommandResult> {
+        match self {
+            Self::Raw(session) => {
+                session
+                    .run_command_result_with_reference_at_position(
+                        query,
+                        execution_reference,
+                        expected_transaction_position,
+                    )
+                    .await
+            }
+        }
+    }
+
     pub(crate) async fn send_command_request_with_reference(
         &mut self,
         query: &str,
@@ -3701,6 +3720,15 @@ impl RawTestSession {
             }
             Some(_) | None => None,
         };
+        self.command_request_at_position(query, execution_reference, expected_transaction_position)
+    }
+
+    fn command_request_at_position(
+        &self,
+        query: &str,
+        execution_reference: &str,
+        expected_transaction_position: Option<u64>,
+    ) -> SessionRequest {
         SessionRequest {
             request: Some(proto::session_request::Request::Command(CommandRequest {
                 query: query.to_string(),
@@ -3810,6 +3838,20 @@ impl RawTestSession {
             .result)
     }
 
+    async fn run_command_result_with_reference_at_position(
+        &mut self,
+        query: &str,
+        execution_reference: &str,
+        expected_transaction_position: u64,
+    ) -> io::Result<proto::CommandResult> {
+        let request = self.command_request_at_position(
+            query,
+            execution_reference,
+            Some(expected_transaction_position),
+        );
+        Ok(self.observe_command_request(request).await?.result)
+    }
+
     async fn observe_command(&mut self, query: &str) -> io::Result<TestCommandObservation> {
         let execution_reference = uuid::Uuid::now_v7().to_string();
         self.observe_command_with_reference(query, &execution_reference)
@@ -3822,6 +3864,13 @@ impl RawTestSession {
         execution_reference: &str,
     ) -> io::Result<TestCommandObservation> {
         let request = self.command_request(query, execution_reference);
+        self.observe_command_request(request).await
+    }
+
+    async fn observe_command_request(
+        &mut self,
+        request: SessionRequest,
+    ) -> io::Result<TestCommandObservation> {
         let request_protobuf_bytes = request.encoded_len();
         self.request_tx
             .send(request)

@@ -1,19 +1,18 @@
-//! The Syslog client configuration a listener or sender is built from.
+//! Syslog client configuration shared by the source and sink transports.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The transport a Syslog client declares: its protocol, address, stream framing,
-//!   message-size bound and TLS material, in each direction it is read for.
-//! - **Depends on.** The connector contract's TLS sources, the vocabulary's configuration entries,
-//!   `rustls` and the URL parser.
-//! - **Must not know.** Runtime batches, relays, branches, registry state, or another connector
-//!   implementation.
+//! - **Owns.** Syslog transport, framing, size and TLS configuration interpretation.
+//! - **Depends on.** Connector TLS primitives, Syslog client entries, and rustls.
+//! - **Must not know.** Runtime tasks, relays, branches, schedules, Models beyond typed client
+//!   entries, or registry state.
 
 use std::{num::NonZeroUsize, sync::Arc as StdArc};
 
 use ahash::HashSet;
-use nervix_connector::{RustlsClientConfigSource, client_tls_paths, read_tls_file};
-use nervix_recovery::Discarded as _;
+use nervix_connector::{
+    RustlsClientConfigSource, client_tls_paths, install_rustls_crypto_provider, read_tls_file,
+};
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
@@ -300,12 +299,7 @@ impl SyslogClientConfig {
     }
 
     pub fn tls_server_config(&self) -> Result<StdArc<ServerConfig>, SyslogConfigError> {
-        rustls::crypto::aws_lc_rs::default_provider()
-            .install_default()
-            .discarded(
-                "a provider the host installed first is the one this connector would have \
-                 installed",
-            );
+        install_rustls_crypto_provider();
         let tls = client_tls_paths(&self.entries);
         let cert_file = tls
             .cert_file

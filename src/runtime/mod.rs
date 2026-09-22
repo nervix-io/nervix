@@ -76,11 +76,9 @@ use nervix_models::{
     IngestQuiesceOverflow, IngestSource, IngestTimestampSource, IngestorName, KafkaIngestMode,
     KafkaOffsetMode, KafkaPartitionSchedule, Literal as ModelLiteral, LookupName,
     MaterializedStatePolicy, MessageErrorCode, MessageErrorOperation, MessageErrorPolicy, Model,
-    ModelIndex, ModelKind, ModelName, MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode,
-    MqttQos, MqttSession, MySqlConflictAction, MySqlValueMapping, NodeRef,
-    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
-    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, PostgresConflictAction,
+    ModelIndex, ModelKind, ModelName, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
+    MySqlValueMapping, NodeRef, OtelValueMapping, OutputBranch, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
     PostgresValueMapping, ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName,
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
     ResolvedBranching, ResourceId, ResourceName, RetryPolicy, RouteConstruction, ScheduledModel,
@@ -444,9 +442,7 @@ use scheduled_node::{
     EmitterTaskBuildDeps, EmitterTaskDeps, ExecutionBuildDeps, ScheduledNodePlacement,
     ScheduledNodeTask,
 };
-pub(in crate::runtime) use shared_clients::{
-    OpenClientError, SharedClientError, SharedClientLease,
-};
+pub(in crate::runtime) use shared_clients::{SharedClientError, SharedClientLease};
 use snapshot_staging::{SnapshotStaging, SnapshotStagingLimits};
 use state_replication::{
     ActivatedRuntimeStateHandoff, DEFAULT_STATE_REPLICATION_POLL_INTERVAL,
@@ -506,6 +502,11 @@ use wasm_checkpoint::{
     WASM_CHECKPOINT_DEADLINE, WasmCallbackReporting, WasmCheckpointHolds,
     checkpoint_wasm_guest_state, wasm_callback_decided_tokens,
 };
+pub(crate) use wasm_guest_state_reset::GuestWasmStateResetRequest;
+use wasm_guest_state_reset::{
+    PendingGuestWasmStateResets, WasmGuestStateResetContext, WasmGuestStateResetFence,
+    refuse_fenced_wasm_branch_input, request_wasm_guest_state_reset,
+};
 use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
 use wasm_processor::{
     WasmBranchModule, WasmInstanceError, WasmLiveInstance, WasmModuleFile,
@@ -522,7 +523,6 @@ pub(crate) use wasm_state_reset::WasmStateResetPreparation;
 use wasm_state_reset::{
     PreparedWasmStateReset, PreparedWasmStateResetBranch, WasmStateResetRuntimeError,
 };
-pub(in crate::runtime) use websocket_signaling::SignalingProtobufDescriptors;
 use window_accumulator::{
     RetainedWindowRows, WindowAccumulator, WindowAccumulatorPlan, WindowArgumentColumns, WindowRow,
 };
@@ -542,12 +542,12 @@ mod wasm_checkpoint;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod wasm_checkpoint_benchmark;
+mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;
 mod wasm_state_recovery;
 mod wasm_state_reset;
-mod websocket_signaling;
 mod window_accumulator;
 mod window_processor;
 mod window_state;
@@ -619,7 +619,4 @@ pub(crate) use subscription_predicate::{
 pub(crate) use vm_compile::{
     CompiledDomainUdfs, CompiledProgramWithMaterializedInterest, MaterializedProgramInterest,
     RuntimeMaterializedRelaySpec, RuntimeVmCompileContext,
-};
-pub(crate) use websocket_signaling::{
-    CompiledSignalingProtocol, SignalingDataSink, WebsocketSignalingSession,
 };

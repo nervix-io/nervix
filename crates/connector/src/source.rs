@@ -267,6 +267,8 @@ pub struct SourceIntakeBatch<'a> {
 /// Why host-owned source intake could not accept a batch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum SourceIntakeError {
+    #[error("failed to retain a source batch during quiesce")]
+    Retain,
     #[error("failed to decode a source payload")]
     Decode,
     #[error("failed to dispatch a source batch")]
@@ -322,6 +324,7 @@ pub trait SourceHostServices: Send + 'static {
     ) -> SourceIntakeResult<SourceIntakeOutcome>;
 
     async fn flush(&mut self) -> SourceIntakeResult<()>;
+    async fn replay_buffered(&mut self) -> SourceIntakeResult<bool>;
     fn next_flush(&self) -> Option<Instant>;
     fn should_suspend_intake(&self) -> bool;
     async fn wait_for_quiesce_change(&mut self);
@@ -356,6 +359,10 @@ impl SourceHost {
 
     pub async fn flush(&mut self) -> SourceIntakeResult<()> {
         self.services.flush().await
+    }
+
+    pub async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
+        self.services.replay_buffered().await
     }
 
     pub fn next_flush(&self) -> Option<Instant> {

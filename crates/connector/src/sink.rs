@@ -15,7 +15,9 @@ use std::{num::NonZeroUsize, ops::Range, path::PathBuf, time::Duration};
 use arrow_array::RecordBatch;
 use async_trait::async_trait;
 use error_stack::Report;
-use nervix_models::{MessageErrorCode, MessageErrorOperation, StructuredMessageError, Timestamp};
+use nervix_models::{
+    FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError, Timestamp,
+};
 use thiserror::Error;
 use tokio::time::Instant;
 use triomphe::Arc;
@@ -96,6 +98,7 @@ pub struct RejectedSinkRecord {
 }
 
 impl RejectedSinkRecord {
+    /// A record the external system itself refused.
     pub fn external(position: SinkRecordPosition, occurred_at: Timestamp, message: String) -> Self {
         Self {
             position,
@@ -106,6 +109,28 @@ impl RejectedSinkRecord {
                 operation: MessageErrorOperation::Publish,
                 operation_index: None,
                 fields: Default::default(),
+                occurred_at,
+            },
+        }
+    }
+
+    /// A record whose mapped values the connector's own validation refused, naming the fields that
+    /// carry them.
+    pub fn invalid(
+        position: SinkRecordPosition,
+        occurred_at: Timestamp,
+        message: String,
+        fields: impl IntoIterator<Item = FieldPath>,
+    ) -> Self {
+        Self {
+            position,
+            error: StructuredMessageError {
+                reference: uuid::Uuid::now_v7(),
+                code: MessageErrorCode::Validation,
+                message,
+                operation: MessageErrorOperation::Values,
+                operation_index: None,
+                fields: fields.into_iter().collect(),
                 occurred_at,
             },
         }
@@ -151,6 +176,12 @@ impl PerRecordOutcome {
         self.infrastructure_error = Some(error);
     }
 
+    /// Whether this write already failed for a reason the host must retry, which a sink writing
+    /// several chunks reads before it starts the next one.
+    pub fn has_infrastructure_error(&self) -> bool {
+        self.infrastructure_error.is_some()
+    }
+
     pub fn into_parts(self) -> PerRecordOutcomeParts {
         PerRecordOutcomeParts {
             delivered: self.delivered,
@@ -161,6 +192,9 @@ impl PerRecordOutcome {
 }
 
 /// A host-projected Arrow batch and the rows one row sink must write from it.
+///
+/// `batch.column(i)` holds the values mapped to `target_columns[i]`, so a sink reads its columns by
+/// position and never resolves a name a mapping may have used twice.
 pub struct MappedSinkRows<'a> {
     pub batch_index: usize,
     pub batch: &'a RecordBatch,
@@ -168,14 +202,9 @@ pub struct MappedSinkRows<'a> {
     pub selected_rows: &'a [usize],
     /// Ranges into `selected_rows` that respect the emitter's declared maximum batch size.
     pub selected_row_chunks: &'a [Range<usize>],
+    /// When the host evaluated the mapping, which a rejected row is reported with.
+    pub occurred_at: Timestamp,
 }
-
-/// How long an external service asked a sink to wait before it publishes again.
-///
-/// A sink attaches this to the publish failure it returns, and the host waits at least this long
-/// before the next attempt, however short its own retry backoff currently is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SinkRetryAfter(pub Duration);
 
 /// A sink-owned deadline the host includes in the task's next wake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,6 +233,9 @@ pub enum SinkStartError {
 pub type SinkStartResult<T> = Result<T, Report<SinkStartError>>;
 
 /// Why a connector could not complete a sink operation.
+///
+/// Every variant but [`SinkPublishError::Misconfigured`] describes a condition the host retries on
+/// its declared backoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum SinkPublishError {
     #[error("{sink} sink is not initialized")]
@@ -212,9 +244,19 @@ pub enum SinkPublishError {
     Publish { sink: &'static str },
     #[error("failed to finish {sink} sink")]
     Finish { sink: &'static str },
+    #[error("{sink} sink cannot accept this write as it is configured")]
+    Misconfigured { sink: &'static str },
 }
 
 pub type SinkPublishResult<T> = Result<T, Report<SinkPublishError>>;
+
+/// How long the external system asked the host to wait before its next attempt.
+///
+/// A connector attaches this to a publish failure when the receiver stated a delay of its own, such
+/// as an OTLP `retry_info` or an HTTP `Retry-After`. The host waits at least this long, and never
+/// less than its own backoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkRetryDelay(pub Duration);
 
 /// Lifecycle policy shared by record and row sinks.
 #[async_trait]
