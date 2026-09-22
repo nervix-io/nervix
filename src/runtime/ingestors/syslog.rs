@@ -15,7 +15,7 @@ use nervix_connector_syslog::{SyslogSource, SyslogSourcePlan};
 
 use super::{
     super::*,
-    source::{BrokerSourceHost, BrokerSourceHostSpec, run_source_instance_with_retry},
+    source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_source_instance_with_retry},
 };
 
 const SYSLOG_RETRY_POLICY: ParsedRetryPolicy = ParsedRetryPolicy {
@@ -91,7 +91,7 @@ impl SyslogIngestor {
             &ingestor.name,
             source_plan.capabilities.instances(),
         );
-        let host = BrokerSourceHost::build(BrokerSourceHostSpec {
+        let host = RuntimeSourceHost::build(RuntimeSourceHostSpec {
             runtime: runtime.clone(),
             domain: domain.clone(),
             ingestor: ingestor.name.clone(),

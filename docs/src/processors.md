@@ -433,6 +433,7 @@ CREATE WASM PROCESSOR normalize_events
         normalized = normalized
     WHERE output.normalized != ""
     ON MESSAGE ERROR LOG
+  ON REJECTED STATE PRESERVE
   ON GLOBAL ERROR LOG;
 ```
 
@@ -450,6 +451,13 @@ failure behavior.
 Guest initialization, input processing, requested-timeout callbacks, quiesce flushes, and state
 save, load, or reset each receive the snapshot selected for that operation. The guest cannot ask
 the engine for wall time or execute without an explicit snapshot.
+
+`ON REJECTED STATE` decides what happens when a recreated guest refuses the snapshot Nervix hands
+it. It is optional and defaults to `PRESERVE`, which keeps the refused snapshot and reports the
+refusal; `RESET` opts the processor in to replacing that branch's state lifetime once. Only the
+guest's own verdict on the saved bytes reaches this policy, so no module, limit, storage or
+replication failure can erase computation state. See
+[Recovering A Rejected Snapshot](wasm-processor-guests.md#recovering-a-rejected-snapshot).
 
 A WASM processor acknowledges an input only after the guest-state checkpoint that covers it is on
 the stable storage of the branch's owner and of every replica the schedule assigns the processor.

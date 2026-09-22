@@ -17,21 +17,20 @@ use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     ConsensusError, ConsensusTransactionError, DomainPlanningInputs, ReplicatedTransaction,
-    TransactionActivity, TransactionApplicationOutcome, TransactionApplyingStep,
-    TransactionCommandResult, TransactionCommitAdmissionFailure, TransactionCommitAdmissionPlan,
-    TransactionCommitAdvance, TransactionDiagnostic, TransactionMutationError, TransactionOutcome,
-    TransactionQueueAdmission, TransactionQueueLimits, TransactionQueueRequest,
-    TransactionReportArchive, TransactionScheduleEligibility, TransactionState,
-    TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
-    TransactionStepResult,
+    TransactionActivity, TransactionCommandResult, TransactionCommitAdmissionFailure,
+    TransactionCommitAdmissionPlan, TransactionCommitAdvance, TransactionDiagnostic,
+    TransactionMutationError, TransactionOutcome, TransactionQueueAdmission,
+    TransactionQueueLimits, TransactionQueueRequest, TransactionReportArchive,
+    TransactionScheduleEligibility, TransactionState, TransactionStatement,
+    TransactionStatementRequest, TransactionStepEffect, TransactionStepResult,
 };
 use nervix_models::{
-    ActualExecutionStepImpact, CanonicalImpactSet, CommandExecutionReference, DomainName,
-    DomainSchedule, DomainState, DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage,
-    ImpactPlanningBasis, Model, ModelIndex, ModelKind, OwnershipMoveImpact, QuiesceLevel,
-    RequestedResourceVersion, ResourceId, ResourceName, ResourceUploads, Statement,
-    TransactionCommitStepKind, TransactionOperationAdmission, TransactionOperationNumber,
-    TransactionPreviewIdentity, TransactionResolvedDomainStart, UserName,
+    CanonicalImpactSet, CommandExecutionReference, DomainName, DomainSchedule, DomainState,
+    DomainStatus, ExecutionStepImpactReport, ImpactNodeCoverage, ImpactPlanningBasis, Model,
+    ModelIndex, OwnershipMoveImpact, RequestedResourceVersion, ResourceId, ResourceName,
+    ResourceUploads, Statement, TransactionCommitStepKind, TransactionOperationAdmission,
+    TransactionOperationNumber, TransactionPreviewIdentity, TransactionResolvedDomainStart,
+    UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
@@ -39,7 +38,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::{
     sync::{OwnedMutexGuard, Semaphore, mpsc},
-    time::{Duration, sleep},
+    time::Duration,
 };
 use tonic::Status;
 use tracing::{info, warn};
@@ -70,6 +69,10 @@ use crate::{
     },
     runtime::RuntimeError,
 };
+
+mod application;
+mod impact;
+pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
 
 pub(in crate::application) const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration =
     Duration::from_secs(15 * 60);
@@ -288,6 +291,7 @@ pub(in crate::application) struct TransactionModelStepContext<'a> {
     pub(in crate::application) operations: Vec<nervix_models::OperationImpactReport>,
     pub(in crate::application) inputs: DomainPlanningInputs,
     pub(in crate::application) eligibility: TransactionScheduleEligibility,
+    pub(in crate::application) actual: &'a TransactionStepImpactRecorder,
     pub(in crate::application) outcome:
         &'a ParkingMutex<Option<Result<ReplicatedTransaction, Report<TransactionCommitError>>>>,
 }
@@ -522,7 +526,7 @@ fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResu
     let quiesce_level = transaction
         .commit_results()
         .iter()
-        .map(|step| step.impact.planned().pause.level())
+        .map(|step| step.impact.actual_quiesce_level())
         .max();
     let planned_relocations = transaction
         .commit_results()
@@ -2074,7 +2078,7 @@ impl SessionServiceImpl {
                     ))
                     .await?;
                     return Box::pin(
-                        self.record_transaction_application_completion(&advanced, None),
+                        self.record_transaction_application_completion(&advanced, None, None),
                     )
                     .await;
                 }
@@ -2121,6 +2125,7 @@ impl SessionServiceImpl {
                     .collect::<Vec<_>>();
                 let outcome = ParkingMutex::new(None);
                 let planned_impact = planned_step.impact.clone();
+                let actual = TransactionStepImpactRecorder::new(&planned_impact);
                 let result = Box::pin(self.process_model_mutation_batch_with_transaction(
                     statements,
                     &sources.join("; "),
@@ -2132,6 +2137,7 @@ impl SessionServiceImpl {
                         operations: operation_impacts,
                         inputs: stored_step.inputs,
                         eligibility: stored_step.eligibility,
+                        actual: &actual,
                         outcome: &outcome,
                     }),
                 ))
@@ -2143,7 +2149,7 @@ impl SessionServiceImpl {
                         Some(reason) => {
                             Box::pin(self.record_transaction_planning_conflict(
                                 &transaction,
-                                planned_impact,
+                                actual.apply_to(planned_impact),
                                 reason,
                             ))
                             .await?
@@ -2160,7 +2166,7 @@ impl SessionServiceImpl {
                     None if !result.success => {
                         Box::pin(self.record_transaction_step(
                             &transaction,
-                            planned_impact,
+                            actual.apply_to(planned_impact),
                             result,
                             None,
                         ))
@@ -2191,206 +2197,6 @@ impl SessionServiceImpl {
                 return Ok(advanced);
             }
         }
-    }
-
-    async fn complete_transaction_application(
-        &self,
-        transaction: &ReplicatedTransaction,
-        applying: &TransactionApplyingStep,
-    ) -> Result<TransactionApplicationAttempt, Report<TransactionCommitError>> {
-        let application_failure = if !applying.result.result.success {
-            None
-        } else {
-            match &applying.effect {
-                Some(TransactionStepEffect::CreateResourceCatalog { .. }) | None => {
-                    if self.wait_for_authoritative_visibility().await.is_err() {
-                        sleep(Duration::from_millis(100)).await;
-                        return Ok(TransactionApplicationAttempt::Retry);
-                    }
-                    None
-                }
-                Some(_) => match self
-                    .wait_for_runtime_revision(applying.effect_revision)
-                    .await
-                {
-                    Ok(()) => None,
-                    Err(error)
-                        if matches!(
-                            error.current_context(),
-                            RuntimeError::RuntimeRevisionPreparation { .. }
-                                | RuntimeError::RuntimeRevisionReadiness { .. }
-                        ) =>
-                    {
-                        match self.apply_current_cluster_state().await {
-                            Ok(()) => {
-                                if self
-                                    .wait_for_runtime_revision(applying.effect_revision)
-                                    .await
-                                    .is_err()
-                                {
-                                    sleep(Duration::from_millis(100)).await;
-                                    return Ok(TransactionApplicationAttempt::Retry);
-                                }
-                                None
-                            }
-                            Err(
-                                RuntimeError::RuntimeRevisionPreparation { .. }
-                                | RuntimeError::RuntimeRevisionReadiness { .. },
-                            ) => {
-                                sleep(Duration::from_millis(100)).await;
-                                return Ok(TransactionApplicationAttempt::Retry);
-                            }
-                            Err(error) => Some(format!(
-                                "transaction '{}' committed the effect beginning at statement {}, \
-                                 but it failed to become usable: {error}",
-                                transaction.id,
-                                applying.result.operation_range().first()
-                            )),
-                        }
-                    }
-                    Err(error) => Some(format!(
-                        "transaction '{}' committed the effect beginning at statement {}, but it \
-                         failed to become usable: {error}",
-                        transaction.id,
-                        applying.result.operation_range().first()
-                    )),
-                },
-            }
-        };
-        let completed = self
-            .record_transaction_application_completion(transaction, application_failure)
-            .await?;
-
-        Ok(TransactionApplicationAttempt::Completed(Box::new(
-            completed,
-        )))
-    }
-
-    /// How an applying step that found no other failure ends. A successful model step that
-    /// creates, changes, or drops a VHOST first waits until every live HTTPS listener installed its
-    /// runtime revision. When one could not, a step that did not pause is rolled back by the entry
-    /// that records its failure, and a paused step, which has already resumed, keeps its committed
-    /// models like any other activation failure.
-    async fn https_listener_outcome(
-        &self,
-        transaction: &ReplicatedTransaction,
-        applying: &TransactionApplyingStep,
-    ) -> TransactionApplicationOutcome {
-        let Some(TransactionStepEffect::ReplaceDomainSchedule { .. }) = &applying.effect else {
-            return TransactionApplicationOutcome::Applied;
-        };
-        let planned = applying.result.impact.planned();
-        if !applying.result.result.success
-            || !planned.effects.changes_configuration_of(ModelKind::Vhost)
-        {
-            return TransactionApplicationOutcome::Applied;
-        }
-        let Err(failure) =
-            Box::pin(self.wait_for_https_listener_installation(applying.effect_revision)).await
-        else {
-            return TransactionApplicationOutcome::Applied;
-        };
-        let domain = &transaction.domain;
-        let error = format!(
-            "committed transaction model step in domain '{}' failed HTTPS listener activation: \
-             {failure}",
-            domain.as_str()
-        );
-        self.broadcast_error(error.clone());
-        if planned.pause.level() != QuiesceLevel::Dynamic {
-            return TransactionApplicationOutcome::Failed { error };
-        }
-        let inputs = Box::pin(self.inner.consensus.domain_planning_inputs(domain)).await;
-        TransactionApplicationOutcome::RolledBack {
-            error: format!("{error}; the model batch was rolled back"),
-            inputs: Box::new(inputs),
-        }
-    }
-
-    /// Makes the schedule a rolled-back step restored usable: every node applies it, and every
-    /// HTTPS listener presents the restored certificates again. The failure is already recorded,
-    /// so a node that cannot follow is reported rather than changing the outcome.
-    async fn apply_rolled_back_transaction_step(&self, domain: &DomainName) {
-        let restored_revision = self.inner.consensus.current_runtime_revision().await;
-        if let Err(error) = self.apply_current_cluster_state().await {
-            self.broadcast_error(format!(
-                "failed to apply the models restored in domain '{}': {error}",
-                domain.as_str()
-            ));
-            return;
-        }
-        if let Err(error) = self
-            .wait_for_https_listener_installation(restored_revision)
-            .await
-        {
-            self.broadcast_error(format!(
-                "the HTTPS listener TLS configuration restored in domain '{}' did not install: \
-                 {error}",
-                domain.as_str()
-            ));
-        }
-    }
-
-    /// Records how the applying step of `transaction` ended. A step without an application failure
-    /// is settled by its HTTPS listeners first, so a VHOST change that no listener could install
-    /// is never recorded as applied.
-    pub(in crate::application) async fn record_transaction_application_completion(
-        &self,
-        transaction: &ReplicatedTransaction,
-        application_failure: Option<String>,
-    ) -> Result<ReplicatedTransaction, Report<TransactionCommitError>> {
-        let applying = match &transaction.state {
-            TransactionState::Committing(progress) => progress.applying.as_ref(),
-            TransactionState::Open(_) | TransactionState::Finished(_) => None,
-        }
-        .ok_or_else(|| {
-            Report::new(TransactionCommitError::InvalidProgress {
-                id: transaction.id.clone(),
-            })
-        })?;
-        let outcome = match application_failure {
-            Some(error) => TransactionApplicationOutcome::Failed { error },
-            None => Box::pin(self.https_listener_outcome(transaction, applying)).await,
-        };
-        let rolls_back = matches!(outcome, TransactionApplicationOutcome::RolledBack { .. });
-        let completed = self
-            .inner
-            .consensus
-            .complete_transaction_application(
-                transaction.id.clone(),
-                applying.result.first_statement(),
-                current_timestamp(),
-                outcome,
-            )
-            .await
-            .map_err(|error| Report::new(TransactionCommitError::Proposal(error)))?;
-        if rolls_back {
-            Box::pin(self.apply_rolled_back_transaction_step(&transaction.domain)).await;
-        }
-
-        if let TransactionState::Finished(finished) = &completed.state {
-            loop {
-                tokio::task::consume_budget().await;
-                if self
-                    .wait_for_authoritative_revision(finished.outcome_revision)
-                    .await
-                    .is_ok()
-                {
-                    break;
-                }
-                if self.inner.consensus.current_leader().await.as_ref()
-                    != Some(self.inner.consensus.local_node_id())
-                {
-                    return Err(Report::new(TransactionCommitError::Proposal(
-                        ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
-                            leader_id: self.inner.consensus.current_leader().await,
-                        }),
-                    )));
-                }
-                sleep(Duration::from_millis(100)).await;
-            }
-        }
-        Ok(completed)
     }
 
     pub(in crate::application) async fn pause_transaction_commit_if_armed(
@@ -2518,16 +2324,10 @@ impl SessionServiceImpl {
             Some(failure.outcome(first_statement, result.message.clone()))
         };
         let effect = if result.success { effect } else { None };
-        let actual_effects = if result.success {
-            impact.planned().effects.clone()
-        } else {
-            Default::default()
-        };
-        *impact.actual_mut() = ActualExecutionStepImpact {
-            outcome: nervix_models::ExecutionStepOutcome::Applying,
-            quiescence: Vec::new(),
-            effects: actual_effects,
-        };
+        if result.success {
+            impact.actual_mut().effects = impact.planned().effects.clone();
+        }
+        impact.actual_mut().outcome = nervix_models::ExecutionStepOutcome::Applying;
         let mut replicated_result = replicated_command_result(&result);
         if statement_count == 1 {
             replicated_result.admission = transaction
@@ -2569,7 +2369,7 @@ impl SessionServiceImpl {
                 TransactionStepFailure::PlanningInputsChanged,
             )
             .await?;
-        self.record_transaction_application_completion(&applying, None)
+        self.record_transaction_application_completion(&applying, None, None)
             .await
     }
 
@@ -2587,6 +2387,7 @@ impl SessionServiceImpl {
              step",
         );
         let impact = planned_step.impact;
+        let actual = TransactionStepImpactRecorder::new(&impact);
         let planned_kind = planned_step.kind;
         let resolved_start = match admitted_kind {
             TransactionCommitStepKind::StartDomain { resolved, .. } => Some(resolved),
@@ -2653,6 +2454,7 @@ impl SessionServiceImpl {
                             plan.expected_schedule.as_ref(),
                             schedule.as_ref(),
                             &ownership_gate,
+                            Some((&actual, impact.planned().pause.clone())),
                         )
                         .await
                     } else {
@@ -2730,28 +2532,37 @@ impl SessionServiceImpl {
 
         let succeeded = result.success;
         let planned_impact = impact.clone();
+        if succeeded {
+            actual.begin_application(impact.planned().effects.clone());
+        }
         let advanced = match self
-            .record_transaction_step(transaction, impact, result, effect)
+            .record_transaction_step(transaction, actual.apply_to(impact), result, effect)
             .await
         {
             Ok(advanced) => advanced,
             Err(error) => {
                 if let Some(handoff) = ownership_handoff.take() {
-                    self.abort_planned_ownership_handoff(domain_id, handoff)
+                    self.abort_planned_ownership_handoff(domain_id, handoff, Some(&actual))
                         .await;
                 }
                 let Some(reason) = error.current_context().planning_input_conflict() else {
                     return Err(error);
                 };
                 return self
-                    .record_transaction_planning_conflict(transaction, planned_impact, reason)
+                    .record_transaction_planning_conflict(
+                        transaction,
+                        actual.apply_to(planned_impact),
+                        reason,
+                    )
                     .await;
             }
         };
         self.pause_transaction_commit_if_armed(&advanced).await;
         let mut application_failure = None;
         if succeeded {
-            let activation_error = self.apply_current_cluster_state().await.err();
+            let activation_error = self
+                .apply_current_cluster_state_recording_recovery(&actual, &advanced)
+                .await;
             if let Some(error) = &activation_error {
                 self.broadcast_error(format!(
                     "failed to reconcile runtime after transaction '{}' step {}: {error}",
@@ -2763,9 +2574,14 @@ impl SessionServiceImpl {
             }
             if let Some(handoff) = ownership_handoff.take() {
                 if let Some(error) = &activation_error {
-                    self.defer_planned_ownership_handoff_release(domain_id, handoff, error);
+                    self.defer_planned_ownership_handoff_release(
+                        domain_id,
+                        handoff,
+                        error,
+                        Some(&actual),
+                    );
                 } else if let Err(error) = self
-                    .finish_planned_ownership_handoff(domain_id, handoff)
+                    .finish_planned_ownership_handoff(domain_id, handoff, Some(&actual))
                     .await
                 {
                     application_failure = Some(format!(
@@ -2804,7 +2620,7 @@ impl SessionServiceImpl {
             }
         }
         if let Some(handoff) = ownership_handoff {
-            self.abort_planned_ownership_handoff(domain_id, handoff)
+            self.abort_planned_ownership_handoff(domain_id, handoff, Some(&actual))
                 .await;
         }
         let runtime_revision = match &advanced.state {
@@ -2832,8 +2648,12 @@ impl SessionServiceImpl {
         {
             return Ok(advanced);
         }
-        self.record_transaction_application_completion(&advanced, application_failure)
-            .await
+        self.record_transaction_application_completion(
+            &advanced,
+            application_failure,
+            Some(actual.snapshot()),
+        )
+        .await
     }
 
     fn schedule_transaction_recovery(

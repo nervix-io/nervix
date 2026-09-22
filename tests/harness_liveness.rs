@@ -2,18 +2,20 @@
 //!
 //! Outside the layer order: a harness test crate.
 //!
-//! - **Owns.** Registration of the focused node-liveness, phase-deadline, status-request,
-//!   cluster-teardown and scenario-phase regressions with Rust's test runner, and the stand-in
-//!   nodes those regressions talk to.
-//! - **Depends on.** The node-liveness, phase-deadline, status-request, cluster-teardown and
-//!   scenario-phase harness modules, and the generated session service they send status requests
-//!   to.
+//! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
+//!   status-request, cluster-teardown and scenario-phase regressions with Rust's test runner, and
+//!   the stand-in nodes those regressions talk to.
+//! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request,
+//!   cluster-teardown and scenario-phase harness modules, and the generated session service they
+//!   send status requests to.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
 mod cluster_teardown;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
+#[path = "common/node_startup.rs"]
+mod node_startup;
 #[path = "common/phase_deadline.rs"]
 mod phase_deadline;
 #[path = "common/scenario_phase.rs"]
@@ -23,8 +25,8 @@ mod status_request;
 
 mod tests {
     use std::{
-        collections::BTreeMap,
-        future,
+        collections::{BTreeMap, VecDeque},
+        future, io,
         net::{Ipv4Addr, SocketAddr},
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
@@ -55,14 +57,20 @@ mod tests {
         time::{Instant, timeout},
     };
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+    use tokio_util::sync::CancellationToken;
     use tonic::{Request, Response, Status, Streaming, transport::Server};
     use triomphe::Arc;
 
     use crate::{
         cluster_teardown::{ClusterTeardown, TeardownNode},
         node_liveness::{
-            LastReadinessOutcome, NodeStartupFailure, NodeTaskState, NodeTaskTerminalOutcome,
-            NodeTaskWaitOutcome, OwnedNodeTask, ReadinessProbeOutcome,
+            LastReadinessOutcome, NodeStartupError, NodeStartupFailure, NodeTaskState,
+            NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask, ReadinessProbeOutcome,
+        },
+        node_startup::{
+            ATTEMPT_READINESS_BUDGET, AttemptCleanup, AttemptFailure, FULL_LENGTH_ATTEMPTS,
+            NODE_START_ATTEMPTS, NODE_STARTUP_BUDGET, NodeStartup, NodeStartupExhausted,
+            StartableNode, StartupEnd, StartupRetry, cluster_startup_budget,
         },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
         scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioPhase},
@@ -100,6 +108,18 @@ mod tests {
     );
     const TEST_AUTHORIZATION: &str = "Basic c3RhbmQtaW46c3RhbmQtaW4=";
     const HEALTHY_STATUS: &str = "raft.state: Leader\nraft.current_leader: node-1";
+    /// How often a startup regression probes its stand-in. The startup regressions run on a
+    /// paused clock, so this only decides how many probes one attempt performs.
+    const STARTUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+    /// What a startup regression allows beyond the budget it asserts. A paused clock advances
+    /// only for a timer, so the slack covers the work between them.
+    const STARTUP_BUDGET_SLACK: Duration = Duration::from_secs(1);
+    /// The longest one node's startup may take before a regression calls its budget broken.
+    const STARTUP_BUDGET_CEILING: Duration =
+        match NODE_STARTUP_BUDGET.checked_add(STARTUP_BUDGET_SLACK) {
+            Some(ceiling) => ceiling,
+            None => panic!("the startup budget and its regression slack must fit in Duration"),
+        };
 
     struct DropCount(Arc<AtomicUsize>);
 
@@ -261,6 +281,141 @@ mod tests {
         }
     }
 
+    /// How the node a startup regression drives behaves on one launch.
+    #[derive(Debug)]
+    enum LaunchBehavior {
+        /// The launch itself fails, the way the harness's own configuration does.
+        LaunchFails,
+        /// The node runs, never answers a readiness probe, and stops when asked.
+        NeverReady,
+        /// The node runs, never answers a readiness probe, and ignores the stop request.
+        NeverReadyAndNeverStops,
+        /// The node's task ends at once with this application error.
+        ApplicationError(AppError),
+        /// The node's task panics at once.
+        Panics,
+        /// The node answers its first readiness probe.
+        Ready,
+    }
+
+    /// A node the startup owner can drive, behaving on each launch the way its regression scripts.
+    struct StandInStartupNode {
+        node: ClusterNodeName,
+        behaviors: VecDeque<LaunchBehavior>,
+        task: OwnedNodeTask,
+        stop: CancellationToken,
+        answers_readiness: bool,
+        ports_available: bool,
+        launches: u32,
+        ports_moved: u32,
+    }
+
+    impl StandInStartupNode {
+        fn new(node: &str, behaviors: impl IntoIterator<Item = LaunchBehavior>) -> Self {
+            Self {
+                node: test_node(node),
+                behaviors: behaviors.into_iter().collect(),
+                task: OwnedNodeTask::not_started(),
+                stop: CancellationToken::new(),
+                answers_readiness: false,
+                ports_available: true,
+                launches: 0,
+                ports_moved: 0,
+            }
+        }
+
+        fn without_spare_ports(mut self) -> Self {
+            self.ports_available = false;
+            self
+        }
+
+        /// Starts this node the way the harness starts one node of its own, and returns the
+        /// exhaustion diagnostic when it never becomes ready.
+        async fn start_within(
+            &mut self,
+            budget: PhaseDeadline,
+        ) -> Result<(), Report<NodeStartupExhausted>> {
+            let node = self.node.clone();
+            NodeStartup::start(&node, self, budget).await
+        }
+    }
+
+    impl StartableNode for StandInStartupNode {
+        fn launch(&mut self) -> io::Result<()> {
+            self.launches += 1;
+            let behavior = self
+                .behaviors
+                .pop_front()
+                .assured("a startup regression scripts one behavior for every launch it allows");
+            self.answers_readiness = matches!(behavior, LaunchBehavior::Ready);
+            self.stop = CancellationToken::new();
+            let stop = self.stop.clone();
+            self.task = match behavior {
+                LaunchBehavior::LaunchFails => {
+                    return Err(io::Error::other("the stand-in node cannot be launched"));
+                }
+                LaunchBehavior::ApplicationError(error) => {
+                    OwnedNodeTask::spawn(async move { Err(Report::new(error)) })
+                }
+                LaunchBehavior::Panics => {
+                    OwnedNodeTask::spawn(async { panic!("intentional stand-in node panic") })
+                }
+                LaunchBehavior::NeverReadyAndNeverStops => OwnedNodeTask::spawn(async {
+                    future::pending::<()>().await;
+                    Ok(())
+                }),
+                LaunchBehavior::NeverReady | LaunchBehavior::Ready => {
+                    OwnedNodeTask::spawn(async move {
+                        stop.cancelled().await;
+                        Ok(())
+                    })
+                }
+            };
+            Ok(())
+        }
+
+        async fn readiness(
+            &mut self,
+            attempt: u32,
+            readiness: PhaseDeadline,
+        ) -> error_stack::Result<(), NodeStartupError> {
+            let node = self.node.clone();
+            let answers = self.answers_readiness;
+            self.task
+                .wait_until_ready(
+                    &node,
+                    attempt,
+                    readiness,
+                    STARTUP_POLL_INTERVAL,
+                    move |_| {
+                        future::ready(if answers {
+                            ReadinessProbeOutcome::Ready {
+                                response_kind: CommandOutcomeKind::Ok,
+                            }
+                        } else {
+                            ReadinessProbeOutcome::RequestFailed(Report::new(
+                                StatusRequestError::SessionEnded,
+                            ))
+                        })
+                    },
+                )
+                .await
+        }
+
+        async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
+            self.stop.cancel();
+            AttemptCleanup::from(self.task.wait(cleanup).await)
+        }
+
+        fn move_to_fresh_ports(&mut self) -> io::Result<()> {
+            if !self.ports_available {
+                return Err(io::Error::other("the port pool is exhausted"));
+            }
+            self.ports_moved += 1;
+            Ok(())
+        }
+    }
+
     fn plaintext_endpoint(address: SocketAddr) -> StatusEndpoint {
         StatusEndpoint::new(
             address,
@@ -311,6 +466,26 @@ mod tests {
 
     fn test_node(raw: &str) -> ClusterNodeName {
         ClusterNodeName::parse(raw).assured("test node names satisfy the cluster node grammar")
+    }
+
+    /// The attempt limit as the number of attempts an exhausted startup records.
+    fn attempt_limit() -> usize {
+        usize::try_from(NODE_START_ATTEMPTS).assured("the attempt limit is a small count")
+    }
+
+    /// The attempts the budget pays for at full length, as a number of recorded attempts.
+    fn full_length_attempts() -> usize {
+        usize::try_from(FULL_LENGTH_ATTEMPTS).assured("the full-length attempts are a small count")
+    }
+
+    /// How the startup owner classified each attempt it spent, in the order they ran.
+    fn attempt_retries(exhausted: &NodeStartupExhausted) -> Vec<StartupRetry> {
+        exhausted
+            .attempts
+            .spent
+            .iter()
+            .map(|attempt| attempt.retry)
+            .collect()
     }
 
     fn deadline_passed_during(
@@ -1462,5 +1637,316 @@ mod tests {
             second_outcome.as_ref()
         ));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_readiness_failure_spends_one_budget_across_every_attempt() {
+        let mut node = StandInStartupNode::new(
+            "node-unready",
+            [
+                LaunchBehavior::NeverReady,
+                LaunchBehavior::NeverReady,
+                LaunchBehavior::NeverReady,
+            ],
+        );
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a node that never answers a probe must exhaust its startup");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::AttemptsSpent));
+        assert_eq!(exhausted.budget, NODE_STARTUP_BUDGET);
+        assert_eq!(node.launches, NODE_START_ATTEMPTS);
+        assert_eq!(node.ports_moved, NODE_START_ATTEMPTS - 1);
+        assert_eq!(exhausted.attempts.spent.len(), attempt_limit());
+        assert_eq!(
+            attempt_retries(exhausted),
+            vec![StartupRetry::Transient; attempt_limit()]
+        );
+        for attempt in &exhausted.attempts.spent {
+            let AttemptFailure::NotReady(readiness) = &attempt.failure else {
+                panic!(
+                    "every attempt must end in its readiness: {}",
+                    attempt.failure
+                );
+            };
+            assert_eq!(
+                readiness.current_context().failure,
+                NodeStartupFailure::DeadlineExpired
+            );
+        }
+        let (last, earlier) = exhausted
+            .attempts
+            .spent
+            .split_last()
+            .assured("an exhausted startup records the attempts it spent");
+        for attempt in earlier {
+            assert!(
+                matches!(attempt.cleanup, AttemptCleanup::Stopped(_)),
+                "a node asked to stop while the budget remains must stop: {}",
+                attempt.cleanup
+            );
+        }
+        // The last attempt polls readiness to the end of the budget, so its cleanup has nothing
+        // left to wait with and aborts the node task at once.
+        assert!(
+            matches!(last.cleanup, AttemptCleanup::AbortedAtDeadline(_)),
+            "cleanup after the budget is spent must abort rather than wait: {}",
+            last.cleanup
+        );
+        assert!(
+            exhausted.elapsed >= NODE_STARTUP_BUDGET,
+            "every attempt the budget admits must be spent: {:?}",
+            exhausted.elapsed
+        );
+        assert!(
+            exhausted.elapsed <= STARTUP_BUDGET_CEILING,
+            "retries must share one budget rather than restart it: {:?}",
+            exhausted.elapsed
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bound_address_is_retried_until_a_launch_becomes_ready() {
+        let mut node = StandInStartupNode::new(
+            "node-bound",
+            [
+                LaunchBehavior::ApplicationError(AppError::BindGrpcListenAddress),
+                LaunchBehavior::Ready,
+            ],
+        );
+        let budget = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+
+        node.start_within(budget)
+            .await
+            .assured("a bound address must be retried on fresh ports");
+
+        assert_eq!(node.launches, 2);
+        assert_eq!(node.ports_moved, 1);
+        assert!(
+            budget.elapsed() < ATTEMPT_READINESS_BUDGET,
+            "a launch that fails at once must not wait for readiness: {:?}",
+            budget.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_last_attempt_still_becomes_ready_with_what_the_budget_left() {
+        let mut node = StandInStartupNode::new(
+            "node-slow",
+            [
+                LaunchBehavior::NeverReady,
+                LaunchBehavior::NeverReady,
+                LaunchBehavior::Ready,
+            ],
+        );
+        let budget = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+
+        node.start_within(budget)
+            .await
+            .assured("the budget must still admit the launch that becomes ready");
+
+        assert_eq!(node.launches, NODE_START_ATTEMPTS);
+        assert_eq!(node.ports_moved, NODE_START_ATTEMPTS - 1);
+        assert!(
+            budget.elapsed() < NODE_STARTUP_BUDGET,
+            "a startup that becomes ready must not spend its whole budget: {:?}",
+            budget.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_application_error_ends_the_startup_without_another_launch() {
+        let mut node = StandInStartupNode::new(
+            "node-registry",
+            [LaunchBehavior::ApplicationError(AppError::OpenRegistry)],
+        );
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("an application error must end the startup");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::TerminalFailure));
+        assert_eq!(attempt_retries(exhausted), vec![StartupRetry::Terminal]);
+        assert_eq!(node.launches, 1);
+        assert_eq!(node.ports_moved, 0);
+        assert!(error.to_string().contains("failed to open registry"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_node_ends_the_startup_without_another_launch() {
+        let mut node = StandInStartupNode::new("node-panic", [LaunchBehavior::Panics]);
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a panicking node must end the startup");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::TerminalFailure));
+        assert_eq!(attempt_retries(exhausted), vec![StartupRetry::Terminal]);
+        assert_eq!(node.launches, 1);
+        assert!(
+            error
+                .to_string()
+                .contains("intentional stand-in node panic")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_launch_failure_ends_the_startup_before_anything_is_cleaned_up() {
+        let mut node = StandInStartupNode::new("node-unlaunchable", [LaunchBehavior::LaunchFails]);
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a node that cannot be launched must end the startup");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::TerminalFailure));
+        assert_eq!(attempt_retries(exhausted), vec![StartupRetry::Terminal]);
+        assert_eq!(node.launches, 1);
+        assert_eq!(node.ports_moved, 0);
+        let [attempt] = exhausted.attempts.spent.as_slice() else {
+            panic!("a launch failure must record exactly one attempt");
+        };
+        assert!(matches!(attempt.failure, AttemptFailure::Launch(_)));
+        assert!(matches!(attempt.cleanup, AttemptCleanup::NothingLaunched));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_that_never_completes_is_aborted_inside_the_same_budget() {
+        let mut node = StandInStartupNode::new(
+            "node-unstoppable",
+            [
+                LaunchBehavior::NeverReadyAndNeverStops,
+                LaunchBehavior::NeverReadyAndNeverStops,
+                LaunchBehavior::NeverReadyAndNeverStops,
+            ],
+        );
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a node that never stops must still exhaust one startup budget");
+
+        // Cleanup spends the same budget as readiness, so a node that has to be aborted every time
+        // spends the whole budget on the attempts it pays for at full length, and the launch a
+        // fast failure would have left room for never starts.
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::BudgetSpent));
+        assert_eq!(node.launches, FULL_LENGTH_ATTEMPTS);
+        assert_eq!(exhausted.attempts.spent.len(), full_length_attempts());
+        for attempt in &exhausted.attempts.spent {
+            assert!(
+                matches!(attempt.cleanup, AttemptCleanup::AbortedAtDeadline(_)),
+                "a node that ignores its stop must be aborted: {}",
+                attempt.cleanup
+            );
+        }
+        assert!(
+            exhausted.elapsed <= STARTUP_BUDGET_CEILING,
+            "cleanup must spend the startup budget rather than a shutdown watchdog: {:?}",
+            exhausted.elapsed
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhaustion_reports_every_attempt_with_its_typed_cause() {
+        let mut node = StandInStartupNode::new(
+            "node-history",
+            [
+                LaunchBehavior::ApplicationError(AppError::BindHttpListenAddress),
+                LaunchBehavior::NeverReadyAndNeverStops,
+                LaunchBehavior::NeverReady,
+            ],
+        );
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a node that never answers a probe must exhaust its startup");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&format!(
+                "node 'node-history' did not become ready within its {NODE_STARTUP_BUDGET:?} \
+                 startup budget: every launch the attempt limit allows was spent"
+            )),
+            "{rendered}"
+        );
+        assert!(rendered.contains("attempt 1/3 [transient]"), "{rendered}");
+        assert!(
+            rendered.contains("failed to bind HTTP listen address"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("attempt 2/3 [transient]"), "{rendered}");
+        assert!(
+            rendered.contains("cleanup: aborted at the cleanup deadline (cancellation:"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("attempt 3/3 [transient]"), "{rendered}");
+        assert!(
+            rendered.contains("startup deadline expired; task state: running"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ports_that_cannot_be_reallocated_end_the_startup() {
+        let mut node = StandInStartupNode::new("node-portless", [LaunchBehavior::NeverReady])
+            .without_spare_ports();
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a startup without ports for its next launch must end");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::PortsUnavailable(_)));
+        assert_eq!(node.launches, 1);
+        assert_eq!(exhausted.attempts.spent.len(), 1);
+        assert!(
+            error.to_string().contains("the port pool is exhausted"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequential_cluster_construction_stays_inside_its_derived_budget() {
+        const CLUSTER_NODES: u32 = 2;
+        let construction = PhaseDeadline::after(cluster_startup_budget(CLUSTER_NODES));
+        let ceiling = cluster_startup_budget(CLUSTER_NODES)
+            .checked_add(STARTUP_BUDGET_SLACK)
+            .assured("a two-node construction budget and its slack fit in Duration");
+
+        for index in 1..=CLUSTER_NODES {
+            let mut node = StandInStartupNode::new(
+                &format!("node-{index}"),
+                [
+                    LaunchBehavior::NeverReady,
+                    LaunchBehavior::NeverReady,
+                    LaunchBehavior::NeverReady,
+                ],
+            );
+            let error = node
+                .start_within(construction.nested(NODE_STARTUP_BUDGET))
+                .await
+                .expect_err("a node that never answers a probe must exhaust its startup");
+            assert!(
+                error.current_context().budget <= NODE_STARTUP_BUDGET,
+                "no node may receive more than the per-node budget"
+            );
+        }
+
+        assert!(
+            construction.elapsed() <= ceiling,
+            "building a cluster one node at a time must stay inside the derived budget: {:?}",
+            construction.elapsed()
+        );
     }
 }

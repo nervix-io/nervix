@@ -145,6 +145,7 @@ impl BranchInstanceTemplate {
             file,
             limits,
             compiled,
+            ..
         } = &template.operation
         else {
             return Err(Report::new(WasmStateResetRuntimeError::NotWasmProcessor {

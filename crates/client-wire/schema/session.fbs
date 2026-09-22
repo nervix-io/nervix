@@ -448,6 +448,7 @@ enum ModelChangeAspect : ubyte {
   WasmBinding,
   WasmLimits,
   WasmGlobalError,
+  WasmRejectedState,
   SchemaDefinition,
   WireSchemaDefinition,
   CodecDefinition,

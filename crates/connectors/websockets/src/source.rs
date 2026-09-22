@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_connector::{
-    ClientConfigResult, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders,
-    RustlsClientConfigSource, ServiceUrl, SourceBatch, SourceBatchRequest, SourceConnector,
-    SourceError, SourceMessage, SourceResult, SourceResume, client_config_value,
+    BrokerSourceConnector, ClientConfigResult, IngestMessageHeaders, IngestMetadataRow,
+    NoIngestHeaders, RustlsClientConfigSource, ServiceUrl, SourceBatch, SourceBatchRequest,
+    SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume, client_config_value,
 };
 use nervix_models::ClientConfigEntry;
 use thiserror::Error;
@@ -135,8 +135,6 @@ pub struct WebsocketSource {
 #[async_trait]
 impl SourceConnector for WebsocketSource {
     type Plan = WebsocketSourcePlan;
-    type Message = WebsocketSourceMessage;
-    type Position = ();
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
         let tls_connector = if plan.endpoint_requires_tls {
@@ -161,56 +159,6 @@ impl SourceConnector for WebsocketSource {
 
     fn needs_resume(&mut self) -> bool {
         self.relay.is_none()
-    }
-
-    async fn next_batch(
-        &mut self,
-        _request: SourceBatchRequest,
-    ) -> SourceResult<SourceBatch<Self::Message>> {
-        if let Some(payload) = self.pending.pop_front() {
-            return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
-                payload,
-            )]));
-        }
-        loop {
-            tokio::task::consume_budget().await;
-            let Some(relay) = self.relay.as_mut() else {
-                return Ok(SourceBatch::ResumeRequired);
-            };
-            let message = futures_util::StreamExt::next(relay).await;
-            match message {
-                Some(Ok(Message::Text(text))) => {
-                    return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
-                        text.to_string().into_bytes(),
-                    )]));
-                }
-                Some(Ok(Message::Binary(bytes))) => {
-                    return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
-                        bytes.to_vec(),
-                    )]));
-                }
-                Some(Ok(Message::Close(_))) | None => {
-                    self.relay = None;
-                    return Ok(SourceBatch::ResumeRequired);
-                }
-                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                Some(Err(error)) => {
-                    self.relay = None;
-                    return Err(Report::new(SourceError::Read {
-                        connector: WEBSOCKETS,
-                    })
-                    .attach_printable(error.to_string()));
-                }
-            }
-        }
-    }
-
-    async fn acknowledge(&mut self, _positions: &[Self::Position]) -> SourceResult<()> {
-        Ok(())
-    }
-
-    async fn reject(&mut self, _positions: &[Self::Position]) -> SourceResult<()> {
-        Ok(())
     }
 
     async fn suspend(&mut self) -> SourceResult<()> {
@@ -263,6 +211,62 @@ impl SourceConnector for WebsocketSource {
     async fn close(&mut self) -> SourceResult<()> {
         self.relay = None;
         self.pending.clear();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BrokerSourceConnector for WebsocketSource {
+    type Message = WebsocketSourceMessage;
+    type Position = ();
+
+    async fn next_batch(
+        &mut self,
+        _request: SourceBatchRequest,
+    ) -> SourceResult<SourceBatch<Self::Message>> {
+        if let Some(payload) = self.pending.pop_front() {
+            return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
+                payload,
+            )]));
+        }
+        loop {
+            tokio::task::consume_budget().await;
+            let Some(relay) = self.relay.as_mut() else {
+                return Ok(SourceBatch::ResumeRequired);
+            };
+            let message = futures_util::StreamExt::next(relay).await;
+            match message {
+                Some(Ok(Message::Text(text))) => {
+                    return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
+                        text.to_string().into_bytes(),
+                    )]));
+                }
+                Some(Ok(Message::Binary(bytes))) => {
+                    return Ok(SourceBatch::Messages(vec![WebsocketSourceMessage::new(
+                        bytes.to_vec(),
+                    )]));
+                }
+                Some(Ok(Message::Close(_))) | None => {
+                    self.relay = None;
+                    return Ok(SourceBatch::ResumeRequired);
+                }
+                Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {}
+                Some(Err(error)) => {
+                    self.relay = None;
+                    return Err(Report::new(SourceError::Read {
+                        connector: WEBSOCKETS,
+                    })
+                    .attach_printable(error.to_string()));
+                }
+            }
+        }
+    }
+
+    async fn acknowledge(&mut self, _positions: &[Self::Position]) -> SourceResult<()> {
+        Ok(())
+    }
+
+    async fn reject(&mut self, _positions: &[Self::Position]) -> SourceResult<()> {
         Ok(())
     }
 }

@@ -59,11 +59,11 @@ pub use sink::{
     SinkStagingDirectory, SinkStartError, SinkStartResult, SinkTransientErrorStatus,
 };
 pub use source::{
-    SourceAckPolicy, SourceAcknowledgement, SourceAcknowledgementOutcome,
-    SourceAcknowledgementServices, SourceAcknowledgementSupport, SourceBatch, SourceBatchRequest,
-    SourceCapabilities, SourceConnector, SourceError, SourceHost, SourceHostServices,
-    SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage, SourceIntakeMode,
-    SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourceMetadataScope, SourcePlan,
-    SourceResult, SourceResume,
+    BrokerSourceConnector, PacedSourceConnector, SourceAckPolicy, SourceAcknowledgement,
+    SourceAcknowledgementOutcome, SourceAcknowledgementServices, SourceAcknowledgementSupport,
+    SourceBatch, SourceBatchRequest, SourceCapabilities, SourceConnector, SourceError, SourceHost,
+    SourceHostServices, SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage,
+    SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourceMetadataScope,
+    SourcePlan, SourcePoll, SourcePollMessage, SourceResult, SourceResume,
 };
 pub use tls::{RustlsClientConfigSource, TlsClientConfigError, install_rustls_crypto_provider};

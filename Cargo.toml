@@ -107,7 +107,9 @@ nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-connector-http = { workspace = true }
 nervix-connector-kafka = { workspace = true }
+nervix-connector-prometheus = { workspace = true }
 nervix-connector-syslog = { workspace = true }
 nervix-connector-websockets = { workspace = true }
 nervix-consensus = { workspace = true }
@@ -256,7 +258,9 @@ members = [
   "crates/client-core",
   "crates/client-wire",
   "crates/connector",
+  "crates/connectors/http",
   "crates/connectors/kafka",
+  "crates/connectors/prometheus",
   "crates/connectors/syslog",
   "crates/connectors/websockets",
   "crates/consensus",
@@ -406,7 +410,9 @@ nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-int
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
+nervix-connector-http = { package = "nervix-connector-http", path = "crates/connectors/http" }
 nervix-connector-kafka = { package = "nervix-connector-kafka", path = "crates/connectors/kafka" }
+nervix-connector-prometheus = { package = "nervix-connector-prometheus", path = "crates/connectors/prometheus" }
 nervix-connector-syslog = { package = "nervix-connector-syslog", path = "crates/connectors/syslog" }
 nervix-connector-websockets = { package = "nervix-connector-websockets", path = "crates/connectors/websockets" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }

@@ -253,6 +253,7 @@ declare_model_change_aspects! {
     WasmBinding => EntityPause, Some(StatePurge::WasmGuestState), false;
     WasmLimits => EntityPause, None, false;
     WasmGlobalError => EntityPause, None, false;
+    WasmRejectedState => EntityPause, None, false;
     SchemaDefinition => DomainPause, None, false;
     WireSchemaDefinition => DomainPause, None, false;
     CodecDefinition => DomainPause, None, false;
@@ -1036,6 +1037,9 @@ fn wasm_processor_change_aspects(
     }
     if base.global_error_policy != candidate.global_error_policy {
         changes.push(ModelChangeAspect::WasmGlobalError);
+    }
+    if base.rejected_state_policy != candidate.rejected_state_policy {
+        changes.push(ModelChangeAspect::WasmRejectedState);
     }
     if has_dynamic_change {
         changes.dynamic_updates.push(DynamicModelUpdate::Processor {
@@ -2514,6 +2518,7 @@ mod catch_all_kind_tests {
                 max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: GeneralErrorPolicy::Log,
+            rejected_state_policy: Default::default(),
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),
@@ -2543,6 +2548,7 @@ mod catch_all_kind_tests {
                 max_memory_bytes: nonzero!(67_108_864u64),
             },
             global_error_policy: GeneralErrorPolicy::Log,
+            rejected_state_policy: Default::default(),
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),

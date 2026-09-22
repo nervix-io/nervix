@@ -19,6 +19,40 @@ pub(in crate::runtime) struct ScheduleApplication {
     applied_revision: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RuntimeRecoveryExpansion {
+    pub(crate) domain: DomainName,
+    pub(crate) reason: String,
+    pub(crate) scope: Vec<NodeRef>,
+}
+
+#[derive(Debug)]
+pub(in crate::runtime) struct AppliedRuntimeRecoveryExpansions {
+    revision: u64,
+    expansions: Vec<RuntimeRecoveryExpansion>,
+}
+
+pub(in crate::runtime) struct ScheduleDeltaApplication {
+    applied_incrementally: bool,
+    recovery_expansion: Option<RuntimeRecoveryExpansion>,
+}
+
+impl ScheduleDeltaApplication {
+    fn incremental() -> Self {
+        Self {
+            applied_incrementally: true,
+            recovery_expansion: None,
+        }
+    }
+
+    fn rebuild_required() -> Self {
+        Self {
+            applied_incrementally: false,
+            recovery_expansion: None,
+        }
+    }
+}
+
 impl ScheduleApplication {
     /// Whether `revision` carries cluster state this node has not applied. The first revision a
     /// node sees always does, and one at or below the applied revision carries nothing newer.
@@ -56,7 +90,9 @@ impl Runtime {
         schedule: &ClusterSchedule,
     ) -> Result<(), RuntimeError> {
         let _application = self.inner.schedule_application.lock().await;
-        Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, true)).await
+        Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, true))
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn apply_cluster_state(
@@ -75,9 +111,26 @@ impl Runtime {
         self.sync_committed_domains(domains, domain_clock_authorities);
         // A failed application records nothing, so the same revision is applied again rather than
         // being suppressed as one this node already holds.
-        Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, false)).await?;
+        let recovery_expansions =
+            Box::pin(self.apply_cluster_schedule_locked(local_node_id, schedule, false)).await?;
         application.record_applied(revision);
+        self.inner
+            .applied_recovery_expansions
+            .store(Some(StdArc::new(AppliedRuntimeRecoveryExpansions {
+                revision,
+                expansions: recovery_expansions,
+            })));
         Ok(())
+    }
+
+    pub(crate) fn recovery_expansions(&self, revision: u64) -> Vec<RuntimeRecoveryExpansion> {
+        let Some(applied) = self.inner.applied_recovery_expansions.load_full() else {
+            return Vec::new();
+        };
+        if applied.revision != revision {
+            return Vec::new();
+        }
+        applied.expansions.clone()
     }
 
     pub(super) async fn apply_cluster_schedule_locked(
@@ -85,7 +138,7 @@ impl Runtime {
         local_node_id: &ClusterNodeName,
         schedule: &ClusterSchedule,
         start_ingestors: bool,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<Vec<RuntimeRecoveryExpansion>, RuntimeError> {
         // Delta application and full rebuild each own substantial state. Poll them indirectly so
         // applying a cluster revision does not embed both state machines in this coordinator.
         let scheduled_domains = schedule
@@ -121,6 +174,7 @@ impl Runtime {
                 .map(|entry| (entry.key().clone(), entry.value().start_version))
                 .collect::<HashMap<_, _>>()
         };
+        let mut recovery_expansions = Vec::new();
 
         for domain in existing_domains.difference(&scheduled_domains) {
             match Box::pin(self.rebuild_domain_from_schedule(
@@ -160,7 +214,7 @@ impl Runtime {
                 || existing_passive_only.get(&domain.domain) != Some(&desired_passive_only)
                 || existing_start_versions.get(&domain.domain) != Some(&desired_start_version)
             {
-                let applied_incrementally = if !desired_passive_only
+                let delta_application = if !desired_passive_only
                     && existing_passive_only.get(&domain.domain) == Some(&desired_passive_only)
                     && existing_start_versions.get(&domain.domain) == Some(&desired_start_version)
                     && let Some(existing_schedule) = existing_schedules.get(&domain.domain)
@@ -173,9 +227,12 @@ impl Runtime {
                     ))
                     .await?
                 } else {
-                    false
+                    ScheduleDeltaApplication::rebuild_required()
                 };
-                if !applied_incrementally {
+                if let Some(expansion) = delta_application.recovery_expansion {
+                    recovery_expansions.push(expansion);
+                }
+                if !delta_application.applied_incrementally {
                     match Box::pin(self.rebuild_domain_from_schedule(
                         local_node_id,
                         &domain.domain,
@@ -213,7 +270,7 @@ impl Runtime {
         }
         self.retain_assigned_wasm_modules(local_node_id, schedule);
 
-        Ok(())
+        Ok(recovery_expansions)
     }
 
     /// Applies a changed schedule without tearing the domain down when the delta allows it.
@@ -224,9 +281,9 @@ impl Runtime {
         existing_schedule: &DomainSchedule,
         desired: &DomainSchedule,
         start_ingestors: bool,
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<ScheduleDeltaApplication, RuntimeError> {
         match ScheduleDelta::classify(existing_schedule, desired) {
-            ScheduleDelta::Unchanged => Ok(true),
+            ScheduleDelta::Unchanged => Ok(ScheduleDeltaApplication::incremental()),
             ScheduleDelta::Dynamic(updates) => {
                 Box::pin(self.apply_dynamic_schedule_update(
                     &desired.domain,
@@ -234,22 +291,44 @@ impl Runtime {
                     &updates,
                 ))
                 .await?;
-                Ok(true)
+                Ok(ScheduleDeltaApplication::incremental())
             }
             ScheduleDelta::EntitySwap {
                 entities,
                 reassignments,
                 dynamic_updates,
             } => {
-                if let Err(error) = Box::pin(self.swap_scheduled_nodes(
+                #[cfg(feature = "testing")]
+                let swap_result = if self
+                    .inner
+                    .fault_injection
+                    .take_failed_entity_schedule_swap(local_node_id, &desired.domain)
+                {
+                    Err(RuntimeError::BuildDomainExecution {
+                        domain: desired.domain.as_str().to_string(),
+                        reason: "injected entity-level schedule apply failure".to_string(),
+                    })
+                } else {
+                    Box::pin(self.swap_scheduled_nodes(
+                        &desired.domain,
+                        desired.clone(),
+                        &entities,
+                        &reassignments,
+                        &dynamic_updates,
+                    ))
+                    .await
+                };
+                #[cfg(not(feature = "testing"))]
+                let swap_result = Box::pin(self.swap_scheduled_nodes(
                     &desired.domain,
                     desired.clone(),
                     &entities,
                     &reassignments,
                     &dynamic_updates,
                 ))
-                .await
-                {
+                .await;
+                if let Err(error) = swap_result {
+                    let reason = error.to_string();
                     warn!(
                         domain = desired.domain.as_str(),
                         error = %error,
@@ -262,10 +341,18 @@ impl Runtime {
                         start_ingestors,
                     ))
                     .await?;
+                    return Ok(ScheduleDeltaApplication {
+                        applied_incrementally: true,
+                        recovery_expansion: Some(RuntimeRecoveryExpansion {
+                            domain: desired.domain.clone(),
+                            reason,
+                            scope: desired.nodes.keys().cloned().collect(),
+                        }),
+                    });
                 }
-                Ok(true)
+                Ok(ScheduleDeltaApplication::incremental())
             }
-            ScheduleDelta::Rebuild => Ok(false),
+            ScheduleDelta::Rebuild => Ok(ScheduleDeltaApplication::rebuild_required()),
         }
     }
 
@@ -2659,6 +2746,57 @@ mod tests {
             kind: ModelKind::Deduplicator,
             identifier: ModelName::from(&processor),
         }));
+        drop(execution);
+
+        #[cfg(feature = "testing")]
+        {
+            let node = ClusterNodeName::parse("node-1")
+                .assured("the test node is an identifier-shaped literal");
+            let mut recovered = desired.clone();
+            let nervix_models::Model::Deduplicator(config) = recovered
+                .nodes
+                .values_mut()
+                .find(|node| node.kind() == ModelKind::Deduplicator)
+                .assured("the test schedule contains the processor")
+                .config
+                .as_mut()
+            else {
+                panic!("scheduled processor must contain a deduplicator model");
+            };
+            config.mode = AckMode::Attached;
+            runtime
+                .inner
+                .fault_injection
+                .fail_next_entity_schedule_swap_on(node.clone(), domain.clone());
+
+            let application = runtime
+                .apply_schedule_delta(&node, &desired, &recovered, true)
+                .await
+                .assured("the domain rebuild recovers the injected entity swap failure");
+            assert!(application.applied_incrementally);
+            let expansion = application
+                .recovery_expansion
+                .assured("entity swap fallback reports its wider recovery scope");
+            assert_eq!(expansion.domain, domain);
+            assert!(
+                expansion
+                    .reason
+                    .contains("injected entity-level schedule apply failure")
+            );
+            assert_eq!(
+                expansion.scope,
+                recovered.nodes.keys().cloned().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                runtime
+                    .inner
+                    .executions
+                    .get(&domain)
+                    .assured("recovery reinstalls the test domain")
+                    .schedule,
+                recovered
+            );
+        }
     }
 
     #[tokio::test]

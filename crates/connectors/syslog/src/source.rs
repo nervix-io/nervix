@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_connector::{
-    IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, SourceBatch, SourceBatchRequest,
-    SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
+    BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, NoIngestHeaders, SourceBatch,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
 use nervix_models::ClientConfigEntry;
 use thiserror::Error;
@@ -186,8 +186,6 @@ enum SyslogFrameError {
 #[async_trait]
 impl SourceConnector for SyslogSource {
     type Plan = SyslogSourcePlan;
-    type Message = SyslogSourceMessage;
-    type Position = ();
 
     async fn open(plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
         let tls_acceptor = if plan.config.protocol == SyslogProtocol::Tls {
@@ -209,6 +207,39 @@ impl SourceConnector for SyslogSource {
     fn needs_resume(&mut self) -> bool {
         self.listener.is_none()
     }
+
+    async fn suspend(&mut self) -> SourceResult<()> {
+        if let Some(SyslogListener::Stream(listener)) = self.listener.as_mut() {
+            listener.paused.send_replace(true);
+        }
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> SourceResult<SourceResume> {
+        if let Some(listener) = self.listener.as_mut() {
+            if let SyslogListener::Stream(listener) = listener {
+                listener.paused.send_replace(false);
+            }
+            return Ok(SourceResume::Ready);
+        }
+        let listener = self
+            .bind_listener()
+            .await
+            .change_context(SourceError::Resume { connector: SYSLOG })?;
+        self.listener = Some(listener);
+        Ok(SourceResume::Ready)
+    }
+
+    async fn close(&mut self) -> SourceResult<()> {
+        self.drop_listener();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BrokerSourceConnector for SyslogSource {
+    type Message = SyslogSourceMessage;
+    type Position = ();
 
     async fn next_batch(
         &mut self,
@@ -239,33 +270,6 @@ impl SourceConnector for SyslogSource {
     }
 
     async fn reject(&mut self, _positions: &[Self::Position]) -> SourceResult<()> {
-        Ok(())
-    }
-
-    async fn suspend(&mut self) -> SourceResult<()> {
-        if let Some(SyslogListener::Stream(listener)) = self.listener.as_mut() {
-            listener.paused.send_replace(true);
-        }
-        Ok(())
-    }
-
-    async fn resume(&mut self) -> SourceResult<SourceResume> {
-        if let Some(listener) = self.listener.as_mut() {
-            if let SyslogListener::Stream(listener) = listener {
-                listener.paused.send_replace(false);
-            }
-            return Ok(SourceResume::Ready);
-        }
-        let listener = self
-            .bind_listener()
-            .await
-            .change_context(SourceError::Resume { connector: SYSLOG })?;
-        self.listener = Some(listener);
-        Ok(SourceResume::Ready)
-    }
-
-    async fn close(&mut self) -> SourceResult<()> {
-        self.drop_listener();
         Ok(())
     }
 }

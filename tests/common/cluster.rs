@@ -109,24 +109,21 @@ use super::{
         PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
     },
     node_liveness::{
-        NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask, ReadinessProbeOutcome,
+        NodeStartupError, NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask,
+        ReadinessProbeOutcome,
+    },
+    node_startup::{
+        ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
+        cluster_startup_budget,
     },
     phase_deadline::PhaseDeadline,
     status_request::{
-        STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_REQUESTS_PER_STARTUP,
-        STATUS_WAIT_BUDGET, StatusEndpoint, StatusRequestError, StatusTransport,
+        STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint,
+        StatusRequestError, StatusTransport,
     },
 };
 
 const HOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-const _: () = assert!(
-    match STATUS_REQUEST_TIMEOUT.checked_mul(STATUS_REQUESTS_PER_STARTUP) {
-        Some(requests) => requests.as_nanos() <= STARTUP_TIMEOUT.as_nanos(),
-        None => false,
-    },
-    "a node startup attempt must outlast its stalled readiness requests"
-);
 const TEST_NODE_UNAVAILABILITY_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_TEST_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT: Duration =
@@ -174,7 +171,6 @@ const _: () = assert!(
     "scenario cleanup must end well before the watchdog of a node a scenario stops itself"
 );
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-const NODE_START_ATTEMPTS: usize = 8;
 const SQS_REGION: &str = "us-east-1";
 const TEST_LOG_DIR: &str = "tests/logs";
 const TEST_LOG_FILE: &str = "tests/logs/scenarios.log";
@@ -859,7 +855,10 @@ impl Cluster {
     }
 
     async fn start_nodes_and_wait(&mut self, node_count: usize) -> io::Result<()> {
-        self.start_node("node-1").await?;
+        let nodes_to_start = u32::try_from(node_count)
+            .assured("a test cluster is built from a handful of nodes, not billions");
+        let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
+        self.start_node_within("node-1", construction).await?;
         let bootstrap_cluster_addr = self
             .nodes
             .get("node-1")
@@ -872,7 +871,8 @@ impl Cluster {
             }
         }
         for index in 2..=node_count {
-            self.start_node(&format!("node-{index}")).await?;
+            self.start_node_within(&format!("node-{index}"), construction)
+                .await?;
         }
         self.wait_for_any_leader("node-1").await?;
         if node_count > 1 {
@@ -909,18 +909,34 @@ impl Cluster {
     ///
     /// A scenario whose subject is a node that cannot apply what the leader committed waits for
     /// its own condition instead, and the retry [`Cluster::start_node`] performs would restart a
-    /// node that had already consumed the failure the scenario armed.
+    /// node that had already consumed the failure the scenario armed. Its budget is therefore one
+    /// attempt's readiness rather than the whole per-node startup budget, which exists for the
+    /// retries this path must not perform.
     pub(crate) async fn start_node_without_catching_up(&mut self, node_id: &str) -> io::Result<()> {
         let handle = self
             .nodes
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        handle.start()?;
-        handle.wait_until_ready(1).await
+        handle.launch()?;
+        handle
+            .readiness(1, PhaseDeadline::after(ATTEMPT_READINESS_BUDGET))
+            .await
+            .map_err(io::Error::other)
     }
 
     pub(crate) async fn start_node(&mut self, node_id: &str) -> io::Result<()> {
-        self.start_node_without_waiting_for_raft_catch_up(node_id)
+        self.start_node_within(node_id, PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+    }
+
+    /// Start one node of a cluster the harness is building, so its startup budget cannot outlive
+    /// the whole construction.
+    async fn start_node_within(
+        &mut self,
+        node_id: &str,
+        construction: PhaseDeadline,
+    ) -> io::Result<()> {
+        self.start_node_without_waiting_for_raft_catch_up_within(node_id, construction)
             .await?;
         let leader_lookup = PhaseDeadline::after(STATUS_WAIT_BUDGET);
         let mut leader_applied = None;
@@ -964,37 +980,27 @@ impl Cluster {
         &mut self,
         node_id: &str,
     ) -> io::Result<()> {
+        self.start_node_without_waiting_for_raft_catch_up_within(
+            node_id,
+            PhaseDeadline::after(NODE_STARTUP_BUDGET),
+        )
+        .await
+    }
+
+    async fn start_node_without_waiting_for_raft_catch_up_within(
+        &mut self,
+        node_id: &str,
+        construction: PhaseDeadline,
+    ) -> io::Result<()> {
         let handle = self
             .nodes
             .get_mut(node_id)
             .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-        let mut last_error = None;
-        for attempt in 1..=NODE_START_ATTEMPTS {
-            handle.start()?;
-            match handle.wait_until_ready(attempt).await {
-                Ok(()) => {
-                    last_error = None;
-                    break;
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    handle.stop().await?;
-                    last_error = Some(error);
-                    if attempt == NODE_START_ATTEMPTS {
-                        break;
-                    }
-                    handle.spec.reallocate_ports()?;
-                    eprintln!(
-                        "retrying node '{node_id}' startup after attempt {attempt} failed: \
-                         {message}"
-                    );
-                }
-            }
-        }
-        if let Some(error) = last_error {
-            return Err(error);
-        }
-        Ok(())
+        let node = node_name(&handle.spec.node_id);
+        let budget = construction.nested(NODE_STARTUP_BUDGET);
+        NodeStartup::start(&node, handle, budget)
+            .await
+            .map_err(io::Error::other)
     }
 
     pub(crate) async fn add_node(&mut self, node_id: &str) -> io::Result<()> {
@@ -1302,12 +1308,15 @@ impl Cluster {
             return Err(error);
         }
 
-        self.start_node("node-1").await?;
+        let nodes_to_start = u32::try_from(node_ids.len())
+            .assured("a test cluster is built from a handful of nodes, not billions");
+        let construction = PhaseDeadline::after(cluster_startup_budget(nodes_to_start));
+        self.start_node_within("node-1", construction).await?;
         for node_id in node_ids
             .iter()
             .filter(|node_id| node_id.as_str() != "node-1")
         {
-            self.start_node(node_id).await?;
+            self.start_node_within(node_id, construction).await?;
         }
 
         self.wait_for_any_leader("node-1").await?;
@@ -2827,21 +2836,6 @@ impl NodeHandle {
             })
     }
 
-    async fn wait_until_ready(&mut self, attempt: usize) -> io::Result<()> {
-        let endpoint = self.status_endpoint();
-        let node = node_name(&self.spec.node_id);
-        self.task
-            .wait_until_ready(
-                &node,
-                attempt,
-                PhaseDeadline::after(STARTUP_TIMEOUT),
-                POLL_INTERVAL,
-                |phase| ReadinessProbeOutcome::probe(&endpoint, phase),
-            )
-            .await
-            .map_err(io::Error::other)
-    }
-
     /// Where status requests reach this node: the session endpoint of its configured client
     /// transport, authenticated as the default test user.
     fn status_endpoint(&self) -> StatusEndpoint {
@@ -2873,6 +2867,44 @@ impl NodeHandle {
     fn abort(&mut self) {
         self.shutdown = None;
         self.task.abort();
+    }
+}
+
+impl StartableNode for NodeHandle {
+    fn launch(&mut self) -> io::Result<()> {
+        self.start()
+    }
+
+    async fn readiness(
+        &mut self,
+        attempt: u32,
+        readiness: PhaseDeadline,
+    ) -> error_stack::Result<(), NodeStartupError> {
+        let endpoint = self.status_endpoint();
+        let node = node_name(&self.spec.node_id);
+        self.task
+            .wait_until_ready(&node, attempt, readiness, POLL_INTERVAL, |phase| {
+                ReadinessProbeOutcome::probe(&endpoint, phase)
+            })
+            .await
+    }
+
+    /// A node that never became ready has no drain to finish, so its cleanup is the short slice
+    /// its startup budget can spare rather than the product's shutdown watchdog. The stop is
+    /// requested first, and the task is aborted and joined when the slice ends. A database lock
+    /// that outlives the abort surfaces as the next attempt's application error, which ends the
+    /// startup with both attempts in its history.
+    async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
+        self.request_stop();
+        let outcome = self.task.wait(cleanup).await;
+        self.shutdown = None;
+        self.fault_injection
+            .unregister_consensus(&node_name(&self.spec.node_id));
+        AttemptCleanup::from(outcome)
+    }
+
+    fn move_to_fresh_ports(&mut self) -> io::Result<()> {
+        self.spec.reallocate_ports()
     }
 }
 

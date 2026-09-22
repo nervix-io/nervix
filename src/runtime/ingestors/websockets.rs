@@ -18,7 +18,7 @@ use nervix_connector_websockets::{WebsocketSource, WebsocketSourcePlan};
 
 use super::{
     super::*,
-    source::{BrokerSourceHost, BrokerSourceHostSpec, run_source_instance_with_retry},
+    source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_source_instance_with_retry},
 };
 
 const WEBSOCKET_RETRY_POLICY: ParsedRetryPolicy = ParsedRetryPolicy {
@@ -115,7 +115,7 @@ impl WebsocketsIngestor {
             &ingestor.name,
             source_plan.capabilities.instances(),
         );
-        let host = BrokerSourceHost::build(BrokerSourceHostSpec {
+        let host = RuntimeSourceHost::build(RuntimeSourceHostSpec {
             runtime: runtime.clone(),
             domain: domain.clone(),
             ingestor: ingestor.name.clone(),
