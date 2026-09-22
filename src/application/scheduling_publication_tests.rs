@@ -89,6 +89,7 @@ async fn drain_reports_when_its_captured_eligibility_has_no_replacement() {
                     domain: "default".to_string(),
                     execution_reference: uuid::Uuid::now_v7().to_string(),
                     expected_transaction_position: None,
+                    expected_preview: None,
                 },
                 &tx,
                 &mut subscriptions,

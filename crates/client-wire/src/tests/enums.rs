@@ -192,7 +192,7 @@ fn every_undeclared_enum_byte_is_refused() {
         wire::SuggestionKind::ENUM_MAX,
         wire::SuggestionKind,
     );
-    assert_undeclared_refused::<crate::InspectionRejection, _>(
+    assert_undeclared_refused::<nervix_models::TransactionInspectionRejection, _>(
         wire::InspectionRejection::ENUM_MAX,
         wire::InspectionRejection,
     );

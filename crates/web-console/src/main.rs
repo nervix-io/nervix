@@ -496,6 +496,7 @@ fn App() -> impl IntoView {
                         domain: request_domain,
                         execution_reference: command_execution_reference(),
                         expected_transaction_position,
+                        expected_preview: None,
                     },
                 )),
             };
@@ -573,6 +574,7 @@ fn App() -> impl IntoView {
                     domain,
                     execution_reference: command_execution_reference(),
                     expected_transaction_position: None,
+                    expected_preview: None,
                 },
             )),
         };
@@ -617,6 +619,7 @@ fn App() -> impl IntoView {
                     domain: tab.domain,
                     execution_reference: command_execution_reference(),
                     expected_transaction_position: None,
+                    expected_preview: None,
                 },
             )),
         };
@@ -2329,6 +2332,7 @@ fn request_resource_describe(
                 domain,
                 execution_reference: command_execution_reference(),
                 expected_transaction_position: None,
+                expected_preview: None,
             },
         )),
     };
