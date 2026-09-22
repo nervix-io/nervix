@@ -6664,6 +6664,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-mqtt"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "rumqttc-next",
+ "shuttle-tokio",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "nervix-connector-nats"
 version = "0.1.0-dev"
 dependencies = [
@@ -7081,6 +7099,7 @@ dependencies = [
  "nervix-client-wire",
  "nervix-connector",
  "nervix-connector-kafka",
+ "nervix-connector-mqtt",
  "nervix-connector-nats",
  "nervix-connector-pulsar",
  "nervix-connector-rabbitmq",

@@ -9,6 +9,9 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use std::{collections::VecDeque, future::Future, num::NonZeroUsize, pin::Pin, time::Duration};
 
 use async_trait::async_trait;

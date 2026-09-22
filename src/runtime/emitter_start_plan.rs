@@ -20,11 +20,12 @@ use error_stack::Report;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, ParsedRetryPolicy, ResolvedClientConfig,
 };
+use nervix_connector_mqtt::MqttPublishingMode;
 use nervix_connector_nats::NatsPublishingMode;
 use nervix_models::{ChannelName, CollectionName, QueueName, SubjectName, TableName, TopicName};
 
 use super::*;
-use crate::runtime::emitters::{MqttPublishingMode, SqsPublishingMode};
+use crate::runtime::emitters::SqsPublishingMode;
 
 /// A duration an emitter's publishing mode declares, named the way its diagnostics read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
