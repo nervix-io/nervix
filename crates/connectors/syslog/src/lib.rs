@@ -9,6 +9,11 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
+mod client_config;
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use async_trait::async_trait;
@@ -26,8 +31,9 @@ use tokio::{
 };
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
-use crate::runtime::syslog::{
-    MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogDirection, SyslogFraming, SyslogProtocol,
+pub use crate::client_config::{
+    DEFAULT_MAX_MESSAGE_SIZE, MAX_UDP_PAYLOAD_SIZE, SyslogClientConfig, SyslogConfigError,
+    SyslogDirection, SyslogFraming, SyslogProtocol,
 };
 
 const SYSLOG: &str = "syslog";

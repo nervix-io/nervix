@@ -1,37 +1,49 @@
+//! The Syslog client configuration a listener or sender is built from.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The transport a Syslog client declares: its protocol, address, stream framing,
+//!   message-size bound and TLS material, in each direction it is read for.
+//! - **Depends on.** The connector contract's TLS sources, the vocabulary's configuration entries,
+//!   `rustls` and the URL parser.
+//! - **Must not know.** Runtime batches, relays, branches, registry state, or another connector
+//!   implementation.
+
 use std::{num::NonZeroUsize, sync::Arc as StdArc};
 
 use ahash::HashSet;
 use nervix_connector::{RustlsClientConfigSource, client_tls_paths, read_tls_file};
+use nervix_recovery::Discarded as _;
 use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use thiserror::Error;
 use url::Url;
 
-pub(super) const DEFAULT_MAX_MESSAGE_SIZE: NonZeroUsize = nonzero!(131_072usize);
-pub(super) const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
+pub const DEFAULT_MAX_MESSAGE_SIZE: NonZeroUsize = nonzero!(131_072usize);
+pub const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SyslogDirection {
+pub enum SyslogDirection {
     Ingest,
     Emit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SyslogProtocol {
+pub enum SyslogProtocol {
     Udp,
     Tcp,
     Tls,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SyslogFraming {
+pub enum SyslogFraming {
     OctetCounting,
     NonTransparent,
 }
 
 #[derive(Debug, Error)]
-pub(super) enum SyslogConfigError {
+pub enum SyslogConfigError {
     #[error("missing Syslog client config key '{key}'")]
     MissingKey { key: &'static str },
     #[error("missing Syslog TLS {direction} config key '{key}'")]
@@ -87,17 +99,17 @@ pub(super) enum SyslogConfigError {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct SyslogClientConfig {
-    pub(super) protocol: SyslogProtocol,
-    pub(super) addr: String,
-    pub(super) server_name: String,
-    pub(super) max_message_size: NonZeroUsize,
-    pub(super) framing: SyslogFraming,
+pub struct SyslogClientConfig {
+    pub protocol: SyslogProtocol,
+    pub addr: String,
+    pub server_name: String,
+    pub max_message_size: NonZeroUsize,
+    pub framing: SyslogFraming,
     entries: Vec<nervix_models::ClientConfigEntry>,
 }
 
 impl SyslogClientConfig {
-    pub(super) fn parse(
+    pub fn parse(
         entries: &[nervix_models::ClientConfigEntry],
         direction: SyslogDirection,
     ) -> Result<Self, SyslogConfigError> {
@@ -279,7 +291,7 @@ impl SyslogClientConfig {
         Ok(host.to_string())
     }
 
-    pub(super) fn tls_client_config(
+    pub fn tls_client_config(
         &self,
     ) -> Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
         RustlsClientConfigSource::new(&self.entries)
@@ -289,8 +301,13 @@ impl SyslogClientConfig {
             })
     }
 
-    pub(super) fn tls_server_config(&self) -> Result<StdArc<ServerConfig>, SyslogConfigError> {
-        nervix_interconnect::install_rustls_crypto_provider();
+    pub fn tls_server_config(&self) -> Result<StdArc<ServerConfig>, SyslogConfigError> {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .discarded(
+                "a provider the host installed first is the one this connector would have \
+                 installed",
+            );
         let tls = client_tls_paths(&self.entries);
         let cert_file = tls
             .cert_file

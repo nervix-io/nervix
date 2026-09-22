@@ -6664,6 +6664,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-sentry"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "error-stack",
+ "nervix-connector",
+ "nervix-models",
+ "reqwest 0.13.4",
+ "sentry-types",
+ "serde_json",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "nervix-connector-syslog"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "error-stack",
+ "nervix-connector",
+ "nervix-models",
+ "nervix-recovery",
+ "nonzero_ext",
+ "rustls",
+ "rustls-pki-types",
+ "shuttle-tokio",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "url",
+]
+
+[[package]]
 name = "nervix-connector-zeromq"
 version = "0.1.0-dev"
 dependencies = [
@@ -6977,6 +7016,8 @@ dependencies = [
  "nervix-client-wire",
  "nervix-connector",
  "nervix-connector-kafka",
+ "nervix-connector-sentry",
+ "nervix-connector-syslog",
  "nervix-connector-zeromq",
  "nervix-consensus",
  "nervix-dataflow-graph",
@@ -7020,7 +7061,6 @@ dependencies = [
  "rumqttc-next",
  "rustls",
  "rustls-pki-types",
- "sentry-types",
  "serde",
  "serde_json",
  "shuttle",

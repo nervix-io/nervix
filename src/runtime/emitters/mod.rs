@@ -30,7 +30,6 @@ mod pulsar;
 mod rabbitmq;
 mod redis;
 mod sqs;
-mod syslog;
 
 use clickhouse::ClickHouseEmitter;
 use iceberg::{IcebergEmitter, IcebergEmitterError, IcebergEmitterInit, IcebergEmitterResult};
@@ -52,7 +51,7 @@ use redis::{RedisPoolHandle, RedisPoolServices, RedisPoolWait, RedisSink, RedisS
 use nervix_connector_sentry::{SentrySink, SentrySinkConfig};
 pub(in crate::runtime) use sqs::SqsPublishingMode;
 use sqs::{SqsSink, SqsSinkConfig};
-use syslog::{SyslogSink, SyslogSinkConfig};
+use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
 use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
 
 const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);

@@ -19,7 +19,7 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 
 use super::super::*;
-use crate::runtime::syslog::{SyslogClientConfig, SyslogDirection, SyslogProtocol};
+use nervix_connector_syslog::{SyslogClientConfig, SyslogDirection, SyslogProtocol};
 
 const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
 const MAX_OCTET_COUNT_DIGITS: usize = 10;
