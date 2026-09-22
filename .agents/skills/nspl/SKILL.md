@@ -164,10 +164,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   stop/start cycle. A coordinated reset is a control-plane state-lifetime operation with an explicit
   unbranched, concrete-branch, or all-branches target and a stable execution reference. Apart from
   the `ON REJECTED STATE RESET` policy, which triggers it for one refused branch lifetime, it is not
-  an NSPL graph statement. Until a documented administrative or SDK surface exposes it, say that no
-  public NSPL reset syntax exists rather than inventing one. `REBIND RESOURCE` does start a fresh
-  lifetime for every branch of each WASM processor it moves, but only as the consequence of changing
-  the module, and it cannot select a branch.
+  an NSPL graph statement, so say that no other public NSPL reset syntax exists rather than inventing
+  one. Guest code reaches the same operation for its own branch through the SDK's
+  `request_state_reset` or the raw `nervix_request_state_reset` import, which discards that
+  callback's uncommitted output and input and never re-enters the guest. `REBIND RESOURCE` does
+  start a fresh lifetime for every branch of each WASM processor it moves, but only as the
+  consequence of changing the module, and it cannot select a branch.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every

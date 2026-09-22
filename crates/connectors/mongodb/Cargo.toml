@@ -1,0 +1,38 @@
+[package]
+description = "The MongoDB sink connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-mongodb"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
+[dependencies]
+ahash = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+error-stack = { workspace = true }
+meticulous = { workspace = true }
+mongodb = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+shuttle-tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "sync",
+  "time",
+], optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { workspace = true }

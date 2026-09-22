@@ -485,6 +485,191 @@ Feature: Coordinated WASM processor state reset
       key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
       """
 
+  Scenario Outline: A WASM guest replaces the state lifetime of its own branch and leaves its sibling counting
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_guest_reset_filter;
+      UPLOAD RESOURCE wasm_guest_reset_filter VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE VHOST edge guest-reset-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR metric_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_guest_reset_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        BRANCHED BY by_tenant
+        TO filtered_metrics
+        SET value = value, tenant = tenant
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      START;
+      """
+    And http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1,"tenant":"alpha"}
+      """
+    And http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1,"tenant":"beta"}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":-500,"tenant":"alpha"}
+      """
+    Then within "60s" WASM processor "filter_even_rows" completes a guest-requested state reset
+    When http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":2,"tenant":"beta"}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"beta"} | "tenant":"beta" | "value":2
+      """
+    When http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":3,"tenant":"alpha"}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":4,"tenant":"alpha"}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "value":4
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: A guest request from a timeout callback discards the output that callback buffered
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has guest-requested-reset WASM processor fixture resource directory "wasm_processor"
+    And an unbranched timeout-buffering WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"root","sequence":1}
+      """
+    Then within "60s" WASM processor "counting_guest" completes a guest-requested state reset
+    And the relay subscription does not receive a payload within "5s"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"root","sequence":2}
+      """
+    Then within "15s" the relay subscription receives payloads containing all fragments
+      """
+      "tenant":"unbranched" | "note":"released"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario: A failed guest-requested reset is reported and leaves the previous lifetime usable
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 1 node nervix cluster is started
+    And node "node-1" has WASM processor fixture resource directory "wasm_processor"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE wasm_guest_reset_filter;
+      UPLOAD RESOURCE wasm_guest_reset_filter VERSION '{{wasm_processor}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA metric ( value I32, tenant STRING );
+      CREATE WIRE JSON SCHEMA metric_wire MODE STRICT ( value integer, tenant string );
+      CREATE CODEC metric_codec FROM WIRE JSON SCHEMA metric_wire TO SCHEMA metric;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY raw_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE RELAY filtered_metrics SCHEMA metric BRANCHED BY by_tenant;
+      CREATE VHOST edge guest-reset-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/metrics' TYPE HTTP;
+      CREATE INGESTOR metric_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING metric_codec
+        TO raw_metrics
+        INHERIT ALL
+        BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE WASM PROCESSOR filter_even_rows FROM raw_metrics
+        USING RESOURCE wasm_guest_reset_filter VERSION 1
+        FILE 'processors/filter_even.wasm'
+        MAX FUEL 1000000000
+        MAX MEMORY 64MiB
+        BRANCHED BY by_tenant
+        TO filtered_metrics
+        SET value = value, tenant = tenant
+        ON MESSAGE ERROR LOG
+        ON GLOBAL ERROR LOG;
+      CREATE SUBSCRIPTION filtered_metrics_subscription TO filtered_metrics;
+      START;
+      """
+    And http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":1,"tenant":"alpha"}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When fresh WASM reset guest initialization fails on every node
+    And http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":-500,"tenant":"alpha"}
+      """
+    Then within "30s" the active session observes a server error containing
+      """
+      wasm processor 'filter_even_rows' in domain '{{domain}}' could not replace the guest-state lifetime its guest requested
+      """
+    When fresh WASM reset guest initialization succeeds again on every node
+    And http payload is posted to host "guest-reset-{{test_id}}.example.com" path "/metrics"
+      """
+      {"value":2,"tenant":"alpha"}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "value":2
+      """
+
+
   Scenario Outline: Rebinding a WASM module starts a fresh lifetime in every branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

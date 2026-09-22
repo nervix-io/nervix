@@ -68,6 +68,7 @@ The guest imports host functions from the `env` module:
 ```text
 nervix_domain_time_nanos() -> i64
 nervix_timeout_after_nanos(delay_nanos: i64) -> i64
+nervix_request_state_reset() -> i32
 ```
 
 The guest must export:
@@ -101,6 +102,10 @@ Only these two codes are a rejection of the saved state. A trap, an exhausted `M
 `MAX MEMORY`, or any other negative code while restoring is a failure of the restore itself and says
 nothing about the saved bytes. Nervix keeps the saved state after every failed restore, including a
 rejection, and reports each outcome as a distinct [failure stage](#failure-diagnostics).
+
+`nervix_request_state_reset` is answered by the host rather than by the guest: `0` when Nervix
+takes the request and `-9` when the guest operation in progress cannot carry one. See
+[Guest-requested reset](#guest-requested-reset) for what an accepted request does.
 
 ## Buffer Ownership
 
@@ -432,7 +437,8 @@ See [Resource Versions And Bindings](./resource-versions.md#classification-and-s
 #### Coordinated reset
 
 The control plane can replace the state lifetime of the explicit unbranched instance, one concrete
-branch, or every branch of a WASM processor. One-branch reset leaves every sibling generation and
+branch, or every branch of a WASM processor, and a guest can ask for the lifetime of its own branch
+to be replaced through the same operation. One-branch reset leaves every sibling generation and
 task intact. All-branches reset advances the processor's shared generation and also covers branches
 that currently exist only as stored checkpoints, so a later appearance cannot restore their old
 state.
@@ -462,6 +468,45 @@ runs the guest.
 ACK tokens are separate from guest state. They are host-local hot-path runtime capabilities and are
 not persisted or replicated. If ACK state is lost with a processor owner, the upstream ingestor
 reacts according to its delivery mode and retry policy.
+
+#### Guest-requested reset
+
+A guest asks for the state lifetime of the branch it runs in to be replaced by calling
+`nervix_request_state_reset()` from a callback. The host performs the replacement after the
+callback returns and never calls back into the guest to do it. The request selects nothing: it is
+scoped to the calling branch and to the generation that branch is running in, so a guest can never
+name another processor, domain, branch, or generation. Every accepted request is routed through the
+same coordinated reset described above, so it has the same durability, replica, fencing and
+recovery guarantees as an operator's, and `SHOW CLUSTER STATUS` reports it under a request
+reference beginning with `wasm-guest-reset.`.
+
+Only the callbacks that end with a [checkpoint](#checkpoints-and-acknowledgements) own uncommitted
+effects a reset can discard, so only those admit a request: an input batch, a timeout callback, and
+a quiesce flush. Every other operation, including initialization, saving, and restoring, refuses
+the request and schedules nothing.
+
+An accepted request is terminal for the callback that made it:
+
+- Output that callback emitted is discarded and never dispatched.
+- Every input the branch holds, including input the guest still buffers, is negatively
+  acknowledged, so a source with acknowledgements redelivers it into the new lifetime.
+- No checkpoint follows, because the state that callback would save is the state the reset
+  discards.
+- The instance is dropped with its pending timeouts, and the branch accepts nothing more until the
+  new lifetime is durable. It then resumes through a fresh instance restored from that lifetime's
+  initial checkpoint, which the failed callback can never observe.
+- Effects earlier callbacks published stand, because their checkpoints completed; their
+  acknowledgements settle exactly once.
+
+A callback that asks and then fails is still asking, and asking repeatedly — several times in one
+callback, or from several callbacks of one lifetime — replaces that lifetime exactly once and
+initializes one fresh guest. Acceptance says only that the host took the request; it is never proof
+that a new lifetime became durable. A reset that fails is reported as a runtime error naming the
+processor and domain, the branch keeps the lifetime the reset could not replace, and the guest asks
+again from its next callback.
+
+Clearing the guest's own fields is an ordinary application-state mutation that the next checkpoint
+saves, and needs none of this.
 
 ### Recovering A Rejected Snapshot
 
@@ -611,7 +656,9 @@ valid while their source token is live.
 
 Timeout handles belong to the branch instance that requested them. A recreated
 instance starts without pending timeouts and never receives a handle issued to
-an earlier instance.
+an earlier instance. A [guest-requested reset](#guest-requested-reset) drops the instance that
+asked together with every timeout it had requested, so no old handle survives into the new
+lifetime.
 
 ## Quiesce Flush
 

@@ -77,15 +77,13 @@ use nervix_models::{
     IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
     MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
-    MongoDbConflictAction, MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession,
-    MySqlConflictAction, MySqlValueMapping, NodeRef, OtelAggregationTemporality, OtelMetric,
-    OtelMetricKind, OtelScope, OtelSignal, OtelValueMapping, OutputBranch, OwnershipStateComponent,
-    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause, ParseAsType,
-    PostgresConflictAction, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
-    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
-    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
-    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
-    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlValueMapping, NodeRef,
+    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
+    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, PostgresValueMapping,
+    ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome,
+    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId,
+    ResourceName, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
+    SchemaFingerprint, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
     StructuredMessageError, SubscriptionName, Timestamp, WasmRejectedStatePolicy,
     WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
@@ -508,6 +506,11 @@ use wasm_checkpoint::{
     WASM_CHECKPOINT_DEADLINE, WasmCallbackReporting, WasmCheckpointHolds,
     checkpoint_wasm_guest_state, wasm_callback_decided_tokens,
 };
+pub(crate) use wasm_guest_state_reset::GuestWasmStateResetRequest;
+use wasm_guest_state_reset::{
+    PendingGuestWasmStateResets, WasmGuestStateResetContext, WasmGuestStateResetFence,
+    refuse_fenced_wasm_branch_input, request_wasm_guest_state_reset,
+};
 use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
 pub(crate) use wasm_processor::WasmInstanceError;
 use wasm_processor::{
@@ -544,6 +547,7 @@ mod wasm_checkpoint;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod wasm_checkpoint_benchmark;
+mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;

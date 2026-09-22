@@ -20,7 +20,8 @@ use std::{
 use ahash::RandomState;
 use meticulous::OptionExt as _;
 use nervix_execution::sync::{ArcSwap, DashMap};
-use nervix_models::ClusterNodeName;
+use nervix_interconnect::RuntimeState;
+use nervix_models::{ClusterNodeName, WasmStateGeneration};
 use tokio::sync::Notify;
 
 use super::{PersistedRuntimeStateEntry, RuntimeStatePlacement, lsm_sequence::LsmSequence};
@@ -305,6 +306,15 @@ impl ReplicatedWasmProcessorState {
     /// The committed checkpoint, which a new guest instance restores from.
     pub(super) fn restore_guest_state(&self) -> StdArc<WasmGuestState> {
         self.committed.load_full()
+    }
+
+    /// The guest-state lifetime these checkpoints belong to.
+    pub(super) fn generation(&self) -> WasmStateGeneration {
+        let named = match self.placement.state {
+            RuntimeState::WasmProcessor { generation, .. } => Some(generation),
+            _ => None,
+        };
+        named.assured("a WASM processor's state is only ever placed as WASM processor state")
     }
 
     /// The revision of the committed checkpoint.

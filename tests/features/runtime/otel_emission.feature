@@ -114,7 +114,7 @@ Feature: OTEL emission
       ON GENERAL ERROR LOG;
       START AT '2000-01-01T00:00:00Z' TIME RATE 1.0;
       """
-    And OTEL client for emitter "audit_to_otel" enters unavailable fault mode
+    And sink client for emitter "audit_to_otel" enters unavailable fault mode
     And http payload is posted to host "otel-{{test_id}}.example.com" path "/audit"
       """
       {
@@ -130,13 +130,13 @@ Feature: OTEL emission
       """
     Then within "5s" DESCRIBE EMITTER "audit_to_otel" on the leader node contains
       """
-      transient error: OTEL client fault injector returned gRPC UNAVAILABLE
+      transient error: sink fault injector returned an unavailable client
       """
     And the last command output contains
       """
       reconnect backoff:
       """
-    And OTEL client for emitter "audit_to_otel" leaves fault mode
+    And sink client for emitter "audit_to_otel" leaves fault mode
     Then OpenTelemetry Collector eventually contains "otel-log-{{test_id}}"
     And OpenTelemetry Collector eventually contains "otel-trace-{{test_id}}"
 

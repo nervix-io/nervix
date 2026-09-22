@@ -29,7 +29,7 @@ impl ConfiguredFaultInjection {
         false
     }
 
-    pub(in crate::runtime) fn otel_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
+    pub(in crate::runtime) fn sink_client_is_unavailable(&self, _emitter: &EmitterName) -> bool {
         false
     }
 
