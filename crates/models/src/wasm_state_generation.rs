@@ -8,9 +8,9 @@
 //! - **Must not know.** Where a snapshot is stored, how replicas synchronize it, or which operation
 //!   publishes a transition.
 
-use std::{collections::BTreeMap, fmt, num::NonZeroU64};
+use std::{collections::BTreeMap, fmt, fmt::Write as _, num::NonZeroU64};
 
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use thiserror::Error;
@@ -36,6 +36,7 @@ use crate::{BranchKeyFingerprint, CommandExecutionReference};
     RkyvSerialize,
     RkyvDeserialize,
 )]
+#[rkyv(derive(PartialEq, Eq, PartialOrd, Ord))]
 pub enum WasmStateResetScope {
     Unbranched,
     Branch(BranchKeyFingerprint),
@@ -52,6 +53,30 @@ impl WasmStateResetScope {
             (Self::AllBranches, Some(_)) => true,
             _ => false,
         }
+    }
+
+    /// The coordinated reset one recovery attempt of this scope at `generation` drives.
+    ///
+    /// The reference is derived from the identity alone, so every node that reaches the same
+    /// refused lifetime asks for the very same reset. A branch contributes its opaque fingerprint
+    /// rather than its key, because a reference is not a place for payload values.
+    pub fn recovery_request(&self, generation: WasmStateGeneration) -> CommandExecutionReference {
+        let mut selector = String::new();
+        match self {
+            Self::Unbranched => selector.push_str("unbranched"),
+            Self::AllBranches => selector.push_str("all-branches"),
+            Self::Branch(branch) => {
+                for byte in branch.fingerprint() {
+                    write!(selector, "{byte:02x}").assured(
+                        "writing to a String cannot fail, and every byte renders as two hex digits",
+                    );
+                }
+            }
+        }
+        CommandExecutionReference::parse(format!("wasm-recovery.{generation}.{selector}")).assured(
+            "a generation renders as decimal digits and a selector as hex or a hyphenated word, \
+             which are reference characters, and the longest of them is well under the limit",
+        )
     }
 }
 
@@ -128,6 +153,254 @@ impl WasmStateReset {
 
     pub fn mark_ready(&mut self) {
         self.phase = WasmStateResetPhase::Ready;
+    }
+}
+
+/// Why a guest refused the saved snapshot it was asked to restore.
+///
+/// The guest ABI carries the same two verdicts as return codes. This is their durable form: the
+/// data plane converts a verdict into it once, at the boundary where a refused restore becomes a
+/// control-plane decision, so nothing outside that boundary reads an ABI code.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::Display,
+)]
+pub enum WasmSavedStateRejection {
+    /// The saved bytes are not a snapshot envelope the guest can decode.
+    #[strum(to_string = "snapshot envelope rejected")]
+    SnapshotEnvelope,
+    /// The guest decoded the envelope and refuses the application state it carries.
+    #[strum(to_string = "application state rejected")]
+    ApplicationState,
+}
+
+/// What became of the one recovery attempt a refused lifetime is worth.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::Display,
+)]
+pub enum WasmStateRecoveryOutcome {
+    /// The attempt is admitted and its coordinated reset has not reported an outcome yet. A leader
+    /// or owner change resumes this attempt rather than admitting another one.
+    #[strum(to_string = "attempted")]
+    Attempted,
+    /// The reset published a fresh lifetime and the branch resumed on it.
+    #[strum(to_string = "recovered")]
+    Recovered,
+    /// The attempt ended without a usable fresh lifetime. The budget is spent, and the same refused
+    /// generation is never discarded again.
+    #[strum(to_string = "failed")]
+    Failed,
+}
+
+/// The one recovery attempt one scope's refused guest-state lifetime is worth.
+///
+/// The identity is the scope together with the generation whose snapshot was refused, which is what
+/// makes the budget survive a process restart and an owner change: both read the same committed
+/// schedule and find the same spent attempt. The reset request is derived from that identity, so a
+/// resumed attempt drives the very same coordinated reset instead of starting a second one.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct WasmStateRecovery {
+    generation: WasmStateGeneration,
+    rejection: WasmSavedStateRejection,
+    request: CommandExecutionReference,
+    outcome: WasmStateRecoveryOutcome,
+}
+
+impl WasmStateRecovery {
+    /// The generation whose saved snapshot the guest refused.
+    pub const fn generation(&self) -> WasmStateGeneration {
+        self.generation
+    }
+
+    /// The guest's verdict on the refused snapshot.
+    pub const fn rejection(&self) -> WasmSavedStateRejection {
+        self.rejection
+    }
+
+    /// The coordinated reset this attempt drives.
+    pub const fn request(&self) -> &CommandExecutionReference {
+        &self.request
+    }
+
+    /// What the attempt achieved.
+    pub const fn outcome(&self) -> WasmStateRecoveryOutcome {
+        self.outcome
+    }
+}
+
+/// What admitting a recovery attempt for one refused lifetime decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WasmStateRecoveryAdmission {
+    /// No attempt has been made for this refused lifetime, and this one is now recorded.
+    Admitted(CommandExecutionReference),
+    /// An attempt for this refused lifetime is already recorded and unresolved. It is resumed
+    /// under the request it was admitted with.
+    Resumed(CommandExecutionReference),
+    /// This refused lifetime has already been replaced, so there is nothing left to discard.
+    AlreadyRecovered,
+    /// This refused lifetime spent its attempt without producing a usable one.
+    Exhausted,
+}
+
+/// The recovery attempts spent on the refused lifetimes of one WASM processor.
+///
+/// One scope holds at most one attempt, for the newest of its lifetimes that was refused. A scope
+/// whose later lifetime is refused replaces the entry, because reaching that lifetime required a
+/// successful fresh start and is a new failure rather than a retry of the previous one.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct WasmStateRecoveries {
+    #[serde(with = "scope_recoveries")]
+    scopes: BTreeMap<WasmStateResetScope, WasmStateRecovery>,
+}
+
+mod scope_recoveries {
+    use super::*;
+
+    #[derive(Serialize)]
+    struct ScopeRecoveryRef<'a> {
+        scope: &'a WasmStateResetScope,
+        recovery: &'a WasmStateRecovery,
+    }
+
+    #[derive(Deserialize)]
+    struct ScopeRecovery {
+        scope: WasmStateResetScope,
+        recovery: WasmStateRecovery,
+    }
+
+    pub(super) fn serialize<S>(
+        scopes: &BTreeMap<WasmStateResetScope, WasmStateRecovery>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        scopes
+            .iter()
+            .map(|(scope, recovery)| ScopeRecoveryRef { scope, recovery })
+            .collect::<Vec<_>>()
+            .serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<BTreeMap<WasmStateResetScope, WasmStateRecovery>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let entries = Vec::<ScopeRecovery>::deserialize(deserializer)?;
+        let mut scopes = BTreeMap::new();
+        for entry in entries {
+            if scopes.insert(entry.scope, entry.recovery).is_some() {
+                return Err(D::Error::custom(
+                    "WASM state recoveries contain a duplicate scope",
+                ));
+            }
+        }
+        Ok(scopes)
+    }
+}
+
+impl WasmStateRecoveries {
+    /// The recoveries of a WASM processor no refused lifetime has been reported for.
+    pub fn empty() -> Self {
+        Self {
+            scopes: BTreeMap::new(),
+        }
+    }
+
+    /// The attempt recorded for `scope`, whichever of its lifetimes it belongs to.
+    pub fn of_scope(&self, scope: &WasmStateResetScope) -> Option<&WasmStateRecovery> {
+        self.scopes.get(scope)
+    }
+
+    /// Every scope that has spent an attempt, with the attempt it spent.
+    pub fn iter(&self) -> impl Iterator<Item = (&WasmStateResetScope, &WasmStateRecovery)> {
+        self.scopes.iter()
+    }
+
+    /// Decide what a refused `generation` of `scope` is entitled to, and record an admitted attempt.
+    ///
+    /// `request` names the coordinated reset an admitted attempt drives. It is ignored when an
+    /// earlier attempt for this same refused lifetime already decided the outcome, so a caller that
+    /// derives it from the identity and a caller that resumes reach the same reset.
+    pub fn admit(
+        &mut self,
+        scope: WasmStateResetScope,
+        generation: WasmStateGeneration,
+        rejection: WasmSavedStateRejection,
+        request: CommandExecutionReference,
+    ) -> WasmStateRecoveryAdmission {
+        if let Some(recorded) = self.scopes.get(&scope)
+            && recorded.generation == generation
+        {
+            return match recorded.outcome {
+                WasmStateRecoveryOutcome::Attempted => {
+                    WasmStateRecoveryAdmission::Resumed(recorded.request.clone())
+                }
+                WasmStateRecoveryOutcome::Recovered => WasmStateRecoveryAdmission::AlreadyRecovered,
+                WasmStateRecoveryOutcome::Failed => WasmStateRecoveryAdmission::Exhausted,
+            };
+        }
+        self.scopes.insert(
+            scope,
+            WasmStateRecovery {
+                generation,
+                rejection,
+                request: request.clone(),
+                outcome: WasmStateRecoveryOutcome::Attempted,
+            },
+        );
+        WasmStateRecoveryAdmission::Admitted(request)
+    }
+
+    /// Record what the admitted attempt of `scope` achieved.
+    ///
+    /// Returns `false` when this scope holds no unresolved attempt under `request`, which is how a
+    /// report that arrives after the attempt was already settled leaves the record alone.
+    pub fn settle(
+        &mut self,
+        scope: &WasmStateResetScope,
+        request: &CommandExecutionReference,
+        outcome: WasmStateRecoveryOutcome,
+    ) -> bool {
+        let Some(recorded) = self.scopes.get_mut(scope) else {
+            return false;
+        };
+        if &recorded.request != request || recorded.outcome != WasmStateRecoveryOutcome::Attempted {
+            return false;
+        }
+        recorded.outcome = outcome;
+        true
     }
 }
 
@@ -359,6 +632,7 @@ mod tests {
                     max_memory_bytes: nonzero!(67_108_864u64),
                 },
                 global_error_policy: GeneralErrorPolicy::Log,
+                rejected_state_policy: Default::default(),
                 mode: AckMode::Attached,
                 filter_where: None,
                 materialized_state: Vec::new(),
@@ -473,6 +747,142 @@ mod tests {
                 .phase(),
             WasmStateResetPhase::Ready
         );
+    }
+
+    #[test]
+    fn a_refused_lifetime_spends_exactly_one_recovery_attempt() {
+        let mut processor = wasm_processor(1, nonzero!(1_000u64));
+        let scope = WasmStateResetScope::Branch(branch(1));
+        let refused = WasmStateGeneration::FIRST;
+
+        let admitted = processor
+            .admit_wasm_state_recovery(scope, refused, WasmSavedStateRejection::ApplicationState)
+            .expect("a WASM processor records recoveries");
+        let WasmStateRecoveryAdmission::Admitted(request) = admitted else {
+            panic!("the first report of a refused lifetime must be admitted: {admitted:?}");
+        };
+        assert_eq!(request, scope.recovery_request(refused));
+
+        // A second report of the same refused lifetime, from a new owner or after a restart,
+        // resumes the attempt that is already recorded rather than starting another one.
+        assert_eq!(
+            processor.admit_wasm_state_recovery(
+                scope,
+                refused,
+                WasmSavedStateRejection::ApplicationState
+            ),
+            Some(WasmStateRecoveryAdmission::Resumed(request.clone()))
+        );
+
+        assert!(processor.settle_wasm_state_recovery(
+            &scope,
+            &request,
+            WasmStateRecoveryOutcome::Failed
+        ));
+        assert!(!processor.settle_wasm_state_recovery(
+            &scope,
+            &request,
+            WasmStateRecoveryOutcome::Recovered
+        ));
+        assert_eq!(
+            processor.admit_wasm_state_recovery(
+                scope,
+                refused,
+                WasmSavedStateRejection::ApplicationState
+            ),
+            Some(WasmStateRecoveryAdmission::Exhausted)
+        );
+
+        // Every other branch keeps its own budget, and a later lifetime of the same branch is a
+        // new failure rather than a retry of the one that already spent its attempt.
+        let sibling = WasmStateResetScope::Branch(branch(2));
+        assert!(matches!(
+            processor.admit_wasm_state_recovery(
+                sibling,
+                refused,
+                WasmSavedStateRejection::SnapshotEnvelope
+            ),
+            Some(WasmStateRecoveryAdmission::Admitted(_))
+        ));
+        assert!(matches!(
+            processor.admit_wasm_state_recovery(
+                scope,
+                generation(4),
+                WasmSavedStateRejection::ApplicationState
+            ),
+            Some(WasmStateRecoveryAdmission::Admitted(_))
+        ));
+    }
+
+    #[test]
+    fn a_recovered_lifetime_answers_a_later_report_of_the_same_refusal() {
+        let mut processor = wasm_processor(1, nonzero!(1_000u64));
+        let scope = WasmStateResetScope::Unbranched;
+        let refused = WasmStateGeneration::FIRST;
+        let request = scope.recovery_request(refused);
+
+        processor
+            .admit_wasm_state_recovery(scope, refused, WasmSavedStateRejection::SnapshotEnvelope)
+            .expect("a WASM processor records recoveries");
+        assert!(processor.settle_wasm_state_recovery(
+            &scope,
+            &request,
+            WasmStateRecoveryOutcome::Recovered
+        ));
+
+        assert_eq!(
+            processor.admit_wasm_state_recovery(
+                scope,
+                refused,
+                WasmSavedStateRejection::SnapshotEnvelope
+            ),
+            Some(WasmStateRecoveryAdmission::AlreadyRecovered)
+        );
+        let recorded = processor
+            .wasm_state_recoveries()
+            .expect("a WASM processor carries recoveries")
+            .of_scope(&scope)
+            .expect("the attempt is recorded under its scope");
+        assert_eq!(recorded.generation(), refused);
+        assert_eq!(
+            recorded.rejection(),
+            WasmSavedStateRejection::SnapshotEnvelope
+        );
+        assert_eq!(recorded.outcome(), WasmStateRecoveryOutcome::Recovered);
+    }
+
+    #[test]
+    fn a_recovery_request_names_its_scope_and_generation_without_a_branch_key() {
+        let unbranched = WasmStateResetScope::Unbranched.recovery_request(generation(4));
+        assert_eq!(unbranched.as_str(), "wasm-recovery.4.unbranched");
+
+        let branched = WasmStateResetScope::Branch(branch(0xab)).recovery_request(generation(12));
+        assert_eq!(
+            branched.as_str(),
+            format!("wasm-recovery.12.{}", "ab".repeat(32))
+        );
+    }
+
+    #[test]
+    fn recovery_attempts_have_a_json_safe_stored_shape() {
+        let mut processor = wasm_processor(1, nonzero!(1_000u64));
+        processor
+            .admit_wasm_state_recovery(
+                WasmStateResetScope::Branch(branch(3)),
+                generation(2),
+                WasmSavedStateRejection::ApplicationState,
+            )
+            .expect("a WASM processor records recoveries");
+        let recoveries = processor
+            .wasm_state_recoveries()
+            .expect("a WASM processor carries recoveries");
+
+        let encoded = serde_json::to_vec(recoveries)
+            .expect("recovery attempts must have a JSON representation");
+        let decoded = serde_json::from_slice::<WasmStateRecoveries>(&encoded)
+            .expect("the current recovery shape must decode");
+
+        assert_eq!(&decoded, recoveries);
     }
 
     #[test]

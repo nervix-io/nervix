@@ -639,6 +639,7 @@ impl RelayProcessorTemplate {
                     resource_version,
                     file,
                     limits,
+                    rejected_state_policy,
                     compiled,
                 } => {
                     let placement = runtime
@@ -667,6 +668,7 @@ impl RelayProcessorTemplate {
                         resource_version: *resource_version,
                         file: file.clone(),
                         limits: *limits,
+                        rejected_state_policy: *rejected_state_policy,
                         compiled: compiled.clone(),
                         instance: None,
                         replicated_state,

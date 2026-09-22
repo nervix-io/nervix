@@ -124,6 +124,8 @@ that prefix. Extending the run can raise that level or make cancelling changes a
 `REBIND RESOURCE` resolves its target and usages from that same prefix. `LATEST` and its impact are
 provisional at admission and are planned again from the captured commit basis. All selected models
 pass ordinary creation and external-resource validation before the one model step can commit.
+[Resource Versions And Bindings](./resource-versions.md#latest-resolution) defines `LATEST`
+resolution and the rebinding contract.
 A rejected statement does not change the pending count or the transaction's activity time, so the
 client can correct it and continue the same transaction. The admitted result is stored with the
 statement. The same consensus update also stores its stable operation number and the report revision
@@ -197,6 +199,16 @@ executable statement payload, so clearing statements at a terminal outcome does 
 an inspection reads. Reports use keyed header, operation, and step records. Topology graphs are
 content-addressed, stored as bounded node and edge records, and shared by every report revision that
 names the same content instead of being copied into one growing transaction value.
+
+Actual quiescence is an ordered engagement history, distinct from the frozen plan. Each attempt
+records its request and then whether engagement was confirmed, definitively failed, or remained
+uncertain; a confirmed cleanup records release. A request timeout is uncertain when the remote node
+may already have engaged its gate, so it contributes its possible scope to the executed aggregate.
+A definitive failure before any engagement leaves the actual level `DYNAMIC`. If runtime activation
+cannot perform the planned entity swap and rebuilds the domain to recover, the report retains the
+entity attempt and appends the wider domain pause and recovery rebuild effects. Later validation,
+publication, activation, or leadership failure never erases engagement already observed. The
+transaction result derives its aggregate from these actual histories rather than the planned scopes.
 
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and
@@ -309,13 +321,11 @@ operator `PAUSE` or `RESUME` statement.
   moving to another version of the TLS resource it already binds are hot-applied while retaining
   buffered and branch-local state when ownership stays fixed. A placement definition is a dynamic
   model change, but its effective command level rises to `ENTITY_PAUSE` when the resulting schedule
-  moves a running runtime node. A VHOST TLS version change is applied as an HTTPS listener refresh:
-  every live node installs the new certificate from the committed revision before the command
-  succeeds, established connections keep the session they negotiated, and new handshakes present
-  the new bundle. No execution node pauses or restarts, and the refresh applies to a stopped domain
-  too, because the listener serves its VHOSTs while it is stopped. If the listener of any node
-  cannot install the change, the batch fails and restores the previous models, and every listener
-  installs the restored certificates again.
+  moves a running runtime node. A VHOST TLS version change is applied as an HTTPS listener refresh
+  on every live node, including for a stopped domain, and no execution node pauses or restarts. If
+  the listener of any node cannot install the change, the batch fails and restores the previous
+  models. [The `DYNAMIC` TLS Refresh](./resource-versions.md#the-dynamic-tls-refresh) defines what
+  every listener presents and when.
 - `ENTITY_PAUSE` changes gate only the affected relays on every live node, force-flush affected
   work, and wait for the owner buffers, fixed dispatch slots, and target-node work counters to
   drain before commit.
@@ -334,7 +344,9 @@ operator `PAUSE` or `RESUME` statement.
   Correlator, window-processor, inferencer, and WASM-processor structural changes use this level
   as well. A WASM processor participates like every other stateful node: the host gates its input
   relays, asks the guest to release what it buffers, checkpoints it, and restores that checkpoint
-  into the replacement instance.
+  into the replacement instance. A change of the module a processor binds instead starts a new
+  guest-state generation for every branch, so its replacement starts without guest state; see
+  [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects).
 - A schedule change that only adjusts replica roles is `DYNAMIC`. A planned primary-owner change
   uses `ENTITY_PAUSE`, even when no model changed. `RELOCATE` is classified this way: it reports
   `ENTITY_PAUSE` when it moves at least one runtime node in a running domain, and `DYNAMIC` when it

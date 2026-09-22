@@ -35,6 +35,7 @@ use super::{
     domain_lifecycle::DomainAlterError,
     entity_gate::{ClusterEntityGate, ENTITY_GATE_RELEASE_RETRY_INTERVAL},
     session_service::SessionServiceImpl,
+    transaction::TransactionStepImpactRecorder,
 };
 use crate::{
     registry::{EntityGatePlan, ownership_handoff_relays_for_schedule},
@@ -636,6 +637,23 @@ pub(in crate::application) fn planned_relocation_count(
 }
 
 impl SessionServiceImpl {
+    async fn release_failed_ownership_gate(
+        &self,
+        gate: ClusterEntityGate,
+        impact: Option<&TransactionStepImpactRecorder>,
+        reason: impl std::fmt::Display,
+    ) {
+        if let (Some(impact), Some(attempt)) = (impact, gate.impact_attempt()) {
+            impact.fail(
+                attempt,
+                nervix_models::ImpactDiagnosticKind::Ownership,
+                reason.to_string(),
+            );
+        }
+        self.release_cluster_entity_gates_recording(gate, impact)
+            .await;
+    }
+
     /// Cluster nodes the cluster considers usable: gossip peers that are not marked unavailable.
     ///
     /// Scheduling and failover read liveness this way, so every leader-orchestrated hold must too.
@@ -743,7 +761,7 @@ impl SessionServiceImpl {
         current: Option<&nervix_models::DomainSchedule>,
         planned: Option<&nervix_models::DomainSchedule>,
     ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
-        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, None)
+        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, None, None)
             .await
     }
 
@@ -753,8 +771,12 @@ impl SessionServiceImpl {
         current: Option<&nervix_models::DomainSchedule>,
         planned: Option<&nervix_models::DomainSchedule>,
         gate: &EntityGatePlan,
+        impact: Option<(
+            &TransactionStepImpactRecorder,
+            nervix_models::PauseRequirement,
+        )>,
     ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
-        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, Some(gate))
+        self.begin_planned_ownership_handoff_with_gate(domain, current, planned, Some(gate), impact)
             .await
     }
 
@@ -764,6 +786,10 @@ impl SessionServiceImpl {
         current: Option<&nervix_models::DomainSchedule>,
         planned: Option<&nervix_models::DomainSchedule>,
         gate: Option<&EntityGatePlan>,
+        impact: Option<(
+            &TransactionStepImpactRecorder,
+            nervix_models::PauseRequirement,
+        )>,
     ) -> Result<Option<PlannedOwnershipHandoff>, Report<DomainAlterError>> {
         let moves = planned_ownership_moves(current, planned);
         if moves.is_empty() {
@@ -916,6 +942,7 @@ impl SessionServiceImpl {
                 affected_entities,
                 EntityGatePurpose::OwnershipHandoff,
                 activation_deadline,
+                impact.clone(),
             )
             .await?;
         let coordination = gate.coordination.clone();
@@ -932,7 +959,12 @@ impl SessionServiceImpl {
             )
             .await
         {
-            self.release_cluster_entity_gates(gate).await;
+            self.release_failed_ownership_gate(
+                gate,
+                impact.as_ref().map(|(impact, _)| *impact),
+                &error,
+            )
+            .await;
             return Err(error);
         }
         let mut preparations = ClusterOwnershipHandoffPreparations::new(
@@ -963,8 +995,7 @@ impl SessionServiceImpl {
                 Ok(Err(reason)) => {
                     self.discard_attempted_ownership_handoff_preparations(&mut preparations)
                         .await;
-                    self.release_cluster_entity_gates(gate).await;
-                    return Err(Report::new(DomainAlterError::EntityGate {
+                    let error = Report::new(DomainAlterError::EntityGate {
                         domain: domain.clone(),
                         operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
                         reason: format!(
@@ -973,13 +1004,19 @@ impl SessionServiceImpl {
                             moved.entity.identifier.as_str(),
                             moved.former_owner
                         ),
-                    }));
+                    });
+                    self.release_failed_ownership_gate(
+                        gate,
+                        impact.as_ref().map(|(impact, _)| *impact),
+                        &error,
+                    )
+                    .await;
+                    return Err(error);
                 }
                 Err(_) => {
                     self.discard_attempted_ownership_handoff_preparations(&mut preparations)
                         .await;
-                    self.release_cluster_entity_gates(gate).await;
-                    return Err(Report::new(DomainAlterError::EntityGate {
+                    let error = Report::new(DomainAlterError::EntityGate {
                         domain: domain.clone(),
                         operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
                         reason: format!(
@@ -988,7 +1025,14 @@ impl SessionServiceImpl {
                             moved.entity.identifier.as_str(),
                             moved.former_owner
                         ),
-                    }));
+                    });
+                    self.release_failed_ownership_gate(
+                        gate,
+                        impact.as_ref().map(|(impact, _)| *impact),
+                        &error,
+                    )
+                    .await;
+                    return Err(error);
                 }
             };
 
@@ -1019,8 +1063,7 @@ impl SessionServiceImpl {
                 Ok(Err(reason)) => {
                     self.discard_attempted_ownership_handoff_preparations(&mut preparations)
                         .await;
-                    self.release_cluster_entity_gates(gate).await;
-                    return Err(Report::new(DomainAlterError::EntityGate {
+                    let error = Report::new(DomainAlterError::EntityGate {
                         domain: domain.clone(),
                         operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
                         reason: format!(
@@ -1030,13 +1073,19 @@ impl SessionServiceImpl {
                             moved.former_owner,
                             moved.destination
                         ),
-                    }));
+                    });
+                    self.release_failed_ownership_gate(
+                        gate,
+                        impact.as_ref().map(|(impact, _)| *impact),
+                        &error,
+                    )
+                    .await;
+                    return Err(error);
                 }
                 Err(_) => {
                     self.discard_attempted_ownership_handoff_preparations(&mut preparations)
                         .await;
-                    self.release_cluster_entity_gates(gate).await;
-                    return Err(Report::new(DomainAlterError::EntityGate {
+                    let error = Report::new(DomainAlterError::EntityGate {
                         domain: domain.clone(),
                         operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
                         reason: format!(
@@ -1046,7 +1095,14 @@ impl SessionServiceImpl {
                             moved.former_owner,
                             moved.destination
                         ),
-                    }));
+                    });
+                    self.release_failed_ownership_gate(
+                        gate,
+                        impact.as_ref().map(|(impact, _)| *impact),
+                        &error,
+                    )
+                    .await;
+                    return Err(error);
                 }
             }
         }
@@ -1071,7 +1127,21 @@ impl SessionServiceImpl {
             .verify_planned_ownership_handoff_incarnations(&handoff)
             .await
         {
-            self.abort_planned_ownership_handoff(domain, handoff).await;
+            if let (Some((impact, _)), Some(attempt)) =
+                (impact.as_ref(), handoff.gate.impact_attempt())
+            {
+                impact.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Ownership,
+                    reason.to_string(),
+                );
+            }
+            self.abort_planned_ownership_handoff(
+                domain,
+                handoff,
+                impact.as_ref().map(|(impact, _)| *impact),
+            )
+            .await;
             return Err(Report::new(DomainAlterError::EntityGate {
                 domain: domain.clone(),
                 operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
@@ -1079,7 +1149,21 @@ impl SessionServiceImpl {
             }));
         }
         if let Err(reason) = self.confirm_planned_ownership_handoff(&handoff).await {
-            self.abort_planned_ownership_handoff(domain, handoff).await;
+            if let (Some((impact, _)), Some(attempt)) =
+                (impact.as_ref(), handoff.gate.impact_attempt())
+            {
+                impact.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Ownership,
+                    reason.to_string(),
+                );
+            }
+            self.abort_planned_ownership_handoff(
+                domain,
+                handoff,
+                impact.as_ref().map(|(impact, _)| *impact),
+            )
+            .await;
             return Err(Report::new(DomainAlterError::EntityGate {
                 domain: domain.clone(),
                 operation: EntityGatePurpose::OwnershipHandoff.operation_name(),
@@ -1829,6 +1913,7 @@ impl SessionServiceImpl {
         &self,
         _domain: &DomainName,
         mut handoff: PlannedOwnershipHandoff,
+        impact: Option<&TransactionStepImpactRecorder>,
     ) {
         if handoff.preparations.publication_may_be_in_flight {
             handoff.preparations.schedule_remaining_cleanup();
@@ -1836,7 +1921,8 @@ impl SessionServiceImpl {
             self.discard_attempted_ownership_handoff_preparations(&mut handoff.preparations)
                 .await;
         }
-        self.release_cluster_entity_gates(handoff.gate).await;
+        self.release_cluster_entity_gates_recording(handoff.gate, impact)
+            .await;
     }
 
     pub(in crate::application) async fn activate_local_ownership_handoff_state(
@@ -2001,6 +2087,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         mut handoff: PlannedOwnershipHandoff,
+        impact: Option<&TransactionStepImpactRecorder>,
     ) -> OwnershipHandoffResult<()> {
         let activation = self
             .activate_planned_ownership_handoff(domain, &handoff)
@@ -2018,6 +2105,18 @@ impl SessionServiceImpl {
                     promoted_replica = moved.promoted_replica,
                     error = %error,
                     "planned ownership handoff destination did not confirm activation"
+                );
+            }
+            if let (Some(impact), Some(attempt)) = (impact, handoff.gate.impact_attempt()) {
+                impact.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Ownership,
+                    error.to_string(),
+                );
+                impact.uncertain(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Recovery,
+                    "ownership gate remains held until its lease deadline",
                 );
             }
             handoff.gate.defer_release_to_lease_deadline();
@@ -2048,7 +2147,7 @@ impl SessionServiceImpl {
         }
         self.discard_attempted_ownership_handoff_preparations(&mut handoff.preparations)
             .await;
-        self.release_cluster_entity_gates_and_wait(handoff.gate)
+        self.release_cluster_entity_gates_and_wait_recording(handoff.gate, impact)
             .await
             .map_err(OwnershipHandoffError::transport)?;
         Ok(())
@@ -2059,6 +2158,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         handoff: PlannedOwnershipHandoff,
         error: &crate::runtime::RuntimeError,
+        impact: Option<&TransactionStepImpactRecorder>,
     ) {
         let hold_duration = handoff.started_at.elapsed();
         for moved in &handoff.moves {
@@ -2072,6 +2172,18 @@ impl SessionServiceImpl {
                 promoted_replica = moved.promoted_replica,
                 error = %error,
                 "planned ownership handoff activation failed; gate remains held until its deadline"
+            );
+        }
+        if let (Some(impact), Some(attempt)) = (impact, handoff.gate.impact_attempt()) {
+            impact.fail(
+                attempt,
+                nervix_models::ImpactDiagnosticKind::Activation,
+                error.to_string(),
+            );
+            impact.uncertain(
+                attempt,
+                nervix_models::ImpactDiagnosticKind::Recovery,
+                "ownership gate remains held until its lease deadline",
             );
         }
         handoff.gate.defer_release_to_lease_deadline();

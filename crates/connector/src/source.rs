@@ -1,11 +1,12 @@
-//! Source operations and host services shared by broker connectors.
+//! Source operations and host services shared by connector families.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The typed source plan, source-message and connector traits, acknowledgement
-//!   policies, lifecycle operations, typed source failures, and the opaque host handle through
-//!   which a source delivers messages and reports lifecycle state.
-//! - **Depends on.** Typed ingest metadata, `error-stack`, and Tokio's monotonic clock.
+//! - **Owns.** The typed source plan, broker and paced-polling connector traits, source messages,
+//!   acknowledgement policies, lifecycle operations, typed source failures, and the opaque host
+//!   handle through which a source delivers messages and reports lifecycle state.
+//! - **Depends on.** Typed ingest metadata and timestamps, `error-stack`, and Tokio's monotonic
+//!   clock.
 //! - **Must not know.** Runtime collectors, relays, branches, schedules, registry state, ACK-tree
 //!   implementations, metrics implementations, or any connector driver.
 
@@ -17,10 +18,11 @@ use std::{
 
 use async_trait::async_trait;
 use error_stack::Report;
+use nervix_models::Timestamp;
 use thiserror::Error;
 use tokio::time::Instant;
 
-use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy};
+use crate::{IngestMessageHeaders, IngestMetadataRow, ParsedRetryPolicy, RetainedIngestHeaders};
 
 /// The metadata namespace a source message makes available to ingest expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,27 +183,16 @@ pub enum SourceError {
 
 pub type SourceResult<T> = Result<T, Report<SourceError>>;
 
-/// The transport operations the host drives for one source instance.
+/// Lifecycle operations common to every source family.
 #[async_trait]
 pub trait SourceConnector: Send + Sized + 'static {
     type Plan: Send + Sync;
-    type Message: SourceMessage<Position = Self::Position>;
-    type Position: Clone + Debug + Send + Sync + 'static;
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> SourceResult<Self>;
 
     fn needs_resume(&mut self) -> bool {
         false
     }
-
-    async fn next_batch(
-        &mut self,
-        request: SourceBatchRequest,
-    ) -> SourceResult<SourceBatch<Self::Message>>;
-
-    async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()>;
-
-    async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()>;
 
     async fn suspend(&mut self) -> SourceResult<()> {
         Ok(())
@@ -214,6 +205,44 @@ pub trait SourceConnector: Send + Sized + 'static {
     async fn close(&mut self) -> SourceResult<()> {
         Ok(())
     }
+}
+
+/// Broker operations the host drives between source lifecycle transitions.
+#[async_trait]
+pub trait BrokerSourceConnector: SourceConnector {
+    type Message: SourceMessage<Position = Self::Position>;
+    type Position: Clone + Debug + Send + Sync + 'static;
+
+    async fn next_batch(
+        &mut self,
+        request: SourceBatchRequest,
+    ) -> SourceResult<SourceBatch<Self::Message>>;
+
+    async fn acknowledge(&mut self, positions: &[Self::Position]) -> SourceResult<()>;
+
+    async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()>;
+}
+
+/// One owned message returned by a paced poll.
+pub struct SourcePollMessage {
+    pub payload: Vec<u8>,
+    pub headers: RetainedIngestHeaders,
+}
+
+/// The result of one host-scheduled source poll.
+///
+/// `failures` contains individual records a connector could not materialize while allowing the
+/// other messages from the same external response to continue through intake.
+pub struct SourcePoll {
+    pub messages: Vec<SourcePollMessage>,
+    pub failures: Vec<Report<SourceError>>,
+    pub observed_at: Timestamp,
+}
+
+/// A source whose transport operation is scheduled by a host-owned domain cadence.
+#[async_trait]
+pub trait PacedSourceConnector: SourceConnector {
+    async fn poll(&mut self, scheduled_at: Timestamp) -> SourceResult<SourcePoll>;
 }
 
 /// Whether the host should attach one ACK root to every accepted source message.

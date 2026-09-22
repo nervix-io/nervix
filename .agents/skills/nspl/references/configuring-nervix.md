@@ -216,7 +216,9 @@ relay. Do not use them to scan across branches.
   negative code, after which Nervix keeps the state saved last. Its `nervix_load_state` rejects
   unusable saved state only with the reserved `-7` or `-8` codes; read a WASM failure by its
   `<stage> failed` diagnostic, and treat only `snapshot envelope decoding` and `application state
-  restoration` as a verdict on the saved state, which Nervix keeps. Owner loss without a surviving
+  restoration` as a verdict on the saved state, which Nervix keeps unless the processor declares
+  `ON REJECTED STATE RESET` and thereby spends that lifetime's single recovery attempt. Owner loss
+  without a surviving
   checkpoint of the current state generation resets the affected branches; a returning former
   owner or stale replica never restores older guest state. Treat a WASM processor's input
   acknowledgement as released only after the guest-state checkpoint covering it reached the owner's

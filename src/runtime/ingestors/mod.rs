@@ -75,10 +75,7 @@ impl IngestorStarter {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{
-        ClientConfigEntry, CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets,
-        CreateClientZeroMq,
-    };
+    use nervix_models::{ClientConfigEntry, CreateClientWebsockets, CreateClientZeroMq};
 
     use super::*;
 
@@ -106,58 +103,6 @@ mod tests {
             &zeromq.config
         ));
 
-        let http = CreateClientHttp::<u64> {
-            name: named("http"),
-            mount: None,
-            config: vec![ClientConfigEntry {
-                key: "endpoint".to_string(),
-                value: "https://example.com/api".to_string(),
-            }],
-        };
-        assert_eq!(
-            ingestors::http::HttpIngestor::endpoint_from_config(&http.config).expect("endpoint"),
-            "https://example.com/api"
-        );
-        assert_eq!(
-            ingestors::http::HttpIngestor::method_from_config(&http.config)
-                .expect("default method"),
-            reqwest::Method::GET
-        );
-
-        let http_post = CreateClientHttp::<u64> {
-            name: named("http"),
-            mount: None,
-            config: vec![
-                ClientConfigEntry {
-                    key: "endpoint".to_string(),
-                    value: "https://example.com/api".to_string(),
-                },
-                ClientConfigEntry {
-                    key: "method".to_string(),
-                    value: "POST".to_string(),
-                },
-            ],
-        };
-        assert_eq!(
-            ingestors::http::HttpIngestor::method_from_config(&http_post.config)
-                .expect("post method"),
-            reqwest::Method::POST
-        );
-        assert!(
-            ingestors::http::HttpIngestor::method_from_config(
-                &CreateClientHttp::<u64> {
-                    name: named("http"),
-                    mount: None,
-                    config: vec![ClientConfigEntry {
-                        key: "method".to_string(),
-                        value: "NOT A METHOD".to_string(),
-                    }],
-                }
-                .config
-            )
-            .is_err()
-        );
-
         let websocket = CreateClientWebsockets::<u64> {
             name: named("ws"),
             mount: None,
@@ -171,20 +116,6 @@ mod tests {
             ingestors::websockets::WebsocketsIngestor::endpoint_from_config(&websocket.config)
                 .expect("endpoint"),
             "wss://example.com/socket"
-        );
-
-        let prometheus = CreateClientPrometheus::<u64> {
-            name: named("prom"),
-            mount: None,
-            config: vec![ClientConfigEntry {
-                key: "addr".to_string(),
-                value: "http://prometheus:9090".to_string(),
-            }],
-        };
-        assert_eq!(
-            ingestors::prometheus::PrometheusIngestor::addr_from_config(&prometheus.config)
-                .expect("addr"),
-            "http://prometheus:9090"
         );
 
         let zeromq_default = CreateClientZeroMq::<u64> {
@@ -213,19 +144,6 @@ mod tests {
             .contains("missing ZeroMQ client config key 'addr'")
         );
         assert!(
-            ingestors::http::HttpIngestor::endpoint_from_config(
-                &CreateClientHttp::<u64> {
-                    name: named("http"),
-                    mount: None,
-                    config: vec![],
-                }
-                .config
-            )
-            .expect_err("missing http endpoint")
-            .to_string()
-            .contains("missing HTTP client config key 'endpoint'")
-        );
-        assert!(
             ingestors::websockets::WebsocketsIngestor::endpoint_from_config(
                 &CreateClientWebsockets::<u64> {
                     name: named("ws"),
@@ -238,19 +156,6 @@ mod tests {
             .expect_err("missing websocket endpoint")
             .to_string()
             .contains("missing WebSockets client config key 'endpoint'")
-        );
-        assert!(
-            ingestors::prometheus::PrometheusIngestor::addr_from_config(
-                &CreateClientPrometheus::<u64> {
-                    name: named("prom"),
-                    mount: None,
-                    config: vec![],
-                }
-                .config
-            )
-            .expect_err("missing prometheus addr")
-            .to_string()
-            .contains("missing Prometheus client config key 'addr'")
         );
     }
 }
