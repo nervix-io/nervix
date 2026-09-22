@@ -713,7 +713,8 @@ impl SessionServiceImpl {
                     .await
                 {
                     if let Some(handoff) = handoff.take() {
-                        self.abort_planned_ownership_handoff(&domain, handoff).await;
+                        self.abort_planned_ownership_handoff(&domain, handoff, None)
+                            .await;
                     }
                     if let ConsensusError::LeadershipLost { .. } = &error {
                         return self
@@ -747,9 +748,9 @@ impl SessionServiceImpl {
                 if let Some(handoff) = handoff {
                     debug_assert_eq!(handoff.moves, planned_moves);
                     if let Some(error) = &local_activation_error {
-                        self.defer_planned_ownership_handoff_release(&domain, handoff, error);
+                        self.defer_planned_ownership_handoff_release(&domain, handoff, error, None);
                     } else if let Err(error) = self
-                        .finish_planned_ownership_handoff(&domain, handoff)
+                        .finish_planned_ownership_handoff(&domain, handoff, None)
                         .await
                     {
                         handoff_activation_error = Some(error.to_string());

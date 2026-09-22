@@ -198,6 +198,16 @@ an inspection reads. Reports use keyed header, operation, and step records. Topo
 content-addressed, stored as bounded node and edge records, and shared by every report revision that
 names the same content instead of being copied into one growing transaction value.
 
+Actual quiescence is an ordered engagement history, distinct from the frozen plan. Each attempt
+records its request and then whether engagement was confirmed, definitively failed, or remained
+uncertain; a confirmed cleanup records release. A request timeout is uncertain when the remote node
+may already have engaged its gate, so it contributes its possible scope to the executed aggregate.
+A definitive failure before any engagement leaves the actual level `DYNAMIC`. If runtime activation
+cannot perform the planned entity swap and rebuilds the domain to recover, the report retains the
+entity attempt and appends the wider domain pause and recovery rebuild effects. Later validation,
+publication, activation, or leadership failure never erases engagement already observed. The
+transaction result derives its aggregate from these actual histories rather than the planned scopes.
+
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and
 error while preserving the applied prefix. A model step that did not pause and whose VHOSTs an HTTPS
