@@ -418,6 +418,12 @@ that generation; a branch with no surviving checkpoint of the generation being r
 fresh, and `SHOW CLUSTER STATUS` reports it as a `wasm_processor` reset. Applying the same committed
 schedule again, after a restart or a rebuild, publishes nothing new.
 
+A generation also belongs to the module binding it was published for. A model change that binds
+another resource, version, or module file, such as a `REBIND RESOURCE`, starts a new generation for
+every branch in the schedule publication that commits it, so the new module starts every branch
+without guest state. See
+[Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects).
+
 #### Coordinated reset
 
 The control plane can replace the state lifetime of the explicit unbranched instance, one concrete
