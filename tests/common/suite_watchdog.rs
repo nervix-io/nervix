@@ -4,9 +4,11 @@
 //!
 //! - **Owns.** The suite's execution budget and the reserve it leaves the workflow job, the
 //!   registry of the clusters a run has live, the diagnostic a suite timeout prints, the bounded
-//!   cleanup that timeout drives, and the status the process ends with.
+//!   cleanup that timeout drives, the bounded teardown that follows every run, and the status the
+//!   process ends with.
 //! - **Depends on.** The active-scenario registry, the stop a running node publishes, the
-//!   whole-cluster cleanup budget, the phase deadline, and Tokio's timers.
+//!   whole-cluster cleanup budget, the phase deadline, Tokio's timers, and the stop of the suite's
+//!   test dependencies, which it is handed as a future.
 //! - **Must not know.** What a scenario does, what a node is, or how a cluster is configured.
 //!
 //! # The advertised worst case
@@ -114,6 +116,27 @@ const _: () = assert!(
 );
 /// How often the cleanup checks whether every node it asked to stop has ended.
 const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How long the suite waits for its test dependencies to stop before it leaves them to the
+/// runner.
+///
+/// Stopping containers is the runner's job too, and it does it when the job ends. Waiting here
+/// without a bound is how a run that has already produced its whole result still loses to the
+/// workflow's own timeout, which uploads nothing. A policy input.
+pub(crate) const DEPENDENCY_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2 * 60);
+/// How long dropping the runtime may wait for the blocking tasks a scenario left behind.
+///
+/// Dropping a multi-threaded runtime waits for every blocking task without a bound, and a scenario
+/// that left one parked in a driver that never returns holds the whole process there. This gives
+/// them a window and then abandons them: the process is ending, so a task that outlives it costs
+/// nothing. A policy input.
+pub(crate) const RUNTIME_SHUTDOWN_BUDGET: Duration = Duration::from_secs(60);
+const _: () = assert!(
+    match DEPENDENCY_SHUTDOWN_BUDGET.checked_add(RUNTIME_SHUTDOWN_BUDGET) {
+        Some(teardown) => teardown.as_nanos() < SUITE_CLEANUP_RESERVE.as_nanos(),
+        None => false,
+    },
+    "the suite's bounded teardown must finish inside the reserve the job keeps for it"
+);
 /// The status the process ends with when the suite budget expired.
 ///
 /// It is the status `timeout(1)` reports, and it is neither the 101 a panic ends with nor the 1 a
@@ -563,6 +586,64 @@ impl SuiteWatchdog {
         // tasks those scenarios own and kills the child processes they started.
         drop(run);
         SuiteRun::TimedOut(SuiteTimeout { stall, cleanup })
+    }
+}
+
+/// What stopping the suite's test dependencies did.
+///
+/// The run's own result is already known by the time this happens, so the only thing at stake is
+/// whether the process ends in time to have that result uploaded.
+#[derive(Clone, Debug)]
+pub(crate) enum SuiteTeardown {
+    /// The dependencies stopped, reporting these failures.
+    Stopped(Vec<String>),
+    /// The budget passed with the stop still running, so the suite stopped waiting for it and
+    /// left the containers to the runner that owns them.
+    Abandoned(Duration),
+}
+
+impl SuiteTeardown {
+    /// Stops the suite's dependencies within [`DEPENDENCY_SHUTDOWN_BUDGET`].
+    ///
+    /// The stop is a future this is handed rather than something it knows how to perform: what a
+    /// dependency is belongs to whoever started it, and what a bounded ending is belongs here.
+    pub(crate) async fn bounded<Stop>(stop: Stop) -> Self
+    where
+        Stop: Future<Output = Vec<String>>,
+    {
+        let deadline = PhaseDeadline::after(DEPENDENCY_SHUTDOWN_BUDGET);
+        match deadline.bound(stop).await {
+            BeforeDeadline::Finished(failures) => Self::Stopped(failures),
+            BeforeDeadline::Passed => Self::Abandoned(DEPENDENCY_SHUTDOWN_BUDGET),
+        }
+    }
+
+    /// Whether the teardown both finished and had nothing to report.
+    pub(crate) fn is_clean(&self) -> bool {
+        match self {
+            Self::Stopped(failures) => failures.is_empty(),
+            Self::Abandoned(_) => false,
+        }
+    }
+}
+
+impl fmt::Display for SuiteTeardown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stopped(failures) if failures.is_empty() => {
+                formatter.write_str("suite dependency teardown stopped every dependency")
+            }
+            Self::Stopped(failures) => write!(
+                formatter,
+                "suite dependency teardown failed: {}",
+                failures.join("; ")
+            ),
+            Self::Abandoned(budget) => write!(
+                formatter,
+                "suite dependency teardown did not finish within {budget:?} and was left to the \
+                 runner"
+            ),
+        }
     }
 }
 

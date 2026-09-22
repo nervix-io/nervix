@@ -111,7 +111,9 @@ use crate::common::{
         ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
-    suite_watchdog::{SuiteOutcome, SuiteRun, SuiteWatchdogArgs},
+    suite_watchdog::{
+        RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
+    },
 };
 
 mod common;
@@ -20408,29 +20410,28 @@ fn main() {
             runtime.block_on(run_scenarios(parallelism))
         }
     }));
-    let dependency_teardown_errors = runtime.block_on(TestDependencies::shutdown_suite());
-    drop(runtime);
+    // Both bounded, because a run whose result is already decided must still end in time for that
+    // result to be uploaded. Stopping containers and dropping a multi-threaded runtime both wait
+    // without a bound of their own, and a suite that has finished every scenario has been lost to
+    // the workflow's own timeout right here.
+    let dependency_teardown =
+        runtime.block_on(SuiteTeardown::bounded(TestDependencies::shutdown_suite()));
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_BUDGET);
 
     let outcome = match execution {
         Ok(outcome) => outcome,
         Err(payload) => resume_unwind(payload),
     };
-    // A run the watchdog ended was dropped mid-scenario, so whatever its dependency teardown then
-    // found is a consequence of that ending rather than a separate failure. The status that says
-    // the budget ended the run is reported first, and the teardown's own errors go out with it.
+    // A run the watchdog ended was dropped mid-scenario, so whatever its teardown then found is a
+    // consequence of that ending rather than a separate failure. The status that says the budget
+    // ended the run is reported first, and the teardown's own report goes out with it.
     if let SuiteOutcome::TimedOut(_) = &outcome {
-        for error in &dependency_teardown_errors {
-            eprintln!("suite dependency teardown failed after the suite timeout: {error}");
-        }
+        eprintln!("{dependency_teardown}");
         outcome.end_process();
         return;
     }
 
-    assert!(
-        dependency_teardown_errors.is_empty(),
-        "suite dependency teardown failed: {}",
-        dependency_teardown_errors.join("; ")
-    );
+    assert!(dependency_teardown.is_clean(), "{dependency_teardown}");
     outcome.end_process();
 }
 

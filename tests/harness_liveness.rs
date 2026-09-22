@@ -87,9 +87,9 @@ mod tests {
             StatusRequestError, StatusTransport,
         },
         suite_watchdog::{
-            LiveCluster, LiveClusterHandle, LiveClusterRegistration, NodeStop, SUITE_BUDGET,
-            StalledScenario, SuiteOutcome, SuiteRun, SuiteTimeout, SuiteWatchdog,
-            SuiteWatchdogArgs,
+            DEPENDENCY_SHUTDOWN_BUDGET, LiveCluster, LiveClusterHandle, LiveClusterRegistration,
+            NodeStop, SUITE_BUDGET, StalledScenario, SuiteOutcome, SuiteRun, SuiteTeardown,
+            SuiteTimeout, SuiteWatchdog, SuiteWatchdogArgs,
         },
     };
 
@@ -2410,5 +2410,52 @@ mod tests {
     #[should_panic(expected = "3 step(s) failed")]
     fn a_failing_suite_ends_the_process_by_unwinding() {
         SuiteOutcome::Failed("3 step(s) failed".to_string()).end_process();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dependency_stop_that_never_returns_is_abandoned_at_its_budget() {
+        let started = Instant::now();
+
+        let teardown = SuiteTeardown::bounded(async {
+            future::pending::<()>().await;
+            Vec::new()
+        })
+        .await;
+
+        assert!(
+            matches!(teardown, SuiteTeardown::Abandoned(budget) if budget == DEPENDENCY_SHUTDOWN_BUDGET),
+            "a stop that never returns must be abandoned at its budget: {teardown}"
+        );
+        assert!(
+            started.elapsed() >= DEPENDENCY_SHUTDOWN_BUDGET,
+            "the stop must be given its whole budget before it is abandoned: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !teardown.is_clean(),
+            "a teardown that never finished has not stopped anything: {teardown}"
+        );
+        assert!(
+            teardown.to_string().contains("left to the runner"),
+            "{teardown}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dependency_stop_that_finishes_keeps_what_it_reported() {
+        let clean = SuiteTeardown::bounded(async { Vec::new() }).await;
+        assert!(clean.is_clean(), "{clean}");
+
+        let failed =
+            SuiteTeardown::bounded(async { vec!["redis container did not stop".to_string()] })
+                .await;
+        assert!(
+            !failed.is_clean(),
+            "a dependency that reported a failure is not a clean teardown: {failed}"
+        );
+        assert!(
+            failed.to_string().contains("redis container did not stop"),
+            "{failed}"
+        );
     }
 }
