@@ -158,6 +158,34 @@ share per input. The branch task owns those shares for the length of the callbac
 resolves them itself: it releases them when the checkpoint completes and negatively acknowledges
 them when it fails. Holding them needs no lock and no shared registry.
 
+### Node quiesce accounting
+
+Every entity on a node keeps one set of quiesce counts. A drain reads them to decide whether the
+node still holds work, and the hot paths that take a message in, collect it, park it on required
+materialized state, buffer its output, or finish it adjust them.
+
+Each total a drain reads is a counter of its own: everything the node holds, and the admitted
+subset of it that a local drain waits for. A total summed across several counters at read time can
+miss an item that is between two of them, because the reader loads the count the item has already
+left and then the count it has not yet joined. A drain that misses the last item reports a node
+holding no work while it still holds one, and an entity gate that believes that alters the entity
+under the message. Messages parked on `REQUIRED WAIT` and outstanding force-flush obligations are
+counted on their own for the drain's report, and neither exchanges items with the admitted count.
+
+An adjustment that moves work between the counts raises every count that rises before it lowers any
+count that falls, so a drain reading during the move sees at least the work the node holds. A
+processor publishes its collected inputs, parked messages, and buffered outputs together for the
+same reason: a batch that left an input collector for an output buffer was admitted work throughout
+the move. Overcounting only delays a drain, while undercounting lets one conclude early, so the
+ordering is chosen in that direction. The counts are hot-path scalars and are never persisted.
+
+A task that must not publish while an ownership handoff has frozen its entity observes that freeze
+through one watch, which registers for the next freeze change before it reads the freeze. A release
+landing between a read and a registration wakes nothing, because the waiter does not exist yet, and
+a task that missed one keeps a stale freeze that disables exactly the force-flush and deadline arms
+that would have woken it again. The release lifts the freeze before it wakes anyone, so a waiter
+that rereads it sees the entity thawed rather than parking on a change that has already happened.
+
 ## Ordering Fences
 
 Three fences remain because they define externally observable order or ownership. Each is scoped to

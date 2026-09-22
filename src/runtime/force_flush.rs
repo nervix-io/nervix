@@ -8,8 +8,6 @@
 //! the participant clears its outstanding obligation, while dropping an unhandled completion
 //! makes the same generation deliverable again.
 
-use std::sync::atomic::Ordering;
-
 use ahash::{HashMap, HashMapExt};
 use parking_lot::Mutex;
 use tokio::sync::watch;
@@ -67,7 +65,7 @@ impl DomainForceFlush {
         if pending_generation.is_some()
             && let Some(counters) = &counters
         {
-            counters.force_flushes.fetch_add(1, Ordering::AcqRel);
+            counters.begin_force_flush_obligation();
         }
         state.participants.insert(
             participant,
@@ -119,7 +117,7 @@ impl DomainForceFlush {
             if participant.pending_generation.is_none()
                 && let Some(counters) = &participant.counters
             {
-                counters.force_flushes.fetch_add(1, Ordering::AcqRel);
+                counters.begin_force_flush_obligation();
             }
             participant.pending_generation = Some(generation);
             participant.claimed_generation = None;
@@ -232,8 +230,8 @@ impl DomainForceFlush {
         if participant.pending_generation.take().is_some()
             && let Some(counters) = &participant.counters
         {
-            let previous = counters.force_flushes.fetch_sub(1, Ordering::AcqRel);
-            debug_assert!(previous > 0, "force-flush obligation count underflow");
+            let held = counters.complete_force_flush_obligation();
+            debug_assert!(held > 0, "force-flush obligation count underflow");
         }
     }
 }
@@ -417,7 +415,7 @@ mod tests {
 
         let generation = coordinator.request();
         assert_eq!(coordinator.pending(), 2);
-        assert_eq!(counters.force_flushes.load(Ordering::Acquire), 2);
+        assert_eq!(counters.force_flush_obligations(), 2);
         assert_eq!(
             first
                 .pending_completion()
@@ -560,7 +558,7 @@ mod tests {
         coordinator.close();
 
         assert_eq!(coordinator.pending(), 0);
-        assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+        assert_eq!(counters.force_flush_obligations(), 0);
         assert!(participant.changed().await.is_err());
     }
 }
@@ -652,7 +650,7 @@ mod shuttle_tests {
                 .assured("the second participant reports its redelivered obligation");
 
             assert_eq!(coordinator.pending(), 1);
-            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 1);
+            assert_eq!(counters.force_flush_obligations(), 1);
             assert_eq!(coordinator.request_if_idle(), generation);
 
             release_second
@@ -663,7 +661,7 @@ mod shuttle_tests {
                 .assured("the second participant completes without panicking");
             assert_eq!(second_generation, generation);
             assert_eq!(coordinator.pending(), 0);
-            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+            assert_eq!(counters.force_flush_obligations(), 0);
             assert_ne!(coordinator.request_if_idle(), generation);
         });
     }
@@ -743,7 +741,7 @@ mod shuttle_tests {
 
             let current_generation = coordinator.request();
             assert_eq!(coordinator.pending(), 2);
-            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 2);
+            assert_eq!(counters.force_flush_obligations(), 2);
             publish_to_first
                 .send(current_generation)
                 .assured("the first participant waits for the newer publication");
@@ -758,7 +756,7 @@ mod shuttle_tests {
                 .await
                 .assured("the second participant completes without panicking");
             assert_eq!(coordinator.pending(), 0);
-            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+            assert_eq!(counters.force_flush_obligations(), 0);
         });
     }
 
@@ -798,7 +796,7 @@ mod shuttle_tests {
                 .assured("the waiting participant does not deadlock or panic");
             assert_eq!(observed_generation, generation);
             assert_eq!(coordinator.pending(), 0);
-            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+            assert_eq!(counters.force_flush_obligations(), 0);
         });
     }
 
@@ -880,10 +878,7 @@ mod shuttle_tests {
                     .assured("every participant reports after subscribing");
             }
             assert_eq!(coordinator.pending(), PCT_PARTICIPANTS + 1);
-            assert_eq!(
-                counters.force_flushes.load(Ordering::Acquire),
-                PCT_PARTICIPANTS + 1
-            );
+            assert_eq!(counters.force_flush_obligations(), PCT_PARTICIPANTS + 1);
 
             let request = {
                 let coordinator = coordinator.clone();
@@ -922,7 +917,7 @@ mod shuttle_tests {
                 .assured("the anchor lifecycle task does not panic");
 
             assert_eq!(coordinator.pending(), 0);
-            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+            assert_eq!(counters.force_flush_obligations(), 0);
 
             let mut first_closing =
                 DomainForceFlush::subscribe(&coordinator, Some(counters.clone()));
@@ -969,7 +964,7 @@ mod shuttle_tests {
 
             assert!(coordinator.request() >= initial_generation);
             assert_eq!(coordinator.pending(), 0);
-            assert_eq!(counters.force_flushes.load(Ordering::Acquire), 0);
+            assert_eq!(counters.force_flush_obligations(), 0);
         });
     }
 

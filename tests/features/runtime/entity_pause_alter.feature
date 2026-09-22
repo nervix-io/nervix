@@ -268,3 +268,107 @@ Feature: Entity-pause model alterations
       | cluster_size |
       | 1            |
       | 3            |
+
+  @entity_gate_waits_for_parked_required_wait
+  Scenario Outline: An entity gate waits for the message its junction parked on required materialized state
+    Given entity gate deadline is configured as "5s"
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA parked_event ( tenant STRING, value STRING, state STRING OPTIONAL );
+      CREATE WIRE JSON SCHEMA parked_event_wire MODE STRICT (
+        tenant string,
+        value string,
+        state string OPTIONAL
+      );
+      CREATE CODEC parked_event_codec
+        FROM WIRE JSON SCHEMA parked_event_wire
+        TO SCHEMA parked_event;
+      CREATE SCHEMA parked_tenant ( tenant STRING );
+      CREATE BRANCH by_parked_tenant SCHEMA parked_tenant TTL 5m;
+      CREATE RELAY parked_state
+        SCHEMA parked_event
+        BRANCHED BY by_parked_tenant
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY parked_input SCHEMA parked_event BRANCHED BY by_parked_tenant;
+      CREATE RELAY parked_output SCHEMA parked_event BRANCHED BY by_parked_tenant;
+      CREATE VHOST edge http-{{test_id}}-parked-gate.example.com;
+      CREATE ENDPOINT parked_state_ingress ON edge PATH '/state' TYPE HTTP;
+      CREATE ENDPOINT parked_input_ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR parked_state_source
+        FROM ENDPOINT parked_state_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
+        TO parked_state
+          INHERIT ALL
+          BRANCHED BY by_parked_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR parked_input_source
+        FROM ENDPOINT parked_input_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parked_event_codec
+        TO parked_input
+          INHERIT ALL
+          BRANCHED BY by_parked_tenant
+          SET tenant = message.tenant
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION enrich_parked
+        FROM parked_input
+        BRANCHED BY by_parked_tenant
+        USING MATERIALIZED STATE parked_state REQUIRED WAIT
+        TO parked_output
+          INHERIT ALL
+          SET state = relay_state.parked_state.value
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      START;
+      """
+    When http payload is posted to node "node-1" with host "http-{{test_id}}-parked-gate.example.com" path "/events"
+      """
+      {"tenant":"acme","value":"input-acme"}
+      """
+    And these NSPL commands fail with "node_work_items=1"
+      """
+      ALTER JUNCTION enrich_parked SET DETACHED;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE JUNCTION enrich_parked;
+      """
+    Then the last command output contains
+      """
+      CREATE ATTACHED JUNCTION enrich_parked
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION parked_output_subscription TO parked_output;
+      """
+    And http payload is posted to node "node-1" with host "http-{{test_id}}-parked-gate.example.com" path "/state"
+      """
+      {"tenant":"acme","value":"state-acme"}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      {"state":"state-acme","tenant":"acme","value":"input-acme"}
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER JUNCTION enrich_parked SET DETACHED;
+      """
+    Then the last command output contains
+      """
+      quiesce level: ENTITY_PAUSE
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

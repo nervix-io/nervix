@@ -308,6 +308,7 @@ pub(in crate::runtime) use entity_gate::OWNERSHIP_HANDOFF_FREEZE_RECHECK_INTERVA
 use entity_gate::{
     ActiveDomainAlter, BranchQuiesceGauges, DomainActivityGuard, EntityGateOperation,
     NodeQuiesceCounters, NodeQuiesceWorkGuard, OutputBufferQuiesceGauge,
+    OwnershipHandoffFreezeWatch,
 };
 pub(in crate::runtime) use events::RuntimeEvents;
 use filter_map::{
