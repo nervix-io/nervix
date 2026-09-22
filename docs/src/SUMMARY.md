@@ -60,6 +60,7 @@
   - [Control Plane](./control-plane.md)
   - [Consensus Storage And Replication](./consensus-storage-and-replication.md)
   - [Command Completion](./command-completion.md)
+  - [Resource Versions And Bindings](./resource-versions.md)
   - [Data Plane](./data-plane.md)
   - [Data-Plane Concurrency](./data-plane-concurrency.md)
   - [Relay](./relay.md)
