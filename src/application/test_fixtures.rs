@@ -247,7 +247,7 @@ fn test_session_service(
             transaction_max_source_bytes: DEFAULT_TRANSACTION_MAX_SOURCE_BYTES,
             transaction_max_open: DEFAULT_TRANSACTION_MAX_OPEN,
             transaction_bindings: DashMap::with_hasher(RandomState::new()),
-            command_executions: DashMap::with_hasher(RandomState::new()),
+            command_executions: super::command_execution::CommandExecutionOwners::default(),
             transaction_executions: DashMap::with_hasher(RandomState::new()),
             transaction_recovery: Default::default(),
             ownership_handoff_operations: tokio::sync::Mutex::new(()),

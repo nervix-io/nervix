@@ -241,6 +241,57 @@ Feature: Client wire failure regressions
       resource: restart_batch_resource
       """
 
+  @client_wire_execution_history
+  Scenario Outline: A reclaimed command identity stays expired after a durable restart
+    Given command retry identities are valid for "1s"
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When this NSPL command request with execution reference "reclaimed-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA reclaimed_identity_record (
+        value STRING
+      );
+      """
+    Then the last command request succeeded
+    When this NSPL command request with execution reference "reclaimed-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA reclaimed_identity_record (
+        value STRING
+      );
+      """
+    Then the last command request succeeded
+    And command execution reference "reclaimed-{{test_id}}" is eventually reclaimed
+    When the cluster is restarted
+    And this NSPL command request with execution reference "reclaimed-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA reclaimed_identity_record (
+        value STRING
+      );
+      """
+    Then the last command error contains
+      """
+      has expired
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA reclaimed_identity_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA reclaimed_identity_record (
+        value STRING
+      );
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire_concurrent_transaction_retry
   Scenario: Concurrent exact BEGIN retries join one durable execution
     Given a 1 node nervix cluster is started

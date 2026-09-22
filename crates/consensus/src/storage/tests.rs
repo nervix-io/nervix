@@ -37,6 +37,21 @@ struct Harness {
 }
 
 impl Harness {
+    fn command_reference(index: u64) -> nervix_models::CommandExecutionReference {
+        nervix_models::CommandExecutionReference::parse(format!(
+            "018bcfe5-6800-7000-8000-{index:012x}"
+        ))
+        .assured("the test command reference is a UUIDv7 value")
+    }
+
+    fn command_policy() -> crate::CommandExecutionAdmissionPolicy {
+        crate::CommandExecutionAdmissionPolicy::at(
+            nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
+            Duration::from_secs(60),
+            65_536,
+        )
+    }
+
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
         Self::with_executor(Executor::default()).await
     }
@@ -142,11 +157,11 @@ impl Harness {
         let owner = nervix_models::UserName::parse("operator")?;
         Ok(ConsensusCommand::AdmitCommandExecution {
             execution: Box::new(crate::CommandExecution::applying(
-                nervix_models::CommandExecutionReference::parse(format!("request-{index}"))?,
+                Self::command_reference(index),
                 owner.clone(),
                 None,
                 [0; 32],
-                nervix_models::Timestamp::from_unix_nanos(1),
+                nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
                 crate::CommandExecutionEffect::CreateUser {
                     if_not_exists: false,
                     name: owner,
@@ -154,6 +169,7 @@ impl Harness {
                 },
             )),
             mutation_domains: BTreeSet::new(),
+            policy: Self::command_policy(),
         })
     }
     fn admissions(
@@ -261,7 +277,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
         )
         .await?;
     let owner = nervix_models::UserName::parse("operator")?;
-    let reference = nervix_models::CommandExecutionReference::parse("reset-request")?;
+    let reference = Harness::command_reference(1);
     harness
         .apply(
             2,
@@ -271,7 +287,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
                     owner.clone(),
                     Some(domain.id.clone()),
                     [7; 32],
-                    nervix_models::Timestamp::from_unix_nanos(1),
+                    nervix_models::Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
                     crate::CommandExecutionEffect::CreateUser {
                         if_not_exists: false,
                         name: owner,
@@ -279,6 +295,7 @@ async fn wasm_state_generation_transitions_survive_restart_and_require_the_mutat
                     },
                 )),
                 mutation_domains: BTreeSet::from([domain.id.clone()]),
+                policy: Harness::command_policy(),
             },
         )
         .await?;
@@ -651,11 +668,10 @@ async fn a_range_is_split_where_the_next_entry_would_exceed_its_write() -> TestR
             )));
         }
         // Entry 4 is the second entry of its write, so its failure fails the whole write.
-        harness
-            .store
-            .inner
-            .faults
-            .fail_next("admit-command-execution:request-4".to_owned(), boundary);
+        harness.store.inner.faults.fail_next(
+            format!("admit-command-execution:{}", Harness::command_reference(4)),
+            boundary,
+        );
         assert!(
             harness
                 .store
@@ -1813,6 +1829,80 @@ async fn transaction_report_and_frozen_plan_survive_snapshot_installation() -> T
             .step("transaction", 0)?
             .decision,
         expected_step
+    );
+    drop(snapshot);
+    Ok(())
+}
+
+#[tokio::test]
+async fn reclaimed_command_retry_fence_survives_snapshot_installation() -> TestResult {
+    let mut source = Harness::new().await?;
+    let reference = Harness::command_reference(1);
+    let owner = nervix_models::UserName::parse("operator")?;
+    source.apply(1, Harness::admission(1, 64)?).await?;
+    source
+        .apply(
+            2,
+            ConsensusCommand::FinishCommandExecution {
+                reference: reference.clone(),
+                owner,
+                request_digest: [0; 32],
+                at: nervix_models::Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
+                result: Box::new(crate::CommandExecutionResult {
+                    success: true,
+                    kind: crate::CommandExecutionResultKind::Ok,
+                    message: "created".to_string(),
+                    diagnostics: Vec::new(),
+                    already_existed: false,
+                    results: Vec::new(),
+                    transaction: None,
+                    transaction_admission: None,
+                }),
+            },
+        )
+        .await?;
+    let retry_fence = nervix_models::Timestamp::from_unix_nanos(1_700_000_020_000_000_000);
+    source
+        .apply(
+            3,
+            ConsensusCommand::ReclaimCommandExecutions {
+                finished_before: retry_fence,
+                retry_fence,
+            },
+        )
+        .await?;
+    assert!(
+        source
+            .store
+            .inner
+            .state()
+            .command_executions
+            .get(&reference)
+            .is_none()
+    );
+
+    let snapshot = source.store.build_snapshot().await?;
+    let mut target = Harness::new().await?;
+    let staged = target.receive(&snapshot.snapshot).await?;
+    target
+        .store
+        .install_snapshot(&snapshot.meta, staged)
+        .await?;
+    assert_eq!(
+        target.store.inner.state().command_executions.retry_fence(),
+        Some(retry_fence)
+    );
+
+    target.apply(4, Harness::admission(1, 64)?).await?;
+    assert!(
+        target
+            .store
+            .inner
+            .state()
+            .command_executions
+            .get(&reference)
+            .is_none(),
+        "the installed retry fence must reject the reclaimed identity"
     );
     drop(snapshot);
     Ok(())

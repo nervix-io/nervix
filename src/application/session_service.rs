@@ -45,7 +45,7 @@ use triomphe::Arc;
 
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
-    command_execution::PersistentCommandRequest,
+    command_execution::{CommandExecutionOwners, PersistentCommandRequest},
     completion::{ApplicationRevisionPhase, wait_for_application_revision},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::{RequestDomainError, command_error, parse_request_domain},
@@ -173,8 +173,7 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) transaction_max_open: usize,
     pub(in crate::application) transaction_bindings: DashMap<String, String, RandomState>,
     /// Requests with one durable execution reference join one application owner on this leader.
-    pub(in crate::application) command_executions:
-        DashMap<CommandExecutionReference, StdArc<AsyncMutex<()>>, RandomState>,
+    pub(in crate::application) command_executions: CommandExecutionOwners,
     /// Calls adopting the same replicated transaction share one executor without serializing
     /// commits in independent domains.
     pub(in crate::application) transaction_executions:
@@ -1293,19 +1292,23 @@ impl SessionServiceImpl {
                     )
                     .await;
             }
-            let lock = self
-                .inner
-                .command_executions
-                .entry(execution_reference.clone())
-                .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-                .clone();
-            execution_guard = Some(lock.lock_owned().await);
+            execution_guard = Some(
+                self.inner
+                    .command_executions
+                    .lock(execution_reference.clone())
+                    .await,
+            );
             if let Some(execution) = self
                 .inner
                 .consensus
                 .current_command_execution(execution_reference)
                 .await
             {
+                if execution.is_expired() {
+                    return command_error(format!(
+                        "command execution reference '{execution_reference}' has expired"
+                    ));
+                }
                 let digest = match PersistentCommandRequest::transaction_digest(&req.query) {
                     Ok(digest) => digest,
                     Err(error) => return command_error(error.to_string()),
@@ -1323,13 +1326,13 @@ impl SessionServiceImpl {
                          {conflict}"
                     ));
                 }
-                let Some(request) = execution.transaction_request() else {
+                let Some(target) = execution.transaction_target() else {
                     return command_error(format!(
                         "command execution reference '{execution_reference}' conflicts by position"
                     ));
                 };
                 if let Some(bound) = subscriptions.transaction_id()
-                    && bound != request.target.id()
+                    && bound != target.id()
                 {
                     return command_error(format!(
                         "command execution reference '{execution_reference}' conflicts by position"
@@ -1427,13 +1430,12 @@ impl SessionServiceImpl {
                 return self.not_leader_response(&req.query, leader).await;
             }
             if execution_guard.is_none() {
-                let lock = self
-                    .inner
-                    .command_executions
-                    .entry(execution_reference.clone())
-                    .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-                    .clone();
-                execution_guard = Some(lock.lock_owned().await);
+                execution_guard = Some(
+                    self.inner
+                        .command_executions
+                        .lock(execution_reference.clone())
+                        .await,
+                );
             }
             let execution = match self
                 .admit_persistent_command(

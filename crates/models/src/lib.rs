@@ -42,7 +42,10 @@ pub use canonical::{
     expression_to_nspl, ingest_quiesce_to_nspl,
 };
 pub use cluster_node::{ClusterNodeIdentity, ClusterNodeIncarnation, CoordinationIdentity};
-pub use command::{CommandExecutionReference, CommandExecutionReferenceError};
+pub use command::{
+    CommandExecutionReference, CommandExecutionReferenceError,
+    CommandExecutionReferenceTimestampError,
+};
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
     DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,

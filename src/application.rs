@@ -123,7 +123,7 @@ mod admitted_connection;
 mod authentication;
 mod background_task;
 mod cluster_status;
-mod command_execution;
+pub mod command_execution;
 mod completion;
 mod describe_output;
 mod domain_clock;
@@ -157,7 +157,6 @@ mod transaction;
 mod wasm_state_recovery;
 mod wasm_state_reset;
 mod web_console;
-
 use service_tasks::ServiceTasks;
 use shutdown::BeforeDeadline;
 pub use shutdown::{
@@ -325,6 +324,8 @@ pub struct Args {
         value_parser = parse_human_duration
     )]
     pub transaction_tombstone_retention: Duration,
+    #[command(flatten)]
+    pub command_execution: command_execution::CommandExecutionPolicy,
     #[arg(
         long,
         env = "NERVIX_TRANSACTION_MAX_STATEMENTS",
@@ -545,6 +546,8 @@ pub struct Application {
     pub transaction_idle_timeout: Duration,
     #[builder(default = DEFAULT_TRANSACTION_TOMBSTONE_RETENTION)]
     pub transaction_tombstone_retention: Duration,
+    #[builder(default)]
+    pub command_execution: command_execution::CommandExecutionPolicy,
     #[builder(default = DEFAULT_TRANSACTION_MAX_STATEMENTS)]
     pub transaction_max_statements: usize,
     #[builder(default = DEFAULT_TRANSACTION_MAX_SOURCE_BYTES)]
@@ -577,13 +580,11 @@ pub struct Application {
 fn parse_human_duration(input: &str) -> Result<Duration, String> {
     humantime::parse_duration(input).map_err(|err| err.to_string())
 }
-
 fn parse_human_bytes(input: &str) -> Result<ubyte::ByteUnit, String> {
     input
         .parse::<ubyte::ByteUnit>()
         .map_err(|err| err.to_string())
 }
-
 fn parse_trace_sample_ratio(input: &str) -> Result<f64, String> {
     let ratio = input
         .parse::<f64>()
@@ -594,7 +595,6 @@ fn parse_trace_sample_ratio(input: &str) -> Result<f64, String> {
         Err("trace sample ratio must be between 0.0 and 1.0".to_string())
     }
 }
-
 #[cfg(test)]
 fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -1711,7 +1711,7 @@ impl Application {
                 transaction_max_source_bytes,
                 transaction_max_open,
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                command_executions: DashMap::with_hasher(RandomState::new()),
+                command_executions: self.command_execution.into(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: Default::default(),
                 ownership_handoff_operations: tokio::sync::Mutex::new(()),

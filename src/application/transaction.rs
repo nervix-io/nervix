@@ -2684,12 +2684,9 @@ impl SessionServiceImpl {
         let now = current_timestamp();
         let finished_before =
             subtract_timestamp_duration(now, self.inner.transaction_tombstone_retention);
-        let command_retention = self
-            .inner
-            .transaction_tombstone_retention
-            .max(DEFAULT_TRANSACTION_TOMBSTONE_RETENTION);
-        let command_finished_before = subtract_timestamp_duration(now, command_retention);
-        self.reconcile_persistent_commands(command_finished_before, now)
+        let command_retry_fence =
+            subtract_timestamp_duration(now, self.inner.command_executions.retry_validity());
+        self.reconcile_persistent_commands(command_retry_fence, command_retry_fence)
             .await;
         let transactions = self.inner.consensus.current_transactions().await;
         let mut tombstone_removal_required = false;

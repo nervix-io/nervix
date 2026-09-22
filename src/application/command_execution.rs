@@ -5,18 +5,24 @@
 //! - **Depends on.** Consensus command records and the authoritative visibility barrier.
 //! - **Must not know.** Parser recovery, transport reconnect policy, or runtime implementation.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{Arc as StdArc, Weak as StdWeak},
+    time::Duration,
+};
 
+use ahash::RandomState;
 use blake3::Hasher;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    CommandExecution, CommandExecutionChildResult, CommandExecutionDiagnostic,
-    CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
-    CommandExecutionState, CommandExecutionTransactionOperation,
+    CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionChildResult,
+    CommandExecutionDiagnostic, CommandExecutionEffect, CommandExecutionResult,
+    CommandExecutionResultKind, CommandExecutionState, CommandExecutionTransactionOperation,
     CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
     CommandExecutionTransactionTarget,
 };
+use nervix_execution::sync::DashMap;
 use nervix_models::{
     CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus,
     ImpactPlanningBasis, Statement, Timestamp, TransactionOperationAdmission,
@@ -24,7 +30,7 @@ use nervix_models::{
 };
 use nervix_nspl::client_statement::ClientStatement;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use tonic::Status;
 use tracing::warn;
 
@@ -37,6 +43,169 @@ use super::{
     transaction::is_queueable_transaction_statement,
 };
 use crate::proto::{CommandResult, CommandResultKind, SessionResponse};
+
+const DEFAULT_COMMAND_RETRY_VALIDITY: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_COMMAND_EXECUTION_CAPACITY: usize = 65_536;
+
+#[derive(Debug, Clone, Copy, clap::Args)]
+pub struct CommandExecutionPolicy {
+    #[arg(
+        long = "command-retry-validity",
+        env = "NERVIX_COMMAND_RETRY_VALIDITY",
+        default_value = "15m",
+        value_parser = super::parse_human_duration
+    )]
+    retry_validity: Duration,
+    #[arg(
+        long = "command-execution-capacity",
+        env = "NERVIX_COMMAND_EXECUTION_CAPACITY",
+        default_value_t = DEFAULT_COMMAND_EXECUTION_CAPACITY
+    )]
+    capacity: usize,
+}
+
+impl CommandExecutionPolicy {
+    pub fn new(retry_validity: Duration, capacity: usize) -> Self {
+        Self {
+            retry_validity,
+            capacity,
+        }
+    }
+
+    pub(in crate::application) fn retry_validity(self) -> Duration {
+        self.retry_validity
+    }
+
+    fn admission_at(self, now: Timestamp) -> CommandExecutionAdmissionPolicy {
+        CommandExecutionAdmissionPolicy::at(now, self.retry_validity, self.capacity)
+    }
+}
+
+impl Default for CommandExecutionPolicy {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_COMMAND_RETRY_VALIDITY,
+            DEFAULT_COMMAND_EXECUTION_CAPACITY,
+        )
+    }
+}
+
+#[derive(Clone)]
+pub(in crate::application) struct CommandExecutionOwners {
+    policy: CommandExecutionPolicy,
+    inner: StdArc<CommandExecutionOwnersInner>,
+}
+
+struct CommandExecutionOwnersInner {
+    locks: DashMap<CommandExecutionReference, StdWeak<CommandExecutionLock>, RandomState>,
+}
+
+struct CommandExecutionLock {
+    owners: StdWeak<CommandExecutionOwnersInner>,
+    reference: CommandExecutionReference,
+    mutex: StdArc<AsyncMutex<()>>,
+}
+
+impl Drop for CommandExecutionLock {
+    fn drop(&mut self) {
+        let Some(owners) = self.owners.upgrade() else {
+            return;
+        };
+        owners.locks.remove_if(&self.reference, |_, current| {
+            current.as_ptr() == std::ptr::from_ref(self)
+        });
+    }
+}
+
+impl Default for CommandExecutionOwners {
+    fn default() -> Self {
+        Self {
+            policy: CommandExecutionPolicy::default(),
+            inner: StdArc::new(CommandExecutionOwnersInner {
+                locks: DashMap::with_hasher(RandomState::new()),
+            }),
+        }
+    }
+}
+
+impl From<CommandExecutionPolicy> for CommandExecutionOwners {
+    fn from(policy: CommandExecutionPolicy) -> Self {
+        Self::new(policy)
+    }
+}
+
+impl CommandExecutionOwners {
+    pub(in crate::application) fn new(policy: CommandExecutionPolicy) -> Self {
+        Self {
+            policy,
+            inner: StdArc::new(CommandExecutionOwnersInner {
+                locks: DashMap::with_hasher(RandomState::new()),
+            }),
+        }
+    }
+
+    pub(in crate::application) fn retry_validity(&self) -> Duration {
+        self.policy.retry_validity()
+    }
+
+    fn admission_at(&self, now: Timestamp) -> CommandExecutionAdmissionPolicy {
+        self.policy.admission_at(now)
+    }
+
+    pub(in crate::application) async fn lock(
+        &self,
+        reference: CommandExecutionReference,
+    ) -> CommandExecutionOwnerGuard {
+        let lock = self.lock_for(&reference);
+        let guard = lock.mutex.clone().lock_owned().await;
+        CommandExecutionOwnerGuard {
+            _lock: lock,
+            guard: Some(guard),
+        }
+    }
+
+    pub(in crate::application) fn try_lock(
+        &self,
+        reference: CommandExecutionReference,
+    ) -> Option<CommandExecutionOwnerGuard> {
+        let lock = self.lock_for(&reference);
+        let guard = lock.mutex.clone().try_lock_owned().ok()?;
+        Some(CommandExecutionOwnerGuard {
+            _lock: lock,
+            guard: Some(guard),
+        })
+    }
+
+    fn lock_for(&self, reference: &CommandExecutionReference) -> StdArc<CommandExecutionLock> {
+        let mut entry = self.inner.locks.entry(reference.clone()).or_default();
+        if let Some(lock) = entry.upgrade() {
+            return lock;
+        }
+        let lock = StdArc::new(CommandExecutionLock {
+            owners: StdArc::downgrade(&self.inner),
+            reference: reference.clone(),
+            mutex: StdArc::new(AsyncMutex::new(())),
+        });
+        *entry = StdArc::downgrade(&lock);
+        lock
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.locks.len()
+    }
+}
+
+pub(in crate::application) struct CommandExecutionOwnerGuard {
+    _lock: StdArc<CommandExecutionLock>,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for CommandExecutionOwnerGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+    }
+}
 
 pub(in crate::application) struct PersistentCommandRequest {
     pub(in crate::application) domain: Option<DomainName>,
@@ -224,10 +393,8 @@ fn transaction_targets_match(
         PersistentCommandRequestBody::Transaction(request) => Some(request),
         PersistentCommandRequestBody::Statement { .. } => None,
     };
-    match (existing.transaction_request(), requested) {
-        (Some(existing), Some(requested)) => {
-            existing.target.identifies_same_request(&requested.target)
-        }
+    match (existing.transaction_target(), requested) {
+        (Some(existing), Some(requested)) => existing.identifies_same_request(&requested.target),
         (None, None) => true,
         (Some(_), None) | (None, Some(_)) => false,
     }
@@ -237,36 +404,43 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn reconcile_persistent_commands(
         &self,
         finished_before: Timestamp,
-        now: Timestamp,
+        retry_fence: Timestamp,
     ) {
-        let executions = self.inner.consensus.current_command_executions().await;
-        let mut expiration_required = false;
-        for execution in executions.into_values() {
+        let reconciliation = self
+            .inner
+            .consensus
+            .command_execution_reconciliation(finished_before, retry_fence)
+            .await;
+        let maintenance_due = reconciliation.maintenance_due;
+        for reference in reconciliation.applying {
             tokio::task::consume_budget().await;
-            match &execution.state {
-                CommandExecutionState::Applying => {}
-                CommandExecutionState::Finished { finished_at, .. } => {
-                    if *finished_at <= finished_before {
-                        expiration_required = true;
-                    }
-                    continue;
-                }
-                CommandExecutionState::Expired { .. } => continue,
-            }
-            let lock = self
-                .inner
-                .command_executions
-                .entry(execution.reference.clone())
-                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-                .clone();
-            let Ok(execution_guard) = lock.try_lock_owned() else {
+            let Some(execution_guard) = self.inner.command_executions.try_lock(reference.clone())
+            else {
                 continue;
             };
+            let Some(execution) = self
+                .inner
+                .consensus
+                .current_command_execution(&reference)
+                .await
+            else {
+                continue;
+            };
+            if !execution.is_applying() {
+                continue;
+            }
+            let owner = execution
+                .owner()
+                .verified("the reconciliation index contains only applying executions")
+                .clone();
+            let request_digest = execution
+                .request_digest()
+                .verified("the reconciliation index contains only applying executions");
             let service = self.clone();
             self.inner.service_tasks.spawn(async move {
                 let _execution_guard = execution_guard;
                 let (response_tx, response_rx) = mpsc::channel(1);
-                let mut subscriptions = SessionSubscriptions::for_user(execution.owner.clone());
+                let mut subscriptions = SessionSubscriptions::for_user(owner.clone());
                 let result = service
                     .execute_persistent_command(&execution, &response_tx, &mut subscriptions)
                     .await;
@@ -277,8 +451,8 @@ impl SessionServiceImpl {
                 if let Err(error) = service
                     .finish_persistent_command(
                         execution.reference.clone(),
-                        execution.owner.clone(),
-                        execution.request_digest,
+                        owner,
+                        request_digest,
                         &result,
                     )
                     .await
@@ -290,11 +464,11 @@ impl SessionServiceImpl {
                 }
             });
         }
-        if expiration_required
+        if maintenance_due
             && let Err(error) = self
                 .inner
                 .consensus
-                .expire_command_executions(finished_before, now)
+                .reclaim_command_executions(finished_before, retry_fence)
                 .await
         {
             warn!(error = %error, "failed to expire retained command results");
@@ -313,6 +487,11 @@ impl SessionServiceImpl {
             .current_command_execution(&reference)
             .await
         {
+            if existing.is_expired() {
+                return Err(Box::new(command_error(format!(
+                    "command execution reference '{reference}' has expired"
+                ))));
+            }
             if let Some(conflict) = existing.request_conflict(
                 &owner,
                 request.domain.as_ref(),
@@ -329,13 +508,14 @@ impl SessionServiceImpl {
                 ))));
             }
             if let (
-                CommandExecutionEffect::CreateUser { password_hash, .. },
+                Some(password_hash),
                 PersistentCommandRequestBody::Statement {
                     statement: Statement::CreateUser(create),
                     ..
                 },
-            ) = (&existing.effect, &request.body)
-                && !verify_password_hash(password_hash.clone(), create.body.password.clone()).await
+            ) = (existing.password_hash(), &request.body)
+                && !verify_password_hash(password_hash.to_string(), create.body.password.clone())
+                    .await
             {
                 return Err(Box::new(command_error(format!(
                     "command execution reference '{reference}' is bound to different user \
@@ -422,19 +602,21 @@ impl SessionServiceImpl {
                 }
             }
         };
+        let admitted_at = current_timestamp();
+        let policy = self.inner.command_executions.admission_at(admitted_at);
         let execution = CommandExecution::applying_at_position(
             reference,
             owner,
             request.domain.clone(),
             request.expected_transaction_position,
             request.digest,
-            current_timestamp(),
+            admitted_at,
             effect,
         );
         match self
             .inner
             .consensus
-            .admit_command_execution(execution, request.mutation_domains())
+            .admit_command_execution(execution, request.mutation_domains(), policy)
             .await
         {
             Ok(execution) => Ok(execution),
@@ -456,7 +638,13 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         // Keep the independently owned command paths out of this dispatcher's poll frame. In a
         // debug build their combined state exceeds the stack available to an ordinary session.
-        match execution.effect.clone() {
+        let Some(effect) = execution.effect().cloned() else {
+            return command_error(format!(
+                "command execution reference '{}' is no longer applying",
+                execution.reference
+            ));
+        };
+        match effect {
             CommandExecutionEffect::CreateDomain {
                 if_not_exists,
                 existed_at_admission,
@@ -481,37 +669,47 @@ impl SessionServiceImpl {
                 source,
                 statement,
             } => {
-                let Some(domain) = execution.domain.clone() else {
+                let Some(domain) = execution.domain().cloned() else {
                     return command_error(
                         "durable configuration application lost its domain".to_string(),
                     );
                 };
-                Box::pin(self.execute_standalone_transaction(
-                    transaction_id,
-                    execution.reference.clone(),
-                    execution.owner.clone(),
-                    domain,
-                    source,
-                    *statement,
-                ))
+                Box::pin(
+                    self.execute_standalone_transaction(
+                        transaction_id,
+                        execution.reference.clone(),
+                        execution
+                            .owner()
+                            .verified("an applying execution retains its owner")
+                            .clone(),
+                        domain,
+                        source,
+                        *statement,
+                    ),
+                )
                 .await
             }
             CommandExecutionEffect::TransactionRequest(request) => {
-                let Some(domain) = execution.domain.clone() else {
+                let Some(domain) = execution.domain().cloned() else {
                     return command_error(
                         "durable transaction request lost its target domain".to_string(),
                     );
                 };
-                Box::pin(self.execute_durable_transaction_request(
-                    execution.owner.clone(),
-                    domain,
-                    *request,
-                ))
+                Box::pin(
+                    self.execute_durable_transaction_request(
+                        execution
+                            .owner()
+                            .verified("an applying execution retains its owner")
+                            .clone(),
+                        domain,
+                        *request,
+                    ),
+                )
                 .await
             }
             CommandExecutionEffect::Statement { source, statement } => match *statement {
                 Statement::Relocate(relocation) => {
-                    let Some(domain) = execution.domain.as_ref() else {
+                    let Some(domain) = execution.domain() else {
                         return command_error("durable relocation lost its domain".to_string());
                     };
                     let Some(mutation) = execution.domain_mutation(domain) else {
@@ -526,7 +724,7 @@ impl SessionServiceImpl {
                     return Box::pin(self.drain_node(drain.node_id, Some(execution))).await;
                 }
                 statement => {
-                    let domain = match &execution.domain {
+                    let domain = match execution.domain() {
                         Some(domain) => domain.to_string(),
                         None => String::new(),
                     };
@@ -605,10 +803,10 @@ impl SessionServiceImpl {
         execution: CommandExecution,
     ) -> Result<CommandResult, Box<CommandResult>> {
         match execution.state {
-            CommandExecutionState::Applying => Err(Box::new(command_error(format!(
+            CommandExecutionState::Applying { .. } => Err(Box::new(command_error(format!(
                 "command execution reference '{reference}' is still applying"
             )))),
-            CommandExecutionState::Expired { .. } => Err(Box::new(command_error(format!(
+            CommandExecutionState::Expired => Err(Box::new(command_error(format!(
                 "command execution reference '{reference}' has expired"
             )))),
             CommandExecutionState::Finished {
@@ -636,7 +834,7 @@ impl SessionServiceImpl {
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
         let mut result = match &execution.state {
-            CommandExecutionState::Applying => {
+            CommandExecutionState::Applying { .. } => {
                 let result =
                     Box::pin(self.execute_persistent_command(&execution, tx, subscriptions)).await;
                 let result = self
@@ -648,8 +846,13 @@ impl SessionServiceImpl {
                     match self
                         .finish_persistent_command(
                             execution.reference.clone(),
-                            execution.owner.clone(),
-                            execution.request_digest,
+                            execution
+                                .owner()
+                                .verified("an applying execution retains its owner")
+                                .clone(),
+                            execution
+                                .request_digest()
+                                .verified("an applying execution retains its request digest"),
                             &result,
                         )
                         .await
@@ -659,7 +862,7 @@ impl SessionServiceImpl {
                     }
                 }
             }
-            CommandExecutionState::Finished { .. } | CommandExecutionState::Expired { .. } => {
+            CommandExecutionState::Finished { .. } | CommandExecutionState::Expired => {
                 match self
                     .result_from_finished_execution(&execution.reference, execution.clone())
                     .await
@@ -679,13 +882,13 @@ impl SessionServiceImpl {
         result: &mut CommandResult,
         subscriptions: &mut SessionSubscriptions,
     ) {
-        let Some(request) = execution.transaction_request() else {
+        let Some(target) = execution.transaction_target() else {
             return;
         };
         let Some(transaction) = result.transaction.as_ref() else {
             return;
         };
-        let target = request.target.id();
+        let target = target.id();
         if transaction.id != target {
             result.success = false;
             result.kind = i32::from(CommandResultKind::Error);
@@ -910,6 +1113,34 @@ mod tests {
             statement: ClientStatement::Server(statement),
             domain: String::new(),
         })
+    }
+
+    #[tokio::test]
+    async fn command_execution_owner_entry_survives_a_waiter_and_leaves_with_its_last_guard() {
+        let owners = CommandExecutionOwners::default();
+        let reference = CommandExecutionReference::parse("request.owners")
+            .assured("the test command reference is an identifier-shaped literal");
+        let first = owners.lock(reference.clone()).await;
+        let late_lock = owners.lock_for(&reference);
+        let waiter_lock = late_lock.clone();
+        let waiter = tokio::spawn(async move {
+            let guard = waiter_lock.mutex.clone().lock_owned().await;
+            (waiter_lock, guard)
+        });
+
+        drop(first);
+        let (lock, guard) = waiter
+            .await
+            .assured("the command execution lock waiter does not panic");
+        let second = CommandExecutionOwnerGuard {
+            _lock: lock,
+            guard: Some(guard),
+        };
+        drop(late_lock);
+        assert_eq!(owners.len(), 1);
+
+        drop(second);
+        assert_eq!(owners.len(), 0);
     }
 
     #[test]

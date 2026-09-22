@@ -268,6 +268,9 @@ struct ScenarioWorld {
     syslog_emit_addr: String,
     syslog_udp_observer: Option<tokio::net::UdpSocket>,
     placeholders: BTreeMap<String, String>,
+    /// Human-readable references in scenarios map to UUIDv7 identities so retries retain one
+    /// stable creation timestamp while feature text remains legible.
+    command_execution_references: BTreeMap<String, String>,
     mqtt_ingestors_by_domain: BTreeMap<String, BTreeSet<String>>,
     avro_http_field_order: Vec<String>,
     avro_http_optional_fields: BTreeSet<String>,
@@ -4614,6 +4617,16 @@ async fn given_transaction_tombstone_retention_is_configured(
         .expect("transaction tombstone retention must be valid");
 }
 
+#[given(expr = "command retry identities are valid for {string}")]
+async fn given_command_retry_identities_are_valid_for(world: &mut ScenarioWorld, validity: String) {
+    assert!(
+        world.cluster.is_none(),
+        "command retry validity must be configured before cluster startup"
+    );
+    world.cluster_config.command_retry_validity = humantime::parse_duration(&validity)
+        .assured("the configured command retry validity is a duration");
+}
+
 #[given(expr = "the transaction statement limit is configured as {int}")]
 async fn given_transaction_statement_limit_is_configured(world: &mut ScenarioWorld, limit: usize) {
     assert!(
@@ -7814,6 +7827,20 @@ fn expand_placeholders(world: &ScenarioWorld, input: &str) -> String {
     output
 }
 
+fn command_execution_reference(world: &mut ScenarioWorld, input: &str) -> String {
+    let expanded = expand_placeholders(world, input);
+    let is_uuid_v7 = nervix_models::CommandExecutionReference::parse(expanded.clone())
+        .is_ok_and(|reference| reference.retry_issued_at().is_ok());
+    if is_uuid_v7 {
+        return expanded;
+    }
+    world
+        .command_execution_references
+        .entry(expanded)
+        .or_insert_with(|| Uuid::now_v7().to_string())
+        .clone()
+}
+
 fn encode_http_payload_for_codec(
     wire_format: &str,
     payload: &str,
@@ -8295,7 +8322,7 @@ async fn when_referenced_command_request_begins_in_background(
         "a background command request is already active"
     );
     let query = expand_placeholders(world, docstring(step));
-    let execution_reference = expand_placeholders(world, &execution_reference);
+    let execution_reference = command_execution_reference(world, &execution_reference);
     let leader = current_leader_node(world).await;
     let mut session = world
         .cluster()
@@ -8323,7 +8350,7 @@ async fn when_exact_command_retry_begins_in_parallel(
         "a background NSPL execution is already active"
     );
     let query = expand_placeholders(world, docstring(step));
-    let execution_reference = expand_placeholders(world, &execution_reference);
+    let execution_reference = command_execution_reference(world, &execution_reference);
     let leader = current_leader_node(world).await;
     let mut session = world
         .cluster()
@@ -8357,7 +8384,7 @@ async fn when_active_session_referenced_command_begins_in_background(
         "a background command request is already active"
     );
     let query = expand_placeholders(world, docstring(step));
-    let execution_reference = expand_placeholders(world, &execution_reference);
+    let execution_reference = command_execution_reference(world, &execution_reference);
     let mut session = world
         .active_session
         .take()
@@ -8383,7 +8410,7 @@ async fn when_active_session_sends_referenced_command_without_reading_response(
     world.last_command_error = None;
     world.last_command_output = None;
     let query = expand_placeholders(world, docstring(step));
-    let execution_reference = expand_placeholders(world, &execution_reference);
+    let execution_reference = command_execution_reference(world, &execution_reference);
     let session = world
         .active_session
         .as_mut()
@@ -8436,7 +8463,7 @@ async fn when_referenced_command_request_is_executed_on_leader(
     #[step] step: &Step,
 ) {
     let query = expand_placeholders(world, docstring(step));
-    let execution_reference = expand_placeholders(world, &execution_reference);
+    let execution_reference = command_execution_reference(world, &execution_reference);
     let leader = current_leader_node(world).await;
     let mut session = world
         .cluster()
@@ -8453,6 +8480,36 @@ async fn when_referenced_command_request_is_executed_on_leader(
     } else {
         world.last_command_output = None;
         world.last_command_error = Some(result.message);
+    }
+}
+
+#[then(expr = "command execution reference {string} is eventually reclaimed")]
+async fn then_command_execution_reference_is_eventually_reclaimed(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+) {
+    let execution_reference = command_execution_reference(world, &execution_reference);
+    let execution_reference = nervix_models::CommandExecutionReference::parse(execution_reference)
+        .assured("scenario command references are valid UUIDv7 values");
+    let leader = current_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "command execution reference '{execution_reference}' was not reclaimed"
+        );
+        if observer
+            .current_command_execution(&execution_reference)
+            .await
+            .is_none()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -9619,7 +9676,7 @@ async fn when_new_session_attaches_and_executes_referenced_command(
     #[step] step: &Step,
 ) {
     let transaction_id = expand_placeholders(world, &transaction_id);
-    let execution_reference = expand_placeholders(world, &execution_reference);
+    let execution_reference = command_execution_reference(world, &execution_reference);
     let query = expand_placeholders(world, docstring(step));
     let leader = current_leader_node(world).await;
     let mut session = world
