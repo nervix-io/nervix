@@ -119,6 +119,15 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   or the data-plane lock ratchet must keep that chapter current in the same change. Its scope
   includes the contentionless rule, published and pre-resolved state, mutable execution state,
   bounded synchronization, and review classification for new lock sites.
+- [Resource Versions And Bindings](docs/src/resource-versions.md) is the authoritative architecture
+  reference for resource versions and the models that bind them. Any change to the resource
+  catalog, upload installation or replication, version resolution, how a binding is validated,
+  classified, pinned, or loaded, `REBIND RESOURCE`, or the HTTPS listener's certificate
+  installation must keep that chapter current in the same change. Its scope includes catalog and
+  store ownership, version assignment and the completion boundary, bindable versions and `LATEST`
+  resolution, the pinning invariant for every binding kind, rebinding atomicity and rollback, the
+  separation of uploads from bindings, the `DYNAMIC` TLS refresh, guarantees and limits, failure
+  semantics and recovery, and observability.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
