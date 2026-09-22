@@ -7,7 +7,7 @@
 //! - **Depends on.** Every subsystem whose state the node holds.
 //! - **Must not know.** How any of that state is used; the subsystems own their own behaviour.
 
-use super::*;
+use super::{schedule_apply::AppliedRuntimeRecoveryExpansions, *};
 
 pub(in crate::runtime) type SharedActiveGraph = StdArc<ArcSwapOption<ActiveGraph>>;
 
@@ -66,6 +66,10 @@ pub(in crate::runtime) struct RuntimeInner {
     /// starts and persisted ownership-handoff activation take the same lock so they observe a
     /// schedule that is not half applied.
     pub(in crate::runtime) schedule_application: Mutex<ScheduleApplication>,
+    /// The recovery expansion observed by the schedule application owner, published for
+    /// transaction reporting without adding another acquisition of the execution-policy lock.
+    pub(in crate::runtime) applied_recovery_expansions:
+        ArcSwapOption<AppliedRuntimeRecoveryExpansions>,
     pub(in crate::runtime) domain_instantiation_errors: DashMap<DomainName, String, RandomState>,
     pub(in crate::runtime) domains: DashMap<DomainName, RuntimeDomainState, RandomState>,
     pub(in crate::runtime) domain_status_changed: watch::Sender<u64>,

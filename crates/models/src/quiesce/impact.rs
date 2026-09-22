@@ -1466,6 +1466,26 @@ impl ActualExecutionStepImpact {
             effects: ImpactEffects::default(),
         }
     }
+
+    /// The greatest scope that was confirmed, may have engaged, or was later released.
+    /// A request followed only by a definitive failure did not interrupt execution.
+    pub fn quiesce_level(&self) -> QuiesceLevel {
+        self.quiescence
+            .iter()
+            .filter(|engagement| {
+                engagement.outcomes.iter().any(|outcome| {
+                    matches!(
+                        outcome,
+                        QuiescenceOutcome::Confirmed
+                            | QuiescenceOutcome::Uncertain { .. }
+                            | QuiescenceOutcome::Released
+                    )
+                })
+            })
+            .map(|engagement| engagement.requirement.level())
+            .max()
+            .unwrap_or(QuiesceLevel::Dynamic)
+    }
 }
 
 /// The effective impact of one atomic execution step, distinct from each operation's contribution.
@@ -1505,6 +1525,10 @@ impl ExecutionStepImpactReport {
 
     pub fn actual_mut(&mut self) -> &mut ActualExecutionStepImpact {
         &mut self.actual
+    }
+
+    pub fn actual_quiesce_level(&self) -> QuiesceLevel {
+        self.actual.quiesce_level()
     }
 }
 
@@ -1629,6 +1653,9 @@ impl TransactionImpactReport {
                 }));
             }
             ensure_requirement_domain(domain, &step.planned.pause)?;
+            for engagement in &step.actual.quiescence {
+                ensure_requirement_domain(domain, &engagement.requirement)?;
+            }
             for expected_number in range.operations() {
                 let operation = operations.get(operation_index).ok_or(
                     ImpactReportError::ExecutionStepPastPosition {
@@ -1964,6 +1991,70 @@ mod impact_report_tests {
         );
         assert!(first.rebuilds.is_empty());
         assert!(second.rebuilds.is_empty());
+    }
+
+    #[test]
+    fn actual_level_counts_confirmed_and_uncertain_engagement_but_not_a_definitive_rejection() {
+        let step = TransactionOperationRange::from_index_and_count(0, 2)
+            .assured("two test operations form one addressable range");
+        let requirement = shared_subgraph(step);
+        let mut impact = ActualExecutionStepImpact::applying();
+        impact.quiescence.push(ActualQuiescence {
+            requirement: requirement.clone(),
+            outcomes: vec![
+                QuiescenceOutcome::Requested,
+                QuiescenceOutcome::Failed {
+                    diagnostic: ImpactDiagnostic {
+                        kind: ImpactDiagnosticKind::Quiescence,
+                        operation: Some(step.first()),
+                        message: "the local gate rejected the request".to_string(),
+                    },
+                },
+            ],
+        });
+        assert_eq!(impact.quiesce_level(), QuiesceLevel::Dynamic);
+
+        impact.quiescence.push(ActualQuiescence {
+            requirement,
+            outcomes: vec![
+                QuiescenceOutcome::Requested,
+                QuiescenceOutcome::Uncertain {
+                    diagnostic: ImpactDiagnostic {
+                        kind: ImpactDiagnosticKind::Quiescence,
+                        operation: Some(step.first()),
+                        message: "the remote response timed out".to_string(),
+                    },
+                },
+                QuiescenceOutcome::Released,
+            ],
+        });
+        assert_eq!(impact.quiesce_level(), QuiesceLevel::EntityPause);
+    }
+
+    #[test]
+    fn actual_level_retains_a_confirmed_pause_after_drain_failure_and_release() {
+        let step = TransactionOperationRange::from_index_and_count(0, 2)
+            .assured("two test operations form one addressable range");
+        let mut impact = ActualExecutionStepImpact::applying();
+        impact.quiescence.push(ActualQuiescence {
+            requirement: PauseRequirement::Domain {
+                domain: named("tenant"),
+            },
+            outcomes: vec![
+                QuiescenceOutcome::Requested,
+                QuiescenceOutcome::Confirmed,
+                QuiescenceOutcome::Failed {
+                    diagnostic: ImpactDiagnostic {
+                        kind: ImpactDiagnosticKind::Quiescence,
+                        operation: Some(step.first()),
+                        message: "the domain did not drain before its deadline".to_string(),
+                    },
+                },
+                QuiescenceOutcome::Released,
+            ],
+        });
+
+        assert_eq!(impact.quiesce_level(), QuiesceLevel::DomainPause);
     }
 
     #[test]

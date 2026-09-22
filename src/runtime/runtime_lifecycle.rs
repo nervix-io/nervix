@@ -94,6 +94,7 @@ impl Runtime {
                 compiled_domain_udfs: DashMap::default(),
                 compiled_wasm_modules: DashMap::default(),
                 schedule_application: Mutex::new(ScheduleApplication::default()),
+                applied_recovery_expansions: ArcSwapOption::empty(),
                 domain_instantiation_errors: DashMap::default(),
                 domains: DashMap::default(),
                 domain_status_changed,
@@ -202,6 +203,20 @@ impl Runtime {
         self.inner
             .fault_injection
             .take_forced_entity_drain_timeout(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_forced_domain_drain_timeout(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_forced_domain_drain_timeout(domain)
+    }
+
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_failed_entity_gate_engagement(&self, domain: &DomainName) -> bool {
+        self.inner
+            .fault_injection
+            .take_failed_entity_gate_engagement(domain)
     }
 
     #[cfg(feature = "testing")]

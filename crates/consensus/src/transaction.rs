@@ -6,11 +6,11 @@ use meticulous::OptionExt as _;
 #[cfg(test)]
 use meticulous::ResultExt as _;
 use nervix_models::{
-    ClusterNodeIdentity, CommandExecutionReference, DomainClockState, DomainName, DomainSchedule,
-    DomainStartPoint, DomainState, ExecutionStepImpactReport, ExecutionStepOutcome,
-    ImpactDiagnostic, ImpactDiagnosticKind, ResourceName, Statement, Timestamp,
-    TransactionOperationAdmission, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPreviewIdentity, UserName,
+    ActualExecutionStepImpact, ClusterNodeIdentity, CommandExecutionReference, DomainClockState,
+    DomainName, DomainSchedule, DomainStartPoint, DomainState, ExecutionStepImpactReport,
+    ExecutionStepOutcome, ImpactDiagnostic, ImpactDiagnosticKind, ResourceName, Statement,
+    Timestamp, TransactionOperationAdmission, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPreviewIdentity, UserName,
 };
 pub use nervix_models::{
     TransactionCommitPlan, TransactionCommitPlanHeader, TransactionCommitPlanStep,
@@ -892,6 +892,7 @@ impl ReplicatedTransaction {
         expected_next_statement: usize,
         at: Timestamp,
         outcome_revision: u64,
+        actual: ActualExecutionStepImpact,
         application_failure: Option<String>,
     ) -> Result<(), TransactionMutationError> {
         let TransactionState::Committing(progress) = &mut self.state else {
@@ -919,6 +920,8 @@ impl ReplicatedTransaction {
                 id: self.id.clone(),
             });
         }
+        applying.result.impact.actual_mut().quiescence = actual.quiescence;
+        applying.result.impact.actual_mut().effects = actual.effects;
 
         let completion = if let Some(error) = application_failure {
             applying.result.result.success = false;
@@ -1374,13 +1377,25 @@ mod tests {
             activity(1),
         );
         assert!(matches!(
-            open.complete_application(0, Timestamp::from_unix_nanos(2), 2, None),
+            open.complete_application(
+                0,
+                Timestamp::from_unix_nanos(2),
+                2,
+                ActualExecutionStepImpact::applying(),
+                None,
+            ),
             Err(TransactionMutationError::NotCommitting { .. })
         ));
 
         let mut without_application = transaction_with_one_statement();
         assert!(matches!(
-            without_application.complete_application(0, Timestamp::from_unix_nanos(4), 4, None),
+            without_application.complete_application(
+                0,
+                Timestamp::from_unix_nanos(4),
+                4,
+                ActualExecutionStepImpact::applying(),
+                None,
+            ),
             Err(TransactionMutationError::NoApplicationInProgress { statement: 0, .. })
         ));
 
@@ -1389,7 +1404,13 @@ mod tests {
             .begin_application(0, Timestamp::from_unix_nanos(4), applying_step())
             .assured("the application step spans the queued test statement");
         assert!(matches!(
-            conflicting_progress.complete_application(1, Timestamp::from_unix_nanos(5), 5, None,),
+            conflicting_progress.complete_application(
+                1,
+                Timestamp::from_unix_nanos(5),
+                5,
+                ActualExecutionStepImpact::applying(),
+                None,
+            ),
             Err(TransactionMutationError::ProgressConflict {
                 expected: 1,
                 actual: 0,
@@ -1420,7 +1441,13 @@ mod tests {
             ActualExecutionStepImpact::applying(),
         );
         assert!(matches!(
-            invalid_result.complete_application(0, Timestamp::from_unix_nanos(5), 5, None),
+            invalid_result.complete_application(
+                0,
+                Timestamp::from_unix_nanos(5),
+                5,
+                ActualExecutionStepImpact::applying(),
+                None,
+            ),
             Err(TransactionMutationError::InvalidStepResult { .. })
         ));
         let TransactionState::Committing(progress) = &invalid_result.state else {

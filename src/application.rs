@@ -1945,6 +1945,12 @@ impl Application {
                             "entity gate deadline exceeds the monotonic clock",
                         )),
                     };
+                    #[cfg(feature = "testing")]
+                    if result.is_ok() {
+                        service
+                            .pause_entity_gate_response_if_armed(&request.domain)
+                            .await;
+                    }
                     RemoteEntityGateResponse { result }
                 }
             })

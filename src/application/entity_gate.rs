@@ -23,7 +23,11 @@ use nervix_models::{ClusterNodeName, CoordinationIdentity, DomainName, NodeRef, 
 use tokio::time::{Duration, interval, sleep};
 use tracing::{debug, warn};
 
-use super::{domain_lifecycle::DomainAlterError, session_service::SessionServiceImpl};
+use super::{
+    domain_lifecycle::DomainAlterError,
+    session_service::SessionServiceImpl,
+    transaction::{QuiescenceAttempt, TransactionStepImpactRecorder},
+};
 use crate::runtime::EntityGateLease;
 
 pub(in crate::application) const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration =
@@ -154,7 +158,23 @@ pub(in crate::application) struct ClusterEntityGate {
     /// Nodes whose gate engagement was attempted and not yet released. Membership decides both
     /// what still needs releasing and what a repeated attempt must not duplicate, so this is a set.
     nodes: BTreeSet<ClusterNodeName>,
+    impact_attempt: Option<QuiescenceAttempt>,
     release_owner: Option<SessionServiceImpl>,
+}
+
+enum EntityGateEngagementOutcome {
+    Confirmed,
+    Rejected(String),
+    Uncertain(String),
+}
+
+impl EntityGateEngagementOutcome {
+    fn message(&self) -> &str {
+        match self {
+            Self::Confirmed => "entity gate engagement confirmed",
+            Self::Rejected(message) | Self::Uncertain(message) => message,
+        }
+    }
 }
 
 struct PendingClusterEntityGateRelease {
@@ -197,6 +217,7 @@ impl ClusterEntityGate {
             coordination,
             domain: domain.clone(),
             nodes: BTreeSet::new(),
+            impact_attempt: None,
             release_owner: Some(service.clone()),
         }
     }
@@ -214,6 +235,10 @@ impl ClusterEntityGate {
 
     pub(in crate::application) fn nodes(&self) -> Vec<ClusterNodeName> {
         self.nodes.iter().cloned().collect()
+    }
+
+    pub(in crate::application) const fn impact_attempt(&self) -> Option<QuiescenceAttempt> {
+        self.impact_attempt
     }
 
     fn schedule_remaining_releases(&mut self) {
@@ -323,11 +348,22 @@ impl SessionServiceImpl {
         })
     }
 
+    #[cfg(feature = "testing")]
+    pub(in crate::application) async fn pause_entity_gate_response_if_armed(
+        &self,
+        domain: &DomainName,
+    ) {
+        self.inner
+            .runtime
+            .pause_entity_gate_response_if_armed(self.inner.consensus.local_node_id(), domain)
+            .await;
+    }
+
     async fn engage_entity_gate_on_node(
         &self,
         node_id: &ClusterNodeName,
         engagement: EntityGateEngagement<'_>,
-    ) -> Result<(), String> {
+    ) -> EntityGateEngagementOutcome {
         let EntityGateEngagement {
             coordination,
             domain,
@@ -338,7 +374,7 @@ impl SessionServiceImpl {
             reason,
         } = engagement;
         if node_id == self.inner.consensus.local_node_id() {
-            return self
+            return match self
                 .inner
                 .runtime
                 .engage_entity_gate_operation(
@@ -350,11 +386,15 @@ impl SessionServiceImpl {
                     EntityGateLease { deadline, reason },
                 )
                 .await
-                .map_err(|error| error.to_string());
+            {
+                Ok(()) => EntityGateEngagementOutcome::Confirmed,
+                Err(error) => EntityGateEngagementOutcome::Rejected(error.to_string()),
+            };
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let deadline_millis = u64::try_from(remaining.as_millis().max(1)).unwrap_or(u64::MAX);
-        self.inner
+        let response = self
+            .inner
             .interconnect
             .request_with_timeout(
                 node_id,
@@ -369,10 +409,15 @@ impl SessionServiceImpl {
                 },
                 remaining.min(Duration::from_secs(2)),
             )
-            .await
-            .map_err(|error| error.to_string())?
-            .result
-            .map_err(|failure| failure.to_string())
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => return EntityGateEngagementOutcome::Uncertain(error.to_string()),
+        };
+        match response.result {
+            Ok(()) => EntityGateEngagementOutcome::Confirmed,
+            Err(failure) => EntityGateEngagementOutcome::Rejected(failure.to_string()),
+        }
     }
 
     async fn entity_drain_status_on_node(
@@ -505,6 +550,10 @@ impl SessionServiceImpl {
         affected_entities: &[NodeRef],
         purpose: EntityGatePurpose,
         deadline: tokio::time::Instant,
+        impact: Option<(
+            &TransactionStepImpactRecorder,
+            nervix_models::PauseRequirement,
+        )>,
     ) -> Result<ClusterEntityGate, Report<DomainAlterError>> {
         let mut nodes = self.available_node_ids().await;
         if !nodes
@@ -527,15 +576,39 @@ impl SessionServiceImpl {
                 })
             })?;
         let mut gate = ClusterEntityGate::new(self, coordination.clone(), domain);
+        gate.impact_attempt = impact
+            .as_ref()
+            .map(|(impact, requirement)| impact.request(requirement.clone()));
+        #[cfg(feature = "testing")]
+        if self
+            .inner
+            .runtime
+            .take_failed_entity_gate_engagement(domain)
+        {
+            let reason = "injected entity gate rejection before engagement";
+            if let (Some((impact, _)), Some(attempt)) = (impact, gate.impact_attempt()) {
+                impact.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Quiescence,
+                    reason,
+                );
+            }
+            return Err(Report::new(DomainAlterError::EntityGate {
+                domain: domain.clone(),
+                operation: purpose.operation_name(),
+                reason: reason.to_string(),
+            }));
+        }
         let reason = match purpose {
             EntityGatePurpose::ModelAlteration => "leader-orchestrated entity alteration",
             EntityGatePurpose::OwnershipHandoff => "leader-orchestrated ownership handoff",
             EntityGatePurpose::WasmStateReset(_) => "leader-orchestrated WASM guest-state reset",
         };
+        let mut engaged_node = false;
         for node in &nodes {
             tokio::task::consume_budget().await;
             gate.record_attempt(node.clone());
-            if let Err(error) = self
+            let engagement = self
                 .engage_entity_gate_on_node(
                     node,
                     EntityGateEngagement {
@@ -548,15 +621,48 @@ impl SessionServiceImpl {
                         reason,
                     },
                 )
-                .await
-            {
-                self.release_cluster_entity_gates(gate).await;
+                .await;
+            if !matches!(engagement, EntityGateEngagementOutcome::Confirmed) {
+                if let (Some((impact, _)), Some(attempt)) = (impact.as_ref(), gate.impact_attempt())
+                {
+                    match &engagement {
+                        EntityGateEngagementOutcome::Rejected(_) if !engaged_node => impact.fail(
+                            attempt,
+                            nervix_models::ImpactDiagnosticKind::Quiescence,
+                            engagement.message(),
+                        ),
+                        EntityGateEngagementOutcome::Rejected(_)
+                        | EntityGateEngagementOutcome::Uncertain(_) => impact.uncertain(
+                            attempt,
+                            nervix_models::ImpactDiagnosticKind::Quiescence,
+                            engagement.message(),
+                        ),
+                        EntityGateEngagementOutcome::Confirmed => {}
+                    }
+                }
+                let may_have_engaged = engaged_node
+                    || matches!(&engagement, EntityGateEngagementOutcome::Uncertain(_));
+                let error_message = engagement.message().to_string();
+                let attempt = gate.impact_attempt();
+                let released = self.release_cluster_entity_gates(gate).await;
+                if may_have_engaged
+                    && released
+                    && let (Some((impact, _)), Some(attempt)) = (impact.as_ref(), attempt)
+                {
+                    impact.release(attempt);
+                }
                 return Err(Report::new(DomainAlterError::EntityGate {
                     domain: domain.clone(),
                     operation: purpose.operation_name(),
-                    reason: format!("failed to engage entity gates on node '{node}': {error}"),
+                    reason: format!(
+                        "failed to engage entity gates on node '{node}': {error_message}"
+                    ),
                 }));
             }
+            engaged_node = true;
+        }
+        if let (Some((impact, _)), Some(attempt)) = (impact, gate.impact_attempt()) {
+            impact.confirm(attempt);
         }
         Ok(gate)
     }
@@ -577,6 +683,10 @@ impl SessionServiceImpl {
         loop {
             tokio::task::consume_budget().await;
             polling.tick().await;
+            #[cfg(feature = "testing")]
+            let force_timeout = self.inner.runtime.take_forced_entity_drain_timeout(domain);
+            #[cfg(not(feature = "testing"))]
+            let force_timeout = false;
             if !required_live_nodes.is_empty() {
                 let live_nodes = self
                     .available_node_ids()
@@ -642,17 +752,9 @@ impl SessionServiceImpl {
                     }
                 }
             }
-            if all_drained {
+            if all_drained && !force_timeout {
                 return Ok(());
             }
-            #[cfg(feature = "testing")]
-            let force_timeout = if last_status.is_some() {
-                self.inner.runtime.take_forced_entity_drain_timeout(domain)
-            } else {
-                false
-            };
-            #[cfg(not(feature = "testing"))]
-            let force_timeout = false;
             if force_timeout || tokio::time::Instant::now() >= deadline {
                 let Some((pending_node, last_status)) = last_status.or_else(|| {
                     // A gate holding no nodes has nothing left to drain, so there is no pending
@@ -687,7 +789,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn release_cluster_entity_gates(
         &self,
         mut gate: ClusterEntityGate,
-    ) {
+    ) -> bool {
         let domain = gate.domain.clone();
         for node in gate.nodes.clone() {
             tokio::task::consume_budget().await;
@@ -709,13 +811,35 @@ impl SessionServiceImpl {
                 }
             }
         }
+        let released = gate.nodes.is_empty();
         gate.schedule_remaining_releases();
+        released
+    }
+
+    pub(in crate::application) async fn release_cluster_entity_gates_recording(
+        &self,
+        gate: ClusterEntityGate,
+        impact: Option<&TransactionStepImpactRecorder>,
+    ) -> bool {
+        let attempt = gate.impact_attempt();
+        let released = self.release_cluster_entity_gates(gate).await;
+        if released && let (Some(impact), Some(attempt)) = (impact, attempt) {
+            impact.release(attempt);
+        } else if !released && let (Some(impact), Some(attempt)) = (impact, attempt) {
+            impact.uncertain(
+                attempt,
+                nervix_models::ImpactDiagnosticKind::Recovery,
+                "entity gate release remains pending until its lease deadline",
+            );
+        }
+        released
     }
 
     pub(in crate::application) async fn release_cluster_entity_gates_and_wait(
         &self,
         mut gate: ClusterEntityGate,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
+        let mut every_release_confirmed = true;
         while !gate.nodes.is_empty() {
             tokio::task::consume_budget().await;
             let available_nodes = self
@@ -728,6 +852,7 @@ impl SessionServiceImpl {
                 tokio::task::consume_budget().await;
                 if node != *self.inner.consensus.local_node_id() && !available_nodes.contains(&node)
                 {
+                    every_release_confirmed = false;
                     gate.mark_released(&node);
                     continue;
                 }
@@ -741,7 +866,7 @@ impl SessionServiceImpl {
             }
             if gate.nodes.is_empty() {
                 gate.release_owner = None;
-                return Ok(());
+                return Ok(every_release_confirmed);
             }
             tokio::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => {
@@ -754,7 +879,42 @@ impl SessionServiceImpl {
             }
         }
         gate.release_owner = None;
-        Ok(())
+        Ok(every_release_confirmed)
+    }
+
+    pub(in crate::application) async fn release_cluster_entity_gates_and_wait_recording(
+        &self,
+        gate: ClusterEntityGate,
+        impact: Option<&TransactionStepImpactRecorder>,
+    ) -> Result<(), String> {
+        let attempt = gate.impact_attempt();
+        match self.release_cluster_entity_gates_and_wait(gate).await {
+            Ok(every_release_confirmed) => {
+                if let (Some(impact), Some(attempt)) = (impact, attempt) {
+                    if every_release_confirmed {
+                        impact.release(attempt);
+                    } else {
+                        impact.uncertain(
+                            attempt,
+                            nervix_models::ImpactDiagnosticKind::Recovery,
+                            "an unavailable node could not confirm entity gate release; its lease \
+                             owns cleanup",
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let (Some(impact), Some(attempt)) = (impact, attempt) {
+                    impact.fail(
+                        attempt,
+                        nervix_models::ImpactDiagnosticKind::Recovery,
+                        error.clone(),
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 }
 
