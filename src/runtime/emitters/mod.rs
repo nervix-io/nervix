@@ -4588,6 +4588,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use nervix_connector::ResolvedClientConfig;
+    use nervix_connector_nats::NatsPublishingMode;
     use nervix_models::{
         ClientName, CreateSchema, DomainName, EmitterName, ModelName, ParseAsType, SchemaName,
         SubjectName,
