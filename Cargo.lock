@@ -6664,6 +6664,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-redis"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "bb8",
+ "error-stack",
+ "nervix-connector",
+ "nervix-models",
+ "redis",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "triomphe",
+]
+
+[[package]]
 name = "nervix-connector-sentry"
 version = "0.1.0-dev"
 dependencies = [
@@ -7016,6 +7032,7 @@ dependencies = [
  "nervix-client-wire",
  "nervix-connector",
  "nervix-connector-kafka",
+ "nervix-connector-redis",
  "nervix-connector-sentry",
  "nervix-connector-syslog",
  "nervix-connector-zeromq",

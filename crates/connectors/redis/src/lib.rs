@@ -10,6 +10,9 @@
 //!   connector implementation. The pool it borrows from is leased by the host, which owns the
 //!   interest that keeps it open and the wait it records while a connection is handed over.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
