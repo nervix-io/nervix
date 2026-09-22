@@ -11476,6 +11476,56 @@ async fn then_graph_edges_depart_at_different_ports(
     assert_graph_probe(page, &script, "fan-out must leave through distinct ports").await;
 }
 
+#[then(expr = "graph action edges {string} and {string} from {string} to {string} are drawn apart")]
+async fn then_parallel_graph_edges_are_drawn_apart(
+    world: &mut ScenarioWorld,
+    first_kind: String,
+    second_kind: String,
+    source: String,
+    target: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before graph assertions");
+    let first_kind = first_kind.replace(' ', "_").to_ascii_uppercase();
+    let second_kind = second_kind.replace(' ', "_").to_ascii_uppercase();
+    let source = expand_placeholders(world, &source);
+    let target = expand_placeholders(world, &target);
+    let script = format!(
+        r#"
+        () => {{
+            {GRAPH_GEOMETRY_HELPERS}
+            const relation = (kind) => edgePaths()
+                .find((path) => path.dataset.kind === kind
+                    && path.dataset.source.endsWith(":" + {source:?})
+                    && path.dataset.target.endsWith(":" + {target:?}));
+            const first = relation({first_kind:?});
+            const second = relation({second_kind:?});
+            if (!first || !second) {{
+                return `missing edge first=${{Boolean(first)}} second=${{Boolean(second)}}`;
+            }}
+            const firstPoints = samplePath(first);
+            const secondPoints = samplePath(second);
+            const departures = Math.abs(firstPoints[0].y - secondPoints[0].y);
+            const arrivals = Math.abs(
+                firstPoints[firstPoints.length - 1].y - secondPoints[secondPoints.length - 1].y
+            );
+            if (departures >= 8 && arrivals >= 8) {{
+                return "OK";
+            }}
+            return `drawn on one line: departures ${{Math.round(departures)}}px apart, arrivals ${{Math.round(arrivals)}}px apart`;
+        }}
+        "#
+    );
+    assert_graph_probe(
+        page,
+        &script,
+        "two relations between one pair of items to leave and arrive through their own ports",
+    )
+    .await;
+}
+
 #[then(expr = "graph edge from {string} to {string} is a return path")]
 async fn then_graph_edge_is_a_return_path(
     world: &mut ScenarioWorld,
