@@ -1069,4 +1069,30 @@ mod tests {
         let restored = command_result(durable);
         assert_eq!(restored.kind, i32::from(CommandResultKind::Error));
     }
+
+    #[test]
+    fn a_recovered_stale_commit_still_reports_both_previews() {
+        let preview = |position: u64, basis: u8| crate::proto::TransactionPreviewIdentity {
+            transaction_id: "transaction-1".to_string(),
+            position,
+            planning_basis: vec![basis; 32].into(),
+        };
+        let result = CommandResult {
+            success: false,
+            message: "transaction 'transaction-1' was planned from different inputs".to_string(),
+            kind: i32::from(CommandResultKind::PreviewStale),
+            preview_stale: Some(crate::proto::TransactionPreviewStale {
+                expected: Some(preview(1, 3)),
+                current: Some(preview(1, 9)),
+            }),
+            ..Default::default()
+        };
+
+        let durable = durable_command_result(&result);
+        assert_eq!(durable.kind, CommandExecutionResultKind::Error);
+        let restored = command_result(durable);
+
+        assert_eq!(restored, result);
+        assert_eq!(restored.kind, i32::from(CommandResultKind::PreviewStale));
+    }
 }
