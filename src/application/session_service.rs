@@ -13,12 +13,14 @@ use std::sync::Arc as StdArc;
 use ahash::RandomState;
 use arch_into::ArchInto;
 use futures_util::future::BoxFuture;
-use nervix_consensus::{Administrator, CommandExecutionState, ConsensusError, Observer, Proposer};
+use nervix_consensus::{
+    Administrator, CommandExecutionTransactionTarget, ConsensusError, Observer, Proposer,
+};
 use nervix_execution::sync::DashMap;
 use nervix_interconnect::Transport;
 use nervix_models::{
     CommandExecutionReference, DomainName, ModelKind, ModelName, ResourceId, ResourceName,
-    ResourceUploadIdentity, ResourceUploadKey,
+    ResourceUploadIdentity, ResourceUploadKey, TransactionPosition,
 };
 use nervix_nspl::{
     Token, Word,
@@ -54,7 +56,7 @@ use super::{
     runtime_admission::RuntimeAdmission,
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
-    subscription::{SessionSubscriptions, SubscriptionInterestKey},
+    subscription::{SessionCommandOperation, SessionSubscriptions, SubscriptionInterestKey},
     tls::HttpsListenerCertificates,
     transaction::{TransactionRecovery, transaction_preview_identity},
 };
@@ -1270,7 +1272,8 @@ impl SessionServiceImpl {
             }
         };
 
-        let is_transaction_request = subscriptions.transaction_active()
+        let is_transaction_request = expected_transaction_position.is_some()
+            || subscriptions.transaction_active()
             || client_statements.iter().any(|parsed| {
                 matches!(
                     parsed.statement,
@@ -1279,6 +1282,7 @@ impl SessionServiceImpl {
                         | ClientStatement::RevertTransaction
                 )
             });
+        let mut execution_guard = None;
         if is_transaction_request {
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
@@ -1287,6 +1291,52 @@ impl SessionServiceImpl {
                         self.not_leader_response(&req.query, leader).await,
                         subscriptions,
                     )
+                    .await;
+            }
+            let lock = self
+                .inner
+                .command_executions
+                .entry(execution_reference.clone())
+                .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+                .clone();
+            execution_guard = Some(lock.lock_owned().await);
+            if let Some(execution) = self
+                .inner
+                .consensus
+                .current_command_execution(execution_reference)
+                .await
+            {
+                let digest = match PersistentCommandRequest::transaction_digest(&req.query) {
+                    Ok(digest) => digest,
+                    Err(error) => return command_error(error.to_string()),
+                };
+                let domain = parse_request_domain(&req.domain).ok();
+                let expected_position = expected_transaction_position.map(TransactionPosition::new);
+                if let Some(conflict) = execution.request_conflict(
+                    &subscriptions.user,
+                    domain.as_ref(),
+                    expected_position,
+                    digest,
+                ) {
+                    return command_error(format!(
+                        "command execution reference '{execution_reference}' conflicts by \
+                         {conflict}"
+                    ));
+                }
+                let Some(request) = execution.transaction_request() else {
+                    return command_error(format!(
+                        "command execution reference '{execution_reference}' conflicts by position"
+                    ));
+                };
+                if let Some(bound) = subscriptions.transaction_id()
+                    && bound != request.target.id()
+                {
+                    return command_error(format!(
+                        "command execution reference '{execution_reference}' conflicts by position"
+                    ));
+                }
+                return self
+                    .complete_persistent_command_request(execution, tx, subscriptions)
                     .await;
             }
             #[cfg(feature = "testing")]
@@ -1334,12 +1384,46 @@ impl SessionServiceImpl {
             }
         };
 
-        let persistent_request =
+        let persistent_request = if is_transaction_request {
+            let domain = match self.resolve_transaction_domain(&req.domain).await {
+                Ok(domain) => domain,
+                Err(error) => return command_error(error),
+            };
+            let target = if matches!(
+                operations.first(),
+                Some(SessionCommandOperation::Begin { .. })
+            ) {
+                CommandExecutionTransactionTarget::New {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    activity: self.transaction_activity(),
+                }
+            } else {
+                let Some(id) = subscriptions.transaction_id() else {
+                    return command_error(
+                        "transaction request has no durable transaction target".to_string(),
+                    );
+                };
+                CommandExecutionTransactionTarget::Existing {
+                    id: id.to_string(),
+                    activity: self.transaction_activity(),
+                }
+            };
+            match PersistentCommandRequest::transaction(
+                &operations,
+                domain,
+                &req.query,
+                expected_transaction_position,
+                target,
+            ) {
+                Ok(request) => Some(request),
+                Err(error) => return command_error(error.to_string()),
+            }
+        } else {
             match PersistentCommandRequest::from_operations(&operations, &req.domain) {
                 Ok(request) => request,
                 Err(error) => return command_error(error.to_string()),
-            };
-        let mut execution_guard = None;
+            }
+        };
         let mut persistent_execution = None;
         if let Some(request) = &persistent_request {
             let leader = self.inner.consensus.current_leader().await;
@@ -1347,21 +1431,25 @@ impl SessionServiceImpl {
                 return self.not_leader_response(&req.query, leader).await;
             }
             #[cfg(feature = "testing")]
-            self.inner
-                .runtime
-                .pause_command_admission_if_armed(self.inner.consensus.local_node_id())
-                .await;
+            if !is_transaction_request {
+                self.inner
+                    .runtime
+                    .pause_command_admission_if_armed(self.inner.consensus.local_node_id())
+                    .await;
+            }
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
                 return self.not_leader_response(&req.query, leader).await;
             }
-            let lock = self
-                .inner
-                .command_executions
-                .entry(execution_reference.clone())
-                .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
-                .clone();
-            execution_guard = Some(lock.lock_owned().await);
+            if execution_guard.is_none() {
+                let lock = self
+                    .inner
+                    .command_executions
+                    .entry(execution_reference.clone())
+                    .or_insert_with(|| StdArc::new(AsyncMutex::new(())))
+                    .clone();
+                execution_guard = Some(lock.lock_owned().await);
+            }
             let execution = match self
                 .admit_persistent_command(
                     execution_reference.clone(),
@@ -1380,51 +1468,24 @@ impl SessionServiceImpl {
                     self.inner.consensus.local_node_id(),
                 )
                 .await;
-            match &execution.state {
-                CommandExecutionState::Applying => {
-                    persistent_execution = Some(execution);
-                }
-                CommandExecutionState::Finished { .. } | CommandExecutionState::Expired { .. } => {
-                    return match self
-                        .result_from_finished_execution(execution_reference, execution.clone())
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(result) => *result,
-                    };
-                }
-            }
+            persistent_execution = Some(execution);
         }
 
-        let result = match persistent_execution.as_ref() {
+        let result = match persistent_execution {
             Some(execution) => {
-                Box::pin(self.execute_persistent_command(execution, tx, subscriptions)).await
-            }
-            None => {
-                Box::pin(self.process_session_command_operations(operations, tx, subscriptions))
+                self.complete_persistent_command_request(execution, tx, subscriptions)
                     .await
             }
-        };
-        let result = self
-            .command_with_transaction_status(result, subscriptions)
-            .await;
-        let result = if let Some(request) = &persistent_request
-            && result.kind != i32::from(CommandResultKind::NotLeader)
-        {
-            match self
-                .finish_persistent_command(
-                    execution_reference.clone(),
-                    subscriptions.user.clone(),
-                    request.digest,
-                    &result,
-                )
-                .await
-            {
-                Ok(result) => result,
-                Err(result) => *result,
+            None => {
+                let result = Box::pin(self.process_session_command_operations(
+                    operations,
+                    tx,
+                    subscriptions,
+                ))
+                .await;
+                self.command_with_transaction_status(result, subscriptions)
+                    .await
             }
-        } else {
-            result
         };
         drop(execution_guard);
         result

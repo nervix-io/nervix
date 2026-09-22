@@ -2,8 +2,13 @@ use std::{future::Future, time::Duration};
 
 use error_stack::{AttachmentKind, FrameKind, Report};
 use futures_util::{SinkExt, StreamExt};
+use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
 use nervix_models::CreateSignalingProtocol;
-use prost_reflect::MessageDescriptor;
+use prost::Message as ProstMessage;
+use prost_reflect::{
+    DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage, MessageDescriptor,
+    SerializeOptions as ProtobufSerializeOptions,
+};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::{
@@ -15,11 +20,6 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, Message},
 };
 use triomphe::Arc;
-
-use crate::{
-    jaq_program::{JaqNativeFormat, StatefulJaqProgram},
-    runtime_schema::{decode_protobuf_payload, encode_protobuf_payload},
-};
 
 /// How much of a rejection value is carried into the failure reason.
 const MAX_REJECTION_REASON_BYTES: usize = 512;
@@ -36,6 +36,130 @@ enum SignalingFrameEncodeError {
     Protobuf { message: String },
 }
 
+type SignalingProtobufResult<T> = Result<T, Report<SignalingProtobufError>>;
+
+#[derive(Debug, Error)]
+enum SignalingProtobufError {
+    #[error("failed to decode protobuf message '{message}': {source}")]
+    Decode {
+        message: String,
+        #[source]
+        source: prost::DecodeError,
+    },
+    #[error("failed to encode protobuf message '{message}': {source}")]
+    Encode {
+        message: String,
+        #[source]
+        source: prost::EncodeError,
+    },
+    #[error("failed to serialize the input JSON for protobuf message '{message}': {source}")]
+    SerializeInput {
+        message: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to deserialize the protobuf message '{message}' from JSON: {source}")]
+    DeserializeMessage {
+        message: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to finish deserializing the protobuf message '{message}': {source}")]
+    FinishMessage {
+        message: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to serialize the protobuf message '{message}' to JSON: {source}")]
+    SerializeMessage {
+        message: String,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to deserialize the protobuf JSON output for message '{message}': {source}")]
+    DeserializeOutput {
+        message: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+fn decode_protobuf_payload(
+    descriptor: &MessageDescriptor,
+    payload: &[u8],
+) -> SignalingProtobufResult<JsonValue> {
+    let message_name = descriptor.full_name().to_string();
+    let message = DynamicMessage::decode(descriptor.clone(), payload).map_err(|source| {
+        Report::new(SignalingProtobufError::Decode {
+            message: message_name.clone(),
+            source,
+        })
+    })?;
+    protobuf_message_to_json(&message_name, &message)
+}
+
+fn encode_protobuf_payload(
+    descriptor: &MessageDescriptor,
+    value: &JsonValue,
+) -> SignalingProtobufResult<Vec<u8>> {
+    let message_name = descriptor.full_name().to_string();
+    let encoded_json = serde_json::to_vec(value).map_err(|source| {
+        Report::new(SignalingProtobufError::SerializeInput {
+            message: message_name.clone(),
+            source,
+        })
+    })?;
+    let mut deserializer = serde_json::Deserializer::from_slice(&encoded_json);
+    let options = ProtobufDeserializeOptions::new().deny_unknown_fields(true);
+    let message =
+        DynamicMessage::deserialize_with_options(descriptor.clone(), &mut deserializer, &options)
+            .map_err(|source| {
+            Report::new(SignalingProtobufError::DeserializeMessage {
+                message: message_name.clone(),
+                source,
+            })
+        })?;
+    deserializer.end().map_err(|source| {
+        Report::new(SignalingProtobufError::FinishMessage {
+            message: message_name.clone(),
+            source,
+        })
+    })?;
+    let mut encoded = Vec::new();
+    message.encode(&mut encoded).map_err(|source| {
+        Report::new(SignalingProtobufError::Encode {
+            message: message_name,
+            source,
+        })
+    })?;
+    Ok(encoded)
+}
+
+fn protobuf_message_to_json(
+    message_name: &str,
+    message: &DynamicMessage,
+) -> SignalingProtobufResult<JsonValue> {
+    let mut encoded = Vec::new();
+    let mut serializer = serde_json::Serializer::new(&mut encoded);
+    let options = ProtobufSerializeOptions::new()
+        .use_proto_field_name(true)
+        .stringify_64_bit_integers(false);
+    message
+        .serialize_with_options(&mut serializer, &options)
+        .map_err(|source| {
+            Report::new(SignalingProtobufError::SerializeMessage {
+                message: message_name.to_string(),
+                source,
+            })
+        })?;
+    serde_json::from_slice(&encoded).map_err(|source| {
+        Report::new(SignalingProtobufError::DeserializeOutput {
+            message: message_name.to_string(),
+            source,
+        })
+    })
+}
+
 fn signaling_frame_encode_error_message(error: &Report<SignalingFrameEncodeError>) -> String {
     error
         .frames()
@@ -49,7 +173,7 @@ fn signaling_frame_encode_error_message(error: &Report<SignalingFrameEncodeError
 }
 
 #[derive(Debug, Error)]
-pub(in crate::runtime) enum SignalingProtocolCompileError {
+pub enum SignalingProtocolCompileError {
     #[error("signaling protocol '{protocol}' {clause} program #{index} is invalid: {reason}")]
     InvalidJaqProgram {
         protocol: String,
@@ -68,7 +192,7 @@ pub(in crate::runtime) enum SignalingProtocolCompileError {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum WebsocketSignalingError {
+pub enum WebsocketSignalingError {
     #[error("failed to send signaling frame: {0}")]
     Send(#[source] Box<WebSocketError>),
     #[error("failed to receive signaling frame: {0}")]
@@ -98,9 +222,9 @@ pub(crate) enum WebsocketSignalingError {
 }
 
 /// The protobuf message types a signaling protocol speaks in each direction.
-pub(in crate::runtime) struct SignalingProtobufDescriptors {
-    pub(in crate::runtime) send: MessageDescriptor,
-    pub(in crate::runtime) wait: MessageDescriptor,
+pub struct SignalingProtobufDescriptors {
+    pub send: MessageDescriptor,
+    pub wait: MessageDescriptor,
 }
 
 #[derive(Debug)]
@@ -149,7 +273,7 @@ struct CompiledWaitStep {
 
 /// A signaling protocol with its jaq programs compiled and its wire format resolved.
 #[derive(Debug)]
-pub(crate) struct CompiledSignalingProtocol {
+pub struct CompiledSignalingProtocol {
     wire: CompiledSignalingWire,
     accept_data: bool,
     steps: Vec<CompiledSignalingStep>,
@@ -158,7 +282,7 @@ pub(crate) struct CompiledSignalingProtocol {
 }
 
 impl CompiledSignalingProtocol {
-    pub(in crate::runtime) fn compile(
+    pub fn compile(
         protocol: &CreateSignalingProtocol,
         protobuf: Option<SignalingProtobufDescriptors>,
     ) -> Result<Self, SignalingProtocolCompileError> {
@@ -330,16 +454,16 @@ impl SessionState {
 ///
 /// A trait rather than a closure: the returned future borrows the sink under one concrete
 /// lifetime, which keeps it `Send` inside the spawned connection tasks that drive signaling.
-pub(crate) trait SignalingDataSink {
+pub trait SignalingDataSink {
     fn accept(&self, payload: Vec<u8>) -> impl Future<Output = ()> + Send;
 }
 
-pub(crate) struct WebsocketSignalingSession {
+pub struct WebsocketSignalingSession {
     protocol: Arc<CompiledSignalingProtocol>,
 }
 
 impl WebsocketSignalingSession {
-    pub(crate) fn new(protocol: Arc<CompiledSignalingProtocol>) -> Self {
+    pub fn new(protocol: Arc<CompiledSignalingProtocol>) -> Self {
         Self { protocol }
     }
 
@@ -348,7 +472,7 @@ impl WebsocketSignalingSession {
     /// Steps run strictly in order. Frames that arrive before the relay is open are not payload
     /// yet and are dropped, so nothing accumulates in memory and nothing reaches the relay from a
     /// connection that was never established.
-    pub(crate) async fn run<S, D>(
+    pub async fn run<S, D>(
         &self,
         websocket: &mut WebSocketStream<S>,
         sink: &D,

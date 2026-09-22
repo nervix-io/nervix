@@ -3888,12 +3888,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fallible-iterator"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7"
-
-[[package]]
 name = "fastnum"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6645,6 +6639,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-clickhouse"
+version = "0.1.0-dev"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "clickhouse",
+ "error-stack",
+ "hyper-rustls",
+ "hyper-util",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "serde_json",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nervix-connector-http"
 version = "0.1.0-dev"
 dependencies = [
@@ -6676,6 +6692,95 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-mongodb"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "error-stack",
+ "meticulous",
+ "mongodb",
+ "nervix-connector",
+ "nervix-models",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nervix-connector-mysql"
+version = "0.1.0-dev"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "error-stack",
+ "meticulous",
+ "mysql_async",
+ "nervix-connector",
+ "nervix-models",
+ "serde_json",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "nervix-connector-otel"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "error-stack",
+ "flate2",
+ "meticulous",
+ "nervix-approx-into",
+ "nervix-connector",
+ "nervix-models",
+ "opentelemetry-proto",
+ "prost 0.14.4",
+ "reqwest 0.13.4",
+ "shuttle-tokio",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic 0.14.6",
+ "tonic-types",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "nervix-connector-postgres"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "chrono",
+ "error-stack",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "serde_json",
+ "shuttle-tokio",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "nervix-connector-prometheus"
 version = "0.1.0-dev"
 dependencies = [
@@ -6692,6 +6797,49 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "nervix-connector-syslog"
+version = "0.1.0-dev"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "error-stack",
+ "meticulous",
+ "nervix-connector",
+ "nervix-models",
+ "nonzero_ext",
+ "rustls",
+ "rustls-pki-types",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "nervix-connector-websockets"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "meticulous",
+ "nervix-connector",
+ "nervix-jaq",
+ "nervix-models",
+ "parking_lot",
+ "prost 0.13.5",
+ "prost-reflect",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "triomphe",
 ]
 
 [[package]]
@@ -6812,6 +6960,23 @@ dependencies = [
  "ubyte",
  "url",
  "x509-parser",
+]
+
+[[package]]
+name = "nervix-jaq"
+version = "0.1.0-dev"
+dependencies = [
+ "bytes",
+ "ciborium",
+ "error-stack",
+ "jaq-core",
+ "jaq-fmts",
+ "jaq-json",
+ "jaq-std",
+ "nervix-models",
+ "serde_json",
+ "strum 0.26.3",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6958,7 +7123,6 @@ dependencies = [
  "ciborium",
  "clap",
  "clap_complete",
- "clickhouse",
  "concurrent-queue",
  "criterion 0.5.1",
  "cucumber",
@@ -6966,7 +7130,6 @@ dependencies = [
  "error-stack",
  "fastrand",
  "fjall",
- "flate2",
  "futures-util",
  "governor",
  "h2",
@@ -6975,16 +7138,11 @@ dependencies = [
  "http-body-util",
  "humantime",
  "hyper",
- "hyper-rustls",
  "hyper-util",
  "iceberg",
  "iceberg-catalog-rest",
  "iceberg-storage-opendal",
  "indexmap 2.14.2",
- "jaq-core",
- "jaq-fmts",
- "jaq-json",
- "jaq-std",
  "lapin",
  "meticulous",
  "mongodb",
@@ -6994,14 +7152,22 @@ dependencies = [
  "nervix-client-core",
  "nervix-client-wire",
  "nervix-connector",
+ "nervix-connector-clickhouse",
  "nervix-connector-http",
  "nervix-connector-kafka",
+ "nervix-connector-mongodb",
+ "nervix-connector-mysql",
+ "nervix-connector-otel",
+ "nervix-connector-postgres",
  "nervix-connector-prometheus",
+ "nervix-connector-syslog",
+ "nervix-connector-websockets",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",
  "nervix-expiry-map",
  "nervix-interconnect",
+ "nervix-jaq",
  "nervix-models",
  "nervix-nspl",
  "nervix-proto",
@@ -7015,7 +7181,6 @@ dependencies = [
  "opendal 0.56.0",
  "opentelemetry",
  "opentelemetry-otlp",
- "opentelemetry-proto",
  "opentelemetry_sdk",
  "ordered-float 4.6.0",
  "ort",
@@ -7023,10 +7188,8 @@ dependencies = [
  "parquet",
  "petgraph 0.8.3",
  "playwright-rs",
- "postgres-types",
  "prometheus",
  "prost 0.13.5",
- "prost 0.14.4",
  "prost-reflect",
  "prost-types 0.13.5",
  "protox",
@@ -7065,8 +7228,6 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tokio-util",
  "tonic 0.13.1",
- "tonic 0.14.6",
- "tonic-types",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
@@ -8494,35 +8655,6 @@ dependencies = [
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
  "serde",
-]
-
-[[package]]
-name = "postgres-protocol"
-version = "0.6.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08808e3c483c46e999108051c78334f473d5adb59d78bb80a1268c7e6aa6c514"
-dependencies = [
- "base64 0.22.1",
- "byteorder",
- "bytes",
- "fallible-iterator",
- "hmac 0.13.0",
- "md-5 0.11.0",
- "memchr",
- "rand 0.10.2",
- "sha2 0.11.0",
- "stringprep",
-]
-
-[[package]]
-name = "postgres-types"
-version = "0.2.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
-dependencies = [
- "bytes",
- "fallible-iterator",
- "postgres-protocol",
 ]
 
 [[package]]

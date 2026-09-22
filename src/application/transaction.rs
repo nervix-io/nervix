@@ -73,6 +73,7 @@ use crate::{
 mod application;
 mod impact;
 mod inspection;
+mod request;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
 pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
 
@@ -130,9 +131,9 @@ impl TransactionRecovery {
     }
 }
 
-struct PreparedTransactionAdmission {
-    result: TransactionCommandResult,
-    report: TransactionReportArchive,
+pub(in crate::application) struct PreparedTransactionAdmission {
+    pub(in crate::application) result: TransactionCommandResult,
+    pub(in crate::application) report: TransactionReportArchive,
 }
 
 struct PreparedTransactionCommit {
@@ -470,7 +471,7 @@ fn replicated_command_result(result: &CommandResult) -> TransactionCommandResult
     }
 }
 
-fn admitted_command_result(
+pub(in crate::application) fn admitted_command_result(
     admission: &TransactionCommandResult,
     transaction: &ReplicatedTransaction,
 ) -> CommandResult {
@@ -585,7 +586,9 @@ fn preview_stale_result(
     }
 }
 
-fn transaction_commit_result(transaction: &ReplicatedTransaction) -> CommandResult {
+pub(in crate::application) fn transaction_commit_result(
+    transaction: &ReplicatedTransaction,
+) -> CommandResult {
     let success = matches!(
         transaction.finished_outcome(),
         Some(TransactionOutcome::Committed)
@@ -737,7 +740,7 @@ pub(in crate::application) fn is_queueable_transaction_statement(statement: &Sta
         )
 }
 
-fn transaction_statement_label(statement: &Statement) -> &'static str {
+pub(in crate::application) fn transaction_statement_label(statement: &Statement) -> &'static str {
     match statement {
         Statement::CreateDomain(_) => "CREATE DOMAIN",
         Statement::CreateUser(_) => "CREATE USER",
@@ -1077,59 +1080,25 @@ impl SessionServiceImpl {
             source: command.source,
             statement,
         };
-        let Some(transaction) = self.inner.consensus.current_transaction(id).await else {
-            return command_error(format!("transaction '{id}' is unknown"));
-        };
-        let limits = TransactionQueueLimits {
-            max_statements: self.inner.transaction_max_statements,
-            max_source_bytes: self.inner.transaction_max_source_bytes,
-        };
-        match transaction.queue_admission(&subscriptions.user, &domain, &queued, limits) {
-            Ok(TransactionQueueAdmission::Existing(admission)) => {
-                return admitted_command_result(&admission, &transaction);
-            }
-            Ok(TransactionQueueAdmission::New) => {}
-            Err(error) => return command_error(error.to_string()),
-        }
-        let prepared = match self
-            .preflight_transaction_statement(&transaction, &queued)
-            .await
-        {
-            Ok(admission) => admission,
-            Err(error) => return command_error(error),
-        };
-        let request_reference = queued.request_reference.clone();
-        let queued = TransactionStatement::admitted(queued, prepared.result);
-        match self
-            .inner
-            .consensus
-            .queue_transaction_statement(TransactionQueueRequest {
-                id: id.to_string(),
-                owner: subscriptions.user.clone(),
+        let result = self
+            .queue_identified_transaction_statement(
+                id.to_string(),
+                subscriptions.user.clone(),
                 domain,
-                activity: self.transaction_activity(),
-                statement: queued,
-                report: prepared.report,
-                limits,
-            })
-            .await
-        {
-            Ok(transaction) => {
-                if matches!(transaction.state, TransactionState::Finished(_)) {
-                    self.release_session_transaction_binding(subscriptions);
-                    return transaction_commit_result(&transaction);
-                }
-                // A transaction contains at most `transaction_max_statements` entries, so this
-                // lookup is bounded by the queue limit checked before the proposal.
-                let admitted = transaction
-                    .statements
-                    .iter()
-                    .find(|statement| statement.request_reference == request_reference)
-                    .verified("a successful queue proposal retains the admitted statement");
-                admitted_command_result(&admitted.admission, &transaction)
-            }
-            Err(error) => self.transaction_consensus_error_response(error).await,
+                queued,
+                self.transaction_activity(),
+            )
+            .await;
+        let transaction_finished = result.transaction.as_ref().is_some_and(|transaction| {
+            !matches!(
+                ApiTransactionState::try_from(transaction.state),
+                Ok(ApiTransactionState::Open | ApiTransactionState::Committing)
+            )
+        });
+        if transaction_finished {
+            self.release_session_transaction_binding(subscriptions);
         }
+        result
     }
 
     pub(in crate::application) async fn execute_standalone_transaction(
@@ -1338,7 +1307,12 @@ impl SessionServiceImpl {
                         Err(error) => {
                             let message = transaction_commit_error_message(&error);
                             match self
-                                .fail_incomplete_transaction_commit(&current, &owner, &error)
+                                .fail_incomplete_transaction_commit(
+                                    &current,
+                                    &owner,
+                                    self.transaction_activity(),
+                                    &error,
+                                )
                                 .await
                             {
                                 Ok(Some(transaction)) => {
@@ -1621,7 +1595,7 @@ impl SessionServiceImpl {
         result
     }
 
-    async fn preflight_transaction_statement(
+    pub(in crate::application) async fn preflight_transaction_statement(
         &self,
         transaction: &ReplicatedTransaction,
         candidate: &TransactionStatementRequest,
@@ -1783,6 +1757,7 @@ impl SessionServiceImpl {
         &self,
         transaction: &ReplicatedTransaction,
         owner: &UserName,
+        activity: TransactionActivity,
         failure: &Report<TransactionCommitError>,
     ) -> Result<Option<ReplicatedTransaction>, Report<ConsensusTransactionError>> {
         let statements = transaction
@@ -1836,7 +1811,7 @@ impl SessionServiceImpl {
             .fail_transaction_commit_admission(TransactionCommitAdmissionFailure {
                 id: transaction.id.clone(),
                 owner: owner.clone(),
-                activity: self.transaction_activity(),
+                activity,
                 expected_preview,
                 report,
                 inputs: captured.inputs,
@@ -1864,38 +1839,22 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("REVERT requires an active transaction".to_string());
         };
-        let previous = self.inner.consensus.current_transaction(&id).await;
-        match self
-            .inner
-            .consensus
-            .revert_transaction(
-                id.clone(),
+        let result = self
+            .revert_identified_transaction(
+                id,
                 subscriptions.user.clone(),
                 self.transaction_activity(),
             )
-            .await
-        {
-            Ok(transaction) => {
-                if !matches!(
-                    transaction.finished_outcome(),
-                    Some(TransactionOutcome::Reverted)
-                ) {
-                    self.release_session_transaction_binding(subscriptions);
-                    return transaction_commit_result(&transaction);
-                }
-                let dropped = match previous {
-                    Some(transaction) => transaction.statements.len(),
-                    None => 0,
-                };
-                self.release_session_transaction_binding(subscriptions);
-                let mut result = command_ok(format!(
-                    "transaction reverted: dropped {dropped} command(s); id '{id}'"
-                ));
-                result.transaction = Some(transaction_status(&transaction));
-                result
-            }
-            Err(error) => self.transaction_consensus_error_response(error).await,
+            .await;
+        if result.transaction.as_ref().is_some_and(|transaction| {
+            !matches!(
+                ApiTransactionState::try_from(transaction.state),
+                Ok(ApiTransactionState::Open | ApiTransactionState::Committing)
+            )
+        }) {
+            self.release_session_transaction_binding(subscriptions);
         }
+        result
     }
 
     /// Commits the transaction bound to this session.
@@ -1917,6 +1876,39 @@ impl SessionServiceImpl {
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
             return command_error("COMMIT requires an active transaction".to_string());
         };
+        let result = self
+            .commit_identified_transaction(
+                id,
+                subscriptions.user.clone(),
+                self.transaction_activity(),
+                expected_preview,
+            )
+            .await;
+        if result.transaction.as_ref().is_some_and(|transaction| {
+            !matches!(
+                ApiTransactionState::try_from(transaction.state),
+                Ok(ApiTransactionState::Open | ApiTransactionState::Committing)
+            )
+        }) {
+            self.release_session_transaction_binding(subscriptions);
+        }
+        result
+    }
+
+    /// Commits the transaction named by `id` on behalf of `owner`.
+    ///
+    /// `expected_preview` is the whole-transaction preview the caller expects this commit to
+    /// apply. When it is present and no longer describes the transaction, the commit is refused
+    /// before any effect applies and the transaction stays open, so the caller can read the
+    /// current preview and decide again. When it is absent the commit applies whatever the
+    /// transaction's own latest preview describes.
+    pub(in crate::application) async fn commit_identified_transaction(
+        &self,
+        id: String,
+        owner: UserName,
+        activity: TransactionActivity,
+        expected_preview: Option<TransactionPreviewIdentity>,
+    ) -> CommandResult {
         let Some(current) = self.inner.consensus.current_transaction(&id).await else {
             return command_error(format!("transaction '{id}' is unknown"));
         };
@@ -1929,8 +1921,8 @@ impl SessionServiceImpl {
                         .consensus
                         .start_transaction_commit(
                             id.clone(),
-                            subscriptions.user.clone(),
-                            self.transaction_activity(),
+                            owner.clone(),
+                            activity,
                             fenced_preview,
                             prepared.report,
                             prepared.plan,
@@ -1946,7 +1938,7 @@ impl SessionServiceImpl {
                 Err(error) => {
                     let message = transaction_commit_error_message(&error);
                     match self
-                        .fail_incomplete_transaction_commit(&current, &subscriptions.user, &error)
+                        .fail_incomplete_transaction_commit(&current, &owner, activity, &error)
                         .await
                     {
                         Ok(Some(transaction)) => transaction,
@@ -1959,7 +1951,6 @@ impl SessionServiceImpl {
             },
             TransactionState::Committing(_) => current,
             TransactionState::Finished(_) => {
-                self.release_session_transaction_binding(subscriptions);
                 return transaction_commit_result(&current);
             }
         };
@@ -1994,12 +1985,7 @@ impl SessionServiceImpl {
             }
         };
         match finished {
-            Ok(transaction) => {
-                if matches!(transaction.state, TransactionState::Finished(_)) {
-                    self.release_session_transaction_binding(subscriptions);
-                }
-                transaction_commit_result(&transaction)
-            }
+            Ok(transaction) => transaction_commit_result(&transaction),
             Err(error) => {
                 let proposal_error = error
                     .current_context()

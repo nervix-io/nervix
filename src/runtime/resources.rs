@@ -1,4 +1,5 @@
 use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, render_client_config_template};
+use nervix_connector_websockets::{CompiledSignalingProtocol, SignalingProtobufDescriptors};
 
 use super::*;
 

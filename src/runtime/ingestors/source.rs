@@ -13,11 +13,12 @@ use std::{future, time::Duration};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    BrokerSourceConnector, PacedSourceConnector, SourceAckPolicy, SourceAcknowledgement,
-    SourceAcknowledgementOutcome, SourceAcknowledgementServices, SourceBatch, SourceBatchRequest,
-    SourceConnector, SourceHost, SourceHostServices, SourceIntakeBatch, SourceIntakeError,
-    SourceIntakeMessage, SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage,
-    SourcePoll, SourceResume, next_retry_delay, physical_time::actual_utc_now,
+    BrokerSourceConnector, IngestMetadataRow, PacedSourceConnector, ParsedRetryPolicy,
+    RetainedIngestHeaders, SourceAckPolicy, SourceAcknowledgement, SourceAcknowledgementOutcome,
+    SourceAcknowledgementServices, SourceBatch, SourceBatchRequest, SourceConnector, SourceHost,
+    SourceHostServices, SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage,
+    SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourcePoll,
+    SourceResume, next_retry_delay, physical_time::actual_utc_now,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -39,6 +40,8 @@ pub(super) struct RuntimeSourceHostSpec {
     pub(super) shutdown: watch::Receiver<bool>,
     pub(super) instance_index: u64,
     pub(super) metadata_kind: IngestMetadataKind,
+    pub(super) buffered_intake: bool,
+    pub(super) flush_each_intake: bool,
 }
 
 pub(super) struct RuntimeSourceHost {
@@ -56,6 +59,8 @@ pub(super) struct RuntimeSourceHost {
     shutdown: watch::Receiver<bool>,
     instance_index: u64,
     collector: IngestRouteCollector,
+    buffered_intake: bool,
+    flush_each_intake: bool,
 }
 
 impl RuntimeSourceHost {
@@ -87,6 +92,8 @@ impl RuntimeSourceHost {
             shutdown: spec.shutdown,
             instance_index: spec.instance_index,
             collector,
+            buffered_intake: spec.buffered_intake,
+            flush_each_intake: spec.flush_each_intake,
         }
     }
 
@@ -184,6 +191,39 @@ impl SourceHostServices for RuntimeSourceHost {
         batch: SourceIntakeBatch<'_>,
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
         let acknowledged = batch.mode == SourceIntakeMode::Acknowledged;
+        if self.buffered_intake && self.quiesce.is_quiesced() {
+            if acknowledged {
+                return Err(Report::new(SourceIntakeError::Retain)
+                    .attach_printable("acknowledged source input cannot enter a quiesce buffer"));
+            }
+            let mut entries = Vec::with_capacity(batch.messages.len());
+            for message in batch.messages {
+                tokio::task::consume_budget().await;
+                let metadata = match message.metadata {
+                    IngestMetadataRow::Syslog { peer_addr } => {
+                        BufferedIngestMetadata::Syslog { peer_addr }
+                    }
+                    IngestMetadataRow::Headers { headers } => {
+                        BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers))
+                    }
+                    IngestMetadataRow::Kafka { .. } => {
+                        return Err(Report::new(SourceIntakeError::Retain).attach_printable(
+                            "Kafka source input supports suspension instead of quiesce buffering",
+                        ));
+                    }
+                };
+                entries.push((message.payload.to_vec(), metadata));
+            }
+            let payload = BufferedIngestPayload::batch(entries, actual_utc_now());
+            if let IngestorQuiesceIntake::Dispatch(payload) =
+                self.quiesce.intake(self.instance_index, payload, false)
+            {
+                self.dispatch_buffered_payload(&payload).await?;
+            }
+            return Ok(SourceIntakeOutcome {
+                acknowledgements: Vec::new(),
+            });
+        }
         let row_bound = if acknowledged {
             batch.messages.len().max(1)
         } else {
@@ -247,7 +287,7 @@ impl SourceHostServices for RuntimeSourceHost {
             .await
             .change_context(SourceIntakeError::Dispatch)?;
 
-        if acknowledged || collector.len() >= INGEST_GROUP_MAX_ROWS {
+        if acknowledged || self.flush_each_intake || collector.len() >= INGEST_GROUP_MAX_ROWS {
             self.runtime
                 .flush_ingest_collector(
                     &self.domain,
@@ -284,6 +324,14 @@ impl SourceHostServices for RuntimeSourceHost {
             )
             .await
             .change_context(SourceIntakeError::Flush)
+    }
+
+    async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
+        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
+            return Ok(false);
+        };
+        self.dispatch_buffered_payload(&payload).await?;
+        Ok(true)
     }
 
     fn next_flush(&self) -> Option<Instant> {
@@ -367,6 +415,19 @@ impl SourceHostServices for RuntimeSourceHost {
             self.ingestor.as_str(),
             self.domain.as_str(),
         ));
+    }
+}
+
+impl RuntimeSourceHost {
+    async fn dispatch_buffered_payload(
+        &mut self,
+        payload: &BufferedIngestPayload,
+    ) -> SourceIntakeResult<()> {
+        self.dispatch_polled_payload(payload).await?;
+        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+            self.flush().await?;
+        }
+        Ok(())
     }
 }
 
@@ -569,14 +630,32 @@ enum BatchDisposition {
 }
 
 pub(super) async fn run_source_instance<C>(
+    source: C,
+    host: SourceHost,
+    acknowledgement: SourceAckPolicy,
+    shutdown: watch::Receiver<bool>,
+) where
+    C: BrokerSourceConnector,
+{
+    run_source_instance_with_retry(
+        source,
+        host,
+        acknowledgement,
+        acknowledgement.retry(),
+        shutdown,
+    )
+    .await;
+}
+
+pub(super) async fn run_source_instance_with_retry<C>(
     mut source: C,
     mut host: SourceHost,
     acknowledgement: SourceAckPolicy,
+    retry_policy: ParsedRetryPolicy,
     mut shutdown: watch::Receiver<bool>,
 ) where
     C: BrokerSourceConnector,
 {
-    let retry_policy = acknowledgement.retry();
     let mut retry_delay = retry_policy.backoff;
     let mut ready = false;
 
@@ -584,6 +663,11 @@ pub(super) async fn run_source_instance<C>(
         tokio::task::consume_budget().await;
         if !host.wait_until_active().await {
             break;
+        }
+        match host.replay_buffered().await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => host.report_error(error.to_string()),
         }
         if host.should_suspend_intake() {
             flush_for_lifecycle(&mut host).await;
@@ -1027,6 +1111,10 @@ mod tests {
         async fn flush(&mut self) -> SourceIntakeResult<()> {
             self.observations.lock().flushes += 1;
             Ok(())
+        }
+
+        async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
+            Ok(false)
         }
 
         fn next_flush(&self) -> Option<Instant> {

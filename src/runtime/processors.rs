@@ -33,8 +33,8 @@ use super::{
     DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch,
     RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
-    RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WasmLiveInstance,
-    WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
+    RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WasmGuestStateResetFence,
+    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
     inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
 };
 use crate::{
@@ -412,6 +412,9 @@ pub(super) enum RelayProcessorOperationNode {
         ack_map: WasmAckMap,
         next_ack_token: u64,
         pending: Vec<RelayRecordBatch>,
+        /// Closed once this branch's guest asks for a new state lifetime, and open for as long as
+        /// the branch runs in the one it has.
+        state_reset: WasmGuestStateResetFence,
     },
 }
 

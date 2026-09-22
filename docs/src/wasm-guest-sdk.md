@@ -232,6 +232,49 @@ keeps the saved state after a rejection and reports it under the
 [failure stage](./wasm-processor-guests.md#failure-diagnostics), so return an
 error from `restore` only when the saved state itself is unusable.
 
+## Requesting A New State Lifetime
+
+`GuestContext::request_state_reset()` asks Nervix to replace the complete guest-state lifetime of
+the branch the callback is running in. Nervix performs the replacement after the callback returns
+and never calls back into the guest to do it, so the SDK is never re-entered. The request selects
+nothing: it is scoped to the calling branch and to the generation it runs in, and it is routed
+through the same coordinated reset an operator triggers, with the same durability and replica
+guarantees.
+
+The request is terminal for the callback that made it. Output queued with `GuestContext::emit` is
+discarded, the input the branch holds is left unacknowledged for its source to redeliver, no
+checkpoint is taken, and the instance is dropped with its pending timeouts. Effects earlier
+callbacks published stand, because their checkpoints completed. The processor is then created by
+`Processor::create` in the new lifetime, without a `Processor::restore` call, and it is that
+initialization — not the returned `Ok(())` — that tells the guest the new lifetime is durable.
+
+Asking repeatedly, in one callback or across the callbacks of one lifetime, replaces that lifetime
+exactly once. The call returns the host's own answer, `StateResetRequestAnswer`. A `GuestContext`
+exists only inside `process_batch`, `on_timeout`, and `flush`, which are exactly the callbacks
+Nervix accepts a request from, so a processor sees `Accepted` unless the host it runs on disagrees
+about which operation is in progress.
+
+Use it when the processor's own state is unusable and must be abandoned, not to clear fields.
+Clearing fields is an ordinary application-state mutation that the next
+[checkpoint](./wasm-processor-guests.md#checkpoints-and-acknowledgements) saves.
+
+```rust,ignore
+fn process_batch(
+    &mut self,
+    ctx: &mut GuestContext<'_>,
+    input: InputBatch,
+) -> Result<(), GuestError> {
+    if self.counters_are_unusable(&input)? {
+        if ctx.request_state_reset() == StateResetRequestAnswer::Refused {
+            return Err(GuestError::failed("host refused the state reset request"));
+        }
+        return Ok(());
+    }
+    // ... ordinary processing
+    Ok(())
+}
+```
+
 ## Timeouts
 
 `GuestContext::request_timeout(delay)` asks the host for a domain-clock

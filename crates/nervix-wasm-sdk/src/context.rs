@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use nervix_wasm_protocol::{BranchInit, GuestSnapshot, ProcessorSchema};
+use nervix_wasm_protocol::{BranchInit, GuestSnapshot, ProcessorSchema, StateResetRequestAnswer};
 
 use crate::{
     abi,
@@ -144,6 +144,34 @@ impl GuestContext<'_> {
             return Err(GuestError::InvalidSize);
         }
         Ok(TimeoutHandle::new(handle))
+    }
+
+    /// Asks the host to replace this branch's complete guest-state lifetime, starting a fresh
+    /// instance from nothing instead of from the state saved last.
+    ///
+    /// The host schedules the replacement for after this callback returns and never calls back
+    /// into the guest to perform it. The request is terminal for everything this callback has not
+    /// committed: output queued with [`GuestContext::emit`] is discarded, the input the branch
+    /// still holds is left unacknowledged for its source to redeliver, no checkpoint is taken, and
+    /// this instance is dropped with its pending timeouts. Effects earlier callbacks already
+    /// published stand, because their checkpoints completed.
+    ///
+    /// Requesting the replacement repeatedly, in one callback or across the callbacks of one state
+    /// lifetime, replaces that lifetime once. The returned answer says only that the host took the
+    /// request; the guest learns the new lifetime is durable by being created and initialized
+    /// again. A `GuestContext` exists only inside the callbacks the host accepts requests from, so
+    /// the answer a processor sees here is [`StateResetRequestAnswer::Accepted`] unless the host it
+    /// runs on disagrees about which operation is in progress.
+    ///
+    /// Clearing the processor's own fields is an ordinary application-state mutation that the next
+    /// checkpoint saves, and needs none of this.
+    #[must_use]
+    pub fn request_state_reset(&mut self) -> StateResetRequestAnswer {
+        let code = abi::host_request_state_reset();
+        match StateResetRequestAnswer::from_code(code) {
+            Some(answer) => answer,
+            None => StateResetRequestAnswer::Refused,
+        }
     }
 
     /// Queues one output envelope for the host to collect through

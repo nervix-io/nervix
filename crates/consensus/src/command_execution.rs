@@ -9,12 +9,12 @@ use std::collections::BTreeMap;
 
 use nervix_models::{
     ClusterNodeIdentity, CommandExecutionReference, DomainName, DomainState, Statement, Timestamp,
-    TransactionOperationAdmission, UserName,
+    TransactionOperationAdmission, TransactionPosition, TransactionPreviewIdentity, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::DomainMutationLease;
+use crate::{DomainMutationLease, TransactionActivity, TransactionStatementRequest};
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
@@ -80,6 +80,81 @@ pub struct CommandExecutionResult {
     pub results: Vec<CommandExecutionChildResult>,
     pub transaction: Option<CommandExecutionTransactionStatus>,
     pub transaction_admission: Option<TransactionOperationAdmission>,
+    /// The two previews a refused commit reported, so a recovered outcome still says the
+    /// transaction moved rather than only that the commit failed.
+    pub preview_stale: Option<CommandExecutionPreviewStale>,
+}
+
+/// The preview a refused commit expected, beside the one that now describes the transaction.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct CommandExecutionPreviewStale {
+    pub expected: TransactionPreviewIdentity,
+    pub current: TransactionPreviewIdentity,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum CommandExecutionTransactionTarget {
+    New {
+        id: String,
+        activity: TransactionActivity,
+    },
+    Existing {
+        id: String,
+        activity: TransactionActivity,
+    },
+}
+
+impl CommandExecutionTransactionTarget {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::New { id, .. } | Self::Existing { id, .. } => id,
+        }
+    }
+
+    pub fn activity(&self) -> TransactionActivity {
+        match self {
+            Self::New { activity, .. } | Self::Existing { activity, .. } => *activity,
+        }
+    }
+
+    pub fn opens_transaction(&self) -> bool {
+        matches!(self, Self::New { .. })
+    }
+
+    pub fn identifies_same_request(&self, requested: &Self) -> bool {
+        match (self, requested) {
+            (Self::New { .. }, Self::New { .. }) => true,
+            (Self::Existing { id, .. }, Self::Existing { id: requested, .. }) => id == requested,
+            (Self::New { .. }, Self::Existing { .. })
+            | (Self::Existing { .. }, Self::New { .. }) => false,
+        }
+    }
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum CommandExecutionTransactionOperation {
+    Queue(Box<TransactionStatementRequest>),
+    Commit {
+        /// The whole-transaction preview the requesting client expected this commit to apply.
+        /// Absent when the request itself opened the transaction or appended to it, because
+        /// either moves the transaction past the preview the client was holding.
+        expected_preview: Option<TransactionPreviewIdentity>,
+    },
+    Revert,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct CommandExecutionTransactionRequest {
+    pub target: CommandExecutionTransactionTarget,
+    pub operations: Vec<CommandExecutionTransactionOperation>,
 }
 
 #[derive(
@@ -96,6 +171,7 @@ pub enum CommandExecutionEffect {
         source: String,
         statement: Box<Statement>,
     },
+    TransactionRequest(Box<CommandExecutionTransactionRequest>),
     Statement {
         source: String,
         statement: Box<Statement>,
@@ -133,6 +209,7 @@ pub struct CommandExecution {
     pub reference: CommandExecutionReference,
     pub owner: UserName,
     pub domain: Option<DomainName>,
+    pub expected_transaction_position: Option<TransactionPosition>,
     pub request_digest: [u8; 32],
     pub admitted_at: Timestamp,
     pub effect: CommandExecutionEffect,
@@ -149,10 +226,31 @@ impl CommandExecution {
         admitted_at: Timestamp,
         effect: CommandExecutionEffect,
     ) -> Self {
+        Self::applying_at_position(
+            reference,
+            owner,
+            domain,
+            None,
+            request_digest,
+            admitted_at,
+            effect,
+        )
+    }
+
+    pub fn applying_at_position(
+        reference: CommandExecutionReference,
+        owner: UserName,
+        domain: Option<DomainName>,
+        expected_transaction_position: Option<TransactionPosition>,
+        request_digest: [u8; 32],
+        admitted_at: Timestamp,
+        effect: CommandExecutionEffect,
+    ) -> Self {
         Self {
             reference,
             owner,
             domain,
+            expected_transaction_position,
             request_digest,
             admitted_at,
             effect,
@@ -173,10 +271,77 @@ impl CommandExecution {
         self.domain_mutations.insert(domain, lease);
     }
 
+    pub fn transaction_request(&self) -> Option<&CommandExecutionTransactionRequest> {
+        match &self.effect {
+            CommandExecutionEffect::TransactionRequest(request) => Some(request),
+            CommandExecutionEffect::CreateDomain { .. }
+            | CommandExecutionEffect::Transaction { .. }
+            | CommandExecutionEffect::Statement { .. }
+            | CommandExecutionEffect::CreateUser { .. }
+            | CommandExecutionEffect::DropNode { .. } => None,
+        }
+    }
+
+    pub fn request_conflict(
+        &self,
+        owner: &UserName,
+        domain: Option<&DomainName>,
+        expected_transaction_position: Option<TransactionPosition>,
+        request_digest: [u8; 32],
+    ) -> Option<CommandExecutionRequestConflict> {
+        if &self.owner != owner {
+            return Some(CommandExecutionRequestConflict::Owner);
+        }
+        if self.domain.as_ref() != domain {
+            return Some(CommandExecutionRequestConflict::Domain);
+        }
+        if self.expected_transaction_position != expected_transaction_position {
+            return Some(CommandExecutionRequestConflict::Position);
+        }
+        if self.request_digest != request_digest {
+            return Some(CommandExecutionRequestConflict::Content);
+        }
+        None
+    }
+
     pub(crate) fn same_request(&self, requested: &Self) -> bool {
-        self.reference == requested.reference
-            && self.owner == requested.owner
-            && self.domain == requested.domain
-            && self.request_digest == requested.request_digest
+        if self.reference != requested.reference
+            || self
+                .request_conflict(
+                    &requested.owner,
+                    requested.domain.as_ref(),
+                    requested.expected_transaction_position,
+                    requested.request_digest,
+                )
+                .is_some()
+        {
+            return false;
+        }
+        match (self.transaction_request(), requested.transaction_request()) {
+            (Some(existing), Some(requested)) => {
+                existing.target.identifies_same_request(&requested.target)
+            }
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandExecutionRequestConflict {
+    Content,
+    Domain,
+    Owner,
+    Position,
+}
+
+impl std::fmt::Display for CommandExecutionRequestConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Content => formatter.write_str("content"),
+            Self::Domain => formatter.write_str("domain"),
+            Self::Owner => formatter.write_str("owner"),
+            Self::Position => formatter.write_str("position"),
+        }
     }
 }

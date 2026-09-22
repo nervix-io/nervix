@@ -1,0 +1,24 @@
+[package]
+description = "The compiled jaq engine and schemaless wire formats used by Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-jaq"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+error-stack = { workspace = true }
+jaq-core = { workspace = true }
+jaq-fmts = { workspace = true }
+jaq-json = { workspace = true, features = ["serde"] }
+jaq-std = { workspace = true }
+nervix-models = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+strum = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+ciborium = { workspace = true }

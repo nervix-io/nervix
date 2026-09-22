@@ -12,8 +12,10 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     CommandExecution, CommandExecutionChildResult, CommandExecutionDiagnostic,
-    CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
-    CommandExecutionState, CommandExecutionTransactionStatus,
+    CommandExecutionEffect, CommandExecutionPreviewStale, CommandExecutionResult,
+    CommandExecutionResultKind, CommandExecutionState, CommandExecutionTransactionOperation,
+    CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
+    CommandExecutionTransactionTarget,
 };
 use nervix_models::{
     CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus,
@@ -32,15 +34,23 @@ use super::{
     model_mutation::{command_error, is_persistent_statement, parse_request_domain},
     session_service::SessionServiceImpl,
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
-    transaction::is_queueable_transaction_statement,
+    transaction::{api_transaction_preview_identity, is_queueable_transaction_statement},
 };
 use crate::proto::{CommandResult, CommandResultKind, SessionResponse};
 
 pub(in crate::application) struct PersistentCommandRequest {
     pub(in crate::application) domain: Option<DomainName>,
+    pub(in crate::application) expected_transaction_position: Option<TransactionPosition>,
     pub(in crate::application) digest: [u8; 32],
-    source: String,
-    statement: Statement,
+    body: PersistentCommandRequestBody,
+}
+
+enum PersistentCommandRequestBody {
+    Statement {
+        source: String,
+        statement: Statement,
+    },
+    Transaction(CommandExecutionTransactionRequest),
 }
 
 #[derive(Debug, Error)]
@@ -51,6 +61,12 @@ pub(in crate::application) enum PersistentCommandRequestError {
     Encoding { message: String },
     #[error("command semantics exceed the supported size")]
     SemanticsTooLarge,
+    #[error("a durable transaction request contains a non-transaction operation")]
+    InvalidTransactionOperation,
+    #[error("session-scoped and client-local statements cannot be queued in a transaction")]
+    NonServerTransactionStatement,
+    #[error("a durable transaction append is missing its expected queue position")]
+    MissingTransactionPosition,
 }
 
 impl PersistentCommandRequest {
@@ -104,14 +120,94 @@ impl PersistentCommandRequest {
         hasher.update(encoded_bytes);
         Ok(Some(Self {
             domain,
+            expected_transaction_position: None,
             digest: *hasher.finalize().as_bytes(),
-            source,
-            statement,
+            body: PersistentCommandRequestBody::Statement { source, statement },
         }))
     }
 
+    pub(in crate::application) fn transaction(
+        operations: &[SessionCommandOperation],
+        domain: DomainName,
+        query: &str,
+        expected_transaction_position: Option<usize>,
+        target: CommandExecutionTransactionTarget,
+    ) -> Result<Self, Report<PersistentCommandRequestError>> {
+        let mut durable_operations = Vec::with_capacity(operations.len());
+        for operation in operations {
+            match operation {
+                SessionCommandOperation::Begin { .. } => {
+                    if !target.opens_transaction() {
+                        return Err(Report::new(
+                            PersistentCommandRequestError::InvalidTransactionOperation,
+                        ));
+                    }
+                }
+                SessionCommandOperation::Queue(command) => {
+                    let ClientStatement::Server(statement) = &command.statement else {
+                        return Err(Report::new(
+                            PersistentCommandRequestError::NonServerTransactionStatement,
+                        ));
+                    };
+                    let Some(position) = command.expected_transaction_position else {
+                        return Err(Report::new(
+                            PersistentCommandRequestError::MissingTransactionPosition,
+                        ));
+                    };
+                    durable_operations.push(CommandExecutionTransactionOperation::Queue(Box::new(
+                        nervix_consensus::TransactionStatementRequest {
+                            request_reference: command.request_reference.clone(),
+                            expected_position: position,
+                            source: command.source.clone(),
+                            statement: statement.clone(),
+                        },
+                    )));
+                }
+                SessionCommandOperation::Commit { expected_preview } => {
+                    durable_operations.push(CommandExecutionTransactionOperation::Commit {
+                        expected_preview: expected_preview.clone(),
+                    });
+                }
+                SessionCommandOperation::Revert => {
+                    durable_operations.push(CommandExecutionTransactionOperation::Revert);
+                }
+                SessionCommandOperation::Execute(_) => {
+                    return Err(Report::new(
+                        PersistentCommandRequestError::InvalidTransactionOperation,
+                    ));
+                }
+            }
+        }
+
+        let digest = Self::transaction_digest(query)?;
+        Ok(Self {
+            domain: Some(domain),
+            expected_transaction_position: expected_transaction_position
+                .map(TransactionPosition::new),
+            digest,
+            body: PersistentCommandRequestBody::Transaction(CommandExecutionTransactionRequest {
+                target,
+                operations: durable_operations,
+            }),
+        })
+    }
+
+    pub(in crate::application) fn transaction_digest(
+        query: &str,
+    ) -> Result<[u8; 32], Report<PersistentCommandRequestError>> {
+        let mut hasher = Hasher::new();
+        let query_length = u64::try_from(query.len())
+            .map_err(|_| Report::new(PersistentCommandRequestError::SemanticsTooLarge))?;
+        hasher.update(&query_length.to_le_bytes());
+        hasher.update(query.as_bytes());
+        Ok(*hasher.finalize().as_bytes())
+    }
+
     fn mutation_domains(&self) -> BTreeSet<DomainName> {
-        match &self.statement {
+        let PersistentCommandRequestBody::Statement { statement, .. } = &self.body else {
+            return BTreeSet::new();
+        };
+        match statement {
             Statement::CreateDomain(create) => BTreeSet::from([create.id.clone()]),
             Statement::DrainNode(_) => BTreeSet::new(),
             statement if statement.requires_domain_mutation_ownership() => {
@@ -119,6 +215,23 @@ impl PersistentCommandRequest {
             }
             _ => BTreeSet::new(),
         }
+    }
+}
+
+fn transaction_targets_match(
+    existing: &CommandExecution,
+    requested: &PersistentCommandRequest,
+) -> bool {
+    let requested = match &requested.body {
+        PersistentCommandRequestBody::Transaction(request) => Some(request),
+        PersistentCommandRequestBody::Statement { .. } => None,
+    };
+    match (existing.transaction_request(), requested) {
+        (Some(existing), Some(requested)) => {
+            existing.target.identifies_same_request(&requested.target)
+        }
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
     }
 }
 
@@ -202,19 +315,28 @@ impl SessionServiceImpl {
             .current_command_execution(&reference)
             .await
         {
-            if existing.owner != owner
-                || existing.domain != request.domain
-                || existing.request_digest != request.digest
-            {
+            if let Some(conflict) = existing.request_conflict(
+                &owner,
+                request.domain.as_ref(),
+                request.expected_transaction_position,
+                request.digest,
+            ) {
                 return Err(Box::new(command_error(format!(
-                    "command execution reference '{reference}' is bound to a different owner, \
-                     domain, or request"
+                    "command execution reference '{reference}' conflicts by {conflict}"
+                ))));
+            }
+            if !transaction_targets_match(&existing, request) {
+                return Err(Box::new(command_error(format!(
+                    "command execution reference '{reference}' conflicts by position"
                 ))));
             }
             if let (
                 CommandExecutionEffect::CreateUser { password_hash, .. },
-                Statement::CreateUser(create),
-            ) = (&existing.effect, &request.statement)
+                PersistentCommandRequestBody::Statement {
+                    statement: Statement::CreateUser(create),
+                    ..
+                },
+            ) = (&existing.effect, &request.body)
                 && !verify_password_hash(password_hash.clone(), create.body.password.clone()).await
             {
                 return Err(Box::new(command_error(format!(
@@ -225,8 +347,14 @@ impl SessionServiceImpl {
             return Ok(existing);
         }
 
-        let effect = match &request.statement {
-            Statement::CreateDomain(create) => {
+        let effect = match &request.body {
+            PersistentCommandRequestBody::Transaction(transaction) => {
+                CommandExecutionEffect::TransactionRequest(Box::new(transaction.clone()))
+            }
+            PersistentCommandRequestBody::Statement {
+                source: _,
+                statement: Statement::CreateDomain(create),
+            } => {
                 let existing = self.inner.consensus.current_domain(&create.id).await;
                 let existed_at_admission = existing.is_some();
                 let state = match existing {
@@ -246,7 +374,10 @@ impl SessionServiceImpl {
                     state: Box::new(state),
                 }
             }
-            Statement::CreateUser(create) => {
+            PersistentCommandRequestBody::Statement {
+                source: _,
+                statement: Statement::CreateUser(create),
+            } => {
                 let user = user_credentials(create.body.name.clone(), create.body.password.clone())
                     .await
                     .map_err(|error| Box::new(command_error(error)))?;
@@ -256,7 +387,10 @@ impl SessionServiceImpl {
                     password_hash: user.password_hash,
                 }
             }
-            Statement::DropNode(drop) => {
+            PersistentCommandRequestBody::Statement {
+                source: _,
+                statement: Statement::DropNode(drop),
+            } => {
                 let availability = self.inner.cluster.availability_state().await;
                 let mut latest_nodes = availability.latest_nodes_by_id();
                 let Some(node) = latest_nodes.remove(&drop.node_id) else {
@@ -271,34 +405,49 @@ impl SessionServiceImpl {
                     member_at_admission: membership.contains_key(&drop.node_id),
                 }
             }
-            statement if is_queueable_transaction_statement(statement) => {
+            PersistentCommandRequestBody::Statement { source, statement }
+                if is_queueable_transaction_statement(statement) =>
+            {
                 request.domain.as_ref().ok_or_else(|| {
                     Box::new(command_error("no active domain selected".to_string()))
                 })?;
                 CommandExecutionEffect::Transaction {
                     transaction_id: format!("command.{}", reference.as_str()),
-                    source: request.source.clone(),
+                    source: source.clone(),
                     statement: Box::new(statement.clone()),
                 }
             }
-            statement => CommandExecutionEffect::Statement {
-                source: request.source.clone(),
-                statement: Box::new(statement.clone()),
-            },
+            PersistentCommandRequestBody::Statement { source, statement } => {
+                CommandExecutionEffect::Statement {
+                    source: source.clone(),
+                    statement: Box::new(statement.clone()),
+                }
+            }
         };
-        let execution = CommandExecution::applying(
+        let execution = CommandExecution::applying_at_position(
             reference,
             owner,
             request.domain.clone(),
+            request.expected_transaction_position,
             request.digest,
             current_timestamp(),
             effect,
         );
-        self.inner
+        match self
+            .inner
             .consensus
             .admit_command_execution(execution, request.mutation_domains())
             .await
-            .map_err(|error| Box::new(command_error(error.to_string())))
+        {
+            Ok(execution) => Ok(execution),
+            Err(error) => {
+                let message = error.to_string();
+                let result = self
+                    .consensus_error_response(error.current_context(), message)
+                    .await;
+                Err(Box::new(result))
+            }
+        }
     }
 
     pub(in crate::application) async fn execute_persistent_command(
@@ -346,6 +495,19 @@ impl SessionServiceImpl {
                     domain,
                     source,
                     *statement,
+                ))
+                .await
+            }
+            CommandExecutionEffect::TransactionRequest(request) => {
+                let Some(domain) = execution.domain.clone() else {
+                    return command_error(
+                        "durable transaction request lost its target domain".to_string(),
+                    );
+                };
+                Box::pin(self.execute_durable_transaction_request(
+                    execution.owner.clone(),
+                    domain,
+                    *request,
                 ))
                 .await
             }
@@ -414,7 +576,7 @@ impl SessionServiceImpl {
         result: &CommandResult,
     ) -> Result<CommandResult, Box<CommandResult>> {
         let durable_result = durable_command_result(result);
-        let execution = self
+        let execution = match self
             .inner
             .consensus
             .finish_command_execution(
@@ -425,7 +587,16 @@ impl SessionServiceImpl {
                 durable_result,
             )
             .await
-            .map_err(|error| Box::new(command_error(error.to_string())))?;
+        {
+            Ok(execution) => execution,
+            Err(error) => {
+                let message = error.to_string();
+                let result = self
+                    .consensus_error_response(error.current_context(), message)
+                    .await;
+                return Err(Box::new(result));
+            }
+        };
         self.result_from_finished_execution(&reference, execution)
             .await
     }
@@ -457,6 +628,88 @@ impl SessionServiceImpl {
                     })?;
                 Ok(command_result(*result))
             }
+        }
+    }
+
+    pub(in crate::application) async fn complete_persistent_command_request(
+        &self,
+        execution: CommandExecution,
+        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
+        subscriptions: &mut SessionSubscriptions,
+    ) -> CommandResult {
+        let mut result = match &execution.state {
+            CommandExecutionState::Applying => {
+                let result =
+                    Box::pin(self.execute_persistent_command(&execution, tx, subscriptions)).await;
+                let result = self
+                    .command_with_transaction_status(result, subscriptions)
+                    .await;
+                if result.kind == i32::from(CommandResultKind::NotLeader) {
+                    result
+                } else {
+                    match self
+                        .finish_persistent_command(
+                            execution.reference.clone(),
+                            execution.owner.clone(),
+                            execution.request_digest,
+                            &result,
+                        )
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(result) => *result,
+                    }
+                }
+            }
+            CommandExecutionState::Finished { .. } | CommandExecutionState::Expired { .. } => {
+                match self
+                    .result_from_finished_execution(&execution.reference, execution.clone())
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(result) => *result,
+                }
+            }
+        };
+        self.restore_transaction_binding_for_execution(&execution, &mut result, subscriptions);
+        result
+    }
+
+    fn restore_transaction_binding_for_execution(
+        &self,
+        execution: &CommandExecution,
+        result: &mut CommandResult,
+        subscriptions: &mut SessionSubscriptions,
+    ) {
+        let Some(request) = execution.transaction_request() else {
+            return;
+        };
+        let Some(transaction) = result.transaction.as_ref() else {
+            return;
+        };
+        let target = request.target.id();
+        if transaction.id != target {
+            result.success = false;
+            result.kind = i32::from(CommandResultKind::Error);
+            result.message = format!(
+                "command execution reference '{}' recovered transaction '{}' instead of its \
+                 durable target '{target}'",
+                execution.reference, transaction.id
+            );
+            return;
+        }
+        let state = crate::proto::TransactionState::try_from(transaction.state);
+        if matches!(
+            state,
+            Ok(crate::proto::TransactionState::Open | crate::proto::TransactionState::Committing)
+        ) {
+            self.release_session_transaction_binding(subscriptions);
+            self.inner
+                .transaction_bindings
+                .insert(target.to_string(), subscriptions.session_id.clone());
+            subscriptions.bind_transaction(target.to_string());
+        } else if subscriptions.transaction_id() == Some(target) {
+            self.release_session_transaction_binding(subscriptions);
         }
     }
 }
@@ -498,6 +751,39 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
             .transaction_admission
             .as_ref()
             .map(durable_transaction_admission),
+        preview_stale: result.preview_stale.as_ref().map(durable_preview_stale),
+    }
+}
+
+/// The two previews a refused commit reported, as the execution ledger retains them.
+fn durable_preview_stale(
+    stale: &crate::proto::TransactionPreviewStale,
+) -> CommandExecutionPreviewStale {
+    CommandExecutionPreviewStale {
+        expected: durable_preview_identity(stale.expected.as_ref()),
+        current: durable_preview_identity(stale.current.as_ref()),
+    }
+}
+
+fn durable_preview_identity(
+    preview: Option<&crate::proto::TransactionPreviewIdentity>,
+) -> TransactionPreviewIdentity {
+    let preview = preview.assured("server-produced stale commits always carry both previews");
+    let position = usize::try_from(preview.position)
+        .assured("server-produced transaction positions fit the target pointer width");
+    let planning_basis = <[u8; 32]>::try_from(preview.planning_basis.as_ref())
+        .assured("server-produced transaction planning bases contain 32 bytes");
+    TransactionPreviewIdentity {
+        transaction_id: preview.transaction_id.clone(),
+        position: TransactionPosition::new(position),
+        planning_basis: ImpactPlanningBasis::new(planning_basis),
+    }
+}
+
+fn api_preview_stale(stale: CommandExecutionPreviewStale) -> crate::proto::TransactionPreviewStale {
+    crate::proto::TransactionPreviewStale {
+        expected: Some(api_transaction_preview_identity(&stale.expected)),
+        current: Some(api_transaction_preview_identity(&stale.current)),
     }
 }
 
@@ -514,9 +800,13 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
                 span_end: diagnostic.span_end,
             })
             .collect(),
-        kind: match result.kind {
-            CommandExecutionResultKind::Ok => i32::from(CommandResultKind::Ok),
-            CommandExecutionResultKind::Error => i32::from(CommandResultKind::Error),
+        // A refused commit is recorded as an error carrying both previews. Restoring the typed
+        // disposition is what lets a recovered outcome tell a client to read the transaction
+        // again rather than only that its commit failed.
+        kind: match (&result.kind, &result.preview_stale) {
+            (_, Some(_)) => i32::from(CommandResultKind::PreviewStale),
+            (CommandExecutionResultKind::Ok, None) => i32::from(CommandResultKind::Ok),
+            (CommandExecutionResultKind::Error, None) => i32::from(CommandResultKind::Error),
         },
         already_existed: result.already_existed,
         results: result.results.into_iter().map(child_result).collect(),
@@ -533,6 +823,7 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
                 failing_step: transaction.failing_step,
             }),
         transaction_admission: result.transaction_admission.map(api_transaction_admission),
+        preview_stale: result.preview_stale.map(api_preview_stale),
         ..Default::default()
     }
 }

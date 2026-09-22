@@ -17,7 +17,10 @@ use blake3::Hasher;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use meticulous::OptionExt as _;
 use nervix_approx_into::ApproxInto;
-use nervix_consensus::ReplicatedTransaction;
+use nervix_consensus::{
+    CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
+    CommandExecutionTransactionTarget, ReplicatedTransaction,
+};
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
@@ -199,12 +202,7 @@ impl SessionSubscriptions {
                     operations.push(SessionCommandOperation::Revert);
                 }
                 statement => {
-                    let request_reference = CommandExecutionReference::parse(format!(
-                        "{}.{}",
-                        execution_reference.as_str(),
-                        statement_index
-                    ))
-                    .map_err(|error| error.to_string())?;
+                    let request_reference = execution_reference.derive_step(statement_index);
                     let command = PendingSessionCommand {
                         request_reference,
                         expected_transaction_position: transaction_position,
@@ -1365,6 +1363,114 @@ impl SessionServiceImpl {
 }
 
 impl SessionServiceImpl {
+    pub(in crate::application) async fn execute_durable_transaction_request(
+        &self,
+        owner: UserName,
+        domain: DomainName,
+        request: CommandExecutionTransactionRequest,
+    ) -> CommandResult {
+        let transaction_id = request.target.id().to_string();
+        let activity = request.target.activity();
+        let operation_count = request.operations.len();
+        let request_count = if request.target.opens_transaction() {
+            operation_count.checked_add(1).verified(
+                "a transaction request cannot contain more operations than an addressable Vec",
+            )
+        } else {
+            operation_count
+        };
+        let is_batch = request_count > 1;
+        let mut results = Vec::new();
+        let mut transaction = self
+            .inner
+            .consensus
+            .current_transaction(&transaction_id)
+            .await
+            .map(|transaction| transaction_status(&transaction));
+
+        if matches!(
+            request.target,
+            CommandExecutionTransactionTarget::New { .. }
+        ) {
+            let result = self
+                .begin_identified_transaction(
+                    transaction_id.clone(),
+                    domain.clone(),
+                    owner.clone(),
+                    activity,
+                )
+                .await;
+            if result.transaction.is_some() {
+                transaction.clone_from(&result.transaction);
+            }
+            if !result.success || !is_batch {
+                return result;
+            }
+            append_command_result(&mut results, result);
+        }
+
+        for operation in request.operations {
+            tokio::task::consume_budget().await;
+            let result = match operation {
+                CommandExecutionTransactionOperation::Queue(statement) => {
+                    self.queue_identified_transaction_statement(
+                        transaction_id.clone(),
+                        owner.clone(),
+                        domain.clone(),
+                        *statement,
+                        activity,
+                    )
+                    .await
+                }
+                CommandExecutionTransactionOperation::Commit { expected_preview } => {
+                    self.commit_identified_transaction(
+                        transaction_id.clone(),
+                        owner.clone(),
+                        activity,
+                        expected_preview,
+                    )
+                    .await
+                }
+                CommandExecutionTransactionOperation::Revert => {
+                    self.revert_identified_transaction(
+                        transaction_id.clone(),
+                        owner.clone(),
+                        activity,
+                    )
+                    .await
+                }
+            };
+
+            if result.transaction.is_some() {
+                transaction.clone_from(&result.transaction);
+            }
+            if !result.success {
+                let mut result = command_batch_result(results, result, is_batch);
+                if result.transaction.is_none() {
+                    result.transaction = transaction;
+                }
+                return result;
+            }
+            if !is_batch {
+                return result;
+            }
+            append_command_result(&mut results, result);
+        }
+
+        if results.is_empty() {
+            return command_error("empty command".to_string());
+        }
+        CommandResult {
+            success: true,
+            message: command_results_message(&results),
+            diagnostics: Vec::new(),
+            kind: i32::from(CommandResultKind::Ok),
+            results,
+            transaction,
+            ..Default::default()
+        }
+    }
+
     pub(in crate::application) async fn process_session_command_operations(
         &self,
         operations: Vec<SessionCommandOperation>,

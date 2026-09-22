@@ -1,34 +1,32 @@
-//! WebSocket ingestor execution.
+//! WebSocket client source runtime composition.
 //!
 //! Layer: data plane.
-//! - **Owns.** WebSocket connection consumption and source-boundary timestamp observation.
-//! - **Depends on.** Typed WebSocket plans, connector clients and ingestor runtime admission.
-//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+//!
+//! - **Owns.** Composing a validated WebSocket connector plan with host-owned intake, quiescence,
+//!   readiness, resource mount retention, and task lifecycle.
+//! - **Depends on.** The WebSocket connector, generic source host, and pre-resolved runtime
+//!   execution handles.
+//! - **Must not know.** WebSocket transport internals, NSPL parsing, registry validation, or
+//!   placement computation.
+
+use std::{num::NonZeroU64, time::Duration};
 
 use nervix_connector::{
-    ClientConfigResult, RustlsClientConfigSource, ServiceUrl, client_config_value,
-    physical_time::actual_utc_now,
+    ParsedRetryPolicy, SourceAckPolicy, SourceCapabilities, SourceConnector, SourcePlan,
 };
-use nervix_models::{DomainName, IngestorName};
-use tokio_tungstenite::{Connector, connect_async, connect_async_tls_with_config};
+use nervix_connector_websockets::{WebsocketSource, WebsocketSourcePlan};
 
-use super::super::*;
+use super::{
+    super::*,
+    source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_source_instance_with_retry},
+};
+
+const WEBSOCKET_RETRY_POLICY: ParsedRetryPolicy = ParsedRetryPolicy {
+    backoff: Duration::from_millis(250),
+    max_backoff: Duration::from_secs(30),
+};
 
 pub(in crate::runtime) struct WebsocketsIngestor;
-
-#[derive(Clone, Copy)]
-struct WebsocketDispatchContext<'a> {
-    runtime: &'a Runtime,
-    domain: &'a DomainName,
-    ingestor: &'a IngestorName,
-    timestamp_source: Option<&'a IngestTimestampSource>,
-    output_routes: &'a RelayProcessorOutputsNode,
-    filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
-    branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
-    codec: &'a Arc<CompiledCodec>,
-    metrics: &'a MessageMetricsHandle,
-    quiesce: &'a Arc<IngestorQuiesceControl>,
-}
 
 impl WebsocketsIngestor {
     pub(in crate::runtime) async fn start(
@@ -50,21 +48,13 @@ impl WebsocketsIngestor {
                 ingestor: ingestor.name.as_str().to_string(),
             });
         }
-
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-            .map_err(|reason| RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-        let endpoint = Self::endpoint_from_config(&resolved_client.entries).map_err(|error| {
-            RuntimeError::StartIngestor {
+            .map_err(|error| RuntimeError::StartIngestor {
                 domain: domain.as_str().to_string(),
                 ingestor: ingestor.name.as_str().to_string(),
                 reason: error.to_string(),
-            }
-        })?;
+            })?;
         let signaling_protocol = if let Some(signaling_protocol) = signaling_protocol.as_ref() {
             Some(
                 runtime
@@ -82,285 +72,93 @@ impl WebsocketsIngestor {
         } else {
             None
         };
+        let connector = WebsocketSourcePlan::new(resolved_client.entries, signaling_protocol)
+            .map_err(|error| RuntimeError::StartIngestor {
+                domain: domain.as_str().to_string(),
+                ingestor: ingestor.name.as_str().to_string(),
+                reason: error.to_string(),
+            })?;
+        let task_endpoint = connector.endpoint().to_string();
+        let acknowledgement = SourceAckPolicy::None;
+        let source_plan = SourcePlan {
+            connector,
+            capabilities: SourceCapabilities::new(
+                ingestor.allow_header_reads,
+                ingestor.metadata_kind.source_scope(),
+                ingestor.quiesce.supports(ingestor.quiesce.mode()),
+                NonZeroU64::MIN,
+                acknowledgement.support(),
+            ),
+            acknowledgement,
+        };
+        let source = WebsocketSource::open(&source_plan.connector, 0)
+            .await
+            .map_err(|error| RuntimeError::StartIngestor {
+                domain: domain.as_str().to_string(),
+                ingestor: ingestor.name.as_str().to_string(),
+                reason: error.to_string(),
+            })?;
         let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
         let branched_runtime = runtime.start_branched_ingestor_runtime(
             domain,
             &ingestor.name,
             dependencies.branched_templates,
         );
-        let branched_senders = branched_runtime.senders.clone();
-        let output_routes = dependencies.output_routes;
-        let filter_where = dependencies.filter_where;
-        let codec = dependencies.codec;
-        let metrics = dependencies.metrics;
         let quiesce = runtime
             .ingestor_quiesce_control(domain, &ingestor.name)
             .verified(
                 "the runtime registers quiesce control for an ingestor before it starts the task",
             );
-
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let task_runtime = runtime.clone();
+        let (shutdown_tx, _) = watch::channel(false);
+        runtime.prepare_ingestor_readiness(
+            domain,
+            &ingestor.name,
+            source_plan.capabilities.instances(),
+        );
+        let host = RuntimeSourceHost::build(RuntimeSourceHostSpec {
+            runtime: runtime.clone(),
+            domain: domain.clone(),
+            ingestor: ingestor.name.clone(),
+            timestamp_source: ingestor.timestamp_source.clone(),
+            output_routes: dependencies.output_routes,
+            filter_where: dependencies.filter_where,
+            codec: dependencies.codec,
+            metrics: dependencies.metrics,
+            branched_senders: branched_runtime.senders.clone(),
+            quiesce,
+            shutdown: shutdown_tx.subscribe(),
+            instance_index: 0,
+            metadata_kind: ingestor.metadata_kind,
+            buffered_intake: true,
+            flush_each_intake: true,
+        });
         let task_domain = domain.clone();
         let task_ingestor = ingestor.name.clone();
-        let task_signaling_protocol = signaling_protocol.clone();
-        let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_events = runtime.events().clone();
-        let task_endpoint_requires_tls =
-            match ServiceUrl::new(endpoint.as_str(), "WebSockets endpoint")
-                .scheme()
-                .map_err(|error| RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: error.to_string(),
-                })?
-                .as_str()
-            {
-                "ws" => false,
-                "wss" => true,
-                scheme => {
-                    return Err(RuntimeError::StartIngestor {
-                        domain: domain.as_str().to_string(),
-                        ingestor: ingestor.name.as_str().to_string(),
-                        reason: format!(
-                            "unsupported WebSockets endpoint scheme '{scheme}', expected ws:// or \
-                             wss://"
-                        ),
-                    });
-                }
-            };
-        let task_tls_connector = if task_endpoint_requires_tls {
-            Some(Connector::Rustls(
-                RustlsClientConfigSource::new(&resolved_client.entries)
-                    .build_with_default_roots()
-                    .map_err(|error| RuntimeError::StartIngestor {
-                        domain: domain.as_str().to_string(),
-                        ingestor: ingestor.name.as_str().to_string(),
-                        reason: error.to_string(),
-                    })?,
-            ))
-        } else {
-            None
-        };
-        let task_client_mounts = resolved_client.mounts.clone();
+        let shutdown = shutdown_tx.subscribe();
+        let acknowledgement = source_plan.acknowledgement;
+        let client_mounts = resolved_client.mounts;
         let task = tokio::spawn(async move {
-            let _client_mounts = task_client_mounts;
-            let dispatch_context = WebsocketDispatchContext {
-                runtime: &task_runtime,
-                domain: &task_domain,
-                ingestor: &task_ingestor,
-                timestamp_source: task_timestamp_source.as_ref(),
-                output_routes: &output_routes,
-                filter_where: filter_where.as_ref(),
-                branched_senders: &branched_senders,
-                codec: &codec,
-                metrics: &metrics,
-                quiesce: &quiesce,
-            };
-            let mut backoff = RuntimeReconnectBackoff::default();
+            let _client_mounts = client_mounts;
             info!(
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),
-                endpoint = endpoint.as_str(),
+                endpoint = task_endpoint,
                 "started websockets ingestor"
             );
-
-            'outer: loop {
-                tokio::task::consume_budget().await;
-                if quiesce.should_suspend_intake() {
-                    tokio::select! {
-                        changed = shutdown_rx.changed() => {
-                            if changed.is_err() || *shutdown_rx.borrow() {
-                                break;
-                            }
-                        }
-                        _ = quiesce.wait_until_not_suspended() => {}
-                    }
-                    continue;
-                }
-                if task_runtime
-                    .wait_if_ingestor_faulted(&task_domain, &task_ingestor, &mut shutdown_rx)
-                    .await
-                {
-                    break;
-                }
-                if task_runtime
-                    .inner
-                    .fault_injection
-                    .ingestor_is_failed(&task_ingestor)
-                {
-                    continue;
-                }
-                tokio::select! {
-                    changed = shutdown_rx.changed() => {
-                        if changed.is_err() || *shutdown_rx.borrow() {
-                            break 'outer;
-                        }
-                    }
-                    connect = async {
-                        if task_endpoint_requires_tls {
-                            connect_async_tls_with_config(
-                                endpoint.as_str(),
-                                None,
-                                false,
-                                task_tls_connector.clone(),
-                            ).await
-                        } else {
-                            connect_async(endpoint.as_str()).await
-                        }
-                    } => {
-                        match connect {
-                            Ok((mut relay, _)) => {
-                                let signaled = if let Some(protocol) =
-                                    task_signaling_protocol.as_ref()
-                                {
-                                    let session =
-                                        WebsocketSignalingSession::new(protocol.clone());
-                                    let sink = ClientSignalingDataSink {
-                                        context: &dispatch_context,
-                                    };
-                                    match session.run(&mut relay, &sink).await {
-                                        Ok(()) => Some(()),
-                                        Err(error) => {
-                                            task_runtime.record_ingestor_transient_error(
-                                                &task_domain,
-                                                &task_ingestor,
-                                                format!("websocket signaling failed: {error}"),
-                                            );
-                                            task_events.report_error(format!(
-                                                "websocket signaling failed for ingestor '{}' in domain '{}': {}",
-                                                task_ingestor.as_str(),
-                                                task_domain.as_str(),
-                                                error
-                                            ));
-                                            warn!(
-                                                domain = task_domain.as_str(),
-                                                ingestor = task_ingestor.as_str(),
-                                                error = %error,
-                                                "websocket signaling failed"
-                                            );
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    Some(())
-                                };
-
-                                let Some(()) = signaled else {
-                                    if !backoff.wait(&mut shutdown_rx).await {
-                                        break 'outer;
-                                    }
-                                    continue;
-                                };
-
-                                task_runtime
-                                    .clear_ingestor_transient_error(&task_domain, &task_ingestor);
-                                backoff.reset();
-
-                                loop {
-                                    tokio::task::consume_budget().await;
-                                    if let Some(payload) = quiesce.pop_buffered(0) {
-                                        Self::dispatch_payload(&dispatch_context, &payload).await;
-                                        continue;
-                                    }
-                                    tokio::select! {
-                                        _ = quiesce.wait_for_change() => {
-                                            if quiesce.should_suspend_intake() {
-                                                break;
-                                            }
-                                        }
-                                        changed = shutdown_rx.changed() => {
-                                            if changed.is_err() || *shutdown_rx.borrow() {
-                                                break 'outer;
-                                            }
-                                        }
-                                        message = relay.next() => {
-                                            match message {
-                                                Some(Ok(message)) => {
-                                                    let payload = match message {
-                                                        tokio_tungstenite::tungstenite::Message::Text(text) => {
-                                                            Some(text.to_string().into_bytes())
-                                                        }
-                                                        tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
-                                                            Some(bytes.to_vec())
-                                                        }
-                                                        tokio_tungstenite::tungstenite::Message::Close(_) => None,
-                                                        tokio_tungstenite::tungstenite::Message::Ping(_) => None,
-                                                        tokio_tungstenite::tungstenite::Message::Pong(_) => None,
-                                                        tokio_tungstenite::tungstenite::Message::Frame(_) => None,
-                                                    };
-
-                                                    let Some(payload) = payload else {
-                                                        break;
-                                                    };
-
-                                                    Self::accept_payload(
-                                                        &dispatch_context,
-                                                        &payload,
-                                                    )
-                                                    .await;
-                                                }
-                                                Some(Err(error)) => {
-                                                    task_runtime.record_ingestor_transient_error(
-                                                        &task_domain,
-                                                        &task_ingestor,
-                                                        format!("websocket receive failed: {error}"),
-                                                    );
-                                                    task_events.report_error(format!(
-                                                        "websocket receive failed for ingestor '{}' in domain '{}': {}",
-                                                        task_ingestor.as_str(),
-                                                        task_domain.as_str(),
-                                                        error
-                                                    ));
-                                                    warn!(
-                                                        domain = task_domain.as_str(),
-                                                        ingestor = task_ingestor.as_str(),
-                                                        error = %error,
-                                                        "websocket receive failed"
-                                                    );
-                                                    break;
-                                                }
-                                                None => break,
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                task_runtime.record_ingestor_transient_error(
-                                    &task_domain,
-                                    &task_ingestor,
-                                    format!("websocket connect failed: {error}"),
-                                );
-                                task_events.report_error(format!(
-                                    "failed to connect websocket source for ingestor '{}' in domain '{}': {}",
-                                    task_ingestor.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                ));
-                                warn!(
-                                    domain = task_domain.as_str(),
-                                    ingestor = task_ingestor.as_str(),
-                                    error = %error,
-                                    "failed to connect websocket source"
-                                );
-                            }
-                        }
-
-                        if !backoff.wait(&mut shutdown_rx).await {
-                            break 'outer;
-                        }
-                    }
-                }
-            }
-
+            run_source_instance_with_retry(
+                source,
+                host,
+                acknowledgement,
+                WEBSOCKET_RETRY_POLICY,
+                shutdown,
+            )
+            .await;
             info!(
                 domain = task_domain.as_str(),
                 ingestor = task_ingestor.as_str(),
                 "stopped websockets ingestor"
             );
         });
-
         runtime.inner.ingestors.insert(
             key,
             IngestorRuntime::Background {
@@ -369,78 +167,13 @@ impl WebsocketsIngestor {
                 tasks: vec![task],
             },
         );
-
         Ok(())
     }
 
-    async fn accept_payload(context: &WebsocketDispatchContext<'_>, payload: &[u8]) {
-        let payload = BufferedIngestPayload::new(
-            payload,
-            BufferedIngestMetadata::without_headers(),
-            actual_utc_now(),
-        );
-        if let IngestorQuiesceIntake::Dispatch(payload) = context.quiesce.intake(0, payload, false)
-        {
-            Self::dispatch_payload(context, &payload).await;
-        }
-    }
-
-    async fn dispatch_payload(
-        context: &WebsocketDispatchContext<'_>,
-        payload: &BufferedIngestPayload,
-    ) {
-        let WebsocketDispatchContext {
-            runtime,
-            domain,
-            ingestor,
-            timestamp_source,
-            output_routes,
-            filter_where,
-            branched_senders,
-            codec,
-            metrics,
-            quiesce: _,
-        } = *context;
-        let mut collector =
-            IngestRouteCollector::new(IngestMetadataKind::Headers, payload.len(), metrics.clone());
-        if let Err(error) = runtime
-            .dispatch_raw_ingest_payload(RawIngestDispatch {
-                domain,
-                ingestor,
-                timestamp_source,
-                output_routes,
-                filter_where,
-                branched_senders,
-                codec: codec.clone(),
-                payload,
-                collector: &mut collector,
-                flush: true,
-            })
-            .await
-        {
-            runtime.events().report_error(format!(
-                "failed to dispatch websocket payload for ingestor '{}' in domain '{}': {}",
-                ingestor.as_str(),
-                domain.as_str(),
-                error
-            ));
-        }
-    }
-
+    #[cfg(test)]
     pub(in crate::runtime) fn endpoint_from_config(
         config: &[nervix_models::ClientConfigEntry],
-    ) -> ClientConfigResult<String> {
-        client_config_value(config, "endpoint", "WebSockets")
-    }
-}
-
-/// Ingests data frames that arrive on an outbound client while its handshake is running.
-struct ClientSignalingDataSink<'a, 'ctx> {
-    context: &'a WebsocketDispatchContext<'ctx>,
-}
-
-impl SignalingDataSink for ClientSignalingDataSink<'_, '_> {
-    async fn accept(&self, payload: Vec<u8>) {
-        WebsocketsIngestor::accept_payload(self.context, payload.as_slice()).await;
+    ) -> nervix_connector::ClientConfigResult<String> {
+        WebsocketSourcePlan::endpoint_from_config(config)
     }
 }
