@@ -302,7 +302,10 @@ carve-outs, lifecycle commands, and introspection.
 
 Every model-mutation batch acquires one exclusive leader-local ALTER lock for its domain before
 validation. The lock remains held through candidate planning, quiescing, persistence, schedule
-publication, rollback when required, and resume. A concurrent mutation is rejected instead of
+publication, rollback when required, and resume. Validation covers every candidate binding that
+reaches outside the registry: domain pace, VHOST TLS material, hash-map content, inferencer tensor
+metadata, and WASM module compilation. A binding that fails there rejects the batch while the models
+it would have replaced, and the node-owned state keyed by them, are still the current ones. A concurrent mutation is rejected instead of
 queued. Raft still serializes the durable domain lifecycle and schedule, while the registry's
 base-model comparison remains a final consistency check.
 

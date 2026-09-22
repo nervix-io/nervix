@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainSchedule, KafkaPartitionSchedule, ModelKind,
+    ClusterNodeName, DomainName, DomainSchedule, KafkaPartitionSchedule, Model, ModelKind,
     WasmStateGenerations,
 };
 use nonzero_ext::nonzero;
@@ -938,6 +938,71 @@ fn merge_existing_schedule_data_continues_guest_state_lifetimes() {
         existing.nodes[0].wasm_state_generations()
     );
     assert_ne!(
+        next.nodes[0].wasm_state_generations(),
+        Some(&WasmStateGenerations::first())
+    );
+}
+
+/// A rebinding publishes the same processor against another resource version, so merging it over
+/// the running schedule is where the guest state of every branch loses its previous lifetime.
+#[test]
+fn merge_existing_schedule_data_starts_a_new_lifetime_for_a_rebound_module() {
+    let domain = DomainName::parse("payments").expect("valid domain");
+    let existing = DomainSchedule::new(
+        domain.clone(),
+        vec![scheduled_node_on(
+            "counting_guest",
+            ModelKind::WasmProcessor,
+            "node-1",
+        )],
+        Vec::new(),
+    );
+    let mut rebound_node = scheduled_node_on("counting_guest", ModelKind::WasmProcessor, "node-1");
+    let Model::WasmProcessor(rebound) = rebound_node.config.as_mut() else {
+        panic!("the fixture configures a WASM processor");
+    };
+    rebound.resource_version = 2;
+    let mut next = DomainSchedule::new(domain, vec![rebound_node], Vec::new());
+
+    SessionServiceImpl::merge_existing_schedule_data(
+        &mut next,
+        Some(&existing),
+        &[node_named("node-1")],
+    );
+
+    let mut replaced = WasmStateGenerations::first();
+    replaced.begin_every_branch();
+    assert_eq!(next.nodes[0].wasm_state_generations(), Some(&replaced));
+}
+
+/// Tightened limits leave the module binding alone, so every branch keeps the guest state it has.
+#[test]
+fn merge_existing_schedule_data_keeps_lifetimes_through_a_limits_change() {
+    let domain = DomainName::parse("payments").expect("valid domain");
+    let existing = DomainSchedule::new(
+        domain.clone(),
+        vec![scheduled_node_on(
+            "counting_guest",
+            ModelKind::WasmProcessor,
+            "node-1",
+        )],
+        Vec::new(),
+    );
+    let mut tightened_node =
+        scheduled_node_on("counting_guest", ModelKind::WasmProcessor, "node-1");
+    let Model::WasmProcessor(tightened) = tightened_node.config.as_mut() else {
+        panic!("the fixture configures a WASM processor");
+    };
+    tightened.limits.max_fuel = nonzero!(500_000u64);
+    let mut next = DomainSchedule::new(domain, vec![tightened_node], Vec::new());
+
+    SessionServiceImpl::merge_existing_schedule_data(
+        &mut next,
+        Some(&existing),
+        &[node_named("node-1")],
+    );
+
+    assert_eq!(
         next.nodes[0].wasm_state_generations(),
         Some(&WasmStateGenerations::first())
     );
