@@ -70,7 +70,9 @@ consumers fan out from. A pipeline with no branching or fan-out is drawn as a si
 Edges run horizontally and vertically with rounded corners, through gutters kept clear of the
 items, so no edge ever passes under a node, a capsule, or a label. Each edge leaves and arrives at
 its own attachment point, so a node with several outputs fans out visibly rather than from one
-spot. Edge style carries meaning:
+spot. Two relations between the same pair of items stay two edges: a node that both reads a
+relay's records and looks up its materialized state draws one edge of each style, side by side.
+Edge style carries meaning:
 
 - **solid** — records flowing
 - **dashed, error tint** — a route's `ON MESSAGE ERROR` destination
@@ -89,7 +91,8 @@ per second on hover, and a pulse travelling along the edge. Where a node declare
 the same relay they are drawn as one edge, and hovering reports how many routes it stands for.
 
 Branch groups are drawn as a tinted region with a stacked outline around the part of the graph that
-runs per branch, containing exactly the items that run per branch and nothing else. The region is
+runs per branch, containing exactly the items that run per branch and nothing else. Regions of
+different branches never touch, even where they share a column. The region is
 headed with the branch name, its key fields, and how many branch instances are currently live; the
 outline thickens with that count. The ingestors and reingestors that construct the branch, and the
 emitters and reingestors that collapse it, sit on the region's border rather than inside it.
