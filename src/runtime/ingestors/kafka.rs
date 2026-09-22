@@ -364,6 +364,7 @@ impl KafkaIngestor {
                 instance_index,
                 metadata_kind: ingestor.metadata_kind,
                 buffered_intake: false,
+                flush_each_intake: false,
             });
             let shutdown = shutdown_tx.subscribe();
             let task_domain = domain.clone();

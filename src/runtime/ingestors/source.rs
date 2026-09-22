@@ -40,6 +40,7 @@ pub(super) struct BrokerSourceHostSpec {
     pub(super) instance_index: u64,
     pub(super) metadata_kind: IngestMetadataKind,
     pub(super) buffered_intake: bool,
+    pub(super) flush_each_intake: bool,
 }
 
 pub(super) struct BrokerSourceHost {
@@ -58,6 +59,7 @@ pub(super) struct BrokerSourceHost {
     instance_index: u64,
     collector: IngestRouteCollector,
     buffered_intake: bool,
+    flush_each_intake: bool,
 }
 
 impl BrokerSourceHost {
@@ -86,6 +88,7 @@ impl BrokerSourceHost {
             instance_index: spec.instance_index,
             collector,
             buffered_intake: spec.buffered_intake,
+            flush_each_intake: spec.flush_each_intake,
         })
     }
 }
@@ -209,7 +212,7 @@ impl SourceHostServices for BrokerSourceHost {
             .await
             .change_context(SourceIntakeError::Dispatch)?;
 
-        if acknowledged || collector.len() >= INGEST_GROUP_MAX_ROWS {
+        if acknowledged || self.flush_each_intake || collector.len() >= INGEST_GROUP_MAX_ROWS {
             self.runtime
                 .flush_ingest_collector(
                     &self.domain,
@@ -360,7 +363,7 @@ impl BrokerSourceHost {
             })
             .await
             .change_context(SourceIntakeError::Dispatch)?;
-        if self.collector.len() >= INGEST_GROUP_MAX_ROWS {
+        if self.flush_each_intake || self.collector.len() >= INGEST_GROUP_MAX_ROWS {
             self.flush().await?;
         }
         Ok(())
