@@ -103,6 +103,7 @@ use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
 use super::{
+    cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
     dependencies::{
         DependencyEndpoints, KAFKA_ADDR, MQTT_ADDR, NATS_ADDR, NATS_TLS_ADDR, PULSAR_ADDR,
         PULSAR_TLS_ADDR, RABBITMQ_ADDR, REDIS_ADDR, SQS_ENDPOINT, SQS_TLS_ENDPOINT,
@@ -167,6 +168,10 @@ const _: () = assert!(
 const _: () = assert!(
     DEFAULT_TEST_SHUTDOWN_TIMEOUT.as_nanos() < NODE_SHUTDOWN_LIVENESS_WATCHDOG.as_nanos(),
     "the node shutdown watchdog must outlast the default test shutdown timeout"
+);
+const _: () = assert!(
+    CLUSTER_TEARDOWN_BUDGET.as_nanos() < NODE_SHUTDOWN_LIVENESS_WATCHDOG.as_nanos(),
+    "scenario cleanup must end well before the watchdog of a node a scenario stops itself"
 );
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 const NODE_START_ATTEMPTS: usize = 8;
@@ -1259,27 +1264,14 @@ impl Cluster {
         }
     }
 
-    pub(crate) async fn shutdown_for_teardown(&mut self) -> Vec<String> {
-        let node_ids = self.nodes.keys().cloned().collect::<Vec<_>>();
-        for node_id in &node_ids {
-            if let Some(handle) = self.nodes.get_mut(node_id) {
-                handle.request_stop();
-            }
-        }
-        let mut errors = Vec::new();
-        for node_id in node_ids {
-            let handle = self
-                .nodes
-                .get_mut(&node_id)
-                .unwrap_or_else(|| panic!("unknown node '{node_id}'"));
-            if let Err(error) = handle.wait_stopped().await {
-                errors.push(format!("node '{node_id}': {error}"));
-            }
-        }
-        for node in self.nodes.values_mut() {
-            node.spec.release_ports();
-        }
-        errors
+    /// Stops every node of this cluster within the one scenario-cleanup budget and gives back the
+    /// harness state they hold.
+    ///
+    /// Cleanup follows the scenario's assertions, so it uses the harness budget rather than the
+    /// product shutdown deadlines a scenario configured: a scenario that asserts on shutdown,
+    /// drain or deadline expiry stops its nodes itself, before it reaches here.
+    pub(crate) async fn shutdown_for_teardown(&mut self) -> ClusterTeardown {
+        ClusterTeardown::stop_all(self.nodes.values_mut(), CLUSTER_TEARDOWN_BUDGET).await
     }
 
     pub(crate) async fn restart(&mut self) -> io::Result<()> {
@@ -2760,12 +2752,6 @@ impl NodeHandle {
         self.wait_stopped().await
     }
 
-    fn request_stop(&mut self) {
-        if let Some(shutdown) = &self.shutdown {
-            shutdown.request_stop();
-        }
-    }
-
     fn shutdown_watchdog_timeout(&self) -> io::Result<Duration> {
         let application_drain_timeout = if self.config.graceful_shutdown_drain {
             self.config.drain_timeout
@@ -2789,9 +2775,11 @@ impl NodeHandle {
             .max(self.config.shutdown_timeout))
     }
 
+    /// Waits for a node a scenario stopped itself, within the product shutdown deadlines that
+    /// scenario configured. Scenario cleanup uses the harness cleanup budget instead.
     async fn wait_stopped(&mut self) -> io::Result<()> {
         let shutdown_timeout = self.shutdown_watchdog_timeout()?;
-        let task_result = match self.task.wait(shutdown_timeout).await {
+        let task_result = match self.task.wait(PhaseDeadline::after(shutdown_timeout)).await {
             NodeTaskWaitOutcome::NotStarted => return Ok(()),
             NodeTaskWaitOutcome::AlreadyObserved(outcome)
             | NodeTaskWaitOutcome::Joined(outcome) => {
@@ -2885,6 +2873,29 @@ impl NodeHandle {
     fn abort(&mut self) {
         self.shutdown = None;
         self.task.abort();
+    }
+}
+
+impl TeardownNode for NodeHandle {
+    fn node_name(&self) -> String {
+        self.spec.node_id.clone()
+    }
+
+    fn request_stop(&mut self) {
+        if let Some(shutdown) = &self.shutdown {
+            shutdown.request_stop();
+        }
+    }
+
+    fn owned_task(&mut self) -> &mut OwnedNodeTask {
+        &mut self.task
+    }
+
+    fn release(&mut self) {
+        self.shutdown = None;
+        self.fault_injection
+            .unregister_consensus(&node_name(&self.spec.node_id));
+        self.spec.release_ports();
     }
 }
 
