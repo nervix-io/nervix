@@ -346,9 +346,11 @@ impl Runtime {
                     .await
                     .map_err(started)?,
             ),
-            PooledTransport::MySql => {
-                SharedClientInstance::MySql(MySqlPool::open(config, pool.bounds).await.map_err(started)?)
-            }
+            PooledTransport::MySql => SharedClientInstance::MySql(
+                MySqlPool::open(config, pool.bounds)
+                    .await
+                    .map_err(started)?,
+            ),
             PooledTransport::MongoDb => SharedClientInstance::MongoDb(
                 MongoDbClient::open(config, pool.bounds)
                     .await
