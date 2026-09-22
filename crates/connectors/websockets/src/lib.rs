@@ -10,8 +10,12 @@
 //!   routing, or another connector implementation.
 
 mod signaling;
+mod source;
 
 pub use signaling::{
     CompiledSignalingProtocol, SignalingDataSink, SignalingProtobufDescriptors,
     SignalingProtocolCompileError, WebsocketSignalingError, WebsocketSignalingSession,
+};
+pub use source::{
+    WebsocketSource, WebsocketSourceMessage, WebsocketSourcePlan, WebsocketSourcePlanError,
 };

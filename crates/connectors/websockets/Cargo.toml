@@ -9,9 +9,12 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 error-stack = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
+meticulous = { workspace = true }
+nervix-connector = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true }
 prost = { workspace = true }
@@ -21,6 +24,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
   "macros",
+  "net",
   "rt",
   "sync",
   "time",
