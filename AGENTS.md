@@ -678,9 +678,10 @@ build and the existing tests, and nothing in it changes behavior.
   instead of running the scenario test binary directly.
 - `just nspl-completion-walk` walks the NSPL completion graph and fails on any branch that cannot be
   completed by accepting the suggestions the parser offers. It is deliberately outside `just test`
-  and runs in CI after the main tests. Grammar changes that add a label must keep it passing; a new
-  finding is a defect, not something to record in its baseline. `just nspl-completion-walk-deep`
-  relaxes deduplication to reach branches the gating budget stops short of.
+  and runs in CI beside the main tests, in the job that carries the workspace-wide checks. Grammar
+  changes that add a label must keep it passing; a new finding is a defect, not something to record
+  in its baseline. `just nspl-completion-walk-deep` relaxes deduplication to reach branches the
+  gating budget stops short of.
 - Every public interface or NSPL surface change must update the relevant `docs/src` pages and the
   user-facing NSPL skill in the same change. Keep `.agents/skills/nspl/SKILL.md` and its references
   accurate for users configuring Nervix, then regenerate `docs/book` with `just book`.

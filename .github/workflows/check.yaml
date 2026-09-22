@@ -179,18 +179,13 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Setup Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt,miri
-
       - uses: bufbuild/buf-setup-action@v1
         with:
           github_token: ${{ github.token }}
       - name: Install cargo tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-hack,cargo-mutants,just,toml-cli,cargo-llvm-cov,trunk,cargo-crap,wild-linker
+          tool: just,toml-cli,cargo-llvm-cov,trunk,cargo-crap,wild-linker
 
       - name: Install Latest LLVM
         run: |
@@ -276,12 +271,6 @@ jobs:
         run: |
             just test-coverage
 
-      - name: Expiry map Miri
-        run: just test-expiry-map-miri
-
-      - name: Expiry map mutation tests
-        run: just test-expiry-map-mutants
-
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
@@ -289,19 +278,6 @@ jobs:
           fail_ci_if_error: true
           files: ./lcov.info
           use_oidc: true
-
-      # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
-      # without treating noisy shared-runner timings as a performance regression signal.
-      - name: Benchmark smoke tests
-        run: just bench --test
-
-      - name: Shuttle concurrency checks
-        run: just test-shuttle
-
-      # Runs after the main tests rather than inside them: the walk saturates every core, and its
-      # failures are about completion reachability rather than any one test.
-      - name: NSPL completion walk
-        run: just nspl-completion-walk
 
       - name: Kache stats
         continue-on-error: true
@@ -314,4 +290,147 @@ jobs:
         with:
           name: test-logs
           path: tests/logs
+          if-no-files-found: ignore
+
+  # The checks that answer for the workspace rather than for the scenario suite: undefined
+  # behaviour, mutation coverage, benchmark bodies, modeled concurrency and completion
+  # reachability. None of them reads the suite's result, so they run beside it instead of queueing
+  # behind it, and a slow one no longer pushes the suite's job toward its own timeout.
+  extra-tests:
+    name: extra-tests
+    # Fewer cores than the suite's job on purpose: this one is compilation-bound rather than
+    # concurrency-bound, most of that compilation comes back from the shared cache, and it only
+    # has to finish before the suite's job does to stay off the critical path.
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Setup Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,just,toml-cli,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      # The same toolchain and flags the other jobs build with, so their compilations are
+      # interchangeable in the shared cache rather than a second set of artifacts.
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "clang-23"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # Cheapest first, so a workspace that does not build at all is named in seconds rather than
+      # after the heavier compilations have run.
+      - name: Expiry map Miri
+        run: just test-expiry-map-miri
+
+      - name: Expiry map mutation tests
+        run: just test-expiry-map-mutants
+
+      # Criterion's test mode executes every benchmark body once, catching panics and deadlocks
+      # without treating noisy shared-runner timings as a performance regression signal.
+      - name: Benchmark smoke tests
+        run: just bench --test
+
+      - name: Shuttle concurrency checks
+        run: just test-shuttle
+
+      # The walk saturates every core, and its failures are about completion reachability rather
+      # than about any one test.
+      - name: NSPL completion walk
+        run: just nspl-completion-walk
+
+      - name: Kache stats
+        continue-on-error: true
+        if: always()
+        run: kache stats
+
+      # A modeled concurrency failure is only reproducible from the schedule that produced it, and
+      # this job is the only witness of that schedule.
+      - name: Upload Shuttle failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shuttle-failures
+          path: target/shuttle-failures
           if-no-files-found: ignore
