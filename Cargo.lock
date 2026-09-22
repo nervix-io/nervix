@@ -6579,6 +6579,7 @@ dependencies = [
  "nervix-recovery",
  "prost 0.13.5",
  "rustls",
+ "serde_json",
  "shuttle-tokio",
  "shuttle-tokio-stream",
  "strum 0.26.3",

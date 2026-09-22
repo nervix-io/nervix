@@ -238,7 +238,7 @@ impl TransactionOperationRange {
     RkyvDeserialize,
 )]
 #[serde(transparent)]
-pub struct ImpactPlanningBasis([u8; 32]);
+pub struct ImpactPlanningBasis(#[serde(with = "fingerprint_hex")] [u8; 32]);
 
 impl ImpactPlanningBasis {
     pub const fn new(fingerprint: [u8; 32]) -> Self {
@@ -247,6 +247,67 @@ impl ImpactPlanningBasis {
 
     pub const fn fingerprint(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+/// A planning basis reads as its hexadecimal fingerprint, which is how a reader compares two.
+impl std::fmt::Display for ImpactPlanningBasis {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fingerprint_hex::write(&self.0, formatter)
+    }
+}
+
+/// The written form of a 32-byte fingerprint: its lowercase hexadecimal digest.
+///
+/// A fingerprint is compared, not read, so every rendering of a report — text and JSON alike —
+/// spells it as one hexadecimal string rather than as the bytes it is made of.
+mod fingerprint_hex {
+    use serde::{Deserialize as _, Deserializer, Serializer, de::Error as _};
+
+    /// Hexadecimal digits in one fingerprint: two per byte.
+    const DIGITS: usize = 64;
+
+    pub(super) fn write(
+        fingerprint: &[u8; 32],
+        output: &mut impl std::fmt::Write,
+    ) -> std::fmt::Result {
+        for byte in fingerprint {
+            write!(output, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn serialize<S: Serializer>(
+        fingerprint: &[u8; 32],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut hex = String::with_capacity(DIGITS);
+        write(fingerprint, &mut hex).map_err(|_| {
+            <S::Error as serde::ser::Error>::custom("a fingerprint could not be written as text")
+        })?;
+        serializer.serialize_str(&hex)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<[u8; 32], D::Error> {
+        let hex = String::deserialize(deserializer)?;
+        if hex.len() != DIGITS {
+            return Err(D::Error::invalid_length(
+                hex.len(),
+                &"a fingerprint of 64 hexadecimal digits",
+            ));
+        }
+        // The length check above leaves no digit outside a pair.
+        let (pairs, _unpaired) = hex.as_bytes().as_chunks::<2>();
+        let mut fingerprint = [0_u8; 32];
+        for (byte, digits) in fingerprint.iter_mut().zip(pairs) {
+            let digits = std::str::from_utf8(digits.as_slice())
+                .map_err(|_| D::Error::custom("a fingerprint holds only hexadecimal digits"))?;
+            *byte = u8::from_str_radix(digits, 16)
+                .map_err(|_| D::Error::custom("a fingerprint holds only hexadecimal digits"))?;
+        }
+        Ok(fingerprint)
     }
 }
 
@@ -445,8 +506,10 @@ pub struct ImpactDiagnostic {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
 )]
 #[serde(tag = "status", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ImpactReportCompleteness {
     Complete,
     Incomplete { diagnostics: Vec<ImpactDiagnostic> },
@@ -541,7 +604,7 @@ impl ImpactAttribution {
 )]
 #[serde(transparent)]
 #[rkyv(derive(PartialEq, Eq, PartialOrd, Ord))]
-pub struct BranchKeyFingerprint([u8; 32]);
+pub struct BranchKeyFingerprint(#[serde(with = "fingerprint_hex")] [u8; 32]);
 
 impl BranchKeyFingerprint {
     pub const fn new(fingerprint: [u8; 32]) -> Self {
@@ -567,8 +630,10 @@ impl BranchKeyFingerprint {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConcreteBranchCoverage {
     /// Every concrete execution of the logical node participates. This is used when the node's
     /// own configuration already carries its declared branch identity.
@@ -802,8 +867,10 @@ impl QuiesceSubgraph {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum PauseRequirement {
     NoPause,
     Subgraph { scope: QuiesceSubgraph },
@@ -881,8 +948,10 @@ fn ensure_same_impact_domain(
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionOperation {
     CreateConfiguration {
         domain: DomainName,
@@ -947,8 +1016,10 @@ impl TransactionOperation {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum OperationImpactReason {
     Configuration {
         node: NodeRef,
@@ -1034,6 +1105,13 @@ pub struct ImpactTopology {
     pub edges: CanonicalImpactSet<ImpactTopologyEdge>,
 }
 
+impl ImpactTopology {
+    /// Whether this side of the topology holds no node and no edge.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty()
+    }
+}
+
 /// The topology immediately before and immediately after an execution step.
 #[derive(
     Debug,
@@ -1064,8 +1142,10 @@ pub struct AffectedTopology {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ConfigurationTransition {
     Created { node: NodeRef },
     Changed { node: NodeRef },
@@ -1410,8 +1490,10 @@ pub struct PlannedExecutionStepImpact {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    AsRefStr,
 )]
 #[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum QuiescenceOutcome {
     Requested,
     Confirmed,
@@ -1431,9 +1513,19 @@ pub struct ActualQuiescence {
 }
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    AsRefStr,
 )]
 #[serde(tag = "status", rename_all = "SCREAMING_SNAKE_CASE")]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExecutionStepOutcome {
     Unattempted,
     Applying,
@@ -2089,6 +2181,35 @@ mod impact_report_tests {
         .assured("the incomplete test report names what remains unresolved");
         assert!(!completeness.is_complete());
         assert_eq!(completeness.diagnostics()[0].operation, Some(operation));
+    }
+
+    #[test]
+    fn fingerprints_read_as_hexadecimal_and_reject_anything_else() {
+        let basis = ImpactPlanningBasis::new([0xab; 32]);
+        assert_eq!(basis.to_string(), "ab".repeat(32));
+        let json =
+            serde_json::to_string(&basis).assured("a planning basis has a JSON representation");
+        assert_eq!(json, format!("\"{}\"", "ab".repeat(32)));
+        let restored: ImpactPlanningBasis =
+            serde_json::from_str(&json).assured("the JSON was produced from a planning basis");
+        assert_eq!(restored, basis);
+
+        let key = BranchKeyFingerprint::new([0x0f; 32]);
+        let json = serde_json::to_string(&key).assured("a branch key has a JSON representation");
+        assert_eq!(json, format!("\"{}\"", "0f".repeat(32)));
+
+        for malformed in [
+            "\"abab\"".to_string(),
+            format!("\"{}\"", "zz".repeat(32)),
+            format!("\"{}\"", "\u{e9}".repeat(32)),
+            format!("\"a{}a\"", "\u{e9}".repeat(31)),
+            "[1, 2, 3]".to_string(),
+        ] {
+            assert!(
+                serde_json::from_str::<ImpactPlanningBasis>(&malformed).is_err(),
+                "{malformed} is not a fingerprint"
+            );
+        }
     }
 
     #[test]
