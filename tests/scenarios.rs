@@ -29,6 +29,7 @@ use arrow_schema::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cucumber::{
     World as _, WriterExt,
+    event::ScenarioFinished,
     gherkin::Step,
     given, then, when,
     writer::{self, Stats as _},
@@ -101,6 +102,7 @@ use crate::common::{
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
     phase_deadline::{BeforeDeadline, PhaseDeadline},
+    scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioPhase},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -149,6 +151,43 @@ enum ScenarioExecutionPermit {
     },
 }
 
+/// What a scenario's own steps did, as its after hook sees it.
+///
+/// It is the result of the scenario body alone. Everything the after hook does afterwards is
+/// cleanup, and cleanup reports itself separately, so a log line never blames a scenario for what
+/// its teardown found.
+#[derive(Debug)]
+enum ScenarioBodyResult {
+    Passed,
+    Skipped,
+    BeforeHookFailed,
+    StepFailed(String),
+}
+
+impl From<&ScenarioFinished> for ScenarioBodyResult {
+    fn from(finished: &ScenarioFinished) -> Self {
+        match finished {
+            ScenarioFinished::StepPassed => Self::Passed,
+            ScenarioFinished::StepSkipped => Self::Skipped,
+            ScenarioFinished::BeforeHookFailed(_) => Self::BeforeHookFailed,
+            ScenarioFinished::StepFailed(_, _, error) => {
+                Self::StepFailed(error.to_string().replace('\n', "\\n"))
+            }
+        }
+    }
+}
+
+impl fmt::Display for ScenarioBodyResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Passed => formatter.write_str("passed"),
+            Self::Skipped => formatter.write_str("skipped"),
+            Self::BeforeHookFailed => formatter.write_str("before hook failed"),
+            Self::StepFailed(error) => write!(formatter, "step failed: {error}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DurableCatchUpObservation {
     follower: String,
@@ -184,6 +223,9 @@ struct FollowerCommandsMemoryObservation {
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     scenario_execution_permit: Option<ScenarioExecutionPermit>,
+    /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
+    /// the registry sees the work in flight rather than the last work that finished.
+    active_scenario: Option<ActiveScenarioRegistration>,
     cluster: Option<Cluster>,
     active_session: Option<TestSession>,
     active_session_node: Option<String>,
@@ -362,6 +404,23 @@ impl fmt::Debug for ScenarioWorld {
 }
 
 impl ScenarioWorld {
+    /// Publishes the phase this scenario is entering and writes the marker that names it.
+    ///
+    /// The marker is written as the phase begins, so a scenario whose log ends at one of them is a
+    /// scenario still inside that phase.
+    fn enter_phase(&self, phase: ScenarioPhase, detail: &str) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.enter(phase);
+        let marker = format!(
+            "scenario {phase}: {} age={:?} {detail}",
+            published.identity,
+            published.age()
+        );
+        append_cucumber_log_line(marker.trim_end());
+    }
+
     fn stop_durable_catch_up_work(&mut self) {
         if let Some(writer) = self.durable_catch_up_writer.take() {
             writer.cancellation.cancel();
@@ -19739,6 +19798,12 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                 .chain(&feature.tags)
                 .any(|tag| tag == "exclusive");
             Box::pin(async move {
+                // Published before the permits below, so a scenario the suite has taken up is
+                // visible while it waits for them rather than only once it runs.
+                world.active_scenario = Some(ActiveScenarioRegistration::start(
+                    &feature_name,
+                    &scenario_name,
+                ));
                 let wasm_state_reset_scenario_permit =
                     if feature_name == WASM_STATE_RESET_FEATURE_NAME {
                         // Every reset scenario starts a cluster and compiles WASM. Running more
@@ -19775,9 +19840,6 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                 };
                 world.wasm_state_reset_scenario_permit = wasm_state_reset_scenario_permit;
                 world.scenario_execution_permit = Some(execution_permit);
-                append_cucumber_log_line(&format!(
-                    "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
-                ));
                 if WEB_CONSOLE_FEATURE_NAMES
                     .iter()
                     .any(|name| *name == feature_name)
@@ -19797,50 +19859,92 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                             .expect("web console scenario semaphore must remain open"),
                     );
                 }
+                world.enter_phase(ScenarioPhase::Body, "");
             })
         })
-        .after(|_feature, _rule, _scenario, _ev, world| {
+        .after(|_feature, _rule, _scenario, finished, world| {
+            let body = ScenarioBodyResult::from(finished);
             Box::pin(async move {
-                append_cucumber_log_line("scenario finished");
-                if let Some(world) = world {
-                    world.stop_durable_catch_up_work();
-                    world.fault_injection.release_all_health_responses();
-                    world.fault_injection.release_all_domain_clock_progress();
-                    world.fault_injection.release_all_command_pauses();
-                    append_cluster_statuses(world, "scenario teardown").await;
-                    append_cucumber_log_line(&format!(
-                        "scenario context: domain={} test_id={} last_command_error={:?} \
-                         last_command_output={:?} last_server_error={:?} \
-                         last_subscription_payload={:?} last_broker_payload={:?}",
-                        world.domain,
-                        world.test_id,
-                        world.last_command_error,
-                        world.last_command_output,
-                        world.last_server_error,
-                        world.last_subscription_payload,
-                        world.last_broker_payload
-                    ));
-                    world.server_process_http_load = None;
-                    world.held_resource_upload = None;
-                    world.server_process = None;
-                    world.broker_observer = None;
-                    close_browser(world).await;
-                    world.active_session = None;
-                    world.active_session_node = None;
-                    world.active_session_has_subscription = false;
-                    world.last_server_error = None;
-                    if let Some(mut cluster) = world.cluster.take() {
-                        let errors = cluster.shutdown_for_teardown().await;
-                        for error in errors {
+                let Some(world) = world else {
+                    return;
+                };
+                world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
+
+                world.enter_phase(ScenarioPhase::TeardownStarted, "");
+                world.stop_durable_catch_up_work();
+                world.fault_injection.release_all_health_responses();
+                world.fault_injection.release_all_domain_clock_progress();
+                world.fault_injection.release_all_command_pauses();
+
+                world.enter_phase(ScenarioPhase::Diagnostics, "");
+                // Scenarios run many at a time, so a status line says which scenario left it.
+                let statuses = match &world.active_scenario {
+                    Some(registration) => format!("scenario teardown {}", registration.identity()),
+                    None => "scenario teardown".to_string(),
+                };
+                append_cluster_statuses(world, &statuses).await;
+                append_cucumber_log_line(&format!(
+                    "scenario context: domain={} test_id={} last_command_error={:?} \
+                     last_command_output={:?} last_server_error={:?} \
+                     last_subscription_payload={:?} last_broker_payload={:?}",
+                    world.domain,
+                    world.test_id,
+                    world.last_command_error,
+                    world.last_command_output,
+                    world.last_server_error,
+                    world.last_subscription_payload,
+                    world.last_broker_payload
+                ));
+
+                world.enter_phase(ScenarioPhase::Stopping, "");
+                world.server_process_http_load = None;
+                world.held_resource_upload = None;
+                world.server_process = None;
+                world.broker_observer = None;
+                close_browser(world).await;
+                world.active_session = None;
+                world.active_session_node = None;
+                world.active_session_has_subscription = false;
+                world.last_server_error = None;
+                let cluster_cleanup = match world.cluster.take() {
+                    Some(mut cluster) => {
+                        let teardown = cluster.shutdown_for_teardown().await;
+                        for panicked in teardown.panics() {
                             append_cucumber_log_line(&format!(
-                                "cluster teardown forced node shutdown after error: {error}"
+                                "scenario teardown failed: {panicked}"
                             ));
                         }
+                        for forced in teardown.forced() {
+                            append_cucumber_log_line(&format!("scenario cleanup forced: {forced}"));
+                        }
+                        if teardown.was_forced() {
+                            // Cleanup that has to take a node apart is usually cleanup that ran
+                            // beside work heavy enough to starve it, so name what else was live.
+                            for active in ActiveScenario::active() {
+                                append_cucumber_log_line(&format!(
+                                    "scenario live during forced cleanup: {active}"
+                                ));
+                            }
+                        }
+                        // Dropping the cluster gives back the temporary storage its nodes wrote to.
+                        drop(cluster);
+                        format!("teardown={teardown}")
                     }
-                    world.web_console_scenario_permit = None;
-                    world.wasm_state_reset_scenario_permit = None;
-                    world.scenario_execution_permit = None;
-                }
+                    None => "teardown=no cluster".to_string(),
+                };
+                // The faults a scenario injected into the network outlast its nodes otherwise: a
+                // proxy standing in front of a node and a socket held silently open against it are
+                // harness state, and they are given back once the nodes they fronted have ended.
+                world.stallable_tcp_proxies.clear();
+                world.silent_interconnect_peers.clear();
+                world.web_console_scenario_permit = None;
+                world.wasm_state_reset_scenario_permit = None;
+                world.scenario_execution_permit = None;
+
+                world.enter_phase(
+                    ScenarioPhase::Finished,
+                    &format!("body={body} {cluster_cleanup}"),
+                );
             })
         })
         .with_writer(writer)

@@ -9,9 +9,14 @@ A resource is an uploaded directory tree that is stored and replicated across th
 - CSV lookup tables
 - TLS certificate bundles
 
+This chapter describes the NSPL statements and their observable behavior. See
+[Resource Versions And Bindings](./resource-versions.md) for the architecture behind them: how a
+version is installed and completed on every node, what each binding loads and when, and how a
+rebinding is validated, classified, and applied.
+
 ## Domain Ownership
 
-A resource belongs to the domain it was created in, like every other entity. `CREATE RESOURCE`, `UPLOAD RESOURCE`, and `DESCRIBE RESOURCE` all act on the session's selected domain, and a model resolves a resource name only against versions published in its own domain.
+A resource belongs to the domain it was created in, like every other entity. `CREATE RESOURCE`, `UPLOAD RESOURCE`, and `DESCRIBE RESOURCE` all act on the session's selected domain, and a model resolves a resource name only against versions completed in its own domain.
 
 The same resource name in two domains is two independent resources: they have separate version sequences, separate stored content, and separate replica state. Referring to a name that was never created in the selected domain fails with `resource '<name>' does not exist`, even when another domain has it.
 
@@ -54,8 +59,7 @@ Its `usages` section lists every model currently bound to the resource and its p
 
 - content checksums
 - total file count and size
-- the terminal upload outcome
-- per-incarnation replica state and installation diagnostics
+- each node's replica state, process incarnation, and installation diagnostics
 - the models pinned to that specific version
 
 Descriptions are observations. They are useful for diagnosis and recovery visibility, but a caller
@@ -107,10 +111,10 @@ level, and one sorted `from`/`to` line per selected model.
 
 ```text
 rebound 2 of 3 usage(s) of resource 'fraud_model' to version 3 (latest)
-quiesce level: ENTITY_PAUSE
+quiesce level: DOMAIN_PAUSE
+- kind=client name=model_store from=3 to=3 unchanged
 - kind=inferencer name=score_model from=1 to=3
 - kind=hash_map name=scores_by_id from=2 to=3
-- kind=client name=model_store from=3 to=3 unchanged
 ```
 
 Rotate a resource by uploading the replacement first and then moving its usages. The upload must
@@ -126,21 +130,22 @@ The rebinding runs at the level of the usages it moves. Rotating a VHOST certifi
 established connections keep their session, new connections present the new certificate, and
 ingestion does not pause. The refresh also applies while the domain is stopped. An inferencer or
 WASM processor usage pauses only that entity, and a protobuf codec, signaling protocol, hash map, or
-client mount usage pauses the domain. If any node's listener cannot install the new certificate,
-the rebinding fails; when none of its usages paused, as when it moves only VHOSTs, every usage keeps
-its previous version.
+client mount usage pauses the domain. A WASM processor moved to another version starts every branch
+without guest state. If any node's listener cannot install the new certificate, the rebinding
+fails; when none of its usages paused, as when it moves only VHOSTs, every usage keeps its previous
+version.
 
 ## Upload Format
 
-The client builds a deterministic tar archive, declares its exact size, and sends it in bounded chunks. Internode replication also streams bounded chunks with HTTP/2 flow control; neither endpoint retains the complete archive in memory. A failed transfer restarts from the beginning on its next reconciliation attempt.
+The client builds a deterministic tar archive of the directory's subdirectories and regular files,
+skipping symbolic links and other special files, declares its exact size, and sends it in bounded
+chunks. Every node verifies the archive against its digest and the per-version limits below before
+it atomically installs the version, so a failed install leaves no partial version behind. An upload
+never changes the version an existing binding uses. See
+[Resource Versions And Bindings](./resource-versions.md#version-lifecycle) for installation,
+transfer between nodes, and completion.
 
-On each node, Nervix verifies the archive digest, enforces the staged-archive quota, then enforces
-extracted-byte and file-count quotas from tar headers before writing each entry. It writes into a
-staging tree, verifies the manifest, and atomically promotes the complete version. Failed installs
-remove their staging trees, and startup removes staging trees abandoned by an interrupted process.
-An upload never changes the version an existing binding uses.
-
-The per-version limits are configured with `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES`, and `NERVIX_RESOURCE_MAX_FILE_COUNT`. Their defaults are 4 GiB, 16 GiB, and 1,000,000 files.
+The per-version limits are configured with `NERVIX_RESOURCE_MAX_ARCHIVE_BYTES`, `NERVIX_RESOURCE_MAX_EXTRACTED_BYTES`, and `NERVIX_RESOURCE_MAX_FILE_COUNT`. Their defaults are 4 GiB, 16 GiB, and 1,000,000 files. Every node enforces them for each version it installs.
 
 ## TLS Bundles
 

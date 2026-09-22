@@ -513,6 +513,8 @@ length. Consensus snapshots use bounded begin, chunk, and finish operations on t
 bulk class. Receivers stage and validate the owning artifact while releasing HTTP/2 credit chunk by
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
 the active decoded section are resident at once.
+[Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
+node fetches a resource archive and how it verifies and records the fetched version.
 
 A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
@@ -616,6 +618,8 @@ incarnation pending, and it is asked again every 250 milliseconds until the comm
 deadline. A failed installation ends the wait at once, so the command reports the failing node
 without waiting for the deadline. The request reads installation state and changes nothing, so a
 repeated or late request is harmless.
+[The `DYNAMIC` TLS Refresh](./resource-versions.md#the-dynamic-tls-refresh) defines what every
+listener presents and how a failed installation fails or rolls back the command.
 
 ## Application Health And Availability
 
