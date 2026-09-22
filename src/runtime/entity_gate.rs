@@ -1,4 +1,14 @@
+// A drain reads one node's quiesce counts one after another while work moves between them, so
+// `QuiesceCount` is Shuttle's atomic under the Shuttle feature: a check needs a scheduling point at
+// every read and every adjustment to explore what a drain observes mid-transfer. The node's other
+// counters stay on the standard library's atomics, because they are shared with maps this module
+// does not own.
+#[cfg(not(feature = "shuttle"))]
+use std::sync::atomic::AtomicUsize as QuiesceCount;
+
 use parking_lot::Mutex;
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::AtomicUsize as QuiesceCount;
 
 use super::*;
 
@@ -264,52 +274,169 @@ pub(super) struct QuiescedIngestorHold {
     pub(super) control: Arc<IngestorQuiesceControl>,
 }
 
+/// One node's quiesce accounting.
+///
+/// A drain reads these counts while work moves between the kinds of work the node holds, so each
+/// total it reads is a counter of its own rather than a sum taken across several. A sum can miss an
+/// item that is between two counters at the moment they are read, and a drain that misses the last
+/// item reports a node holding no work while it still holds one.
 #[derive(Debug, Default)]
 pub(super) struct NodeQuiesceCounters {
-    pub(super) mailbox_and_in_flight: AtomicUsize,
-    pub(super) collected_inputs: AtomicUsize,
-    pub(super) pending_materialized: AtomicUsize,
-    pub(super) output_buffers: AtomicUsize,
-    pub(super) force_flushes: AtomicUsize,
+    /// Every work item this node holds in memory.
+    outstanding: QuiesceCount,
+    /// Everything in `outstanding` apart from messages parked on `REQUIRED WAIT` and outstanding
+    /// force-flush obligations, which a local drain weighs on their own.
+    admitted: QuiesceCount,
+    /// Messages parked on `REQUIRED WAIT`, which a drain that ran out of time reports separately.
+    parked: QuiesceCount,
+    /// Force-flush obligations this node has not completed, reported the same way.
+    force_flushes: QuiesceCount,
+}
+
+/// What one publisher of processor depths contributes to its node's quiesce accounting.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct NodeQuiesceContribution {
+    /// Work items the node has admitted and has to finish.
+    admitted: usize,
+    /// Messages parked on required materialized state.
+    parked: usize,
+}
+
+impl NodeQuiesceContribution {
+    fn total(self) -> usize {
+        self.admitted
+            .checked_add(self.parked)
+            .assured("both counts total work items this node already holds in memory")
+    }
+}
+
+impl From<BranchQuiesceDepths> for NodeQuiesceContribution {
+    fn from(depths: BranchQuiesceDepths) -> Self {
+        Self {
+            admitted: depths
+                .collected_inputs
+                .checked_add(depths.output_buffers)
+                .assured("both counts total batches this processor already holds in memory"),
+            parked: depths.pending_materialized,
+        }
+    }
 }
 
 impl NodeQuiesceCounters {
     pub(super) fn outstanding_work(&self) -> usize {
-        [
-            self.mailbox_and_in_flight.load(Ordering::Acquire),
-            self.collected_inputs.load(Ordering::Acquire),
-            self.pending_materialized.load(Ordering::Acquire),
-            self.output_buffers.load(Ordering::Acquire),
-            self.force_flushes.load(Ordering::Acquire),
-        ]
-        .into_iter()
-        .try_fold(0_usize, usize::checked_add)
-        .assured("every count totals work items this node already holds in memory")
+        self.outstanding.load(Ordering::Acquire)
     }
 
     /// The admitted work this node holds, apart from messages parked on `REQUIRED WAIT` and
     /// outstanding force-flush obligations, which a local drain weighs on their own.
     pub(super) fn admitted_work(&self) -> usize {
-        [
-            self.mailbox_and_in_flight.load(Ordering::Acquire),
-            self.collected_inputs.load(Ordering::Acquire),
-            self.output_buffers.load(Ordering::Acquire),
-        ]
-        .into_iter()
-        .try_fold(0_usize, usize::checked_add)
-        .assured("every count totals work items this node already holds in memory")
+        self.admitted.load(Ordering::Acquire)
+    }
+
+    /// Messages this node holds parked on required materialized state.
+    pub(super) fn parked_work(&self) -> usize {
+        self.parked.load(Ordering::Acquire)
+    }
+
+    /// Force-flush obligations this node has taken on and not completed.
+    pub(super) fn force_flush_obligations(&self) -> usize {
+        self.force_flushes.load(Ordering::Acquire)
     }
 
     pub(super) fn outstanding_work_for(&self, purpose: EntityGatePurpose) -> usize {
-        let outstanding = self.outstanding_work();
         if purpose == EntityGatePurpose::OwnershipHandoff {
-            // The counters are read one at a time, so a materialized wait resolved between the
-            // two loads can leave the subtrahend above the total. An ownership handoff that
-            // observes that raced pair has no non-materialized work left to wait for.
-            outstanding.saturating_sub(self.pending_materialized.load(Ordering::Acquire))
-        } else {
-            outstanding
+            // An ownership handoff carries the parked messages to the node that takes the entity
+            // over, so it waits only for the work that has to finish here. Neither count exchanges
+            // items with the other, so reading one after the other cannot miss one between them.
+            return self
+                .admitted_work()
+                .checked_add(self.force_flush_obligations())
+                .assured("both counts total work items this node already holds in memory");
         }
+        self.outstanding_work()
+    }
+
+    /// Counts `items` of work this node has admitted.
+    pub(super) fn admit(&self, items: usize) {
+        self.outstanding.fetch_add(items, Ordering::AcqRel);
+        self.admitted.fetch_add(items, Ordering::AcqRel);
+    }
+
+    /// Withdraws `items` of admitted work this node has finished.
+    pub(super) fn withdraw_admitted(&self, items: usize) {
+        self.admitted.fetch_sub(items, Ordering::AcqRel);
+        self.outstanding.fetch_sub(items, Ordering::AcqRel);
+    }
+
+    /// Parks `items` of admitted work on required materialized state, which leaves the node
+    /// holding them and a local drain no longer waiting for them.
+    fn park(&self, items: usize) {
+        self.parked.fetch_add(items, Ordering::AcqRel);
+        self.admitted.fetch_sub(items, Ordering::AcqRel);
+    }
+
+    /// Returns `items` parked on required materialized state to admitted work.
+    fn resume(&self, items: usize) {
+        self.admitted.fetch_add(items, Ordering::AcqRel);
+        self.parked.fetch_sub(items, Ordering::AcqRel);
+    }
+
+    /// Withdraws `items` this node parked on required materialized state and will not resume.
+    fn withdraw_parked(&self, items: usize) {
+        self.parked.fetch_sub(items, Ordering::AcqRel);
+        self.outstanding.fetch_sub(items, Ordering::AcqRel);
+    }
+
+    /// Counts one force-flush obligation this node has taken on.
+    pub(super) fn begin_force_flush_obligation(&self) {
+        self.outstanding.fetch_add(1, Ordering::AcqRel);
+        self.force_flushes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Withdraws one force-flush obligation, answering how many this node held before it.
+    pub(super) fn complete_force_flush_obligation(&self) -> usize {
+        let held = self.force_flushes.fetch_sub(1, Ordering::AcqRel);
+        self.outstanding.fetch_sub(1, Ordering::AcqRel);
+        held
+    }
+
+    /// Replaces `previous` with `next` as one publisher's contribution to these counts.
+    ///
+    /// Every count that rises is raised before any count falls, so a drain that reads while the
+    /// replacement is underway sees at least the work the publisher holds and never less.
+    fn replace_contribution(
+        &self,
+        previous: NodeQuiesceContribution,
+        next: NodeQuiesceContribution,
+    ) {
+        let held = previous.total();
+        let holding = next.total();
+        Self::raise(&self.outstanding, held, holding);
+        Self::raise(&self.admitted, previous.admitted, next.admitted);
+        Self::raise(&self.parked, previous.parked, next.parked);
+        Self::lower(&self.admitted, previous.admitted, next.admitted);
+        Self::lower(&self.parked, previous.parked, next.parked);
+        Self::lower(&self.outstanding, held, holding);
+    }
+
+    fn raise(count: &QuiesceCount, previous: usize, next: usize) {
+        if next <= previous {
+            return;
+        }
+        let rise = next
+            .checked_sub(previous)
+            .verified("the branch above returned unless next is above previous");
+        count.fetch_add(rise, Ordering::AcqRel);
+    }
+
+    fn lower(count: &QuiesceCount, previous: usize, next: usize) {
+        if next >= previous {
+            return;
+        }
+        let fall = previous
+            .checked_sub(next)
+            .verified("the branch above returned unless next is below previous");
+        count.fetch_sub(fall, Ordering::AcqRel);
     }
 }
 
@@ -320,9 +447,7 @@ pub(super) struct NodeQuiesceWorkGuard {
 
 impl NodeQuiesceWorkGuard {
     pub(super) fn begin(counters: Arc<NodeQuiesceCounters>) -> Self {
-        counters
-            .mailbox_and_in_flight
-            .fetch_add(1, Ordering::AcqRel);
+        counters.admit(1);
         Self {
             counters,
             required_materialized_wait: false,
@@ -333,12 +458,7 @@ impl NodeQuiesceWorkGuard {
         if self.required_materialized_wait {
             return;
         }
-        self.counters
-            .pending_materialized
-            .fetch_add(1, Ordering::AcqRel);
-        self.counters
-            .mailbox_and_in_flight
-            .fetch_sub(1, Ordering::AcqRel);
+        self.counters.park(1);
         self.required_materialized_wait = true;
     }
 
@@ -346,24 +466,18 @@ impl NodeQuiesceWorkGuard {
         if !self.required_materialized_wait {
             return;
         }
-        self.counters
-            .mailbox_and_in_flight
-            .fetch_add(1, Ordering::AcqRel);
-        self.counters
-            .pending_materialized
-            .fetch_sub(1, Ordering::AcqRel);
+        self.counters.resume(1);
         self.required_materialized_wait = false;
     }
 }
 
 impl Drop for NodeQuiesceWorkGuard {
     fn drop(&mut self) {
-        let counter = if self.required_materialized_wait {
-            &self.counters.pending_materialized
-        } else {
-            &self.counters.mailbox_and_in_flight
-        };
-        counter.fetch_sub(1, Ordering::AcqRel);
+        if self.required_materialized_wait {
+            self.counters.withdraw_parked(1);
+            return;
+        }
+        self.counters.withdraw_admitted(1);
     }
 }
 
@@ -395,7 +509,7 @@ impl OutputBufferQuiesceGauge {
             .output_buffers
             .checked_add(1)
             .assured("the count cannot exceed the batches this task holds in memory");
-        self.counters.output_buffers.fetch_add(1, Ordering::AcqRel);
+        self.counters.admit(1);
     }
 
     pub(super) fn remove_batches(&mut self, count: usize) {
@@ -403,30 +517,24 @@ impl OutputBufferQuiesceGauge {
             .output_buffers
             .checked_sub(count)
             .verified("only batches counted when they entered this buffer can be removed");
-        self.counters
-            .output_buffers
-            .fetch_sub(count, Ordering::AcqRel);
+        self.counters.withdraw_admitted(count);
     }
 }
 
 impl Drop for OutputBufferQuiesceGauge {
     fn drop(&mut self) {
-        self.counters
-            .output_buffers
-            .fetch_sub(self.output_buffers, Ordering::AcqRel);
+        self.counters.withdraw_admitted(self.output_buffers);
     }
 }
 
 pub(super) struct BranchQuiesceGauges {
-    pub(super) counters: Arc<NodeQuiesceCounters>,
-    pub(super) collected_inputs: usize,
-    pub(super) pending_materialized: usize,
-    pub(super) output_buffers: usize,
+    counters: Arc<NodeQuiesceCounters>,
+    published: NodeQuiesceContribution,
 }
 
 /// The three depths a processor contributes to its node's quiesce accounting, read together so
 /// one observation reports a single consistent view of the processor.
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub(super) struct BranchQuiesceDepths {
     pub(super) collected_inputs: usize,
     pub(super) pending_materialized: usize,
@@ -437,9 +545,7 @@ impl BranchQuiesceGauges {
     pub(super) fn new(counters: Arc<NodeQuiesceCounters>) -> Self {
         Self {
             counters,
-            collected_inputs: 0,
-            pending_materialized: 0,
-            output_buffers: 0,
+            published: NodeQuiesceContribution::default(),
         }
     }
 
@@ -462,44 +568,27 @@ impl BranchQuiesceGauges {
             },
             None => BranchQuiesceDepths::default(),
         };
-        Self::replace_gauge(
-            &self.counters.collected_inputs,
-            &mut self.collected_inputs,
-            depths.collected_inputs,
-        );
-        Self::replace_gauge(
-            &self.counters.pending_materialized,
-            &mut self.pending_materialized,
-            depths.pending_materialized,
-        );
-        Self::replace_gauge(
-            &self.counters.output_buffers,
-            &mut self.output_buffers,
-            depths.output_buffers,
-        );
+        self.publish(depths);
     }
 
-    pub(super) fn replace_gauge(counter: &AtomicUsize, current: &mut usize, next: usize) {
-        if next > *current {
-            counter.fetch_add(next - *current, Ordering::AcqRel);
-        } else if next < *current {
-            counter.fetch_sub(*current - next, Ordering::AcqRel);
-        }
-        *current = next;
+    /// Replaces this processor's contribution to its node's quiesce accounting with `depths`.
+    ///
+    /// The depths are published together because a batch that left an input collector for an
+    /// output buffer is admitted work throughout the move, and one that left for the materialized
+    /// queue is work the node holds throughout it. Publishing each depth on its own would open a
+    /// gap in the totals a drain reads.
+    pub(super) fn publish(&mut self, depths: BranchQuiesceDepths) {
+        let publishing = NodeQuiesceContribution::from(depths);
+        self.counters
+            .replace_contribution(self.published, publishing);
+        self.published = publishing;
     }
 }
 
 impl Drop for BranchQuiesceGauges {
     fn drop(&mut self) {
         self.counters
-            .collected_inputs
-            .fetch_sub(self.collected_inputs, Ordering::AcqRel);
-        self.counters
-            .pending_materialized
-            .fetch_sub(self.pending_materialized, Ordering::AcqRel);
-        self.counters
-            .output_buffers
-            .fetch_sub(self.output_buffers, Ordering::AcqRel);
+            .replace_contribution(self.published, NodeQuiesceContribution::default());
     }
 }
 
@@ -527,6 +616,64 @@ impl EntityGateHold {
 impl Drop for EntityGateHold {
     fn drop(&mut self) {
         self.release_all();
+    }
+}
+
+/// Watches one entity's ownership-handoff freeze for a task that must not publish while it is held.
+///
+/// The watch registers for the next freeze change before it reads the freeze, because a release
+/// that lands between a read and a registration wakes nothing: the waiter did not exist yet. A task
+/// that missed one keeps a stale freeze, and a stale freeze disables exactly the arms that would
+/// wake it again, so its force-flush obligation can outlive the handoff that raised it.
+pub(in crate::runtime) struct OwnershipHandoffFreezeWatch {
+    frozen_entities: Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
+    changed: Arc<Notify>,
+    entity: DomainNodeRef,
+}
+
+/// One observation of an entity's ownership-handoff freeze, with the wait that outlives it.
+pub(in crate::runtime) struct OwnershipHandoffFreeze<'watch> {
+    frozen: bool,
+    changed: tokio::sync::futures::Notified<'watch>,
+}
+
+impl OwnershipHandoffFreezeWatch {
+    pub(in crate::runtime) fn new(runtime: &Runtime, entity: DomainNodeRef) -> Self {
+        Self::over(
+            runtime.inner.frozen_ownership_handoff_entities.clone(),
+            runtime.inner.ownership_handoff_freeze_changed.clone(),
+            entity,
+        )
+    }
+
+    fn over(
+        frozen_entities: Arc<DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>>,
+        changed: Arc<Notify>,
+        entity: DomainNodeRef,
+    ) -> Self {
+        Self {
+            frozen_entities,
+            changed,
+            entity,
+        }
+    }
+
+    /// One observation of the entity's freeze, with its wait registered before the read.
+    pub(in crate::runtime) fn observe(&self) -> OwnershipHandoffFreeze<'_> {
+        let changed = self.changed.notified();
+        let frozen = self.frozen_entities.contains_key(&self.entity);
+        OwnershipHandoffFreeze { frozen, changed }
+    }
+}
+
+impl<'watch> OwnershipHandoffFreeze<'watch> {
+    pub(in crate::runtime) fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+
+    /// The wait for the next freeze change, registered before the freeze above was read.
+    pub(in crate::runtime) fn changed(self) -> tokio::sync::futures::Notified<'watch> {
+        self.changed
     }
 }
 
@@ -981,6 +1128,8 @@ impl Runtime {
         hold: EntityAlterHold,
     ) {
         if hold.purpose == EntityGatePurpose::OwnershipHandoff {
+            // The freeze is lifted before the wake, because a waiter that rereads a freeze this
+            // release has not lifted yet parks again on a change that has already happened.
             for entity in &hold.affected_entities {
                 let key =
                     DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
@@ -2058,3 +2207,7 @@ mod tests {
         assert_eq!(emitter.outstanding_work(), 0);
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "entity_gate_shuttle_tests.rs"]
+mod shuttle_tests;
