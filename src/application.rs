@@ -154,7 +154,6 @@ pub(crate) mod test_fixtures;
 mod tls;
 mod tracing_setup;
 mod transaction;
-mod transaction_request;
 mod wasm_state_reset;
 mod web_console;
 

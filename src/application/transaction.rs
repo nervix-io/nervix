@@ -71,6 +71,8 @@ use crate::{
     runtime::RuntimeError,
 };
 
+mod request;
+
 pub(in crate::application) const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration =
     Duration::from_secs(15 * 60);
 
