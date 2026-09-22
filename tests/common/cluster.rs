@@ -2093,12 +2093,12 @@ impl Cluster {
         self.fault_injection.clear_emitter_fault(emitter);
     }
 
-    pub(crate) fn fail_otel_client_unavailable_on_all_nodes(&self, emitter: &str) {
-        self.fault_injection.fail_otel_client_unavailable(emitter);
+    pub(crate) fn fail_sink_client_unavailable_on_all_nodes(&self, emitter: &str) {
+        self.fault_injection.fail_sink_client_unavailable(emitter);
     }
 
-    pub(crate) fn clear_otel_client_fault_on_all_nodes(&self, emitter: &str) {
-        self.fault_injection.clear_otel_client_fault(emitter);
+    pub(crate) fn clear_sink_client_fault_on_all_nodes(&self, emitter: &str) {
+        self.fault_injection.clear_sink_client_fault(emitter);
     }
 
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {

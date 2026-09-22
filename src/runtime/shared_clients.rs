@@ -14,13 +14,14 @@
 //! a property of the transport rather than of whoever happened to open a connection first.
 
 use error_stack::Report;
-use nervix_connector::{ClientResourceMounts, ResolvedClientConfig};
+use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, SinkStartError};
+use nervix_connector_mongodb::MongoDbClient;
+use nervix_connector_mysql::MySqlPool;
+use nervix_connector_postgres::PostgresPool;
 use url::Url;
 
 use super::*;
-use crate::runtime::emitters::{
-    MongoDbClient, MySqlPool, MySqlSharedPool, PgPool, RedisCommandPool,
-};
+use crate::runtime::emitters::RedisCommandPool;
 
 /// Why one client's connector instance could not be opened.
 ///
@@ -118,10 +119,10 @@ pub(in crate::runtime) enum SharedClientError {
 /// connection pool appear here; the connection policies of the broker, socket and request
 /// transports stay with those connectors.
 pub(in crate::runtime) enum SharedClientInstance {
-    MySql(MySqlSharedPool),
+    MySql(MySqlPool),
     MongoDb(MongoDbClient),
     Redis(RedisCommandPool),
-    Postgres(PgPool),
+    Postgres(PostgresPool),
 }
 
 /// One named client's instance on this node, together with everything it needs to stay usable.
@@ -141,7 +142,7 @@ impl SharedClient {
         client: &ClientName,
     ) -> Result<&MySqlPool, Report<SharedClientError>> {
         match &self.instance {
-            SharedClientInstance::MySql(shared) => Ok(shared.pool()),
+            SharedClientInstance::MySql(pool) => Ok(pool),
             _ => Err(Report::new(SharedClientError::WrongTransport {
                 client: client.as_str().to_string(),
                 expected: "MySQL",
@@ -167,7 +168,7 @@ impl SharedClient {
     pub(in crate::runtime) fn postgres(
         &self,
         client: &ClientName,
-    ) -> Result<&PgPool, Report<SharedClientError>> {
+    ) -> Result<&PostgresPool, Report<SharedClientError>> {
         match &self.instance {
             SharedClientInstance::Postgres(pool) => Ok(pool),
             _ => Err(Report::new(SharedClientError::WrongTransport {
@@ -333,21 +334,25 @@ impl Runtime {
                 client: name.as_str().to_string(),
             })
         };
+        // A connector states its own start failure, and the client names which one could not open.
+        let started = |error: Report<SinkStartError>| {
+            error.change_context(SharedClientError::Open {
+                client: name.as_str().to_string(),
+            })
+        };
         let instance = match pool.transport {
             PooledTransport::Postgres => SharedClientInstance::Postgres(
-                emitters::open_postgres_pool(config, pool.bounds)
+                PostgresPool::open(config, pool.bounds)
                     .await
-                    .map_err(opened)?,
+                    .map_err(started)?,
             ),
-            PooledTransport::MySql => SharedClientInstance::MySql(
-                emitters::open_mysql_pool(config, pool.bounds)
-                    .await
-                    .map_err(opened)?,
-            ),
+            PooledTransport::MySql => {
+                SharedClientInstance::MySql(MySqlPool::open(config, pool.bounds).await.map_err(started)?)
+            }
             PooledTransport::MongoDb => SharedClientInstance::MongoDb(
-                emitters::open_mongodb_client(config, pool.bounds)
+                MongoDbClient::open(config, pool.bounds)
                     .await
-                    .map_err(opened)?,
+                    .map_err(started)?,
             ),
             PooledTransport::Redis => SharedClientInstance::Redis(
                 emitters::open_redis_command_pool(config, pool.bounds)

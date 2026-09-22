@@ -27,7 +27,12 @@ shuttle = [
   "dep:shuttle-tokio-util",
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
+  "nervix-connector-clickhouse/shuttle",
   "nervix-connector-kafka/shuttle",
+  "nervix-connector-mongodb/shuttle",
+  "nervix-connector-mysql/shuttle",
+  "nervix-connector-otel/shuttle",
+  "nervix-connector-postgres/shuttle",
   "nervix-consensus/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
@@ -73,20 +78,17 @@ chrono = { workspace = true }
 ciborium = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
-clickhouse = { workspace = true, features = ["inserter", "chrono"] }
 concurrent-queue = { workspace = true }
 dashmap = { workspace = true }
 error-stack = { workspace = true }
 fastrand = { workspace = true }
 fjall = { workspace = true }
-flate2 = { workspace = true }
 futures-util = { workspace = true }
 governor = { workspace = true }
 hdrhistogram = { workspace = true }
 http-body-util = { workspace = true }
 humantime = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
-hyper-rustls = { workspace = true, features = ["http1"] }
 hyper-util = { workspace = true, features = [
   "server",
   "client-legacy",
@@ -103,15 +105,17 @@ jaq-json = { workspace = true, features = ["serde"] }
 jaq-std = { workspace = true }
 lapin = { workspace = true }
 meticulous = { workspace = true }
-mongodb = { workspace = true }
 multer = { workspace = true }
-# This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
-mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-approx-into = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-connector = { workspace = true }
+nervix-connector-clickhouse = { workspace = true }
 nervix-connector-kafka = { workspace = true }
+nervix-connector-mongodb = { workspace = true }
+nervix-connector-mysql = { workspace = true }
+nervix-connector-otel = { workspace = true }
+nervix-connector-postgres = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-execution = { workspace = true }
@@ -131,12 +135,6 @@ opentelemetry-otlp = { workspace = true, default-features = false, features = [
   "grpc-tonic",
   "trace",
 ] }
-opentelemetry-proto = { workspace = true, features = [
-  "gen-tonic",
-  "logs",
-  "metrics",
-  "trace",
-] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 ordered-float = { workspace = true }
 ort = { workspace = true, features = [
@@ -149,13 +147,9 @@ ort = { workspace = true, features = [
   "tracing",
   "webgpu",
 ] }
-otel-prost = { workspace = true }
-otel-tonic = { workspace = true }
-otel-tonic-types = { workspace = true }
 parking_lot = { workspace = true }
 parquet = { workspace = true }
 petgraph = { workspace = true }
-postgres-types = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["serde"] }
@@ -188,7 +182,6 @@ shuttle-tokio-util = { workspace = true, features = ["rt"], optional = true }
 signal-hook = { workspace = true }
 simd-json = { workspace = true }
 sorted-vec = { workspace = true }
-sqlx = { workspace = true }
 storekey = { workspace = true }
 strum = { workspace = true }
 tar = { workspace = true }
@@ -220,12 +213,16 @@ criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 h2 = { workspace = true }
 http = { workspace = true }
+mongodb = { workspace = true }
+# This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
+mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
 playwright-rs = { workspace = true }
 rcgen = { workspace = true }
 rstest = { workspace = true }
+sqlx = { workspace = true }
 tempfile = { workspace = true }
 trybuild = { workspace = true }
 
@@ -257,7 +254,12 @@ members = [
   "crates/client-core",
   "crates/client-wire",
   "crates/connector",
+  "crates/connectors/clickhouse",
   "crates/connectors/kafka",
+  "crates/connectors/mongodb",
+  "crates/connectors/mysql",
+  "crates/connectors/otel",
+  "crates/connectors/postgres",
   "crates/consensus",
   "crates/dataflow-graph",
   "crates/execution",
@@ -404,7 +406,12 @@ nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-int
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
+nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = "crates/connectors/clickhouse" }
 nervix-connector-kafka = { package = "nervix-connector-kafka", path = "crates/connectors/kafka" }
+nervix-connector-mongodb = { package = "nervix-connector-mongodb", path = "crates/connectors/mongodb" }
+nervix-connector-mysql = { package = "nervix-connector-mysql", path = "crates/connectors/mysql" }
+nervix-connector-otel = { package = "nervix-connector-otel", path = "crates/connectors/otel" }
+nervix-connector-postgres = { package = "nervix-connector-postgres", path = "crates/connectors/postgres" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
 nervix-execution = { package = "nervix-execution", path = "crates/execution" }
@@ -457,7 +464,6 @@ playwright-rs = { version = "0.16", default-features = false, features = [
   "rustls-tls-webpki-roots",
   "aws-lc",
 ] }
-postgres-types = "0.2"
 prometheus = "0.14.0"
 prost = "0.13"
 prost-reflect = "0.15.3"
