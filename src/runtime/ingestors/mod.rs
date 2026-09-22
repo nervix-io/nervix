@@ -6,7 +6,6 @@ pub(in crate::runtime) mod kafka;
 pub(in crate::runtime) mod mqtt;
 pub(in crate::runtime) mod nats;
 pub(in crate::runtime) mod prometheus;
-mod prometheus_source;
 pub(in crate::runtime) mod pulsar;
 pub(in crate::runtime) mod rabbitmq;
 pub(in crate::runtime) mod redis_pubsub;

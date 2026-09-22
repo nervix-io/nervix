@@ -10,10 +10,10 @@
 //!   placement computation.
 
 use nervix_connector::{SourceAckPolicy, SourceCapabilities, SourceConnector, SourcePlan};
+use nervix_connector_prometheus::{PrometheusSource, PrometheusSourcePlan};
 
 use super::{
     super::*,
-    prometheus_source::{PrometheusSource, PrometheusSourcePlan},
     source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_paced_source},
 };
 
