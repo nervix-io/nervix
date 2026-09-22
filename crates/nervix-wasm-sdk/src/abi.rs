@@ -23,6 +23,7 @@ use crate::{
 unsafe extern "C" {
     fn nervix_domain_time_nanos() -> i64;
     fn nervix_timeout_after_nanos(delay_nanos: i64) -> i64;
+    fn nervix_request_state_reset() -> i32;
 }
 
 pub(crate) fn host_domain_time_nanos() -> i64 {
@@ -45,6 +46,17 @@ pub(crate) fn host_timeout_after_nanos(delay_nanos: i64) -> i64 {
     {
         let _ = delay_nanos;
         panic!("nervix_timeout_after_nanos is only callable inside a Nervix WASM guest")
+    }
+}
+
+pub(crate) fn host_request_state_reset() -> i32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        unsafe { nervix_request_state_reset() }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        panic!("nervix_request_state_reset is only callable inside a Nervix WASM guest")
     }
 }
 

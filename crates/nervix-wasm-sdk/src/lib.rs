@@ -47,7 +47,7 @@ mod processor;
 
 pub use nervix_wasm_protocol::{
     AckSidecar, AckToken, AckTokenSet, MessageErrorSet, NackSet, OutputColumnRef, OutputRow,
-    ProcessorField, ProcessorSchema, ProcessorType,
+    ProcessorField, ProcessorSchema, ProcessorType, StateResetRequestAnswer,
 };
 
 pub use crate::{

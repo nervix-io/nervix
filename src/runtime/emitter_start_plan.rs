@@ -20,6 +20,12 @@ use error_stack::Report;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, ParsedRetryPolicy, ResolvedClientConfig,
 };
+use nervix_connector_mongodb::MongoDbConflictAction;
+use nervix_connector_mysql::MySqlConflictAction;
+use nervix_connector_otel::{
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+};
+use nervix_connector_postgres::PostgresConflictAction;
 use nervix_models::{ChannelName, CollectionName, QueueName, SubjectName, TableName, TopicName};
 
 use super::*;
@@ -377,6 +383,102 @@ single_client_sink_plan! {
         values: Vec<MongoDbValueMapping>,
         conflict_action: MongoDbConflictAction,
         max_batch: NonZeroU64,
+    }
+}
+
+/// The OTLP signal an emitter exports, as its connector states it.
+fn otel_signal(signal: &nervix_models::OtelSignal) -> OtelSignal {
+    match signal {
+        nervix_models::OtelSignal::Logs => OtelSignal::Logs,
+        nervix_models::OtelSignal::Traces => OtelSignal::Traces,
+        nervix_models::OtelSignal::Metric(metric) => OtelSignal::Metric(OtelMetric {
+            name: metric.name.clone(),
+            unit: metric.unit.clone(),
+            description: metric.description.clone(),
+            kind: otel_metric_kind(&metric.kind),
+        }),
+    }
+}
+
+fn otel_metric_kind(kind: &nervix_models::OtelMetricKind) -> OtelMetricKind {
+    match kind {
+        nervix_models::OtelMetricKind::Gauge => OtelMetricKind::Gauge,
+        nervix_models::OtelMetricKind::Sum {
+            monotonic,
+            temporality,
+        } => OtelMetricKind::Sum {
+            monotonic: *monotonic,
+            temporality: otel_temporality(*temporality),
+        },
+        nervix_models::OtelMetricKind::Histogram { temporality } => OtelMetricKind::Histogram {
+            temporality: otel_temporality(*temporality),
+        },
+    }
+}
+
+fn otel_temporality(
+    temporality: nervix_models::OtelAggregationTemporality,
+) -> OtelAggregationTemporality {
+    match temporality {
+        nervix_models::OtelAggregationTemporality::Delta => OtelAggregationTemporality::Delta,
+        nervix_models::OtelAggregationTemporality::Cumulative => {
+            OtelAggregationTemporality::Cumulative
+        }
+    }
+}
+
+/// The instrumentation scope an emitter's records carry, as its connector states it.
+fn otel_scope(scope: &nervix_models::OtelScope) -> OtelScope {
+    OtelScope {
+        name: scope.name.clone(),
+        version: scope.version.clone(),
+    }
+}
+
+/// What a MongoDB write does with a document the target collection already holds, as its connector
+/// states it.
+fn mongodb_conflict_action(action: &nervix_models::MongoDbConflictAction) -> MongoDbConflictAction {
+    match action {
+        nervix_models::MongoDbConflictAction::None => MongoDbConflictAction::None,
+        nervix_models::MongoDbConflictAction::DoNothing { target } => {
+            MongoDbConflictAction::DoNothing {
+                target: target.clone(),
+            }
+        }
+        nervix_models::MongoDbConflictAction::DoUpdate { target } => {
+            MongoDbConflictAction::DoUpdate {
+                target: target.clone(),
+            }
+        }
+    }
+}
+
+/// What a Postgres insert does with a row the target table already holds, as its connector states
+/// it.
+fn postgres_conflict_action(
+    action: &nervix_models::PostgresConflictAction,
+) -> PostgresConflictAction {
+    match action {
+        nervix_models::PostgresConflictAction::None => PostgresConflictAction::None,
+        nervix_models::PostgresConflictAction::DoNothing { target } => {
+            PostgresConflictAction::DoNothing {
+                target: target.clone(),
+            }
+        }
+        nervix_models::PostgresConflictAction::DoUpdate { target } => {
+            PostgresConflictAction::DoUpdate {
+                target: target.clone(),
+            }
+        }
+    }
+}
+
+/// What a MySQL insert does with a row the target table already holds, as its connector states it.
+fn mysql_conflict_action(action: &nervix_models::MySqlConflictAction) -> MySqlConflictAction {
+    match action {
+        nervix_models::MySqlConflictAction::None => MySqlConflictAction::None,
+        nervix_models::MySqlConflictAction::DoNothing => MySqlConflictAction::DoNothing,
+        nervix_models::MySqlConflictAction::DoUpdate => MySqlConflictAction::DoUpdate,
     }
 }
 
@@ -738,11 +840,11 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                         client.mount.as_ref(),
                         &client.config,
                     )?,
-                    signal: signal.clone(),
+                    signal: otel_signal(signal),
                     values: values.clone(),
                     attributes: attributes.clone(),
                     resource: resource.clone(),
-                    scope: scope.clone(),
+                    scope: scope.as_ref().map(otel_scope),
                 })
             }
             (
@@ -788,7 +890,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     pool: client.pool,
                     table: table.clone(),
                     values: values.clone(),
-                    conflict_action: conflict_action.clone(),
+                    conflict_action: postgres_conflict_action(conflict_action),
                     max_batch: *max_batch,
                 })
             }
@@ -813,7 +915,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     pool: client.pool,
                     table: table.clone(),
                     values: values.clone(),
-                    conflict_action: conflict_action.clone(),
+                    conflict_action: mysql_conflict_action(conflict_action),
                     max_batch: *max_batch,
                 })
             }
@@ -838,7 +940,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     pool: client.pool,
                     collection: collection.clone(),
                     values: values.clone(),
-                    conflict_action: conflict_action.clone(),
+                    conflict_action: mongodb_conflict_action(conflict_action),
                     max_batch: *max_batch,
                 })
             }
@@ -1414,7 +1516,7 @@ mod tests {
                 Self::Otel => SinkCase {
                     sink: EmitSink::Otel {
                         client: client(),
-                        signal: OtelSignal::Logs,
+                        signal: nervix_models::OtelSignal::Logs,
                         values: Vec::new(),
                         attributes: Vec::new(),
                         resource: Vec::new(),
@@ -1448,7 +1550,7 @@ mod tests {
                         client: client(),
                         table: named("orders"),
                         values: Vec::new(),
-                        conflict_action: PostgresConflictAction::None,
+                        conflict_action: nervix_models::PostgresConflictAction::None,
                         max_batch: nonzero!(100u64),
                     },
                     mode: request_ack(),
@@ -1465,7 +1567,7 @@ mod tests {
                         client: client(),
                         table: named("orders"),
                         values: Vec::new(),
-                        conflict_action: MySqlConflictAction::None,
+                        conflict_action: nervix_models::MySqlConflictAction::None,
                         max_batch: nonzero!(100u64),
                     },
                     mode: request_ack(),
@@ -1482,7 +1584,7 @@ mod tests {
                         client: client(),
                         collection: named("orders"),
                         values: Vec::new(),
-                        conflict_action: MongoDbConflictAction::None,
+                        conflict_action: nervix_models::MongoDbConflictAction::None,
                         max_batch: nonzero!(100u64),
                     },
                     mode: request_ack(),
