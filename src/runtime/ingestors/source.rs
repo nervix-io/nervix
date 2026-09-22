@@ -13,18 +13,19 @@ use std::{future, time::Duration};
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    SourceAckPolicy, SourceAcknowledgement, SourceAcknowledgementOutcome,
-    SourceAcknowledgementServices, SourceBatch, SourceBatchRequest, SourceConnector, SourceHost,
-    SourceHostServices, SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage,
-    SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourceResume,
-    next_retry_delay, physical_time::actual_utc_now,
+    BrokerSourceConnector, PacedSourceConnector, SourceAckPolicy, SourceAcknowledgement,
+    SourceAcknowledgementOutcome, SourceAcknowledgementServices, SourceBatch, SourceBatchRequest,
+    SourceHost, SourceHostServices, SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage,
+    SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourcePoll,
+    SourceResume, next_retry_delay, physical_time::actual_utc_now,
 };
+use tokio_util::sync::CancellationToken;
 
-use super::super::*;
+use super::super::{domain_clock::DomainCadence, *};
 
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
-pub(super) struct BrokerSourceHostSpec {
+pub(super) struct RuntimeSourceHostSpec {
     pub(super) runtime: Runtime,
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
@@ -40,7 +41,7 @@ pub(super) struct BrokerSourceHostSpec {
     pub(super) metadata_kind: IngestMetadataKind,
 }
 
-pub(super) struct BrokerSourceHost {
+pub(super) struct RuntimeSourceHost {
     runtime: Runtime,
     domain: DomainName,
     ingestor: IngestorName,
@@ -57,8 +58,12 @@ pub(super) struct BrokerSourceHost {
     collector: IngestRouteCollector,
 }
 
-impl BrokerSourceHost {
-    pub(super) fn build(spec: BrokerSourceHostSpec) -> SourceHost {
+impl RuntimeSourceHost {
+    pub(super) fn build(spec: RuntimeSourceHostSpec) -> SourceHost {
+        SourceHost::new(Self::new(spec))
+    }
+
+    pub(super) fn new(spec: RuntimeSourceHostSpec) -> Self {
         let ack_root_trackers = spec
             .runtime
             .ingestor_ack_root_trackers(&spec.domain, &spec.ingestor);
@@ -67,7 +72,7 @@ impl BrokerSourceHost {
             INGEST_GROUP_MAX_ROWS,
             spec.metrics.clone(),
         );
-        SourceHost::new(Self {
+        Self {
             runtime: spec.runtime,
             domain: spec.domain,
             ingestor: spec.ingestor,
@@ -82,7 +87,77 @@ impl BrokerSourceHost {
             shutdown: spec.shutdown,
             instance_index: spec.instance_index,
             collector,
-        })
+        }
+    }
+
+    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
+        for failure in poll.failures {
+            tokio::task::consume_budget().await;
+            self.report_error(format!(
+                "source poll could not materialize one message: {failure:?}"
+            ));
+        }
+        if poll.messages.is_empty() {
+            return Ok(false);
+        }
+        let entries = poll
+            .messages
+            .into_iter()
+            .map(|message| {
+                (
+                    message.payload,
+                    BufferedIngestMetadata::Headers(message.headers),
+                )
+            })
+            .collect();
+        let payload = BufferedIngestPayload::batch(entries, poll.observed_at);
+        let payload = match self.quiesce.intake(self.instance_index, payload, false) {
+            IngestorQuiesceIntake::Dispatch(payload) => payload,
+            IngestorQuiesceIntake::Buffered
+            | IngestorQuiesceIntake::Dropped
+            | IngestorQuiesceIntake::Rejected { .. } => return Ok(false),
+        };
+        self.dispatch_polled_payload(&payload).await?;
+        Ok(true)
+    }
+
+    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
+        let Some(payload) = self.quiesce.pop_buffered(self.instance_index) else {
+            return Ok(false);
+        };
+        self.dispatch_polled_payload(&payload).await?;
+        Ok(true)
+    }
+
+    async fn dispatch_polled_payload(
+        &mut self,
+        payload: &BufferedIngestPayload,
+    ) -> SourceIntakeResult<()> {
+        self.runtime
+            .dispatch_raw_ingest_payload(RawIngestDispatch {
+                domain: &self.domain,
+                ingestor: &self.ingestor,
+                timestamp_source: self.timestamp_source.as_ref(),
+                output_routes: &self.output_routes,
+                filter_where: self.filter_where.as_ref(),
+                branched_senders: &self.branched_senders,
+                codec: self.codec.clone(),
+                payload,
+                collector: &mut self.collector,
+                flush: false,
+            })
+            .await
+            .change_context(SourceIntakeError::Dispatch)
+    }
+
+    fn should_skip_poll(&self) -> bool {
+        self.quiesce.should_skip_poll()
+    }
+
+    fn record_poll_error(&self, reason: String) {
+        self.runtime
+            .record_ingestor_transient_error(&self.domain, &self.ingestor, reason.clone());
+        self.report_error(reason);
     }
 }
 
@@ -103,7 +178,7 @@ impl SourceAcknowledgementServices for RuntimeSourceAcknowledgement {
 }
 
 #[async_trait]
-impl SourceHostServices for BrokerSourceHost {
+impl SourceHostServices for RuntimeSourceHost {
     async fn intake(
         &mut self,
         batch: SourceIntakeBatch<'_>,
@@ -295,6 +370,154 @@ impl SourceHostServices for BrokerSourceHost {
     }
 }
 
+pub(super) async fn run_paced_source<C>(
+    mut source: C,
+    mut host: RuntimeSourceHost,
+    mut cadence: DomainCadence,
+    mut shutdown: watch::Receiver<bool>,
+) where
+    C: PacedSourceConnector,
+{
+    let cadence_cancellation = CancellationToken::new();
+    let mut ready = false;
+
+    loop {
+        tokio::task::consume_budget().await;
+        if !host.wait_until_active().await {
+            break;
+        }
+        if host.should_suspend_intake() {
+            flush_paced_source(&mut host).await;
+            if ready {
+                if let Err(error) = source.suspend().await {
+                    host.report_error(error.to_string());
+                }
+                ready = false;
+                host.mark_unready();
+            }
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = host.wait_until_not_suspended() => {}
+            }
+            continue;
+        }
+
+        if !ready || source.needs_resume() {
+            flush_paced_source(&mut host).await;
+            match source.resume().await {
+                Ok(SourceResume::Ready) => {
+                    ready = true;
+                    host.mark_ready();
+                    host.clear_transient_error();
+                }
+                Ok(SourceResume::Waiting { retry_after }) => {
+                    ready = false;
+                    host.mark_unready();
+                    if !wait_for_paced_retry(&mut host, &mut shutdown, retry_after).await {
+                        break;
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    ready = false;
+                    host.mark_unready();
+                    host.record_poll_error(error.to_string());
+                    if !wait_for_paced_retry(&mut host, &mut shutdown, SOURCE_ERROR_RETRY).await {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        }
+
+        match host.replay_buffered_poll().await {
+            Ok(true) => {
+                flush_paced_source(&mut host).await;
+                continue;
+            }
+            Ok(false) => {}
+            Err(error) => host.report_error(error.to_string()),
+        }
+
+        let occurrence = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+            _ = host.wait_for_quiesce_change() => {
+                continue;
+            }
+            occurrence = cadence.next(&cadence_cancellation) => occurrence,
+        };
+        let occurrence = match occurrence {
+            Ok(occurrence) => occurrence,
+            Err(error) => {
+                host.report_error(format!("could not advance source cadence: {error}"));
+                break;
+            }
+        };
+        if host.should_skip_poll() {
+            continue;
+        }
+
+        let poll = tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+                continue;
+            }
+            _ = host.wait_for_quiesce_change() => {
+                continue;
+            }
+            poll = source.poll(occurrence.due_at()) => poll,
+        };
+        let poll = match poll {
+            Ok(poll) => poll,
+            Err(error) => {
+                host.record_poll_error(error.to_string());
+                continue;
+            }
+        };
+        host.clear_transient_error();
+        match host.intake_poll(poll).await {
+            Ok(true) => flush_paced_source(&mut host).await,
+            Ok(false) => {}
+            Err(error) => host.report_error(error.to_string()),
+        }
+    }
+
+    flush_paced_source(&mut host).await;
+    if let Err(error) = source.close().await {
+        host.report_error(error.to_string());
+    }
+    host.mark_unready();
+}
+
+async fn flush_paced_source(host: &mut RuntimeSourceHost) {
+    if let Err(error) = host.flush().await {
+        host.report_error(error.to_string());
+    }
+}
+
+async fn wait_for_paced_retry(
+    host: &mut RuntimeSourceHost,
+    shutdown: &mut watch::Receiver<bool>,
+    delay: Duration,
+) -> bool {
+    tokio::select! {
+        changed = shutdown.changed() => !(changed.is_err() || *shutdown.borrow()),
+        _ = host.wait_for_quiesce_change() => true,
+        _ = sleep(delay) => true,
+    }
+}
+
 enum BatchDisposition {
     Accepted,
     Retry,
@@ -307,7 +530,7 @@ pub(super) async fn run_source_instance<C>(
     acknowledgement: SourceAckPolicy,
     mut shutdown: watch::Receiver<bool>,
 ) where
-    C: SourceConnector,
+    C: BrokerSourceConnector,
 {
     let retry_policy = acknowledgement.retry();
     let mut retry_delay = retry_policy.backoff;
@@ -458,7 +681,7 @@ async fn handle_batch<C>(
     messages: Vec<C::Message>,
 ) -> BatchDisposition
 where
-    C: SourceConnector,
+    C: BrokerSourceConnector,
 {
     let positions = messages
         .iter()
@@ -537,7 +760,7 @@ where
 
 async fn reject_batch<C>(source: &mut C, host: &mut SourceHost, positions: &[C::Position])
 where
-    C: SourceConnector,
+    C: BrokerSourceConnector,
 {
     if let Err(error) = source.reject(positions).await {
         host.report_error(error.to_string());
@@ -577,7 +800,9 @@ async fn wait_for_flush(deadline: Option<Instant>) {
 mod tests {
     use std::{collections::VecDeque, future};
 
-    use nervix_connector::{IngestMessageHeaders, IngestMetadataRow, SourceError, SourceResult};
+    use nervix_connector::{
+        IngestMessageHeaders, IngestMetadataRow, SourceConnector, SourceError, SourceResult,
+    };
     use parking_lot::Mutex;
 
     use super::*;
@@ -632,12 +857,21 @@ mod tests {
     #[async_trait]
     impl SourceConnector for FakeSource {
         type Plan = ();
-        type Message = FakeMessage;
-        type Position = u64;
 
         async fn open(_plan: &Self::Plan, _instance_index: u64) -> SourceResult<Self> {
             Err(Report::new(SourceError::Open { connector: "fake" }))
         }
+
+        async fn resume(&mut self) -> SourceResult<SourceResume> {
+            self.observations.lock().resumes += 1;
+            Ok(SourceResume::Ready)
+        }
+    }
+
+    #[async_trait]
+    impl BrokerSourceConnector for FakeSource {
+        type Message = FakeMessage;
+        type Position = u64;
 
         async fn next_batch(
             &mut self,
@@ -674,11 +908,6 @@ mod tests {
         async fn reject(&mut self, positions: &[Self::Position]) -> SourceResult<()> {
             self.observations.lock().rejected.push(positions.to_vec());
             Ok(())
-        }
-
-        async fn resume(&mut self) -> SourceResult<SourceResume> {
-            self.observations.lock().resumes += 1;
-            Ok(SourceResume::Ready)
         }
     }
 

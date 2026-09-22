@@ -2,6 +2,7 @@ use super::*;
 
 pub(in crate::runtime) mod endpoint;
 pub(in crate::runtime) mod http;
+mod http_source;
 pub(in crate::runtime) mod kafka;
 pub(in crate::runtime) mod mqtt;
 pub(in crate::runtime) mod nats;
@@ -76,8 +77,7 @@ impl IngestorStarter {
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        ClientConfigEntry, CreateClientHttp, CreateClientPrometheus, CreateClientWebsockets,
-        CreateClientZeroMq,
+        ClientConfigEntry, CreateClientPrometheus, CreateClientWebsockets, CreateClientZeroMq,
     };
 
     use super::*;
@@ -105,58 +105,6 @@ mod tests {
         assert!(ingestors::zeromq::ZeroMqIngestor::bind_from_config(
             &zeromq.config
         ));
-
-        let http = CreateClientHttp::<u64> {
-            name: named("http"),
-            mount: None,
-            config: vec![ClientConfigEntry {
-                key: "endpoint".to_string(),
-                value: "https://example.com/api".to_string(),
-            }],
-        };
-        assert_eq!(
-            ingestors::http::HttpIngestor::endpoint_from_config(&http.config).expect("endpoint"),
-            "https://example.com/api"
-        );
-        assert_eq!(
-            ingestors::http::HttpIngestor::method_from_config(&http.config)
-                .expect("default method"),
-            reqwest::Method::GET
-        );
-
-        let http_post = CreateClientHttp::<u64> {
-            name: named("http"),
-            mount: None,
-            config: vec![
-                ClientConfigEntry {
-                    key: "endpoint".to_string(),
-                    value: "https://example.com/api".to_string(),
-                },
-                ClientConfigEntry {
-                    key: "method".to_string(),
-                    value: "POST".to_string(),
-                },
-            ],
-        };
-        assert_eq!(
-            ingestors::http::HttpIngestor::method_from_config(&http_post.config)
-                .expect("post method"),
-            reqwest::Method::POST
-        );
-        assert!(
-            ingestors::http::HttpIngestor::method_from_config(
-                &CreateClientHttp::<u64> {
-                    name: named("http"),
-                    mount: None,
-                    config: vec![ClientConfigEntry {
-                        key: "method".to_string(),
-                        value: "NOT A METHOD".to_string(),
-                    }],
-                }
-                .config
-            )
-            .is_err()
-        );
 
         let websocket = CreateClientWebsockets::<u64> {
             name: named("ws"),
@@ -211,19 +159,6 @@ mod tests {
             .expect_err("missing zeromq addr")
             .to_string()
             .contains("missing ZeroMQ client config key 'addr'")
-        );
-        assert!(
-            ingestors::http::HttpIngestor::endpoint_from_config(
-                &CreateClientHttp::<u64> {
-                    name: named("http"),
-                    mount: None,
-                    config: vec![],
-                }
-                .config
-            )
-            .expect_err("missing http endpoint")
-            .to_string()
-            .contains("missing HTTP client config key 'endpoint'")
         );
         assert!(
             ingestors::websockets::WebsocketsIngestor::endpoint_from_config(
