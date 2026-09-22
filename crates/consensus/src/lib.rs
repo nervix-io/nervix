@@ -493,6 +493,7 @@ pub enum ConsensusCommand {
         id: String,
         expected_next_statement: usize,
         at: nervix_models::Timestamp,
+        actual: Box<nervix_models::ActualExecutionStepImpact>,
         outcome: TransactionApplicationOutcome,
     },
     FinishEmptyTransactionCommit {
@@ -3317,12 +3318,14 @@ impl Proposer {
         id: String,
         expected_next_statement: usize,
         at: nervix_models::Timestamp,
+        actual: nervix_models::ActualExecutionStepImpact,
         outcome: TransactionApplicationOutcome,
     ) -> Result<ReplicatedTransaction, ConsensusTransactionError> {
         self.write_transaction(ConsensusCommand::CompleteTransactionApplication {
             id,
             expected_next_statement,
             at,
+            actual: Box::new(actual),
             outcome,
         })
         .await
@@ -5280,6 +5283,7 @@ fn apply_consensus_command_at(
             id,
             expected_next_statement,
             at,
+            actual,
             outcome,
         } => {
             let outcome_revision = match &state.last_applied_log_id {
@@ -5318,6 +5322,7 @@ fn apply_consensus_command_at(
                 *expected_next_statement,
                 *at,
                 outcome_revision,
+                actual.as_ref().clone(),
                 outcome.error().map(ToOwned::to_owned),
             ) {
                 return AppliedConsensusCommand::transaction(Err(error), changes);
@@ -7473,6 +7478,7 @@ mod tests {
                 id: "tx-1".to_string(),
                 expected_next_statement: 0,
                 at: nervix_models::Timestamp::from_unix_nanos(5),
+                actual: Box::new(nervix_models::ActualExecutionStepImpact::applying()),
                 outcome: TransactionApplicationOutcome::RolledBack {
                     error: "listener failed".to_string(),
                     inputs: current,
@@ -7514,6 +7520,7 @@ mod tests {
                 id: "tx-1".to_string(),
                 expected_next_statement: 0,
                 at: nervix_models::Timestamp::from_unix_nanos(5),
+                actual: Box::new(nervix_models::ActualExecutionStepImpact::applying()),
                 outcome: TransactionApplicationOutcome::RolledBack {
                     error: "listener failed".to_string(),
                     inputs: stale,
@@ -8098,12 +8105,43 @@ mod tests {
                 .start_version,
             1
         );
+        let first_operation = nervix_models::TransactionOperationNumber::from_index(0)
+            .assured("the first transaction operation is addressable");
+        let completed_actual = nervix_models::ActualExecutionStepImpact {
+            outcome: nervix_models::ExecutionStepOutcome::Applying,
+            quiescence: vec![nervix_models::ActualQuiescence {
+                requirement: nervix_models::PauseRequirement::Domain {
+                    domain: domain_id.clone(),
+                },
+                outcomes: vec![
+                    nervix_models::QuiescenceOutcome::Requested,
+                    nervix_models::QuiescenceOutcome::Confirmed,
+                    nervix_models::QuiescenceOutcome::Failed {
+                        diagnostic: nervix_models::ImpactDiagnostic {
+                            kind: nervix_models::ImpactDiagnosticKind::Quiescence,
+                            operation: Some(first_operation),
+                            message: "drain failed".to_string(),
+                        },
+                    },
+                    nervix_models::QuiescenceOutcome::Uncertain {
+                        diagnostic: nervix_models::ImpactDiagnostic {
+                            kind: nervix_models::ImpactDiagnosticKind::Recovery,
+                            operation: Some(first_operation),
+                            message: "remote release was not acknowledged".to_string(),
+                        },
+                    },
+                    nervix_models::QuiescenceOutcome::Released,
+                ],
+            }],
+            effects: Default::default(),
+        };
         apply_consensus_command(
             &mut state,
             &ConsensusCommand::CompleteTransactionApplication {
                 id: "tx-1".to_string(),
                 expected_next_statement: 0,
                 at: nervix_models::Timestamp::from_unix_nanos(6),
+                actual: Box::new(completed_actual),
                 outcome: TransactionApplicationOutcome::Applied,
             },
         );
@@ -8126,6 +8164,24 @@ mod tests {
                 .outcome,
             nervix_models::ExecutionStepOutcome::Applied
         ));
+        assert!(matches!(
+            completed_prefix_report.execution_steps()[0]
+                .actual()
+                .quiescence[0]
+                .outcomes
+                .as_slice(),
+            [
+                nervix_models::QuiescenceOutcome::Requested,
+                nervix_models::QuiescenceOutcome::Confirmed,
+                nervix_models::QuiescenceOutcome::Failed { .. },
+                nervix_models::QuiescenceOutcome::Uncertain { .. },
+                nervix_models::QuiescenceOutcome::Released,
+            ]
+        ));
+        assert_eq!(
+            completed_prefix_report.execution_steps()[0].actual_quiesce_level(),
+            nervix_models::QuiesceLevel::DomainPause
+        );
         assert!(matches!(
             completed_prefix_report.execution_steps()[1]
                 .actual()
@@ -8163,6 +8219,7 @@ mod tests {
                 id: "tx-1".to_string(),
                 expected_next_statement: 1,
                 at: nervix_models::Timestamp::from_unix_nanos(8),
+                actual: Box::new(nervix_models::ActualExecutionStepImpact::applying()),
                 outcome: TransactionApplicationOutcome::Applied,
             },
         );

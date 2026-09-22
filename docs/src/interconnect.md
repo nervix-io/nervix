@@ -137,6 +137,18 @@ tasks. Responses carry the complete classified failure chain. A transport succes
 the receiver performed the requested action; the Raft-backed `Publishing` and `Ready` schedule
 phases remain the durability and usability boundaries.
 
+One more management request belongs to the same operation. A processor that declares
+`ON REJECTED STATE RESET` raises a refused guest-state lifetime from the node that owns the branch,
+and that node forwards it to the current leader as a typed recovery request naming the domain, the
+processor, the refused branch or the explicit unbranched instance, the generation whose snapshot was
+refused, and which of the two guest verdicts it gave. It carries no reset reference: the leader
+derives one from that identity, so a request that is retried, forwarded again after a leadership
+change, or raised by a new owner drives the very same coordinated reset instead of a second one. A
+leader that finds the branch already past the reported generation answers that the lifetime is gone
+rather than resetting the one that replaced it. The response carries the classified failure chain
+and is not itself the durability boundary; the recovery's spent attempt and the reset's schedule
+phases are.
+
 The coordinator records every destination as an attempted participant before sending its prepare
 request. A timeout, cancellation, or missing response after the destination persisted the request
 therefore remains explicit cleanup work. A participant that refuses capture, preparation, forced
@@ -501,6 +513,8 @@ length. Consensus snapshots use bounded begin, chunk, and finish operations on t
 bulk class. Receivers stage and validate the owning artifact while releasing HTTP/2 credit chunk by
 chunk. The whole transfer may exceed the 32 MiB bulk-memory budget because only bounded chunks and
 the active decoded section are resident at once.
+[Resource Versions And Bindings](./resource-versions.md#publication-and-transfer) defines when a
+node fetches a resource archive and how it verifies and records the fetched version.
 
 A runtime-state placement names exactly the state it addresses: the domain, entity, state kind, and
 concrete branch; for every kind of state except branch-aggregated metrics and Kafka domain offsets,
@@ -604,6 +618,8 @@ incarnation pending, and it is asked again every 250 milliseconds until the comm
 deadline. A failed installation ends the wait at once, so the command reports the failing node
 without waiting for the deadline. The request reads installation state and changes nothing, so a
 repeated or late request is harmless.
+[The `DYNAMIC` TLS Refresh](./resource-versions.md#the-dynamic-tls-refresh) defines what every
+listener presents and how a failed installation fails or rolls back the command.
 
 ## Application Health And Availability
 

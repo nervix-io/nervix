@@ -2,23 +2,31 @@
 //!
 //! Outside the layer order: a harness test crate.
 //!
-//! - **Owns.** Registration of the focused node-liveness, phase-deadline and status-request
-//!   regressions with Rust's test runner, and the stand-in nodes those regressions talk to.
-//! - **Depends on.** The node-liveness, phase-deadline and status-request harness modules, and the
-//!   generated session service they send status requests to.
+//! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
+//!   status-request, cluster-teardown and scenario-phase regressions with Rust's test runner, and
+//!   the stand-in nodes those regressions talk to.
+//! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request,
+//!   cluster-teardown and scenario-phase harness modules, and the generated session service they
+//!   send status requests to.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
+#[path = "common/cluster_teardown.rs"]
+mod cluster_teardown;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
+#[path = "common/node_startup.rs"]
+mod node_startup;
 #[path = "common/phase_deadline.rs"]
 mod phase_deadline;
+#[path = "common/scenario_phase.rs"]
+mod scenario_phase;
 #[path = "common/status_request.rs"]
 mod status_request;
 
 mod tests {
     use std::{
-        collections::BTreeMap,
-        future,
+        collections::{BTreeMap, VecDeque},
+        future, io,
         net::{Ipv4Addr, SocketAddr},
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
@@ -39,6 +47,7 @@ mod tests {
     use nervix_models::ClusterNodeName;
     use nervix_recovery::NoReceiver as _;
     use nervix_server::application::AppError;
+    use parking_lot::Mutex;
     use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
     use tempfile::TempDir;
     use tokio::{
@@ -48,15 +57,23 @@ mod tests {
         time::{Instant, timeout},
     };
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
+    use tokio_util::sync::CancellationToken;
     use tonic::{Request, Response, Status, Streaming, transport::Server};
     use triomphe::Arc;
 
     use crate::{
+        cluster_teardown::{ClusterTeardown, TeardownNode},
         node_liveness::{
-            LastReadinessOutcome, NodeStartupFailure, NodeTaskState, NodeTaskTerminalOutcome,
-            NodeTaskWaitOutcome, OwnedNodeTask, ReadinessProbeOutcome,
+            LastReadinessOutcome, NodeStartupError, NodeStartupFailure, NodeTaskState,
+            NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask, ReadinessProbeOutcome,
+        },
+        node_startup::{
+            ATTEMPT_READINESS_BUDGET, AttemptCleanup, AttemptFailure, FULL_LENGTH_ATTEMPTS,
+            NODE_START_ATTEMPTS, NODE_STARTUP_BUDGET, NodeStartup, NodeStartupExhausted,
+            StartableNode, StartupEnd, StartupRetry, cluster_startup_budget,
         },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
+        scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioPhase},
         status_request::{
             STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint, StatusOperation,
             StatusRequestError, StatusTransport,
@@ -65,6 +82,16 @@ mod tests {
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
     const TEST_POLL_INTERVAL: Duration = Duration::from_millis(1);
+    /// The cleanup budget the teardown regressions give a cluster. It is long enough that one
+    /// budget and one budget per node are unmistakably different, and every regression that uses
+    /// it runs on a paused clock, so no wall-clock time is spent reaching it.
+    const TEST_TEARDOWN_BUDGET: Duration = Duration::from_secs(60);
+    /// The bound a cleanup that shares one budget stays under and a cleanup that spends one budget
+    /// per node cannot: the first ends one budget after it started, the second three.
+    const TEST_SHARED_TEARDOWN_BOUND: Duration = match TEST_TEARDOWN_BUDGET.checked_mul(2) {
+        Some(bound) => bound,
+        None => panic!("the shared cleanup bound must fit in Duration"),
+    };
     /// A poll interval like the one the harness status waits use.
     const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(200);
     /// How long a request to a stalled stand-in may take. It leaves a loaded machine ample time to
@@ -81,6 +108,18 @@ mod tests {
     );
     const TEST_AUTHORIZATION: &str = "Basic c3RhbmQtaW46c3RhbmQtaW4=";
     const HEALTHY_STATUS: &str = "raft.state: Leader\nraft.current_leader: node-1";
+    /// How often a startup regression probes its stand-in. The startup regressions run on a
+    /// paused clock, so this only decides how many probes one attempt performs.
+    const STARTUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
+    /// What a startup regression allows beyond the budget it asserts. A paused clock advances
+    /// only for a timer, so the slack covers the work between them.
+    const STARTUP_BUDGET_SLACK: Duration = Duration::from_secs(1);
+    /// The longest one node's startup may take before a regression calls its budget broken.
+    const STARTUP_BUDGET_CEILING: Duration =
+        match NODE_STARTUP_BUDGET.checked_add(STARTUP_BUDGET_SLACK) {
+            Some(ceiling) => ceiling,
+            None => panic!("the startup budget and its regression slack must fit in Duration"),
+        };
 
     struct DropCount(Arc<AtomicUsize>);
 
@@ -242,6 +281,141 @@ mod tests {
         }
     }
 
+    /// How the node a startup regression drives behaves on one launch.
+    #[derive(Debug)]
+    enum LaunchBehavior {
+        /// The launch itself fails, the way the harness's own configuration does.
+        LaunchFails,
+        /// The node runs, never answers a readiness probe, and stops when asked.
+        NeverReady,
+        /// The node runs, never answers a readiness probe, and ignores the stop request.
+        NeverReadyAndNeverStops,
+        /// The node's task ends at once with this application error.
+        ApplicationError(AppError),
+        /// The node's task panics at once.
+        Panics,
+        /// The node answers its first readiness probe.
+        Ready,
+    }
+
+    /// A node the startup owner can drive, behaving on each launch the way its regression scripts.
+    struct StandInStartupNode {
+        node: ClusterNodeName,
+        behaviors: VecDeque<LaunchBehavior>,
+        task: OwnedNodeTask,
+        stop: CancellationToken,
+        answers_readiness: bool,
+        ports_available: bool,
+        launches: u32,
+        ports_moved: u32,
+    }
+
+    impl StandInStartupNode {
+        fn new(node: &str, behaviors: impl IntoIterator<Item = LaunchBehavior>) -> Self {
+            Self {
+                node: test_node(node),
+                behaviors: behaviors.into_iter().collect(),
+                task: OwnedNodeTask::not_started(),
+                stop: CancellationToken::new(),
+                answers_readiness: false,
+                ports_available: true,
+                launches: 0,
+                ports_moved: 0,
+            }
+        }
+
+        fn without_spare_ports(mut self) -> Self {
+            self.ports_available = false;
+            self
+        }
+
+        /// Starts this node the way the harness starts one node of its own, and returns the
+        /// exhaustion diagnostic when it never becomes ready.
+        async fn start_within(
+            &mut self,
+            budget: PhaseDeadline,
+        ) -> Result<(), Report<NodeStartupExhausted>> {
+            let node = self.node.clone();
+            NodeStartup::start(&node, self, budget).await
+        }
+    }
+
+    impl StartableNode for StandInStartupNode {
+        fn launch(&mut self) -> io::Result<()> {
+            self.launches += 1;
+            let behavior = self
+                .behaviors
+                .pop_front()
+                .assured("a startup regression scripts one behavior for every launch it allows");
+            self.answers_readiness = matches!(behavior, LaunchBehavior::Ready);
+            self.stop = CancellationToken::new();
+            let stop = self.stop.clone();
+            self.task = match behavior {
+                LaunchBehavior::LaunchFails => {
+                    return Err(io::Error::other("the stand-in node cannot be launched"));
+                }
+                LaunchBehavior::ApplicationError(error) => {
+                    OwnedNodeTask::spawn(async move { Err(Report::new(error)) })
+                }
+                LaunchBehavior::Panics => {
+                    OwnedNodeTask::spawn(async { panic!("intentional stand-in node panic") })
+                }
+                LaunchBehavior::NeverReadyAndNeverStops => OwnedNodeTask::spawn(async {
+                    future::pending::<()>().await;
+                    Ok(())
+                }),
+                LaunchBehavior::NeverReady | LaunchBehavior::Ready => {
+                    OwnedNodeTask::spawn(async move {
+                        stop.cancelled().await;
+                        Ok(())
+                    })
+                }
+            };
+            Ok(())
+        }
+
+        async fn readiness(
+            &mut self,
+            attempt: u32,
+            readiness: PhaseDeadline,
+        ) -> error_stack::Result<(), NodeStartupError> {
+            let node = self.node.clone();
+            let answers = self.answers_readiness;
+            self.task
+                .wait_until_ready(
+                    &node,
+                    attempt,
+                    readiness,
+                    STARTUP_POLL_INTERVAL,
+                    move |_| {
+                        future::ready(if answers {
+                            ReadinessProbeOutcome::Ready {
+                                response_kind: CommandOutcomeKind::Ok,
+                            }
+                        } else {
+                            ReadinessProbeOutcome::RequestFailed(Report::new(
+                                StatusRequestError::SessionEnded,
+                            ))
+                        })
+                    },
+                )
+                .await
+        }
+
+        async fn clean_up(&mut self, cleanup: PhaseDeadline) -> AttemptCleanup {
+            self.stop.cancel();
+            AttemptCleanup::from(self.task.wait(cleanup).await)
+        }
+
+        fn move_to_fresh_ports(&mut self) -> io::Result<()> {
+            if !self.ports_available {
+                return Err(io::Error::other("the port pool is exhausted"));
+            }
+            self.ports_moved += 1;
+            Ok(())
+        }
+    }
+
     fn plaintext_endpoint(address: SocketAddr) -> StatusEndpoint {
         StatusEndpoint::new(
             address,
@@ -292,6 +466,26 @@ mod tests {
 
     fn test_node(raw: &str) -> ClusterNodeName {
         ClusterNodeName::parse(raw).assured("test node names satisfy the cluster node grammar")
+    }
+
+    /// The attempt limit as the number of attempts an exhausted startup records.
+    fn attempt_limit() -> usize {
+        usize::try_from(NODE_START_ATTEMPTS).assured("the attempt limit is a small count")
+    }
+
+    /// The attempts the budget pays for at full length, as a number of recorded attempts.
+    fn full_length_attempts() -> usize {
+        usize::try_from(FULL_LENGTH_ATTEMPTS).assured("the full-length attempts are a small count")
+    }
+
+    /// How the startup owner classified each attempt it spent, in the order they ran.
+    fn attempt_retries(exhausted: &NodeStartupExhausted) -> Vec<StartupRetry> {
+        exhausted
+            .attempts
+            .spent
+            .iter()
+            .map(|attempt| attempt.retry)
+            .collect()
     }
 
     fn deadline_passed_during(
@@ -884,7 +1078,7 @@ mod tests {
             panic!("the completed task must be terminal when inspected");
         };
         let NodeTaskWaitOutcome::AlreadyObserved(stopped_outcome) =
-            completed.wait(TEST_TIMEOUT).await
+            completed.wait(PhaseDeadline::after(TEST_TIMEOUT)).await
         else {
             panic!("stopping after inspection must reuse the observed terminal outcome");
         };
@@ -927,16 +1121,470 @@ mod tests {
         assert_eq!(aborted_drops.load(Ordering::SeqCst), 1);
     }
 
+    /// How a stand-in node's task ends once cleanup has asked it to stop.
+    #[derive(Clone, Copy, Debug)]
+    enum StandInEnding {
+        StopsWhenAsked,
+        FailsWhenAsked,
+        PanicsWhenAsked,
+        /// Ignores the stop request, so only the cleanup deadline can end it.
+        NeverStops,
+    }
+
+    impl StandInEnding {
+        /// Whether `outcome` is how a task that ends this way ends.
+        fn ended_as(self, outcome: &NodeTaskTerminalOutcome) -> bool {
+            match self {
+                Self::StopsWhenAsked => {
+                    matches!(outcome, NodeTaskTerminalOutcome::CleanApplicationExit)
+                }
+                Self::FailsWhenAsked => matches!(
+                    outcome,
+                    NodeTaskTerminalOutcome::ApplicationError(error)
+                        if matches!(
+                            error.current_context(),
+                            AppError::MissingGrpcHttpsListenAddress
+                        )
+                ),
+                Self::PanicsWhenAsked => matches!(outcome, NodeTaskTerminalOutcome::Panic(_)),
+                // A task the cleanup deadline aborted is joined for the cancellation it left.
+                Self::NeverStops => matches!(outcome, NodeTaskTerminalOutcome::Cancellation(_)),
+            }
+        }
+    }
+
+    /// What the stand-in nodes of one cleanup did, in the order they did it.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum CleanupEvent {
+        StopRequested {
+            node: String,
+        },
+        TaskEnded {
+            node: String,
+        },
+        Released {
+            node: String,
+            /// The phase the scenario published while this node was releasing, when the node was
+            /// given a registration to read.
+            phase: Option<ScenarioPhase>,
+        },
+    }
+
+    #[derive(Debug, Default)]
+    struct CleanupLog {
+        events: Mutex<Vec<CleanupEvent>>,
+    }
+
+    impl CleanupLog {
+        fn record(&self, event: CleanupEvent) {
+            self.events.lock().push(event);
+        }
+
+        fn events(&self) -> Vec<CleanupEvent> {
+            self.events.lock().clone()
+        }
+
+        fn stop_was_requested(&self, node: &str) -> bool {
+            self.events().iter().any(|event| {
+                matches!(event, CleanupEvent::StopRequested { node: requested } if requested == node)
+            })
+        }
+
+        fn phase_while_releasing(&self, node: &str) -> Option<ScenarioPhase> {
+            self.events().into_iter().find_map(|event| match event {
+                CleanupEvent::Released {
+                    node: released,
+                    phase,
+                } if released == node => phase,
+                _ => None,
+            })
+        }
+
+        /// Whether every node gave its harness state back only once every task had ended.
+        fn released_only_after_every_task_ended(&self) -> bool {
+            let events = self.events();
+            let last_end = events
+                .iter()
+                .rposition(|event| matches!(event, CleanupEvent::TaskEnded { .. }));
+            let first_release = events
+                .iter()
+                .position(|event| matches!(event, CleanupEvent::Released { .. }));
+            let Some(last_end) = last_end else {
+                return false;
+            };
+            let Some(first_release) = first_release else {
+                return false;
+            };
+            last_end < first_release
+        }
+
+        fn released(&self) -> Vec<String> {
+            self.events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    CleanupEvent::Released { node, .. } => Some(node),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
+    /// Records that a node's task ended, whether it returned, failed, panicked or was aborted.
+    struct TaskEnd {
+        node: String,
+        log: Arc<CleanupLog>,
+    }
+
+    impl Drop for TaskEnd {
+        fn drop(&mut self) {
+            self.log.record(CleanupEvent::TaskEnded {
+                node: self.node.clone(),
+            });
+        }
+    }
+
+    /// A node standing in for a cluster node during cleanup: it records the stop request it was
+    /// given and the harness state it gave back, and its task ends the way the regression asked.
+    struct StandInTeardownNode {
+        name: String,
+        stop: Arc<Notify>,
+        task: OwnedNodeTask,
+        log: Arc<CleanupLog>,
+        scenario: Option<Arc<ActiveScenarioRegistration>>,
+    }
+
+    impl StandInTeardownNode {
+        fn new(name: &str, ending: StandInEnding, log: &Arc<CleanupLog>) -> Self {
+            let stop = Arc::new(Notify::new());
+            let task_stop = stop.clone();
+            let task_end = TaskEnd {
+                node: name.to_string(),
+                log: log.clone(),
+            };
+            let task = OwnedNodeTask::spawn(async move {
+                let _ended = task_end;
+                match ending {
+                    StandInEnding::NeverStops => {
+                        future::pending::<()>().await;
+                        Ok(())
+                    }
+                    StandInEnding::StopsWhenAsked => {
+                        task_stop.notified().await;
+                        Ok(())
+                    }
+                    StandInEnding::FailsWhenAsked => {
+                        task_stop.notified().await;
+                        Err(Report::new(AppError::MissingGrpcHttpsListenAddress))
+                    }
+                    StandInEnding::PanicsWhenAsked => {
+                        task_stop.notified().await;
+                        panic!("intentional stand-in node panic");
+                    }
+                }
+            });
+            Self {
+                name: name.to_string(),
+                stop,
+                task,
+                log: log.clone(),
+                scenario: None,
+            }
+        }
+
+        /// Reads the phase `scenario` publishes while this node releases, so a regression can tell
+        /// what a reader of the registry would have seen during cleanup.
+        fn reading(mut self, scenario: &Arc<ActiveScenarioRegistration>) -> Self {
+            self.scenario = Some(scenario.clone());
+            self
+        }
+    }
+
+    impl TeardownNode for StandInTeardownNode {
+        fn node_name(&self) -> String {
+            self.name.clone()
+        }
+
+        fn request_stop(&mut self) {
+            self.log.record(CleanupEvent::StopRequested {
+                node: self.name.clone(),
+            });
+            self.stop.notify_one();
+        }
+
+        fn owned_task(&mut self) -> &mut OwnedNodeTask {
+            &mut self.task
+        }
+
+        fn release(&mut self) {
+            let phase = self
+                .scenario
+                .as_ref()
+                .map(|scenario| published(scenario).phase);
+            self.log.record(CleanupEvent::Released {
+                node: self.name.clone(),
+                phase,
+            });
+        }
+    }
+
+    /// What the registry publishes for one scenario, read the way a suite watchdog reads it.
+    fn published(scenario: &ActiveScenarioRegistration) -> ActiveScenario {
+        ActiveScenario::active()
+            .into_iter()
+            .find(|active| &active.identity == scenario.identity())
+            .verified("a registered scenario is published until its registration is dropped")
+    }
+
+    fn stand_in_cluster(
+        nodes: &[(&str, StandInEnding)],
+        log: &Arc<CleanupLog>,
+    ) -> Vec<StandInTeardownNode> {
+        nodes
+            .iter()
+            .map(|(name, ending)| StandInTeardownNode::new(name, *ending, log))
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_single_node_cleanup_keeps_how_its_task_ended() {
+        for ending in [
+            StandInEnding::StopsWhenAsked,
+            StandInEnding::FailsWhenAsked,
+            StandInEnding::PanicsWhenAsked,
+        ] {
+            let log = Arc::new(CleanupLog::default());
+            let mut nodes = stand_in_cluster(&[("node-1", ending)], &log);
+
+            let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+            assert!(log.stop_was_requested("node-1"));
+            assert!(
+                teardown.elapsed < TEST_TEARDOWN_BUDGET,
+                "a node that stops when asked must not reach the cleanup deadline: {teardown}"
+            );
+            assert!(!teardown.was_forced(), "{teardown}");
+            let [node] = teardown.nodes.as_slice() else {
+                panic!("a cluster of one reports one node: {teardown}");
+            };
+            let NodeTaskWaitOutcome::Joined(outcome) = &node.stop else {
+                panic!("a node that ends itself must be joined, not forced: {node}");
+            };
+            assert!(
+                ending.ended_as(outcome.as_ref()),
+                "cleanup must keep how the task of a node that {ending:?} ended, got {outcome}"
+            );
+            assert_eq!(log.released(), vec!["node-1".to_string()]);
+            assert!(
+                log.released_only_after_every_task_ended(),
+                "{:?}",
+                log.events()
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports() {
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = stand_in_cluster(
+            &[
+                ("node-1", StandInEnding::StopsWhenAsked),
+                ("node-2", StandInEnding::FailsWhenAsked),
+                ("node-3", StandInEnding::PanicsWhenAsked),
+            ],
+            &log,
+        );
+
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+        assert!(!teardown.was_forced(), "{teardown}");
+        let panicked = teardown
+            .panics()
+            .map(|node| node.node.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(panicked, vec!["node-3".to_string()]);
+        assert_eq!(
+            log.released(),
+            vec![
+                "node-1".to_string(),
+                "node-2".to_string(),
+                "node-3".to_string()
+            ]
+        );
+        assert!(
+            log.released_only_after_every_task_ended(),
+            "{:?}",
+            log.events()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn three_stuck_nodes_spend_one_cleanup_budget_rather_than_three() {
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = stand_in_cluster(
+            &[
+                ("node-1", StandInEnding::NeverStops),
+                ("node-2", StandInEnding::NeverStops),
+                ("node-3", StandInEnding::NeverStops),
+            ],
+            &log,
+        );
+
+        let started = Instant::now();
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        let spent = started.elapsed();
+
+        assert!(spent >= TEST_TEARDOWN_BUDGET, "{teardown}");
+        assert!(
+            spent < TEST_SHARED_TEARDOWN_BOUND,
+            "three stuck nodes must share one cleanup budget, but cleanup took {spent:?}: \
+             {teardown}"
+        );
+        for node in &teardown.nodes {
+            assert!(log.stop_was_requested(&node.node));
+            let NodeTaskWaitOutcome::AbortedAtDeadline(outcome) = &node.stop else {
+                panic!("a node that never stops must be aborted at the deadline: {node}");
+            };
+            assert!(
+                StandInEnding::NeverStops.ended_as(outcome.as_ref()),
+                "an aborted node task must be joined for its outcome: {outcome}"
+            );
+        }
+        assert_eq!(teardown.forced().count(), 3, "{teardown}");
+        assert_eq!(log.released().len(), 3);
+        assert!(
+            log.released_only_after_every_task_ended(),
+            "harness state must be given back only once every task has ended: {:?}",
+            log.events()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_diagnostic_still_reaches_every_node_stop() {
+        let stalled = StandInNode::serve(StandInBehavior::WithholdSession).await;
+        let healthy = StandInNode::serve(StandInBehavior::Answer(command_result(
+            CommandResultKind::Ok,
+            HEALTHY_STATUS,
+        )))
+        .await;
+        let endpoints = BTreeMap::from([
+            ("node-1".to_string(), healthy.endpoint()),
+            ("node-2".to_string(), stalled.endpoint()),
+        ]);
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = stand_in_cluster(
+            &[
+                ("node-1", StandInEnding::StopsWhenAsked),
+                ("node-2", StandInEnding::StopsWhenAsked),
+            ],
+            &log,
+        );
+
+        let started = Instant::now();
+        let snapshots = StatusEndpoint::cluster_statuses(
+            &endpoints,
+            PhaseDeadline::after(STALLED_REQUEST_BUDGET),
+        )
+        .await;
+        let diagnostics_ended = started.elapsed();
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
+        assert!(
+            diagnostics_ended >= STALLED_REQUEST_BUDGET,
+            "the stalled diagnostic must run out its own budget before cleanup continues"
+        );
+        assert!(matches!(snapshots.get("node-1"), Some(Ok(status)) if status == HEALTHY_STATUS));
+        let Some(Err(stalled_error)) = snapshots.get("node-2") else {
+            panic!("the stalled node's snapshot must be its timeout: {snapshots:?}");
+        };
+        assert!(deadline_passed_during(
+            stalled_error,
+            StatusOperation::OpenSession
+        ));
+        for node in &teardown.nodes {
+            assert!(
+                log.stop_was_requested(&node.node),
+                "a stalled diagnostic must not keep a node from being asked to stop: {node}"
+            );
+        }
+        assert!(!teardown.was_forced(), "{teardown}");
+        assert_eq!(log.released().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_finished_phase_is_published_only_once_cleanup_has_completed() {
+        let scenario = Arc::new(ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "cleanup publishes truthful phases",
+        ));
+        let log = Arc::new(CleanupLog::default());
+        let mut nodes = [
+            StandInTeardownNode::new("node-1", StandInEnding::NeverStops, &log).reading(&scenario),
+        ];
+
+        scenario.enter(ScenarioPhase::BodyComplete);
+        scenario.enter(ScenarioPhase::TeardownStarted);
+        scenario.enter(ScenarioPhase::Diagnostics);
+        scenario.enter(ScenarioPhase::Stopping);
+        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        assert_eq!(published(&scenario).phase, ScenarioPhase::Stopping);
+        scenario.enter(ScenarioPhase::Finished);
+
+        assert!(teardown.was_forced(), "{teardown}");
+        assert_eq!(
+            log.phase_while_releasing("node-1"),
+            Some(ScenarioPhase::Stopping),
+            "cleanup that is still giving state back must not publish that it has finished"
+        );
+        assert_eq!(published(&scenario).phase, ScenarioPhase::Finished);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_active_scenario_publishes_its_phase_and_the_age_of_that_phase() {
+        let scenario = ActiveScenarioRegistration::start("Harness liveness", "phase ages");
+        let queued = published(&scenario);
+        assert_eq!(&queued.identity, scenario.identity());
+        assert_eq!(queued.phase, ScenarioPhase::Queued);
+        assert_eq!(queued.identity.feature, "Harness liveness");
+        assert_eq!(queued.identity.scenario, "phase ages");
+
+        // A scenario that has not reached its first step ages in the phase it is waiting in.
+        tokio::time::advance(Duration::from_secs(30)).await;
+        let waiting = published(&scenario);
+        assert_eq!(waiting.phase, ScenarioPhase::Queued);
+        assert_eq!(waiting.phase_age(), Duration::from_secs(30));
+        assert_eq!(waiting.age(), Duration::from_secs(30));
+
+        let started = scenario.enter(ScenarioPhase::Body);
+        assert_eq!(started.phase, ScenarioPhase::Body);
+        assert_eq!(started.phase_age(), Duration::ZERO);
+        assert_eq!(started.age(), Duration::from_secs(30));
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let running = published(&scenario);
+        assert_eq!(running.phase, ScenarioPhase::Body);
+        assert_eq!(running.phase_age(), Duration::from_secs(5));
+        assert_eq!(running.age(), Duration::from_secs(35));
+
+        let identity = queued.identity.clone();
+        drop(scenario);
+        assert!(
+            !ActiveScenario::active()
+                .iter()
+                .any(|active| active.identity == identity),
+            "a scenario whose world is dropped must leave the registry"
+        );
+    }
+
     #[tokio::test]
     async fn forced_cleanup_aborts_and_joins_the_owned_task_once() {
         let mut not_started = OwnedNodeTask::not_started();
         assert!(matches!(
-            not_started.wait(TEST_TIMEOUT).await,
+            not_started.wait(PhaseDeadline::after(TEST_TIMEOUT)).await,
             NodeTaskWaitOutcome::NotStarted
         ));
 
         let mut completed = OwnedNodeTask::spawn(async { Ok(()) });
-        let NodeTaskWaitOutcome::Joined(completed_outcome) = completed.wait(TEST_TIMEOUT).await
+        let NodeTaskWaitOutcome::Joined(completed_outcome) =
+            completed.wait(PhaseDeadline::after(TEST_TIMEOUT)).await
         else {
             panic!("waiting for a clean task must join its terminal outcome");
         };
@@ -961,7 +1609,8 @@ mod tests {
             .await
             .assured("the forced-cleanup task sends after installing its drop guard");
 
-        let NodeTaskWaitOutcome::AbortedAtDeadline(first_outcome) = task.wait(Duration::ZERO).await
+        let NodeTaskWaitOutcome::AbortedAtDeadline(first_outcome) =
+            task.wait(PhaseDeadline::after(Duration::ZERO)).await
         else {
             panic!("a pending task with an expired deadline must be aborted and joined");
         };
@@ -971,7 +1620,8 @@ mod tests {
         ));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
 
-        let NodeTaskWaitOutcome::AlreadyObserved(observed_outcome) = task.wait(TEST_TIMEOUT).await
+        let NodeTaskWaitOutcome::AlreadyObserved(observed_outcome) =
+            task.wait(PhaseDeadline::after(TEST_TIMEOUT)).await
         else {
             panic!("a second cleanup must reuse the retained terminal outcome");
         };
@@ -987,5 +1637,316 @@ mod tests {
             second_outcome.as_ref()
         ));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repeated_readiness_failure_spends_one_budget_across_every_attempt() {
+        let mut node = StandInStartupNode::new(
+            "node-unready",
+            [
+                LaunchBehavior::NeverReady,
+                LaunchBehavior::NeverReady,
+                LaunchBehavior::NeverReady,
+            ],
+        );
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a node that never answers a probe must exhaust its startup");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::AttemptsSpent));
+        assert_eq!(exhausted.budget, NODE_STARTUP_BUDGET);
+        assert_eq!(node.launches, NODE_START_ATTEMPTS);
+        assert_eq!(node.ports_moved, NODE_START_ATTEMPTS - 1);
+        assert_eq!(exhausted.attempts.spent.len(), attempt_limit());
+        assert_eq!(
+            attempt_retries(exhausted),
+            vec![StartupRetry::Transient; attempt_limit()]
+        );
+        for attempt in &exhausted.attempts.spent {
+            let AttemptFailure::NotReady(readiness) = &attempt.failure else {
+                panic!(
+                    "every attempt must end in its readiness: {}",
+                    attempt.failure
+                );
+            };
+            assert_eq!(
+                readiness.current_context().failure,
+                NodeStartupFailure::DeadlineExpired
+            );
+        }
+        let (last, earlier) = exhausted
+            .attempts
+            .spent
+            .split_last()
+            .assured("an exhausted startup records the attempts it spent");
+        for attempt in earlier {
+            assert!(
+                matches!(attempt.cleanup, AttemptCleanup::Stopped(_)),
+                "a node asked to stop while the budget remains must stop: {}",
+                attempt.cleanup
+            );
+        }
+        // The last attempt polls readiness to the end of the budget, so its cleanup has nothing
+        // left to wait with and aborts the node task at once.
+        assert!(
+            matches!(last.cleanup, AttemptCleanup::AbortedAtDeadline(_)),
+            "cleanup after the budget is spent must abort rather than wait: {}",
+            last.cleanup
+        );
+        assert!(
+            exhausted.elapsed >= NODE_STARTUP_BUDGET,
+            "every attempt the budget admits must be spent: {:?}",
+            exhausted.elapsed
+        );
+        assert!(
+            exhausted.elapsed <= STARTUP_BUDGET_CEILING,
+            "retries must share one budget rather than restart it: {:?}",
+            exhausted.elapsed
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bound_address_is_retried_until_a_launch_becomes_ready() {
+        let mut node = StandInStartupNode::new(
+            "node-bound",
+            [
+                LaunchBehavior::ApplicationError(AppError::BindGrpcListenAddress),
+                LaunchBehavior::Ready,
+            ],
+        );
+        let budget = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+
+        node.start_within(budget)
+            .await
+            .assured("a bound address must be retried on fresh ports");
+
+        assert_eq!(node.launches, 2);
+        assert_eq!(node.ports_moved, 1);
+        assert!(
+            budget.elapsed() < ATTEMPT_READINESS_BUDGET,
+            "a launch that fails at once must not wait for readiness: {:?}",
+            budget.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_last_attempt_still_becomes_ready_with_what_the_budget_left() {
+        let mut node = StandInStartupNode::new(
+            "node-slow",
+            [
+                LaunchBehavior::NeverReady,
+                LaunchBehavior::NeverReady,
+                LaunchBehavior::Ready,
+            ],
+        );
+        let budget = PhaseDeadline::after(NODE_STARTUP_BUDGET);
+
+        node.start_within(budget)
+            .await
+            .assured("the budget must still admit the launch that becomes ready");
+
+        assert_eq!(node.launches, NODE_START_ATTEMPTS);
+        assert_eq!(node.ports_moved, NODE_START_ATTEMPTS - 1);
+        assert!(
+            budget.elapsed() < NODE_STARTUP_BUDGET,
+            "a startup that becomes ready must not spend its whole budget: {:?}",
+            budget.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_application_error_ends_the_startup_without_another_launch() {
+        let mut node = StandInStartupNode::new(
+            "node-registry",
+            [LaunchBehavior::ApplicationError(AppError::OpenRegistry)],
+        );
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("an application error must end the startup");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::TerminalFailure));
+        assert_eq!(attempt_retries(exhausted), vec![StartupRetry::Terminal]);
+        assert_eq!(node.launches, 1);
+        assert_eq!(node.ports_moved, 0);
+        assert!(error.to_string().contains("failed to open registry"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_node_ends_the_startup_without_another_launch() {
+        let mut node = StandInStartupNode::new("node-panic", [LaunchBehavior::Panics]);
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a panicking node must end the startup");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::TerminalFailure));
+        assert_eq!(attempt_retries(exhausted), vec![StartupRetry::Terminal]);
+        assert_eq!(node.launches, 1);
+        assert!(
+            error
+                .to_string()
+                .contains("intentional stand-in node panic")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_launch_failure_ends_the_startup_before_anything_is_cleaned_up() {
+        let mut node = StandInStartupNode::new("node-unlaunchable", [LaunchBehavior::LaunchFails]);
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a node that cannot be launched must end the startup");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::TerminalFailure));
+        assert_eq!(attempt_retries(exhausted), vec![StartupRetry::Terminal]);
+        assert_eq!(node.launches, 1);
+        assert_eq!(node.ports_moved, 0);
+        let [attempt] = exhausted.attempts.spent.as_slice() else {
+            panic!("a launch failure must record exactly one attempt");
+        };
+        assert!(matches!(attempt.failure, AttemptFailure::Launch(_)));
+        assert!(matches!(attempt.cleanup, AttemptCleanup::NothingLaunched));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_that_never_completes_is_aborted_inside_the_same_budget() {
+        let mut node = StandInStartupNode::new(
+            "node-unstoppable",
+            [
+                LaunchBehavior::NeverReadyAndNeverStops,
+                LaunchBehavior::NeverReadyAndNeverStops,
+                LaunchBehavior::NeverReadyAndNeverStops,
+            ],
+        );
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a node that never stops must still exhaust one startup budget");
+
+        // Cleanup spends the same budget as readiness, so a node that has to be aborted every time
+        // spends the whole budget on the attempts it pays for at full length, and the launch a
+        // fast failure would have left room for never starts.
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::BudgetSpent));
+        assert_eq!(node.launches, FULL_LENGTH_ATTEMPTS);
+        assert_eq!(exhausted.attempts.spent.len(), full_length_attempts());
+        for attempt in &exhausted.attempts.spent {
+            assert!(
+                matches!(attempt.cleanup, AttemptCleanup::AbortedAtDeadline(_)),
+                "a node that ignores its stop must be aborted: {}",
+                attempt.cleanup
+            );
+        }
+        assert!(
+            exhausted.elapsed <= STARTUP_BUDGET_CEILING,
+            "cleanup must spend the startup budget rather than a shutdown watchdog: {:?}",
+            exhausted.elapsed
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn exhaustion_reports_every_attempt_with_its_typed_cause() {
+        let mut node = StandInStartupNode::new(
+            "node-history",
+            [
+                LaunchBehavior::ApplicationError(AppError::BindHttpListenAddress),
+                LaunchBehavior::NeverReadyAndNeverStops,
+                LaunchBehavior::NeverReady,
+            ],
+        );
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a node that never answers a probe must exhaust its startup");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains(&format!(
+                "node 'node-history' did not become ready within its {NODE_STARTUP_BUDGET:?} \
+                 startup budget: every launch the attempt limit allows was spent"
+            )),
+            "{rendered}"
+        );
+        assert!(rendered.contains("attempt 1/3 [transient]"), "{rendered}");
+        assert!(
+            rendered.contains("failed to bind HTTP listen address"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("attempt 2/3 [transient]"), "{rendered}");
+        assert!(
+            rendered.contains("cleanup: aborted at the cleanup deadline (cancellation:"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("attempt 3/3 [transient]"), "{rendered}");
+        assert!(
+            rendered.contains("startup deadline expired; task state: running"),
+            "{rendered}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ports_that_cannot_be_reallocated_end_the_startup() {
+        let mut node = StandInStartupNode::new("node-portless", [LaunchBehavior::NeverReady])
+            .without_spare_ports();
+
+        let error = node
+            .start_within(PhaseDeadline::after(NODE_STARTUP_BUDGET))
+            .await
+            .expect_err("a startup without ports for its next launch must end");
+
+        let exhausted = error.current_context();
+        assert!(matches!(exhausted.end, StartupEnd::PortsUnavailable(_)));
+        assert_eq!(node.launches, 1);
+        assert_eq!(exhausted.attempts.spent.len(), 1);
+        assert!(
+            error.to_string().contains("the port pool is exhausted"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sequential_cluster_construction_stays_inside_its_derived_budget() {
+        const CLUSTER_NODES: u32 = 2;
+        let construction = PhaseDeadline::after(cluster_startup_budget(CLUSTER_NODES));
+        let ceiling = cluster_startup_budget(CLUSTER_NODES)
+            .checked_add(STARTUP_BUDGET_SLACK)
+            .assured("a two-node construction budget and its slack fit in Duration");
+
+        for index in 1..=CLUSTER_NODES {
+            let mut node = StandInStartupNode::new(
+                &format!("node-{index}"),
+                [
+                    LaunchBehavior::NeverReady,
+                    LaunchBehavior::NeverReady,
+                    LaunchBehavior::NeverReady,
+                ],
+            );
+            let error = node
+                .start_within(construction.nested(NODE_STARTUP_BUDGET))
+                .await
+                .expect_err("a node that never answers a probe must exhaust its startup");
+            assert!(
+                error.current_context().budget <= NODE_STARTUP_BUDGET,
+                "no node may receive more than the per-node budget"
+            );
+        }
+
+        assert!(
+            construction.elapsed() <= ceiling,
+            "building a cluster one node at a time must stay inside the derived budget: {:?}",
+            construction.elapsed()
+        );
     }
 }

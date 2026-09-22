@@ -87,6 +87,7 @@ CREATE ATTACHED WASM PROCESSOR rust_filter_even_rows
     SET value = value
     WHERE output.value > 0 AS I32
     ON MESSAGE ERROR LOG
+  ON REJECTED STATE PRESERVE
   ON GLOBAL ERROR LOG;
 
 CREATE ATTACHED WASM PROCESSOR go_filter_even_rows
@@ -103,6 +104,7 @@ CREATE ATTACHED WASM PROCESSOR go_filter_even_rows
     SET value = value
     WHERE output.value > 0 AS I32
     ON MESSAGE ERROR LOG
+  ON REJECTED STATE PRESERVE
   ON GLOBAL ERROR LOG;
 
 CREATE SUBSCRIPTION rust_filtered_metrics_subscription TO rust_filtered_metrics;

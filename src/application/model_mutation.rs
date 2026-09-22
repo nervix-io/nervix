@@ -17,9 +17,10 @@ use nervix_consensus::{
 };
 use nervix_interconnect::EntityGatePurpose;
 use nervix_models::{
-    DomainName, DomainSchedule, DomainStatus, ModelKind, ModelName, OperationImpactReason,
-    OperationImpactReport, QuiesceLevel, RequestedResourceVersion, ResourceBindingImpact,
-    Statement, TransactionOperation, TransactionOperationNumber,
+    DomainName, DomainSchedule, DomainStatus, ImpactDiagnosticKind, ModelKind, ModelName,
+    OperationImpactReason, OperationImpactReport, PauseRequirement, QuiesceLevel,
+    RequestedResourceVersion, ResourceBindingImpact, Statement, TransactionOperation,
+    TransactionOperationNumber,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use tokio::sync::mpsc;
@@ -1107,6 +1108,7 @@ impl SessionServiceImpl {
             let changes_vhosts = planned.changes_vhosts();
             let mut cluster_entity_gate = None;
             let mut ownership_handoff = None;
+            let mut domain_pause_attempt = None;
             // Ordered plans and direct model commits share this schedule publication boundary.
             #[cfg(feature = "testing")]
             if !is_noop
@@ -1239,6 +1241,17 @@ impl SessionServiceImpl {
                 }
             };
             let requires_domain_pause = classified_level.requires_domain_pause();
+            if !is_noop
+                && requires_domain_pause
+                && adopted_domain_pause
+                && let Some(step) = transaction_step.as_ref()
+            {
+                let attempt = step.actual.request(PauseRequirement::Domain {
+                    domain: domain.clone(),
+                });
+                step.actual.confirm(attempt);
+                domain_pause_attempt = Some(attempt);
+            }
             if transaction_step.is_none()
                 && let Some(prepared_schedule) = prepared_schedule.as_mut()
             {
@@ -1299,30 +1312,36 @@ impl SessionServiceImpl {
                     ));
                 }
             }
-            if !is_noop
-                && requires_domain_pause
-                && !adopted_domain_pause
-                && let Err(error) = Box::pin(
-                    self.pause_and_drain_domain_for_alter(&domain, domain_mutation.as_ref()),
-                )
-                .await
-            {
-                let response = match error.downcast_ref::<ConsensusError>() {
-                    Some(cause) => {
-                        Box::pin(self.consensus_error_response(cause, error.to_string())).await
+            if !is_noop && requires_domain_pause && !adopted_domain_pause {
+                let pause = Box::pin(self.pause_and_drain_domain_for_alter(
+                    &domain,
+                    domain_mutation.as_ref(),
+                    transaction_step.as_ref().map(|step| step.actual),
+                ))
+                .await;
+                let attempt = match pause {
+                    Ok(attempt) => attempt,
+                    Err(error) => {
+                        let response = match error.downcast_ref::<ConsensusError>() {
+                            Some(cause) => {
+                                Box::pin(self.consensus_error_response(cause, error.to_string()))
+                                    .await
+                            }
+                            None => command_error(error.to_string()),
+                        };
+                        if response.kind == i32::from(CommandResultKind::NotLeader)
+                            && let Some(step) = transaction_step.as_ref()
+                        {
+                            *step.outcome.lock() = Some(Err(error.change_context(
+                                TransactionCommitError::RecoverQuiescence {
+                                    id: step.transaction.id.clone(),
+                                },
+                            )));
+                        }
+                        return response;
                     }
-                    None => command_error(error.to_string()),
                 };
-                if response.kind == i32::from(CommandResultKind::NotLeader)
-                    && let Some(step) = transaction_step.as_ref()
-                {
-                    *step.outcome.lock() = Some(Err(error.change_context(
-                        TransactionCommitError::RecoverQuiescence {
-                            id: step.transaction.id.clone(),
-                        },
-                    )));
-                }
-                return response;
+                domain_pause_attempt = attempt;
             }
             if !is_noop && requires_domain_pause {
                 let paused_inputs = inputs
@@ -1342,6 +1361,12 @@ impl SessionServiceImpl {
                     affected_entities,
                     EntityGatePurpose::ModelAlteration,
                     deadline,
+                    transaction_step.as_ref().map(|step| {
+                        (
+                            step.actual,
+                            step.planned_step.impact.planned().pause.clone(),
+                        )
+                    }),
                 ))
                 .await
                 {
@@ -1360,7 +1385,20 @@ impl SessionServiceImpl {
                 ))
                 .await
                 {
-                    Box::pin(self.release_cluster_entity_gates(gate)).await;
+                    if let Some(step) = transaction_step.as_ref()
+                        && let Some(attempt) = gate.impact_attempt()
+                    {
+                        step.actual.fail(
+                            attempt,
+                            ImpactDiagnosticKind::Quiescence,
+                            error.to_string(),
+                        );
+                    }
+                    Box::pin(self.release_cluster_entity_gates_recording(
+                        gate,
+                        transaction_step.as_ref().map(|step| step.actual),
+                    ))
+                    .await;
                     return command_error(error.to_string());
                 }
                 cluster_entity_gate = Some(gate);
@@ -1372,18 +1410,33 @@ impl SessionServiceImpl {
                         expected_schedule.as_ref(),
                         prepared_schedule.as_ref(),
                         &ownership_gate,
+                        transaction_step.as_ref().map(|step| {
+                            (
+                                step.actual,
+                                step.planned_step.impact.planned().pause.clone(),
+                            )
+                        }),
                     ))
                     .await
                     {
                         Ok(handoff) => handoff,
                         Err(error) => {
                             if let Some(gate) = cluster_entity_gate.take() {
-                                Box::pin(self.release_cluster_entity_gates(gate)).await;
+                                Box::pin(self.release_cluster_entity_gates_recording(
+                                    gate,
+                                    transaction_step.as_ref().map(|step| step.actual),
+                                ))
+                                .await;
                             }
                             return command_error(error.to_string());
                         }
                     };
             }
+            let domain_pause_impact = || {
+                transaction_step
+                    .as_ref()
+                    .and_then(|step| domain_pause_attempt.map(|attempt| (step.actual, attempt)))
+            };
 
             let mut rollback_plan = None;
             // The runtime revision whose HTTPS listener installation a direct batch confirms, once
@@ -1394,11 +1447,31 @@ impl SessionServiceImpl {
                 let _runtime_changes = match self.inner.registry.commit_planned(planned) {
                     Ok(changes) => changes,
                     Err(err) => {
+                        if let Some(step) = transaction_step.as_ref()
+                            && let Some(attempt) = cluster_entity_gate
+                                .as_ref()
+                                .and_then(|gate| gate.impact_attempt())
+                        {
+                            step.actual.fail(
+                                attempt,
+                                ImpactDiagnosticKind::Application,
+                                err.to_string(),
+                            );
+                        }
                         if let Some(handoff) = ownership_handoff.take() {
-                            Box::pin(self.abort_planned_ownership_handoff(&domain, handoff)).await;
+                            Box::pin(self.abort_planned_ownership_handoff(
+                                &domain,
+                                handoff,
+                                transaction_step.as_ref().map(|step| step.actual),
+                            ))
+                            .await;
                         }
                         if let Some(gate) = cluster_entity_gate.take() {
-                            Box::pin(self.release_cluster_entity_gates(gate)).await;
+                            Box::pin(self.release_cluster_entity_gates_recording(
+                                gate,
+                                transaction_step.as_ref().map(|step| step.actual),
+                            ))
+                            .await;
                         }
                         if let RegistryError::ConcurrentMutation { .. } = err.current_context() {
                             error!(
@@ -1409,9 +1482,11 @@ impl SessionServiceImpl {
                             );
                         }
                         let resume_error = if requires_domain_pause {
-                            Box::pin(
-                                self.resume_domain_after_alter(&domain, domain_mutation.as_ref()),
-                            )
+                            Box::pin(self.resume_domain_after_alter_with_impact(
+                                &domain,
+                                domain_mutation.as_ref(),
+                                domain_pause_impact(),
+                            ))
                             .await
                             .err()
                         } else {
@@ -1452,19 +1527,35 @@ impl SessionServiceImpl {
                         )),
                         schedule: prepared_schedule.clone().map(Box::new),
                     };
-                    match Box::pin(self.record_transaction_step(
-                        transaction_step.transaction,
-                        transaction_step.planned_step.impact.clone(),
-                        step_result,
-                        Some(effect),
-                    ))
+                    transaction_step.actual.begin_application(
+                        transaction_step
+                            .planned_step
+                            .impact
+                            .planned()
+                            .effects
+                            .clone(),
+                    );
+                    match Box::pin(
+                        self.record_transaction_step(
+                            transaction_step.transaction,
+                            transaction_step
+                                .actual
+                                .apply_to(transaction_step.planned_step.impact.clone()),
+                            step_result,
+                            Some(effect),
+                        ),
+                    )
                     .await
                     {
                         Ok(transaction) => {
                             self.pause_transaction_commit_if_armed(&transaction).await;
-                            recorded_transaction = Some(transaction);
                             let activation_error =
-                                Box::pin(self.apply_current_cluster_state()).await.err();
+                                Box::pin(self.apply_current_cluster_state_recording_recovery(
+                                    transaction_step.actual,
+                                    &transaction,
+                                ))
+                                .await;
+                            recorded_transaction = Some(transaction);
                             if let Some(handoff) = ownership_handoff.take() {
                                 if let Some(error) = &activation_error {
                                     transaction_application_failure = Some(format!(
@@ -1474,13 +1565,19 @@ impl SessionServiceImpl {
                                         domain.as_str()
                                     ));
                                     self.defer_planned_ownership_handoff_release(
-                                        &domain, handoff, error,
+                                        &domain,
+                                        handoff,
+                                        error,
+                                        Some(transaction_step.actual),
                                     );
                                 } else {
-                                    if let Err(error) = Box::pin(
-                                        self.finish_planned_ownership_handoff(&domain, handoff),
-                                    )
-                                    .await
+                                    if let Err(error) =
+                                        Box::pin(self.finish_planned_ownership_handoff(
+                                            &domain,
+                                            handoff,
+                                            Some(transaction_step.actual),
+                                        ))
+                                        .await
                                     {
                                         transaction_application_failure = Some(format!(
                                             "committed transaction model step in domain '{}' \
@@ -1521,11 +1618,19 @@ impl SessionServiceImpl {
                         }
                         Err(error) => {
                             if let Some(handoff) = ownership_handoff.take() {
-                                Box::pin(self.abort_planned_ownership_handoff(&domain, handoff))
-                                    .await;
+                                Box::pin(self.abort_planned_ownership_handoff(
+                                    &domain,
+                                    handoff,
+                                    Some(transaction_step.actual),
+                                ))
+                                .await;
                             }
                             if let Some(gate) = cluster_entity_gate.take() {
-                                Box::pin(self.release_cluster_entity_gates(gate)).await;
+                                Box::pin(self.release_cluster_entity_gates_recording(
+                                    gate,
+                                    Some(transaction_step.actual),
+                                ))
+                                .await;
                             }
                             let rollback_error = if let Some(plan) = rollback_plan.take() {
                                 match self.inner.registry.rollback_committed(plan) {
@@ -1535,17 +1640,17 @@ impl SessionServiceImpl {
                             } else {
                                 None
                             };
-                            let resume_error =
-                                if requires_domain_pause {
-                                    Box::pin(self.resume_domain_after_alter(
-                                        &domain,
-                                        domain_mutation.as_ref(),
-                                    ))
-                                    .await
-                                    .err()
-                                } else {
-                                    None
-                                };
+                            let resume_error = if requires_domain_pause {
+                                Box::pin(self.resume_domain_after_alter_with_impact(
+                                    &domain,
+                                    domain_mutation.as_ref(),
+                                    domain_pause_impact(),
+                                ))
+                                .await
+                                .err()
+                            } else {
+                                None
+                            };
                             let error = match rollback_error {
                                 Some(rollback) => error.attach(format!(
                                     "local registry rollback also failed: {rollback}"
@@ -1579,10 +1684,19 @@ impl SessionServiceImpl {
                     {
                         let err = error.to_string();
                         if let Some(handoff) = ownership_handoff.take() {
-                            Box::pin(self.abort_planned_ownership_handoff(&domain, handoff)).await;
+                            Box::pin(self.abort_planned_ownership_handoff(
+                                &domain,
+                                handoff,
+                                transaction_step.as_ref().map(|step| step.actual),
+                            ))
+                            .await;
                         }
                         if let Some(gate) = cluster_entity_gate.take() {
-                            Box::pin(self.release_cluster_entity_gates(gate)).await;
+                            Box::pin(self.release_cluster_entity_gates_recording(
+                                gate,
+                                transaction_step.as_ref().map(|step| step.actual),
+                            ))
+                            .await;
                         }
                         if let Some(rollback_plan) = rollback_plan.take()
                             && let Err(rollback_error) = Box::pin(self.rollback_model_alteration(
@@ -1636,15 +1750,26 @@ impl SessionServiceImpl {
                         Some(Box::pin(self.inner.consensus.current_runtime_revision()).await);
                     if let Err(error) = Box::pin(self.apply_current_cluster_state()).await {
                         if let Some(handoff) = ownership_handoff.take() {
-                            self.defer_planned_ownership_handoff_release(&domain, handoff, &error);
+                            self.defer_planned_ownership_handoff_release(
+                                &domain,
+                                handoff,
+                                &error,
+                                transaction_step.as_ref().map(|step| step.actual),
+                            );
                         }
                         if let Some(gate) = cluster_entity_gate.take() {
-                            Box::pin(self.release_cluster_entity_gates(gate)).await;
+                            Box::pin(self.release_cluster_entity_gates_recording(
+                                gate,
+                                transaction_step.as_ref().map(|step| step.actual),
+                            ))
+                            .await;
                         }
                         let paused = if requires_domain_pause {
-                            match Box::pin(
-                                self.resume_domain_after_alter(&domain, domain_mutation.as_ref()),
-                            )
+                            match Box::pin(self.resume_domain_after_alter_with_impact(
+                                &domain,
+                                domain_mutation.as_ref(),
+                                domain_pause_impact(),
+                            ))
                             .await
                             {
                                 Ok(()) => String::new(),
@@ -1662,16 +1787,26 @@ impl SessionServiceImpl {
                         ));
                     }
                     if let Some(handoff) = ownership_handoff.take()
-                        && let Err(error) =
-                            Box::pin(self.finish_planned_ownership_handoff(&domain, handoff)).await
+                        && let Err(error) = Box::pin(self.finish_planned_ownership_handoff(
+                            &domain,
+                            handoff,
+                            transaction_step.as_ref().map(|step| step.actual),
+                        ))
+                        .await
                     {
                         if let Some(gate) = cluster_entity_gate.take() {
-                            Box::pin(self.release_cluster_entity_gates(gate)).await;
+                            Box::pin(self.release_cluster_entity_gates_recording(
+                                gate,
+                                transaction_step.as_ref().map(|step| step.actual),
+                            ))
+                            .await;
                         }
                         let paused = if requires_domain_pause {
-                            match Box::pin(
-                                self.resume_domain_after_alter(&domain, domain_mutation.as_ref()),
-                            )
+                            match Box::pin(self.resume_domain_after_alter_with_impact(
+                                &domain,
+                                domain_mutation.as_ref(),
+                                domain_pause_impact(),
+                            ))
                             .await
                             {
                                 Ok(()) => String::new(),
@@ -1692,6 +1827,13 @@ impl SessionServiceImpl {
 
                 if requires_domain_pause {
                     if let Err(error) = Box::pin(self.wait_for_paused_domain_drain(&domain)).await {
+                        if let Some((impact, attempt)) = domain_pause_impact() {
+                            impact.fail(
+                                attempt,
+                                ImpactDiagnosticKind::Quiescence,
+                                error.to_string(),
+                            );
+                        }
                         if transaction_step.is_some() {
                             transaction_application_failure = Some(format!(
                                 "committed transaction model step in domain '{}' failed to drain \
@@ -1719,9 +1861,12 @@ impl SessionServiceImpl {
                             return command_error(error.to_string());
                         }
                     }
-                    if let Err(error) =
-                        Box::pin(self.resume_domain_after_alter(&domain, domain_mutation.as_ref()))
-                            .await
+                    if let Err(error) = Box::pin(self.resume_domain_after_alter_with_impact(
+                        &domain,
+                        domain_mutation.as_ref(),
+                        domain_pause_impact(),
+                    ))
+                    .await
                     {
                         if transaction_step.is_some() {
                             transaction_application_failure = Some(format!(
@@ -1752,7 +1897,11 @@ impl SessionServiceImpl {
                 }
             }
             if let Some(gate) = cluster_entity_gate
-                && let Err(error) = Box::pin(self.release_cluster_entity_gates_and_wait(gate)).await
+                && let Err(error) = Box::pin(self.release_cluster_entity_gates_and_wait_recording(
+                    gate,
+                    transaction_step.as_ref().map(|step| step.actual),
+                ))
+                .await
             {
                 if transaction_step.is_some() {
                     transaction_application_failure = Some(format!(
@@ -1863,12 +2012,24 @@ impl SessionServiceImpl {
         if let Some(transaction_step) = transaction_step.as_ref()
             && recorded_transaction.is_none()
         {
-            match Box::pin(self.record_transaction_step(
-                transaction_step.transaction,
-                transaction_step.planned_step.impact.clone(),
-                result.clone(),
-                None,
-            ))
+            transaction_step.actual.begin_application(
+                transaction_step
+                    .planned_step
+                    .impact
+                    .planned()
+                    .effects
+                    .clone(),
+            );
+            match Box::pin(
+                self.record_transaction_step(
+                    transaction_step.transaction,
+                    transaction_step
+                        .actual
+                        .apply_to(transaction_step.planned_step.impact.clone()),
+                    result.clone(),
+                    None,
+                ),
+            )
             .await
             {
                 Ok(transaction) => {
@@ -1891,6 +2052,7 @@ impl SessionServiceImpl {
                 match Box::pin(self.record_transaction_application_completion(
                     &transaction,
                     transaction_application_failure,
+                    Some(transaction_step.actual.snapshot()),
                 ))
                 .await
                 {

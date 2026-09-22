@@ -20,7 +20,7 @@ use nervix_models::{
     IngestTimestampSource, KafkaOffsetMode, Model, ModelName, MongoDbConflictAction,
     MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
     ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ScheduledNode,
-    expression_to_nspl, ingest_quiesce_to_nspl,
+    WasmStateResetScope, expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use tokio::time::Duration;
@@ -1011,6 +1011,10 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
         format!("file: {}", processor.file),
         format!("max fuel: {}", processor.limits.max_fuel),
         format!("max memory: {} bytes", processor.limits.max_memory_bytes),
+        format!(
+            "rejected state policy: {}",
+            processor.rejected_state_policy.as_ref()
+        ),
         format!("ABI serialization: {}", nervix_wasm::ABI_SERIALIZATION_NAME),
         format!(
             "filter-where: {}",
@@ -1026,8 +1030,36 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
         "replicated state: true".to_string(),
     ]);
     lines.extend(format_processor_output_lines(&processor.output_routes));
+    lines.extend(format_wasm_state_recovery_lines(scheduled_node));
     lines.extend(state_lines);
     lines.join("\n")
+}
+
+/// What became of the one recovery attempt each refused guest-state lifetime was worth.
+///
+/// A refusal that is still being worked on, one that started a fresh lifetime, and one that spent
+/// its attempt without producing a usable lifetime are the three states an operator acts on, so all
+/// three are reported. The branch is named by the scope alone, because a branch key may carry
+/// payload values.
+fn format_wasm_state_recovery_lines(scheduled_node: Option<&ScheduledNode>) -> Vec<String> {
+    let Some(recoveries) = scheduled_node.and_then(ScheduledNode::wasm_state_recoveries) else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for (scope, recovery) in recoveries.iter() {
+        let selected = match scope {
+            WasmStateResetScope::Unbranched => "unbranched",
+            WasmStateResetScope::Branch(_) => "branch",
+            WasmStateResetScope::AllBranches => "all branches",
+        };
+        lines.push(format!(
+            "rejected state recovery: {selected}, {}, {} (generation {})",
+            recovery.rejection(),
+            recovery.outcome(),
+            recovery.generation()
+        ));
+    }
+    lines
 }
 
 pub(in crate::application) fn format_materialized_stream_state_output(
