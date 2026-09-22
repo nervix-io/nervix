@@ -23,7 +23,6 @@ mod iceberg;
 mod mongodb;
 mod mqtt;
 mod mysql;
-mod nats;
 mod otel;
 mod postgres;
 mod sqs;
@@ -36,11 +35,7 @@ pub(in crate::runtime) use mqtt::MqttPublishingMode;
 use mqtt::{MqttSink, MqttSinkConfig};
 use mysql::MySqlEmitter;
 pub(in crate::runtime) use mysql::{MySqlPool, MySqlSharedPool, open_mysql_pool};
-pub(in crate::runtime) use nats::NatsPublishingMode;
-use nats::{NatsSink, NatsSinkConfig};
-use otel::{OtelEmitter, OtelEmitterInit};
-use postgres::PostgresEmitter;
-pub(in crate::runtime) use postgres::{PgPool, open_postgres_pool};
+use nervix_connector_nats::{NatsSink, NatsSinkConfig};
 use nervix_connector_pulsar::{PulsarSink, PulsarSinkConfig};
 use nervix_connector_rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
 pub(in crate::runtime) use nervix_connector_redis::{
@@ -50,10 +45,13 @@ use nervix_connector_redis::{
     RedisPoolHandle, RedisPoolServices, RedisPoolWait, RedisSink, RedisSinkConfig,
 };
 use nervix_connector_sentry::{SentrySink, SentrySinkConfig};
-pub(in crate::runtime) use sqs::SqsPublishingMode;
-use sqs::{SqsSink, SqsSinkConfig};
 use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
 use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
+use otel::{OtelEmitter, OtelEmitterInit};
+use postgres::PostgresEmitter;
+pub(in crate::runtime) use postgres::{PgPool, open_postgres_pool};
+pub(in crate::runtime) use sqs::SqsPublishingMode;
+use sqs::{SqsSink, SqsSinkConfig};
 
 const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
 

@@ -291,9 +291,7 @@ impl SyslogClientConfig {
         Ok(host.to_string())
     }
 
-    pub fn tls_client_config(
-        &self,
-    ) -> Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
+    pub fn tls_client_config(&self) -> Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {
         RustlsClientConfigSource::new(&self.entries)
             .build_with_default_roots()
             .map_err(|error| SyslogConfigError::TlsMaterial {

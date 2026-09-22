@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 
 use nervix_connector::physical_time::actual_utc_now;
+use nervix_connector_syslog::{SyslogClientConfig, SyslogDirection, SyslogProtocol};
 use nervix_models::{DomainName, IngestorName};
 use thiserror::Error;
 use tokio::{
@@ -19,7 +20,6 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 
 use super::super::*;
-use nervix_connector_syslog::{SyslogClientConfig, SyslogDirection, SyslogProtocol};
 
 const STREAM_INTAKE_QUEUE_CAPACITY: usize = 64;
 const MAX_OCTET_COUNT_DIGITS: usize = 10;
