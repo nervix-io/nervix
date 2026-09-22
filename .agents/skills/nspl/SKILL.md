@@ -159,11 +159,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   logical, while Wasmtime fuel and epoch yielding are physical safety controls.
 - Do not simulate a WASM guest-state reset with `ALTER`, resource rebinding, or a stop/start cycle.
   A coordinated reset is a control-plane state-lifetime operation with an explicit unbranched,
-  concrete-branch, or all-branches target and a stable execution reference. It is not an NSPL graph
-  statement, so say that no public NSPL reset syntax exists rather than inventing one. Guest code
-  reaches the same operation for its own branch through the SDK's `request_state_reset` or the raw
-  `nervix_request_state_reset` import, which discards that callback's uncommitted output and input
-  and never re-enters the guest.
+  concrete-branch, or all-branches target and a stable execution reference. Apart from the
+  `ON REJECTED STATE RESET` policy, which triggers it for one refused branch lifetime, it is not an
+  NSPL graph statement, so say that no other public NSPL reset syntax exists rather than inventing
+  one. Guest code reaches the same operation for its own branch through the SDK's
+  `request_state_reset` or the raw `nervix_request_state_reset` import, which discards that
+  callback's uncommitted output and input and never re-enters the guest.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
@@ -330,6 +331,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Declare both required WASM limits immediately after `FILE`, in order: `MAX FUEL <positive_u64>
   MAX MEMORY <positive_byte_size>`. Fuel is reset per logical guest operation; memory caps each
   branch guest's Wasmtime linear memory.
+- Write the optional `ON REJECTED STATE PRESERVE|RESET` between the last `TO` clause and
+  `ON GLOBAL ERROR`. It answers only a guest's own verdict on the snapshot it was handed, and it
+  defaults to `PRESERVE`. Offer `RESET` only when the user accepts losing that branch's computation
+  state, and say that it replaces the lifetime once rather than retrying. Never present it as a
+  recovery for a compile, initialization, fuel, memory, storage, replication, or authority failure;
+  none of those discards state under either value.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.

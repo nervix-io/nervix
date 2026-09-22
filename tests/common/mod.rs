@@ -3,6 +3,7 @@ pub(crate) mod cluster;
 pub(crate) mod cluster_teardown;
 pub(crate) mod dependencies;
 pub(crate) mod node_liveness;
+pub(crate) mod node_startup;
 pub(crate) mod phase_deadline;
 pub(crate) mod scenario_phase;
 pub(crate) mod server_process;

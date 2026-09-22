@@ -154,6 +154,7 @@ pub(crate) mod test_fixtures;
 mod tls;
 mod tracing_setup;
 mod transaction;
+mod wasm_state_recovery;
 mod wasm_state_reset;
 mod web_console;
 
@@ -1718,7 +1719,6 @@ impl Application {
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
         };
-        service.register_guest_wasm_state_reset_coordinator(shutdown.clone());
         #[cfg(feature = "testing")]
         service.register_wasm_state_reset_test_coordinator(&fault_injection, shutdown.clone());
         let domain_clock_progress_service = service.clone();
@@ -1946,12 +1946,20 @@ impl Application {
                             "entity gate deadline exceeds the monotonic clock",
                         )),
                     };
+                    #[cfg(feature = "testing")]
+                    if result.is_ok() {
+                        service
+                            .pause_entity_gate_response_if_armed(&request.domain)
+                            .await;
+                    }
                     RemoteEntityGateResponse { result }
                 }
             })
             .change_context(AppError::RegisterInterconnectRequestHandler)?;
 
-        service.register_wasm_state_reset_interconnect_handler()?;
+        service.register_wasm_state_reset_service(shutdown.clone())?;
+        service.register_wasm_state_recovery_interconnect_handler()?;
+        service.register_wasm_state_recovery_coordinator(shutdown.clone());
 
         let entity_drain_service = service.clone();
         interconnect

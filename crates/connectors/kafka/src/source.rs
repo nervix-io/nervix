@@ -19,8 +19,8 @@ use std::{
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
 use nervix_connector::{
-    IngestMessageHeaders, IngestMetadataRow, SourceBatch, SourceBatchRequest, SourceConnector,
-    SourceError, SourceMessage, SourceResult, SourceResume,
+    BrokerSourceConnector, IngestMessageHeaders, IngestMetadataRow, SourceBatch,
+    SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
 };
 use nervix_models::{ClientConfigEntry, KafkaPartitionSchedule, Timestamp, TopicName};
 use rdkafka::{
@@ -326,8 +326,6 @@ pub struct KafkaSource {
 #[async_trait]
 impl SourceConnector for KafkaSource {
     type Plan = KafkaSourcePlan;
-    type Message = KafkaSourceMessage;
-    type Position = KafkaOffsetPosition;
 
     async fn open(plan: &Self::Plan, instance_index: u64) -> SourceResult<Self> {
         let mut config = ClientConfig::new();
@@ -376,6 +374,76 @@ impl SourceConnector for KafkaSource {
         let rebalance_changed = rebalance.has_changed().unwrap_or(false);
         generation_changed || rebalance_changed
     }
+
+    async fn suspend(&mut self) -> SourceResult<()> {
+        match &self.offset_mode {
+            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
+                self.consumer.unsubscribe();
+                Ok(())
+            }
+            KafkaSourceOffsetMode::Domain { .. } => self
+                .assignment
+                .clear(&self.consumer, self.topic.as_str())
+                .change_context(SourceError::Suspend { connector: KAFKA }),
+        }
+    }
+
+    async fn resume(&mut self) -> SourceResult<SourceResume> {
+        if let KafkaSourceOffsetMode::ConsumerGroup { .. } = &self.offset_mode {
+            self.consumer
+                .subscribe(&[self.topic.as_str()])
+                .map_err(|source| {
+                    Report::new(KafkaSourceError::Subscribe {
+                        topic: self.topic.as_str().to_string(),
+                    })
+                    .attach_printable(source.to_string())
+                })
+                .change_context(SourceError::Resume { connector: KAFKA })?;
+            return Ok(SourceResume::Ready);
+        }
+
+        let offsets = match &mut self.offset_mode {
+            KafkaSourceOffsetMode::Domain {
+                offsets, rebalance, ..
+            } => {
+                rebalance.borrow_and_update();
+                offsets.clone()
+            }
+            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
+                return Ok(SourceResume::Ready);
+            }
+        };
+        let ready = self
+            .initialize_domain_offsets(&offsets)
+            .await
+            .change_context(SourceError::Resume { connector: KAFKA })?;
+        if ready {
+            Ok(SourceResume::Ready)
+        } else {
+            Ok(SourceResume::Waiting {
+                retry_after: DOMAIN_ASSIGNMENT_RETRY,
+            })
+        }
+    }
+
+    async fn close(&mut self) -> SourceResult<()> {
+        match &self.offset_mode {
+            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
+                self.consumer.unsubscribe();
+                Ok(())
+            }
+            KafkaSourceOffsetMode::Domain { .. } => self
+                .assignment
+                .clear(&self.consumer, self.topic.as_str())
+                .change_context(SourceError::Close { connector: KAFKA }),
+        }
+    }
+}
+
+#[async_trait]
+impl BrokerSourceConnector for KafkaSource {
+    type Message = KafkaSourceMessage;
+    type Position = KafkaOffsetPosition;
 
     async fn next_batch(
         &mut self,
@@ -466,70 +534,6 @@ impl SourceConnector for KafkaSource {
                 .change_context(SourceError::Reject { connector: KAFKA })?;
         }
         Ok(())
-    }
-
-    async fn suspend(&mut self) -> SourceResult<()> {
-        match &self.offset_mode {
-            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
-                self.consumer.unsubscribe();
-                Ok(())
-            }
-            KafkaSourceOffsetMode::Domain { .. } => self
-                .assignment
-                .clear(&self.consumer, self.topic.as_str())
-                .change_context(SourceError::Suspend { connector: KAFKA }),
-        }
-    }
-
-    async fn resume(&mut self) -> SourceResult<SourceResume> {
-        if let KafkaSourceOffsetMode::ConsumerGroup { .. } = &self.offset_mode {
-            self.consumer
-                .subscribe(&[self.topic.as_str()])
-                .map_err(|source| {
-                    Report::new(KafkaSourceError::Subscribe {
-                        topic: self.topic.as_str().to_string(),
-                    })
-                    .attach_printable(source.to_string())
-                })
-                .change_context(SourceError::Resume { connector: KAFKA })?;
-            return Ok(SourceResume::Ready);
-        }
-
-        let offsets = match &mut self.offset_mode {
-            KafkaSourceOffsetMode::Domain {
-                offsets, rebalance, ..
-            } => {
-                rebalance.borrow_and_update();
-                offsets.clone()
-            }
-            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
-                return Ok(SourceResume::Ready);
-            }
-        };
-        let ready = self
-            .initialize_domain_offsets(&offsets)
-            .await
-            .change_context(SourceError::Resume { connector: KAFKA })?;
-        if ready {
-            Ok(SourceResume::Ready)
-        } else {
-            Ok(SourceResume::Waiting {
-                retry_after: DOMAIN_ASSIGNMENT_RETRY,
-            })
-        }
-    }
-
-    async fn close(&mut self) -> SourceResult<()> {
-        match &self.offset_mode {
-            KafkaSourceOffsetMode::ConsumerGroup { .. } => {
-                self.consumer.unsubscribe();
-                Ok(())
-            }
-            KafkaSourceOffsetMode::Domain { .. } => self
-                .assignment
-                .clear(&self.consumer, self.topic.as_str())
-                .change_context(SourceError::Close { connector: KAFKA }),
-        }
     }
 }
 

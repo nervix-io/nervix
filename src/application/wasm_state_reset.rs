@@ -87,9 +87,14 @@ struct WasmStateResetPlan {
 }
 
 impl SessionServiceImpl {
-    pub(super) fn register_wasm_state_reset_interconnect_handler(
+    /// Register everything this node runs for coordinated WASM state resets: the interconnect
+    /// handlers that carry one between nodes, and the coordinator that turns a guest's request
+    /// into one.
+    pub(super) fn register_wasm_state_reset_service(
         &self,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> error_stack::Result<(), AppError> {
+        self.register_guest_wasm_state_reset_coordinator(shutdown);
         let service = self.clone();
         self.inner
             .interconnect
@@ -246,7 +251,7 @@ impl SessionServiceImpl {
     /// A branch task fences itself and hands its request to the runtime; this task is what turns
     /// that request into the one coordinated reset every trigger shares, so a guest-requested reset
     /// has the same durability and replica guarantees as an operator's.
-    pub(super) fn register_guest_wasm_state_reset_coordinator(
+    fn register_guest_wasm_state_reset_coordinator(
         &self,
         shutdown: tokio_util::sync::CancellationToken,
     ) {
@@ -367,6 +372,7 @@ impl SessionServiceImpl {
                 std::slice::from_ref(&plan.entity),
                 purpose,
                 deadline,
+                None,
             )
             .await
             .change_context_lazy(|| WasmStateResetError::Gate {

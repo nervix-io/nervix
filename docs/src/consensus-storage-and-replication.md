@@ -66,6 +66,13 @@ A crash or lost connection after durable application but before delivery of the 
 the client uncertain even though the command took effect; persistent administrative requests use
 their stable execution reference to join or retrieve that result.
 
+Transaction application completion persists the actual quiescence history and actual effects in
+the same applied state-machine boundary that changes the step from applying to applied or failed.
+Recovery therefore sees ordered requested, confirmed, failed or uncertain, and released outcomes
+without inferring them from a client timeout. These records contain control-plane scope,
+attribution, and non-sensitive diagnostics only. Runtime payloads, acknowledgement maps, connector
+buffers, and handoff bytes remain volatile data-plane state.
+
 ### Coordinated WASM Reset Publications
 
 A coordinated WASM state reset stores its command execution reference, exact branch scope, phase,
