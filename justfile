@@ -277,7 +277,9 @@ test-coverage: tests-deps
 
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
 # `just bench --test` to execute each benchmark body once without recording runner timings.
-bench *args:
+# The server benches link the console the server serves, so the console is built first rather than
+# left to whatever ran before them.
+bench *args: build-web-console
     cargo bench --package nervix-server --bench relay_interaction --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
