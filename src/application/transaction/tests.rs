@@ -305,6 +305,23 @@ async fn process_command_queues_transaction_across_requests_and_reverts() {
         command_transaction_state(&reverted),
         Some(ApiTransactionState::Reverted)
     );
+    let reverted_status = reverted
+        .transaction
+        .as_ref()
+        .verified("a successful revert reports its terminal transaction");
+    let replayed = service
+        .revert_identified_transaction(
+            reverted_status.id.clone(),
+            subscriptions.user.clone(),
+            service.transaction_activity(),
+        )
+        .await;
+    assert!(replayed.success);
+    assert_eq!(replayed.message, reverted.message);
+    assert_eq!(
+        command_transaction_state(&replayed),
+        Some(ApiTransactionState::Reverted)
+    );
     assert!(
         registry
             .get::<CreateSchema>(

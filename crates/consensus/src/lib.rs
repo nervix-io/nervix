@@ -91,8 +91,10 @@ mod retention;
 mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionChildResult, CommandExecutionDiagnostic,
-    CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
-    CommandExecutionState, CommandExecutionTransactionStatus,
+    CommandExecutionEffect, CommandExecutionRequestConflict, CommandExecutionResult,
+    CommandExecutionResultKind, CommandExecutionState, CommandExecutionTransactionOperation,
+    CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
+    CommandExecutionTransactionTarget,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use retention::RaftRetentionPolicy;
@@ -4367,10 +4369,17 @@ fn apply_consensus_command_at(
         } => {
             if let Some(existing) = state.command_executions.get(&execution.reference) {
                 if !existing.same_request(execution) {
+                    let conflict = existing
+                        .request_conflict(
+                            &execution.owner,
+                            execution.domain.as_ref(),
+                            execution.expected_transaction_position,
+                            execution.request_digest,
+                        )
+                        .unwrap_or(CommandExecutionRequestConflict::Position);
                     return AppliedConsensusCommand::conflict(format!(
-                        "command execution reference '{}' is bound to a different owner, domain, \
-                         or request",
-                        execution.reference
+                        "command execution reference '{}' conflicts by {conflict}",
+                        execution.reference,
                     ));
                 }
             } else {
@@ -5756,7 +5765,7 @@ mod tests {
         DomainStatus, DomainTimeRate, NodeEndpoint, ResourceId, ResourceName, ResourceNodeState,
         ResourceNodeStatus, ResourceReplicaKey, ResourceUploadIdentity, ResourceUploadKey,
         ResourceUploadState, ResourceVersion, ResourceVersionCounter, ResourceVersionStatus,
-        Statement, Timestamp,
+        Statement, Timestamp, TransactionPosition,
     };
     use openraft::{
         entry::RaftEntry,
@@ -6831,6 +6840,27 @@ mod tests {
 
     #[test]
     fn command_execution_identity_retains_one_terminal_outcome() {
+        fn assert_identity_conflict(
+            state: &mut StateMachineData,
+            execution: CommandExecution,
+            expected_kind: &str,
+        ) {
+            let reference = execution.reference.clone();
+            let response = apply_consensus_command(
+                state,
+                &ConsensusCommand::AdmitCommandExecution {
+                    execution: Box::new(execution),
+                    mutation_domains: BTreeSet::new(),
+                },
+            );
+            let expected =
+                format!("command execution reference '{reference}' conflicts by {expected_kind}");
+            assert!(matches!(
+                response.response,
+                ConsensusResponse::Conflict(reason) if reason == expected
+            ));
+        }
+
         let reference = nervix_models::CommandExecutionReference::parse("request-1")
             .assured("the test reference contains only admitted characters");
         let owner =
@@ -6864,14 +6894,20 @@ mod tests {
 
         let mut conflicting = execution.clone();
         conflicting.request_digest = [8; 32];
-        let conflict = apply_consensus_command(
-            &mut state,
-            &ConsensusCommand::AdmitCommandExecution {
-                execution: Box::new(conflicting),
-                mutation_domains: BTreeSet::new(),
-            },
-        );
-        assert!(matches!(conflict.response, ConsensusResponse::Conflict(_)));
+        assert_identity_conflict(&mut state, conflicting, "content");
+
+        let mut conflicting = execution.clone();
+        conflicting.domain = Some(domain("other_tenant"));
+        assert_identity_conflict(&mut state, conflicting, "domain");
+
+        let mut conflicting = execution.clone();
+        conflicting.owner = UserName::parse("other_user")
+            .assured("the conflicting test owner is an identifier-shaped literal");
+        assert_identity_conflict(&mut state, conflicting, "owner");
+
+        let mut conflicting = execution.clone();
+        conflicting.expected_transaction_position = Some(TransactionPosition::new(1));
+        assert_identity_conflict(&mut state, conflicting, "position");
 
         let result = CommandExecutionResult {
             success: true,

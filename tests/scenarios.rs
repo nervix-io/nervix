@@ -7940,6 +7940,40 @@ async fn when_referenced_command_request_begins_in_background(
 }
 
 #[when(
+    expr = "an exact retry of this NSPL command request with execution reference {string} begins \
+            in parallel on the leader node"
+)]
+async fn when_exact_command_retry_begins_in_parallel(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    assert!(
+        world.background_nspl.is_none(),
+        "a background NSPL execution is already active"
+    );
+    let query = expand_placeholders(world, docstring(step));
+    let execution_reference = expand_placeholders(world, &execution_reference);
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the exact retry session: {error}"));
+    world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let result = session
+            .run_command_result_with_reference(&query, &execution_reference)
+            .await
+            .map_err(|error| error.to_string())?;
+        if result.success {
+            Ok(result.message)
+        } else {
+            Err(result.message)
+        }
+    })));
+}
+
+#[when(
     expr = "the active session begins this NSPL command request with execution reference {string} \
             in the background"
 )]
@@ -8085,6 +8119,26 @@ async fn then_background_command_request_redirects(world: &mut ScenarioWorld, no
         result.leader_grpc_uri, grpc_uri,
         "redirect must carry the leader endpoint"
     );
+}
+
+#[then("the background command request succeeds")]
+async fn then_background_command_request_succeeds(world: &mut ScenarioWorld) {
+    let task = world
+        .background_command_result
+        .take()
+        .verified("the preceding step started a background command request");
+    let result = tokio::time::timeout(Duration::from_secs(30), task)
+        .await
+        .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
+        .assured("the background command request task is owned by this scenario")
+        .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
+    assert!(
+        result.success,
+        "background command request failed: {}",
+        result.message
+    );
+    world.last_command_error = None;
+    world.last_command_output = Some(result.message);
 }
 
 #[when(expr = "client {string} begins executing these NSPL commands in the background")]
@@ -9185,12 +9239,13 @@ async fn when_this_nspl_command_request_is_executed_on_leader_node(
 
 #[when(
     expr = "a new session attaches to transaction {string} and executes this NSPL command with \
-            execution reference {string}"
+            execution reference {string} at transaction position {int}"
 )]
 async fn when_new_session_attaches_and_executes_referenced_command(
     world: &mut ScenarioWorld,
     transaction_id: String,
     execution_reference: String,
+    expected_transaction_position: u64,
     #[step] step: &Step,
 ) {
     let transaction_id = expand_placeholders(world, &transaction_id);
@@ -9212,7 +9267,11 @@ async fn when_new_session_attaches_and_executes_referenced_command(
         attached.message
     );
     let result = session
-        .run_command_result_with_reference(&query, &execution_reference)
+        .run_command_result_with_reference_at_position(
+            &query,
+            &execution_reference,
+            expected_transaction_position,
+        )
         .await
         .unwrap_or_else(|error| panic!("replayed command request failed: {error}"));
     if result.success {
@@ -9222,6 +9281,9 @@ async fn when_new_session_attaches_and_executes_referenced_command(
         world.last_command_output = None;
         world.last_command_error = Some(result.message);
     }
+    world.active_session = Some(session);
+    world.active_session_node = Some(leader);
+    world.active_session_has_subscription = false;
 }
 
 #[then(expr = "the current leader node is saved as placeholder {string}")]
