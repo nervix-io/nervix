@@ -46,7 +46,8 @@ use arrow_select::{
     concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array,
     take::take as take_arrow_array,
 };
-use chrono::{TimeZone, Utc};
+#[cfg(test)]
+use chrono::TimeZone as _;
 use error_stack::Report;
 use fjall::Database;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};

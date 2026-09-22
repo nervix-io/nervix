@@ -6,6 +6,7 @@ pub(in crate::runtime) mod kafka;
 pub(in crate::runtime) mod mqtt;
 pub(in crate::runtime) mod nats;
 pub(in crate::runtime) mod prometheus;
+mod prometheus_source;
 pub(in crate::runtime) mod pulsar;
 pub(in crate::runtime) mod rabbitmq;
 pub(in crate::runtime) mod redis_pubsub;
@@ -75,9 +76,7 @@ impl IngestorStarter {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{
-        ClientConfigEntry, CreateClientPrometheus, CreateClientWebsockets, CreateClientZeroMq,
-    };
+    use nervix_models::{ClientConfigEntry, CreateClientWebsockets, CreateClientZeroMq};
 
     use super::*;
 
@@ -120,20 +119,6 @@ mod tests {
             "wss://example.com/socket"
         );
 
-        let prometheus = CreateClientPrometheus::<u64> {
-            name: named("prom"),
-            mount: None,
-            config: vec![ClientConfigEntry {
-                key: "addr".to_string(),
-                value: "http://prometheus:9090".to_string(),
-            }],
-        };
-        assert_eq!(
-            ingestors::prometheus::PrometheusIngestor::addr_from_config(&prometheus.config)
-                .expect("addr"),
-            "http://prometheus:9090"
-        );
-
         let zeromq_default = CreateClientZeroMq::<u64> {
             name: named("zmq"),
             mount: None,
@@ -172,19 +157,6 @@ mod tests {
             .expect_err("missing websocket endpoint")
             .to_string()
             .contains("missing WebSockets client config key 'endpoint'")
-        );
-        assert!(
-            ingestors::prometheus::PrometheusIngestor::addr_from_config(
-                &CreateClientPrometheus::<u64> {
-                    name: named("prom"),
-                    mount: None,
-                    config: vec![],
-                }
-                .config
-            )
-            .expect_err("missing prometheus addr")
-            .to_string()
-            .contains("missing Prometheus client config key 'addr'")
         );
     }
 }
