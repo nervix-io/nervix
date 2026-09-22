@@ -52,6 +52,20 @@ message CommandResult {
   string execution_reference = 11;
   TransactionOperationAdmission transaction_admission = 12;
   TransactionPreviewStale preview_stale = 13;
+  // Present when the command inspected a transaction, whatever format rendered its message. The
+  // inspected transaction may differ from `transaction`, which keeps describing the caller's own
+  // session binding.
+  TransactionInspection inspection = 14;
+}
+
+// A transaction's impact report, read without attaching or changing the transaction.
+message TransactionInspection {
+  // The inspected transaction, counting the operations its report numbers.
+  TransactionStatus transaction = 1;
+  // The inspected one-based operation. Absent when the whole transaction was inspected.
+  optional uint64 operation = 2;
+  // The whole impact report in its JSON representation. Selecting an operation never narrows it.
+  bytes report = 3;
 }
 
 message TransactionPreviewIdentity {

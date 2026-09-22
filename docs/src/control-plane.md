@@ -247,6 +247,20 @@ transaction has no readable report, which is the state of one that ended before 
 planned. The inspected report travels in its own typed envelope; the transaction status a command
 result carries continues to describe the caller's own session binding.
 
+NSPL reaches inspection through `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT |
+JSON ]`. The session answers it before transaction queueing: sent while a transaction is attached,
+it neither becomes queued content nor consumes an operation number, and it takes no queue position,
+durable admission, or execution-reference replay, so repeating it reads the transaction again. It
+must be the only statement of its request, because sharing a request with an append would make it
+part of that append's durable admission. A request that pairs it with any other statement is
+refused before anything in it runs. Other read-only statements remain rejected inside a transaction.
+`TEXT` renders identity and state, progress, completeness and planning basis, the transaction-wide
+quiesce level and pause scope, each operation with its execution step and reasons, and each
+execution step with its planned scope, effects, actual quiescence, and outcome; naming an operation
+moves that operation, its own contribution, and its step to the front. `FORMAT JSON` renders the
+same inspection as one JSON document holding the status, the selected operation or `null`, and the
+whole report. Every format carries the same typed envelope in the command result.
+
 A new leader automatically resumes every `COMMITTING` transaction from its recorded applying step.
 Completed effects are not repeated, and a failed remaining step records its statement number and
 error while preserving the applied prefix. A model step that did not pause and whose VHOSTs an HTTPS

@@ -30,6 +30,7 @@ nervix-proto = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
 prost = { workspace = true }
 rustls = { workspace = true }
+serde_json = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "fs",
   "io-util",

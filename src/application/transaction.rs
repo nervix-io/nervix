@@ -71,8 +71,10 @@ use crate::{
 };
 
 mod application;
+mod describe;
 mod impact;
 mod inspection;
+mod rendering;
 mod request;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
 pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
@@ -773,7 +775,8 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         | Statement::DescribeWasmProcessor(_)
         | Statement::DescribeUdf(_)
         | Statement::DescribePlacement(_)
-        | Statement::DescribeRelocation(_) => "DESCRIBE",
+        | Statement::DescribeRelocation(_)
+        | Statement::DescribeTransaction(_) => "DESCRIBE",
         _ => "statement",
     }
 }

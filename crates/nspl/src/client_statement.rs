@@ -70,6 +70,15 @@ impl ClientStatement {
             | Self::Server(_) => false,
         }
     }
+
+    /// Whether this statement reads a transaction's impact report instead of changing anything.
+    ///
+    /// An inspection is answered before transaction queueing: it never becomes transaction
+    /// content, never takes a queue position, and never shares a request with statements that
+    /// change the transaction it reads.
+    pub fn inspects_transaction(&self) -> bool {
+        matches!(self, Self::Server(Statement::DescribeTransaction(_)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

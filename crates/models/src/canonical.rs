@@ -30,9 +30,9 @@ use crate::{
     CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
-    CreateWindowProcessor, CreateWireSchema, DomainPace, DomainStartPoint, EmitSink,
-    EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, Expression, FieldName, FieldScope,
-    FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
+    CreateWindowProcessor, CreateWireSchema, DescribeTransaction, DomainPace, DomainStartPoint,
+    EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, Expression, FieldName,
+    FieldScope, FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
     InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
     Inheritance, InputCollectPolicy, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
     MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
@@ -42,8 +42,8 @@ use crate::{
     ProcessorOutputs, PulsarIngestMode, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode,
     RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
     SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
-    SubscriptionLiteral, TopicName, UnaryOperator, WebsocketsIngestMode, WindowBound,
-    WireSchemaField, ZeroMqIngestMode,
+    SubscriptionLiteral, TopicName, TransactionInspectionTarget, TransactionReportFormat,
+    UnaryOperator, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -805,7 +805,27 @@ impl Statement {
             )),
             Self::ShowClusterStatus(_) => Ok("SHOW CLUSTER STATUS;".to_string()),
             Self::ShowTransactions(_) => Ok("SHOW TRANSACTIONS;".to_string()),
+            Self::DescribeTransaction(describe) => Ok(describe.to_canonical_nspl()),
         }
+    }
+}
+
+impl DescribeTransaction {
+    /// Renders the statement with each clause it needs, omitting the default `FORMAT TEXT`.
+    pub fn to_canonical_nspl(&self) -> String {
+        let mut statement = "DESCRIBE TRANSACTION".to_string();
+        if let TransactionInspectionTarget::Transaction { transaction_id } = &self.request.target {
+            statement.push(' ');
+            statement.push_str(&string_literal(transaction_id));
+        }
+        if let Some(operation) = self.request.operation {
+            statement.push_str(&format!(" OPERATION {operation}"));
+        }
+        if self.format != TransactionReportFormat::default() {
+            statement.push_str(&format!(" FORMAT {}", self.format.as_ref()));
+        }
+        statement.push(';');
+        statement
     }
 }
 

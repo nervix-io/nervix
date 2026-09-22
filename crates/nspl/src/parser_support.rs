@@ -6,7 +6,7 @@
 //! - **Must not know.** Registry state, runtime execution or connector lifecycle.
 
 use std::{
-    num::{NonZeroU32, NonZeroU64},
+    num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::Range,
 };
 
@@ -26,8 +26,8 @@ use nervix_models::{
     ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarSubscriptionName, QueueGroupName,
     QueueName, ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
     RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, TopicName, UdfName, UserName, VhostName, WasmProcessorName,
-    WindowProcessorName, WireSchemaName,
+    SubscriptionName, TableName, TopicName, TransactionOperationNumber, UdfName, UserName,
+    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -314,14 +314,19 @@ pub fn unknown_word<'src>()
     .boxed()
 }
 
-pub fn u64_value<'src>()
--> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
-    // Each alternative carries the label: chumsky only rewrites an alternative error whose position
-    // matches the start of the labelled parser, so labelling the choice as a whole leaves the
-    // branches' own expectations in place and completion has nothing to offer here.
+/// An integer written where the count is bounded by the 64-bit range its Model uses.
+///
+/// The slot names itself with `label`. Each alternative carries the label rather than the parser
+/// as a whole: chumsky only rewrites an alternative error whose position matches the start of the
+/// labelled parser, so labelling the choice leaves the branches' own expectations in place and
+/// completion has nothing to offer, and labelling the checked parser would rewrite the invalid
+/// integer this reports into a bare expectation.
+pub fn u64_value<'src>(
+    label: &'static str,
+) -> impl Parser<'src, &'src [Token], u64, extra::Err<ParseError<'src>>> + Clone {
     choice((
-        select! { Token::NumberLiteral(v) => v }.labelled("integer_literal"),
-        word_raw().labelled("integer_literal"),
+        select! { Token::NumberLiteral(v) => v }.labelled(label),
+        word_raw().labelled(label),
     ))
     .try_map(|raw, span| {
         raw.parse::<u64>()
@@ -341,9 +346,7 @@ pub fn resource_version_clause<'src>()
     kw(Identifier::Version)
         .ignore_then(choice((
             kw(Identifier::Latest).to(RequestedResourceVersion::Latest),
-            u64_value()
-                .labelled("completed_resource_version")
-                .map(RequestedResourceVersion::Number),
+            u64_value("completed_resource_version").map(RequestedResourceVersion::Number),
         )))
         .boxed()
 }
@@ -360,8 +363,7 @@ pub fn nonzero_u64_value<'src>(
     label: &'static str,
     zero_reason: &'static str,
 ) -> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
-    u64_value()
-        .labelled(label)
+    u64_value(label)
         .try_map(move |value, span| {
             NonZeroU64::new(value).ok_or_else(|| Rich::custom(span, zero_reason))
         })
@@ -911,6 +913,53 @@ pub fn string_lit<'src>()
         Token::StringLiteral(value) => value,
     }
     .labelled("string_literal")
+    .boxed()
+}
+
+/// A transaction named by its identity, written as a quoted literal.
+///
+/// The server issues transaction identities, and they are not NSPL names: they are quoted exactly
+/// as `SHOW TRANSACTIONS` and `BEGIN` print them. An empty literal names no transaction, so it is
+/// rejected where it is written rather than reported later as an unknown identity.
+///
+/// The label goes on the literal itself, not on the checked parser, so the emptiness check keeps
+/// its explanation.
+pub fn transaction_id<'src>()
+-> impl Parser<'src, &'src [Token], String, extra::Err<ParseError<'src>>> + Clone {
+    select! {
+        Token::StringLiteral(value) => value,
+    }
+    .labelled("transaction_id")
+    .try_map(|transaction_id, span| {
+        if transaction_id.is_empty() {
+            return Err(Rich::custom(span, "transaction_id must not be empty"));
+        }
+        Ok(transaction_id)
+    })
+    .boxed()
+}
+
+/// The one-based number of an accepted transaction operation.
+///
+/// Operation numbers start at one, so zero is rejected with the reason rather than read as an
+/// operation that cannot exist. A number past this platform's address space names no accepted
+/// operation either, and says so here instead of wrapping into one that might.
+pub fn transaction_operation_number<'src>()
+-> impl Parser<'src, &'src [Token], TransactionOperationNumber, extra::Err<ParseError<'src>>> + Clone
+{
+    nonzero_u64_value(
+        "operation_number",
+        "operation_number must be greater than zero; operations are numbered from 1",
+    )
+    .try_map(|number, span| {
+        let Ok(number) = NonZeroUsize::try_from(number) else {
+            return Err(Rich::custom(
+                span,
+                format!("operation_number {number} exceeds this platform's address space"),
+            ));
+        };
+        Ok(TransactionOperationNumber::new(number))
+    })
     .boxed()
 }
 

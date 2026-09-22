@@ -158,6 +158,10 @@ nervix[quickstart committing]>
 
 `BEGIN` requires a selected domain that already exists and binds the transaction to it. The
 console follows the transaction's domain, so attaching switches the domain selector to it.
+`DESCRIBE TRANSACTION` prints the open transaction's impact report between queued statements, and
+with an id it reads another transaction of the same user while the prompt, domain selector, and
+attached transaction stay as they were. See
+[NSPL Overview](nspl-overview.md) for its forms and output.
 
 Every persistent command keeps one execution reference while the browser waits, reconnects, or
 follows leadership. The transaction id and status are replicated. If the WebSocket closes
