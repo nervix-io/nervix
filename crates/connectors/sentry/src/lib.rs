@@ -9,6 +9,9 @@
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use std::time::Duration;
 
 use async_trait::async_trait;

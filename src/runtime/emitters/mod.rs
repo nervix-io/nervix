@@ -29,7 +29,6 @@ mod postgres;
 mod pulsar;
 mod rabbitmq;
 mod redis;
-mod sentry;
 mod sqs;
 mod syslog;
 
@@ -50,7 +49,7 @@ use pulsar::{PulsarSink, PulsarSinkConfig};
 use rabbitmq::{RabbitMqSink, RabbitMqSinkConfig};
 pub(in crate::runtime) use redis::{RedisClientError, RedisCommandPool, open_redis_command_pool};
 use redis::{RedisPoolHandle, RedisPoolServices, RedisPoolWait, RedisSink, RedisSinkConfig};
-use sentry::{SentrySink, SentrySinkConfig};
+use nervix_connector_sentry::{SentrySink, SentrySinkConfig};
 pub(in crate::runtime) use sqs::SqsPublishingMode;
 use sqs::{SqsSink, SqsSinkConfig};
 use syslog::{SyslogSink, SyslogSinkConfig};

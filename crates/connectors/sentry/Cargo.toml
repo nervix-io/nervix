@@ -1,0 +1,31 @@
+[package]
+description = "The Sentry sink connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-sentry"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+error-stack = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+reqwest = { workspace = true }
+sentry-types = { workspace = true }
+serde_json = { workspace = true }
+shuttle-tokio = { workspace = true, features = ["rt"], optional = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+url = { workspace = true }

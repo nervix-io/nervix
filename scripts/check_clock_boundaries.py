@@ -117,12 +117,12 @@ def main() -> int:
     runtime_root = ROOT / "src/runtime"
     actual_utc_owner = ROOT / PHYSICAL_TIME_OWNER
     actual_utc_consumers = {
+        ROOT / "crates/connectors/sentry/src/lib.rs",
         runtime_root / "domain_clock.rs",
         runtime_root / "endpoint.rs",
         runtime_root / "emitters/mod.rs",
         runtime_root / "emitters/iceberg.rs",
         runtime_root / "emitters/otel.rs",
-        runtime_root / "emitters/sentry.rs",
         runtime_root / "ingestors/http.rs",
         runtime_root / "ingestors/kafka.rs",
         runtime_root / "ingestors/mqtt.rs",
