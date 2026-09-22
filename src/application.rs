@@ -1718,6 +1718,7 @@ impl Application {
                 resource_replication_executions: DashMap::with_hasher(RandomState::new()),
             }),
         };
+        service.register_guest_wasm_state_reset_coordinator(shutdown.clone());
         #[cfg(feature = "testing")]
         service.register_wasm_state_reset_test_coordinator(&fault_injection, shutdown.clone());
         let domain_clock_progress_service = service.clone();

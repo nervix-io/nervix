@@ -299,6 +299,7 @@ pub(super) async fn flush_branch_wasm_processor(
     ack_map: &mut WasmAckMap,
     next_ack_token: &mut u64,
     pending: &mut Vec<RelayRecordBatch>,
+    state_reset: &mut WasmGuestStateResetFence,
 ) {
     let WasmFlushContext {
         graph,
@@ -316,6 +317,21 @@ pub(super) async fn flush_branch_wasm_processor(
         execution_now,
     } = context;
     if pending.is_empty() {
+        return;
+    }
+    // A branch whose guest asked for a new state lifetime runs nothing more in the one it has.
+    // Instantiating the guest again here would restore exactly the committed checkpoint the reset
+    // is replacing, so the input waits for its source to redeliver it into the new lifetime.
+    if let Some(refusal) = state_reset.refusal(processor) {
+        refuse_fenced_wasm_branch_input(
+            WasmGuestStateResetContext {
+                branch,
+                processor,
+                replicated_state,
+            },
+            &refusal,
+            std::mem::take(pending),
+        );
         return;
     }
     let grouped_batches = std::mem::take(pending);
@@ -462,15 +478,33 @@ pub(super) async fn flush_branch_wasm_processor(
             }
         };
     ack_map.extend(input_ack_map);
-    let process_result = instance
+    let live = instance
         .as_mut()
-        .verified("the is_none check above returned unless this branch holds an instance")
+        .verified("the is_none check above returned unless this branch holds an instance");
+    let process_result = live
         .guest
         .process_envelope_in_context(
             &envelope,
             nervix_wasm::WasmExecutionContext::new(execution_now),
         )
         .await;
+    // The request belongs to the callback that made it, whether or not the callback then failed,
+    // so it is taken before the result decides anything.
+    let requested_lifetime = live.guest.take_requested_state_reset();
+    if requested_lifetime.is_reset_requested() {
+        request_wasm_guest_state_reset(
+            WasmGuestStateResetContext {
+                branch,
+                processor,
+                replicated_state,
+            },
+            process_result,
+            instance,
+            ack_map,
+            state_reset,
+        );
+        return;
+    }
     let mut holds = WasmCheckpointHolds::default();
     match process_result {
         Ok(outputs) => {

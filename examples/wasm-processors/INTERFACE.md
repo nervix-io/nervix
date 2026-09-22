@@ -16,6 +16,7 @@ The guest imports these functions from the `env` module:
 | --- | --- | --- |
 | `nervix_domain_time_nanos` | `() -> i64` | Returns the current domain-clock time as Unix nanoseconds. Nanoseconds are an ABI boundary format only. |
 | `nervix_timeout_after_nanos` | `(delay_nanos: i64) -> i64` | Guest requests a domain-clock timeout and receives a monotonically increasing handle. |
+| `nervix_request_state_reset` | `() -> i32` | Guest asks the host to replace the complete guest-state lifetime of the calling branch. Returns `0` when the host takes the request and `-9` when it refuses. |
 
 ## Exported Guest Functions
 
@@ -52,6 +53,42 @@ Return code `0` means success. Negative return codes are guest errors:
 unusable. The host keeps the saved state after every failed restore and reports
 a rejection separately from a restore that trapped, exhausted a limit, or
 failed with another code.
+
+## Guest-Requested State Reset
+
+A guest asks the host to replace the complete guest-state lifetime of the branch it runs in by
+calling `nervix_request_state_reset()`. The host records the request and performs the replacement
+after the callback returns; it never calls back into the guest to perform it, so the guest can ask
+from anywhere inside a callback without re-entering its own exports.
+
+The request names nothing. It is scoped to the calling branch and to the state generation that
+branch is running in, so a guest can never select another processor, domain, branch, or generation.
+
+Only the callbacks the host completes with a checkpoint — `nervix_process_batch`,
+`nervix_on_timeout`, and `nervix_flush` — own uncommitted effects a reset can discard, so only
+those callbacks admit a request. Every other operation, including `nervix_init`,
+`nervix_dump_state`, `nervix_load_state`, and `nervix_read_emit`, is answered with `-9` and
+schedules nothing.
+
+Once the host accepts a request, the callback that made it is terminal:
+
+- Output the callback queued for `nervix_read_emit` is discarded and never dispatched.
+- Every input the branch holds, including input the guest still buffers, is negatively
+  acknowledged, so a source with acknowledgements redelivers it into the new lifetime.
+- No checkpoint is taken, because the state the callback would save is exactly the state the reset
+  discards.
+- The instance is dropped with its pending timeout handles, and the branch runs no further callback
+  in the lifetime being replaced.
+- Effects earlier callbacks already published stand, because their checkpoints completed.
+
+A callback that asks and then fails is still asking, and asking repeatedly — several times inside
+one callback, or from several callbacks of one state lifetime — replaces that lifetime exactly
+once. The return code says only that the host took the request. It is never proof that a new
+lifetime became durable: the guest learns that by being initialized again, with no
+`nervix_load_state` call, in a new lifetime.
+
+Clearing the guest's own fields is an ordinary application-state mutation that the next
+`nervix_dump_state` saves, and needs none of this.
 
 ## Batch Envelope
 
@@ -294,6 +331,7 @@ emitted envelope's `acked` sidecar.
 
 Sentinel first values exercise the error paths in both guests: `-100` routes a
 message error, `-200` reports a global error, `-300` fails the batch with a
-guest error, and `-400` is filtered like any other value but leaves the guest
+guest error, `-400` is filtered like any other value but leaves the guest
 unable to serialize its state, so every later `nervix_dump_state` fails with the
-reason on the global-error channel.
+reason on the global-error channel, and `-500` asks the host for a new guest-state
+lifetime instead of counting the row.

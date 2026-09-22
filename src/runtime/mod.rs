@@ -506,6 +506,11 @@ use wasm_checkpoint::{
     WASM_CHECKPOINT_DEADLINE, WasmCallbackReporting, WasmCheckpointHolds,
     checkpoint_wasm_guest_state, wasm_callback_decided_tokens,
 };
+pub(crate) use wasm_guest_state_reset::GuestWasmStateResetRequest;
+use wasm_guest_state_reset::{
+    PendingGuestWasmStateResets, WasmGuestStateResetContext, WasmGuestStateResetFence,
+    refuse_fenced_wasm_branch_input, request_wasm_guest_state_reset,
+};
 use wasm_output::{WasmMaterializedOutput, WasmOutputContext, dispatch_wasm_output_envelopes};
 use wasm_processor::{
     WasmBranchModule, WasmInstanceError, WasmLiveInstance, WasmModuleFile,
@@ -540,6 +545,7 @@ mod wasm_checkpoint;
 #[cfg(feature = "benchmarks")]
 #[doc(hidden)]
 pub mod wasm_checkpoint_benchmark;
+mod wasm_guest_state_reset;
 mod wasm_output;
 mod wasm_processor;
 mod wasm_state;

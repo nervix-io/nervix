@@ -164,6 +164,9 @@ pub(in crate::runtime) struct RuntimeInner {
     pub(in crate::runtime) replicated_branch_aggregated_states:
         DashMap<RuntimeStatePlacement, Arc<ReplicatedBranchAggregatedState>, RandomState>,
     pub(in crate::runtime) wasm_runtime: WasmRuntime,
+    /// The guest-requested branch state resets this node's branch tasks are waiting for. A branch
+    /// fences itself and leaves its request here; the control-plane coordinator drains them.
+    pub(in crate::runtime) guest_wasm_state_resets: PendingGuestWasmStateResets,
     pub(in crate::runtime) branch_instance_expiration_scan_interval: Duration,
     pub(in crate::runtime) state_store: Option<Arc<RuntimeStateStore>>,
     /// The bounded disk incoming sealed snapshots land on before they are verified and opened.

@@ -23,6 +23,8 @@ const (
 	maxGuestBufferBytes        = 4 * 1024 * 1024
 	// A first value that leaves the guest unable to serialize its state.
 	unserializableStateValue int32 = -400
+	// A first value that asks the host for a new guest-state lifetime.
+	requestStateResetValue int32 = -500
 	// The processed row count, the only application state, is eight little-endian bytes.
 	processedRowsStateBytes = 8
 )
@@ -33,11 +35,18 @@ const (
 	errApplicationStateRejected int32 = -8
 )
 
+// nervix_request_state_reset answers with this code when the guest operation in progress cannot
+// carry a request, which is every operation that is not a callback.
+const stateResetRefused int32 = -9
+
 //go:wasmimport env nervix_domain_time_nanos
 func hostDomainTimeNanos() int64
 
 //go:wasmimport env nervix_timeout_after_nanos
 func hostTimeoutAfterNanos(delayNanos int64) int64
+
+//go:wasmimport env nervix_request_state_reset
+func hostRequestStateReset() int32
 
 var fixedBuffer [maxGuestBufferBytes]byte
 var buffer []byte
@@ -228,6 +237,17 @@ func nervixProcessBatch(ptr int32, size int32) int32 {
 		}
 		pendingEmit = pendingEmit[:0]
 		pendingEmit = append(pendingEmit, encoded)
+		return success
+	}
+	if hasFirstValue && firstValue == requestStateResetValue {
+		// The row ordinal this guest counts is unusable, so it asks for the whole state lifetime
+		// rather than clearing the field. The host replaces it after this callback returns: the
+		// batch still buffered here and the one that asked are both left to their sources, and the
+		// instance that asked runs nothing more.
+		if hostRequestStateReset() == stateResetRefused {
+			setGlobalError("host refused a state reset request from nervix_process_batch")
+			return errErrorState
+		}
 		return success
 	}
 	if hasFirstValue && firstValue == unserializableStateValue {

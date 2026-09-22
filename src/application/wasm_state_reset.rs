@@ -27,9 +27,10 @@ use nervix_models::{
 };
 #[cfg(feature = "testing")]
 use nervix_recovery::NoReceiver as _;
+use tracing::debug;
 
 use super::{AppError, entity_gate::ClusterEntityGate, session_service::SessionServiceImpl};
-use crate::runtime::{Runtime, WasmStateResetPreparation};
+use crate::runtime::{GuestWasmStateResetRequest, Runtime, WasmStateResetPreparation};
 
 #[derive(Debug, thiserror::Error)]
 pub(in crate::application) enum WasmStateResetError {
@@ -69,6 +70,8 @@ pub(in crate::application) enum WasmStateResetError {
     Abort { processor: ModelName },
     #[error("WASM processor '{}' reset was committed but its new lifetime is not usable", .processor.as_str())]
     CommittedNotUsable { processor: ModelName },
+    #[error("failed to reach the coordinator of WASM processor '{}' state reset", .processor.as_str())]
+    Coordinator { processor: ModelName },
 }
 
 struct WasmStateResetPlan {
@@ -193,6 +196,23 @@ impl SessionServiceImpl {
         let failed = || crate::fault_injection::WasmStateResetRequestError::ResetFailed {
             processor: processor.clone(),
         };
+        self.coordinate_wasm_state_reset(&domain, &processor, reference, target)
+            .await
+            .change_context_lazy(failed)
+    }
+
+    /// Run one reset where it is coordinated: on the leader, which serializes it with every other
+    /// mutation of the domain. A request that starts on another node is forwarded there.
+    async fn coordinate_wasm_state_reset(
+        &self,
+        domain: &DomainName,
+        processor: &ModelName,
+        request: CommandExecutionReference,
+        target: WasmStateResetTarget,
+    ) -> error_stack::Result<(), WasmStateResetError> {
+        let unreachable = || WasmStateResetError::Coordinator {
+            processor: processor.clone(),
+        };
         if let Some(leader) = self.inner.consensus.current_leader().await
             && &leader != self.inner.consensus.local_node_id()
         {
@@ -202,22 +222,104 @@ impl SessionServiceImpl {
                 .request(
                     &leader,
                     CoordinateWasmStateResetRequest {
-                        domain,
+                        domain: domain.clone(),
                         processor: processor.clone(),
-                        request: reference,
+                        request,
                         target,
                     },
                 )
                 .await
-                .change_context_lazy(failed)?;
+                .change_context_lazy(unreachable)?;
             return response
                 .result
-                .map_err(Report::new)
-                .change_context_lazy(failed);
+                .map_err(|failure| Report::new(unreachable()).attach_printable(failure));
         }
-        self.reset_wasm_processor_state(&domain, &processor, reference, target, None)
+        self.reset_wasm_processor_state(domain, processor, request, target, None)
             .await
-            .change_context_lazy(failed)
+    }
+
+    /// Start the task that coordinates the state resets this node's WASM guests ask for.
+    ///
+    /// A branch task fences itself and hands its request to the runtime; this task is what turns
+    /// that request into the one coordinated reset every trigger shares, so a guest-requested reset
+    /// has the same durability and replica guarantees as an operator's.
+    pub(super) fn register_guest_wasm_state_reset_coordinator(
+        &self,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) {
+        let service = self.clone();
+        self.inner.service_tasks.spawn(async move {
+            loop {
+                tokio::task::consume_budget().await;
+                for request in service.inner.runtime.take_guest_wasm_state_resets() {
+                    service.coordinate_guest_wasm_state_reset(request).await;
+                }
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    () = service.inner.runtime.guest_wasm_state_reset_requested() => {}
+                }
+            }
+        });
+    }
+
+    /// Replace the guest-state lifetime one branch asked to leave behind.
+    ///
+    /// A failure that never reached the branch leaves it fenced, and the next input that branch
+    /// refuses re-states the request, so nothing is retried here. A failure the owner reported
+    /// after it stopped the branch has already restored it, and the guest that continues in the
+    /// lifetime the reset could not replace asks again from its next callback. Either way, asking
+    /// was never proof that a new lifetime became durable, so the failure is reported.
+    async fn coordinate_guest_wasm_state_reset(&self, request: GuestWasmStateResetRequest) {
+        if self.guest_wasm_state_reset_is_obsolete(&request).await {
+            debug!(
+                domain = request.domain().as_str(),
+                processor = request.processor().as_str(),
+                generation = %request.generation(),
+                "skipped a WASM guest state reset whose generation was already replaced"
+            );
+            return;
+        }
+        let result = self
+            .coordinate_wasm_state_reset(
+                request.domain(),
+                request.processor(),
+                request.reference(),
+                request.target(),
+            )
+            .await;
+        if let Err(error) = result {
+            self.inner.runtime.report_error(format!(
+                "wasm processor '{}' in domain '{}' could not replace the guest-state lifetime \
+                 its guest requested: {error:#}",
+                request.processor().as_str(),
+                request.domain().as_str(),
+            ));
+        }
+    }
+
+    /// Whether the lifetime this request asked to leave behind is already gone, which is the one
+    /// way a guest's request stops meaning anything. Coordinating it then would replace the
+    /// lifetime that replaced it instead.
+    async fn guest_wasm_state_reset_is_obsolete(
+        &self,
+        request: &GuestWasmStateResetRequest,
+    ) -> bool {
+        let inputs = self
+            .inner
+            .consensus
+            .domain_planning_inputs(request.domain())
+            .await;
+        let Some(schedule) = inputs.schedule() else {
+            return true;
+        };
+        let entity = NodeRef::new(ModelKind::WasmProcessor, request.processor().clone());
+        let Some(node) = schedule.nodes.get(&entity) else {
+            return true;
+        };
+        let Some(generations) = node.wasm_state_generations() else {
+            return true;
+        };
+        generations.of_branch(request.branch_fingerprint()) != request.generation()
     }
 
     pub(in crate::application) async fn reset_wasm_processor_state(

@@ -673,6 +673,7 @@ impl RelayProcessorTemplate {
                         ack_map: HashMap::default(),
                         next_ack_token: 1,
                         pending: Vec::new(),
+                        state_reset: WasmGuestStateResetFence::Open,
                     }
                 }
             },
