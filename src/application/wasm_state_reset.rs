@@ -262,6 +262,7 @@ impl SessionServiceImpl {
                 std::slice::from_ref(&plan.entity),
                 purpose,
                 deadline,
+                None,
             )
             .await
             .change_context_lazy(|| WasmStateResetError::Gate {

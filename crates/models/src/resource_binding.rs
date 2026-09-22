@@ -317,6 +317,7 @@ impl<Version> CreateWasmProcessor<Version> {
             file: self.file,
             limits: self.limits,
             global_error_policy: self.global_error_policy,
+            rejected_state_policy: self.rejected_state_policy,
             mode: self.mode,
             filter_where: self.filter_where,
             materialized_state: self.materialized_state,

@@ -6661,6 +6661,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-http"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "error-stack",
+ "nervix-connector",
+ "nervix-models",
+ "reqwest 0.13.4",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "nervix-connector-kafka"
 version = "0.1.0-dev"
 dependencies = [
@@ -6765,6 +6777,25 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "url",
+]
+
+[[package]]
+name = "nervix-connector-prometheus"
+version = "0.1.0-dev"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "error-stack",
+ "meticulous",
+ "nervix-approx-into",
+ "nervix-connector",
+ "nervix-models",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
  "url",
 ]
 
@@ -7066,11 +7097,13 @@ dependencies = [
  "nervix-client-wire",
  "nervix-connector",
  "nervix-connector-clickhouse",
+ "nervix-connector-http",
  "nervix-connector-kafka",
  "nervix-connector-mongodb",
  "nervix-connector-mysql",
  "nervix-connector-otel",
  "nervix-connector-postgres",
+ "nervix-connector-prometheus",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",

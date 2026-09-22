@@ -66,8 +66,14 @@ struct FaultInjectionState {
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_sink_clients: DashMap<String, (), RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
-    /// One-shot, domain-scoped drain failures consumed after a pending status is observed.
+    /// One-shot, domain-scoped rejections consumed before any entity gate engages.
+    failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
+    /// One-shot, domain-scoped failures consumed at the entity drain observation boundary.
     forced_entity_drain_timeouts: DashMap<DomainName, (), RandomState>,
+    /// One-shot, domain-scoped timeouts consumed after the durable domain pause engages.
+    forced_domain_drain_timeouts: DashMap<DomainName, (), RandomState>,
+    /// One-shot entity-swap failures consumed by the selected runtime node and domain.
+    failed_entity_schedule_swaps: DashMap<EntityScheduleSwapFailureKey, (), RandomState>,
     transaction_binding_drops: DashMap<ClusterNodeName, (), RandomState>,
     /// One-shot installation failures, consumed by the next resource version a node installs.
     failed_resource_installations: DashMap<ClusterNodeName, (), RandomState>,
@@ -85,6 +91,8 @@ struct FaultInjectionState {
     command_pauses: DashMap<CommandPausePoint, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     entity_gate_pauses: DashMap<String, Arc<TestPause>, RandomState>,
+    /// A remote node pauses after engaging its gate but before replying to the coordinator.
+    entity_gate_response_pauses: DashMap<EntityGateResponsePauseKey, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     remote_relay_admission_pauses:
         DashMap<RemoteRelayAdmissionPauseKey, Arc<TestPause>, RandomState>,
@@ -192,6 +200,18 @@ struct HealthResponsePauseKey {
     responding_node: ClusterNodeName,
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct EntityGateResponsePauseKey {
+    node: ClusterNodeName,
+    domain: DomainName,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct EntityScheduleSwapFailureKey {
+    node: ClusterNodeName,
+    domain: DomainName,
+}
+
 /// The command boundary a test controls without racing an election against a request.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum CommandPausePoint {
@@ -228,7 +248,10 @@ impl Default for FaultInjection {
                 failed_ingestors: DashMap::default(),
                 unavailable_sink_clients: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
+                failed_entity_gate_engagements: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
+                forced_domain_drain_timeouts: DashMap::default(),
+                failed_entity_schedule_swaps: DashMap::default(),
                 transaction_binding_drops: DashMap::default(),
                 failed_resource_installations: DashMap::default(),
                 failed_https_listener_installations: DashMap::default(),
@@ -239,6 +262,7 @@ impl Default for FaultInjection {
                 health_response_pauses: DashMap::default(),
                 command_pauses: DashMap::default(),
                 entity_gate_pauses: DashMap::default(),
+                entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
@@ -568,11 +592,28 @@ impl FaultInjection {
             .insert(domain.to_ascii_lowercase(), ());
     }
 
-    /// Forces the next pending entity drain in `domain` to report its normal timeout outcome
-    /// after collecting one complete status observation. The one-shot seam lets timeout recovery
-    /// tests exercise that outcome without making successful cluster work race a short duration.
+    /// Rejects the next entity gate before any node can engage it.
+    pub fn fail_next_entity_gate_engagement(&self, domain: DomainName) {
+        self.inner.failed_entity_gate_engagements.insert(domain, ());
+    }
+
+    /// Forces the next entity drain in `domain` to report its normal timeout outcome after one
+    /// complete status observation. The one-shot seam lets timeout recovery tests exercise that
+    /// outcome without making successful cluster work race a short duration.
     pub fn force_next_entity_drain_timeout(&self, domain: DomainName) {
         self.inner.forced_entity_drain_timeouts.insert(domain, ());
+    }
+
+    /// Forces the next domain drain to time out after the durable pause has engaged.
+    pub fn force_next_domain_drain_timeout(&self, domain: DomainName) {
+        self.inner.forced_domain_drain_timeouts.insert(domain, ());
+    }
+
+    /// Fails the next incremental entity swap for `domain` on `node`.
+    pub fn fail_next_entity_schedule_swap_on(&self, node: ClusterNodeName, domain: DomainName) {
+        self.inner
+            .failed_entity_schedule_swaps
+            .insert(EntityScheduleSwapFailureKey { node, domain }, ());
     }
 
     pub fn drop_transaction_bindings_on(&self, node_id: ClusterNodeName) {
@@ -833,6 +874,35 @@ impl FaultInjection {
 
     pub fn release_entity_gate_pause(&self, domain: &str) {
         let pause = self.entity_gate_pause(&domain.to_ascii_lowercase());
+        pause.release();
+    }
+
+    pub fn pause_entity_gate_response_on(&self, node: ClusterNodeName, domain: DomainName) {
+        self.inner.entity_gate_response_pauses.insert(
+            EntityGateResponsePauseKey { node, domain },
+            Arc::new(TestPause::default()),
+        );
+    }
+
+    pub async fn wait_for_entity_gate_response_pause(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        let key = EntityGateResponsePauseKey {
+            node: node.clone(),
+            domain: domain.clone(),
+        };
+        let pause = self.entity_gate_response_pause(&key);
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_entity_gate_response_pause(&self, node: &ClusterNodeName, domain: &DomainName) {
+        let key = EntityGateResponsePauseKey {
+            node: node.clone(),
+            domain: domain.clone(),
+        };
+        let pause = self.entity_gate_response_pause(&key);
         pause.release();
     }
 
@@ -1125,11 +1195,39 @@ impl FaultInjection {
             .is_some()
     }
 
+    pub(crate) fn take_failed_entity_gate_engagement(&self, domain: &DomainName) -> bool {
+        self.inner
+            .failed_entity_gate_engagements
+            .remove(domain)
+            .is_some()
+    }
+
     /// Consumes the domain-scoped timeout only at the coordinator's drain-observation seam.
     pub(crate) fn take_forced_entity_drain_timeout(&self, domain: &DomainName) -> bool {
         self.inner
             .forced_entity_drain_timeouts
             .remove(domain)
+            .is_some()
+    }
+
+    pub(crate) fn take_forced_domain_drain_timeout(&self, domain: &DomainName) -> bool {
+        self.inner
+            .forced_domain_drain_timeouts
+            .remove(domain)
+            .is_some()
+    }
+
+    pub(crate) fn take_failed_entity_schedule_swap(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) -> bool {
+        self.inner
+            .failed_entity_schedule_swaps
+            .remove(&EntityScheduleSwapFailureKey {
+                node: node.clone(),
+                domain: domain.clone(),
+            })
             .is_some()
     }
 
@@ -1271,6 +1369,28 @@ impl FaultInjection {
         pause.reach();
         pause.wait_until_released().await;
         self.inner.entity_gate_pauses.remove(&key);
+    }
+
+    pub(crate) async fn pause_entity_gate_response_if_armed(
+        &self,
+        node: &ClusterNodeName,
+        domain: &DomainName,
+    ) {
+        let key = EntityGateResponsePauseKey {
+            node: node.clone(),
+            domain: domain.clone(),
+        };
+        let Some(pause) = self
+            .inner
+            .entity_gate_response_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner.entity_gate_response_pauses.remove(&key);
     }
 
     pub(crate) async fn pause_remote_relay_admission_if_armed(
@@ -1527,6 +1647,17 @@ impl FaultInjection {
     fn entity_gate_pause(&self, key: &str) -> Arc<TestPause> {
         let Some(pause) = self.inner.entity_gate_pauses.get(key) else {
             panic!("entity gate pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn entity_gate_response_pause(&self, key: &EntityGateResponsePauseKey) -> Arc<TestPause> {
+        let Some(pause) = self.inner.entity_gate_response_pauses.get(key) else {
+            panic!(
+                "entity gate response pause for domain '{}' on node '{}' is not armed",
+                key.domain.as_str(),
+                key.node
+            );
         };
         pause.value().clone()
     }

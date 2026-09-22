@@ -210,8 +210,12 @@ impl OwnedNodeTask {
         NodeTaskState::Terminal(outcome)
     }
 
-    /// Wait for the owned task once, aborting and then joining it if the deadline expires.
-    pub(crate) async fn wait(&mut self, deadline: Duration) -> NodeTaskWaitOutcome {
+    /// Wait for the owned task once, aborting and then joining it if `deadline` passes.
+    ///
+    /// The deadline is a value this call receives rather than a timeout wrapped around it: the
+    /// wait takes the join handle out of the owner, so a wait cancelled from outside would drop
+    /// that handle and leave the task running with nothing left that could abort or join it.
+    pub(crate) async fn wait(&mut self, deadline: PhaseDeadline) -> NodeTaskWaitOutcome {
         let previous = std::mem::replace(self, Self::NotStarted);
         let mut task = match previous {
             Self::NotStarted => return NodeTaskWaitOutcome::NotStarted,
@@ -222,7 +226,7 @@ impl OwnedNodeTask {
             Self::Running(task) => task,
         };
 
-        let (outcome, expired) = match timeout(deadline, &mut task).await {
+        let (outcome, expired) = match timeout(deadline.remaining(), &mut task).await {
             Ok(result) => (Arc::new(NodeTaskTerminalOutcome::from_join(result)), false),
             Err(_) => {
                 task.abort();
@@ -285,7 +289,7 @@ impl fmt::Display for LastReadinessOutcome {
 )]
 pub(crate) struct NodeStartupError {
     pub(crate) node: ClusterNodeName,
-    pub(crate) attempt: usize,
+    pub(crate) attempt: u32,
     pub(crate) elapsed: Duration,
     pub(crate) failure: NodeStartupFailure,
     pub(crate) task_state: NodeTaskState,
@@ -295,7 +299,7 @@ pub(crate) struct NodeStartupError {
 impl NodeStartupError {
     fn report(
         node: &ClusterNodeName,
-        attempt: usize,
+        attempt: u32,
         deadline: PhaseDeadline,
         failure: NodeStartupFailure,
         task_state: NodeTaskState,
@@ -320,7 +324,7 @@ impl OwnedNodeTask {
     pub(crate) async fn wait_until_ready<P, Probe>(
         &mut self,
         node: &ClusterNodeName,
-        attempt: usize,
+        attempt: u32,
         deadline: PhaseDeadline,
         poll_interval: Duration,
         mut probe: P,

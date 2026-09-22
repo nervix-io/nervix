@@ -29,6 +29,7 @@ use arrow_schema::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use cucumber::{
     World as _, WriterExt,
+    event::ScenarioFinished,
     gherkin::Step,
     given, then, when,
     writer::{self, Stats as _},
@@ -101,6 +102,7 @@ use crate::common::{
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
     phase_deadline::{BeforeDeadline, PhaseDeadline},
+    scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioPhase},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
@@ -149,6 +151,43 @@ enum ScenarioExecutionPermit {
     },
 }
 
+/// What a scenario's own steps did, as its after hook sees it.
+///
+/// It is the result of the scenario body alone. Everything the after hook does afterwards is
+/// cleanup, and cleanup reports itself separately, so a log line never blames a scenario for what
+/// its teardown found.
+#[derive(Debug)]
+enum ScenarioBodyResult {
+    Passed,
+    Skipped,
+    BeforeHookFailed,
+    StepFailed(String),
+}
+
+impl From<&ScenarioFinished> for ScenarioBodyResult {
+    fn from(finished: &ScenarioFinished) -> Self {
+        match finished {
+            ScenarioFinished::StepPassed => Self::Passed,
+            ScenarioFinished::StepSkipped => Self::Skipped,
+            ScenarioFinished::BeforeHookFailed(_) => Self::BeforeHookFailed,
+            ScenarioFinished::StepFailed(_, _, error) => {
+                Self::StepFailed(error.to_string().replace('\n', "\\n"))
+            }
+        }
+    }
+}
+
+impl fmt::Display for ScenarioBodyResult {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Passed => formatter.write_str("passed"),
+            Self::Skipped => formatter.write_str("skipped"),
+            Self::BeforeHookFailed => formatter.write_str("before hook failed"),
+            Self::StepFailed(error) => write!(formatter, "step failed: {error}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DurableCatchUpObservation {
     follower: String,
@@ -184,6 +223,9 @@ struct FollowerCommandsMemoryObservation {
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     scenario_execution_permit: Option<ScenarioExecutionPermit>,
+    /// Publishes which phase this scenario is in for as long as its world lives, so a reader of
+    /// the registry sees the work in flight rather than the last work that finished.
+    active_scenario: Option<ActiveScenarioRegistration>,
     cluster: Option<Cluster>,
     active_session: Option<TestSession>,
     active_session_node: Option<String>,
@@ -362,6 +404,23 @@ impl fmt::Debug for ScenarioWorld {
 }
 
 impl ScenarioWorld {
+    /// Publishes the phase this scenario is entering and writes the marker that names it.
+    ///
+    /// The marker is written as the phase begins, so a scenario whose log ends at one of them is a
+    /// scenario still inside that phase.
+    fn enter_phase(&self, phase: ScenarioPhase, detail: &str) {
+        let Some(registration) = &self.active_scenario else {
+            return;
+        };
+        let published = registration.enter(phase);
+        let marker = format!(
+            "scenario {phase}: {} age={:?} {detail}",
+            published.identity,
+            published.age()
+        );
+        append_cucumber_log_line(marker.trim_end());
+    }
+
     fn stop_durable_catch_up_work(&mut self) {
         if let Some(writer) = self.durable_catch_up_writer.take() {
             writer.cancellation.cancel();
@@ -4631,6 +4690,40 @@ async fn given_next_pending_entity_drain_is_forced_to_time_out(
         .force_next_entity_drain_timeout(domain);
 }
 
+#[given(expr = "the next entity gate engagement in domain {string} is rejected")]
+async fn given_next_entity_gate_engagement_is_rejected(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .fail_next_entity_gate_engagement(domain);
+}
+
+#[given(expr = "the next domain drain in domain {string} is forced to time out")]
+async fn given_next_domain_drain_is_forced_to_time_out(world: &mut ScenarioWorld, domain: String) {
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .force_next_domain_drain_timeout(domain);
+}
+
+#[given(expr = "the next entity schedule swap in domain {string} on the leader is forced to fail")]
+async fn given_next_entity_schedule_swap_on_leader_fails(
+    world: &mut ScenarioWorld,
+    domain: String,
+) {
+    let leader = current_leader_node(world).await;
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .fail_next_entity_schedule_swap_on(crate::common::cluster::node_name(&leader), domain);
+}
+
 #[given("graceful shutdown drain is enabled")]
 async fn given_graceful_shutdown_drain_is_enabled(world: &mut ScenarioWorld) {
     assert!(
@@ -6649,6 +6742,24 @@ async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
     world.fault_injection.pause_entity_gate(domain);
 }
 
+#[given(
+    expr = "the entity gate response from node {string} for domain {string} pauses after \
+            engagement"
+)]
+async fn given_entity_gate_response_pause(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    domain: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .pause_entity_gate_response_on(crate::common::cluster::node_name(&node_id), domain);
+}
+
 #[given(expr = "remote relay admission for domain {string} is paused")]
 async fn given_remote_relay_admission_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
@@ -6800,6 +6911,47 @@ async fn then_entity_gate_pause_is_reached(world: &mut ScenarioWorld, domain: St
 async fn when_entity_gate_pause_is_released(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.release_entity_gate_pause(&domain);
+}
+
+#[then(expr = "the entity gate response pause from node {string} for domain {string} is reached")]
+async fn then_entity_gate_response_pause_is_reached(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    domain: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let domain = expand_placeholders(world, &domain);
+    let parsed_domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    tokio::time::timeout(
+        ENTITY_GATE_PAUSE_TIMEOUT,
+        world.fault_injection.wait_for_entity_gate_response_pause(
+            &crate::common::cluster::node_name(&node_id),
+            &parsed_domain,
+        ),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "entity gate response pause from node '{node_id}' for domain '{domain}' was not \
+             reached: {error}"
+        )
+    });
+}
+
+#[when(expr = "the entity gate response pause from node {string} for domain {string} is released")]
+async fn when_entity_gate_response_pause_is_released(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    domain: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let domain = expand_placeholders(world, &domain);
+    let domain = nervix_models::DomainName::try_from(domain.as_str())
+        .assured("the scenario uses an identifier-shaped domain name");
+    world
+        .fault_injection
+        .release_entity_gate_response_pause(&crate::common::cluster::node_name(&node_id), &domain);
 }
 
 #[then(expr = "the ownership handoff preparation pause for domain {string} is reached")]
@@ -9290,6 +9442,154 @@ async fn then_transaction_eventually_has_state(
                 last_output = output;
             }
             Err(error) => last_output = error.to_string(),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn quiescence_outcome_name(outcome: &nervix_models::QuiescenceOutcome) -> &'static str {
+    match outcome {
+        nervix_models::QuiescenceOutcome::Requested => "REQUESTED",
+        nervix_models::QuiescenceOutcome::Confirmed => "CONFIRMED",
+        nervix_models::QuiescenceOutcome::Failed { .. } => "FAILED",
+        nervix_models::QuiescenceOutcome::Uncertain { .. } => "UNCERTAIN",
+        nervix_models::QuiescenceOutcome::Released => "RELEASED",
+    }
+}
+
+fn execution_outcome_name(outcome: &nervix_models::ExecutionStepOutcome) -> &'static str {
+    match outcome {
+        nervix_models::ExecutionStepOutcome::Unattempted => "UNATTEMPTED",
+        nervix_models::ExecutionStepOutcome::Applying => "APPLYING",
+        nervix_models::ExecutionStepOutcome::Applied => "APPLIED",
+        nervix_models::ExecutionStepOutcome::Failed { .. } => "FAILED",
+    }
+}
+
+async fn read_transaction_impact_report(
+    world: &ScenarioWorld,
+    transaction_id: &str,
+) -> Result<nervix_models::TransactionImpactReport, String> {
+    let leader = current_leader_node(world).await;
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader));
+    let transaction = observer
+        .current_transaction(transaction_id)
+        .await
+        .ok_or_else(|| format!("transaction '{transaction_id}' is not retained"))?;
+    let preview = transaction
+        .latest_preview()
+        .ok_or_else(|| format!("transaction '{transaction_id}' has no retained preview"))?;
+    observer
+        .current_transaction_report(preview)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[then(
+    expr = "transaction {string} report step {int} eventually records planned quiesce {string}, \
+            actual quiesce {string}, execution {string}, and outcomes {string}"
+)]
+async fn then_transaction_report_records_actual_quiescence(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    step_number: usize,
+    planned: String,
+    actual: String,
+    execution: String,
+    outcomes: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let planned = expand_placeholders(world, &planned).to_ascii_uppercase();
+    let actual = expand_placeholders(world, &actual).to_ascii_uppercase();
+    let execution = expand_placeholders(world, &execution).to_ascii_uppercase();
+    let outcomes = expand_placeholders(world, &outcomes).to_ascii_uppercase();
+    let index = step_number
+        .checked_sub(1)
+        .assured("transaction report step numbers are one-based");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut observed = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "transaction '{transaction_id}' report step {step_number} did not record planned \
+             '{planned}', actual '{actual}', execution '{execution}', and outcomes '{outcomes}'; \
+             last observation: {observed}"
+        );
+        match read_transaction_impact_report(world, &transaction_id).await {
+            Ok(report) => {
+                let Some(step) = report.execution_steps().get(index) else {
+                    observed =
+                        format!("report contains {} step(s)", report.execution_steps().len());
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                };
+                let observed_planned = step.planned().pause.level().as_str();
+                let observed_actual = step.actual_quiesce_level().as_str();
+                let observed_execution = execution_outcome_name(&step.actual().outcome);
+                let observed_outcomes = step
+                    .actual()
+                    .quiescence
+                    .iter()
+                    .map(|engagement| {
+                        engagement
+                            .outcomes
+                            .iter()
+                            .map(quiescence_outcome_name)
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|");
+                observed = format!(
+                    "planned={observed_planned}, actual={observed_actual}, \
+                     execution={observed_execution}, outcomes={observed_outcomes}"
+                );
+                if observed_planned == planned
+                    && observed_actual == actual
+                    && observed_execution == execution
+                    && observed_outcomes == outcomes
+                {
+                    return;
+                }
+            }
+            Err(error) => observed = error,
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "transaction {string} report step {int} eventually records recovery rebuild effects")]
+async fn then_transaction_report_records_recovery_rebuilds(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    step_number: usize,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let index = step_number
+        .checked_sub(1)
+        .assured("transaction report step numbers are one-based");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "transaction '{transaction_id}' report step {step_number} did not record recovery \
+             rebuild effects"
+        );
+        if let Ok(report) = read_transaction_impact_report(world, &transaction_id).await
+            && let Some(step) = report.execution_steps().get(index)
+        {
+            let rebuilds = step.actual().effects.rebuilds.as_slice();
+            if rebuilds.len() > step.planned().effects.rebuilds.len()
+                && rebuilds
+                    .iter()
+                    .any(|rebuild| rebuild.reason == nervix_models::RebuildReason::Recovery)
+            {
+                return;
+            }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -13432,6 +13732,43 @@ async fn then_within_duration_describe_ingestor_on_leader_contains(
     }
 }
 
+#[then(expr = "within {string} DESCRIBE WASM PROCESSOR {string} on the leader node contains")]
+async fn then_within_duration_describe_wasm_processor_on_leader_contains(
+    world: &mut ScenarioWorld,
+    duration: String,
+    processor: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let processor = expand_placeholders(world, &processor);
+    let expected = expand_placeholders(world, docstring(step));
+    let deadline = Instant::now() + duration;
+
+    loop {
+        tokio::task::consume_budget().await;
+        let leader = current_leader_node(world).await;
+        let output = run_nspl_commands_on_node(
+            world,
+            &leader,
+            &format!("DESCRIBE WASM PROCESSOR {processor};"),
+        )
+        .await
+        .expect("describe wasm processor command must succeed");
+        world.last_command_output = Some(output.clone());
+        if output.contains(expected.trim()) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for DESCRIBE WASM PROCESSOR {processor} to contain {}. last \
+             output: {output}",
+            expected.trim()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Assert that one of two emitters reports the given text.
 ///
 /// Which of two peers contending for the last connection ends up holding it and which ends up
@@ -17197,6 +17534,59 @@ async fn then_stream_subscription_does_not_receive_a_payload_within(
     assert_no_subscription_payload_within(world, duration).await;
 }
 
+/// Assert that nothing the subscription delivers within `duration` carries every named fragment.
+///
+/// Sibling branches keep publishing while the branch under test must stay silent, so the window
+/// has to be drained rather than closed on the first payload that arrives.
+#[then(
+    expr = "the relay subscription does not receive a payload containing fragments within {string}"
+)]
+async fn then_stream_subscription_does_not_receive_a_payload_containing_fragments_within(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let fragments = docstring(step)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| expand_placeholders(world, line))
+        .collect::<Vec<_>>();
+    assert!(
+        !fragments.is_empty(),
+        "step docstring must contain at least one forbidden payload fragment"
+    );
+    let session = world
+        .active_session
+        .as_mut()
+        .expect("an active session with subscription must exist");
+    let deadline = Instant::now() + duration;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        let wait = deadline.saturating_duration_since(now);
+        let event = session
+            .try_next_subscription(wait)
+            .await
+            .expect("failed while waiting for absence of a subscription payload");
+        let Some(event) = event else {
+            return;
+        };
+        assert!(
+            !fragments
+                .iter()
+                .all(|fragment| event.payload.contains(fragment)),
+            "expected no subscription payload containing {fragments:?}, got: {}",
+            event.payload
+        );
+    }
+}
+
 async fn assert_no_subscription_payload_within(world: &mut ScenarioWorld, duration: Duration) {
     let session = world
         .active_session
@@ -19649,6 +20039,12 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                 .chain(&feature.tags)
                 .any(|tag| tag == "exclusive");
             Box::pin(async move {
+                // Published before the permits below, so a scenario the suite has taken up is
+                // visible while it waits for them rather than only once it runs.
+                world.active_scenario = Some(ActiveScenarioRegistration::start(
+                    &feature_name,
+                    &scenario_name,
+                ));
                 let wasm_state_reset_scenario_permit =
                     if feature_name == WASM_STATE_RESET_FEATURE_NAME {
                         // Every reset scenario starts a cluster and compiles WASM. Running more
@@ -19685,9 +20081,6 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                 };
                 world.wasm_state_reset_scenario_permit = wasm_state_reset_scenario_permit;
                 world.scenario_execution_permit = Some(execution_permit);
-                append_cucumber_log_line(&format!(
-                    "scenario started: feature={feature_name:?} scenario={scenario_name:?}"
-                ));
                 if WEB_CONSOLE_FEATURE_NAMES
                     .iter()
                     .any(|name| *name == feature_name)
@@ -19707,50 +20100,92 @@ async fn run_scenarios(parallelism: TestParallelism) -> Option<String> {
                             .expect("web console scenario semaphore must remain open"),
                     );
                 }
+                world.enter_phase(ScenarioPhase::Body, "");
             })
         })
-        .after(|_feature, _rule, _scenario, _ev, world| {
+        .after(|_feature, _rule, _scenario, finished, world| {
+            let body = ScenarioBodyResult::from(finished);
             Box::pin(async move {
-                append_cucumber_log_line("scenario finished");
-                if let Some(world) = world {
-                    world.stop_durable_catch_up_work();
-                    world.fault_injection.release_all_health_responses();
-                    world.fault_injection.release_all_domain_clock_progress();
-                    world.fault_injection.release_all_command_pauses();
-                    append_cluster_statuses(world, "scenario teardown").await;
-                    append_cucumber_log_line(&format!(
-                        "scenario context: domain={} test_id={} last_command_error={:?} \
-                         last_command_output={:?} last_server_error={:?} \
-                         last_subscription_payload={:?} last_broker_payload={:?}",
-                        world.domain,
-                        world.test_id,
-                        world.last_command_error,
-                        world.last_command_output,
-                        world.last_server_error,
-                        world.last_subscription_payload,
-                        world.last_broker_payload
-                    ));
-                    world.server_process_http_load = None;
-                    world.held_resource_upload = None;
-                    world.server_process = None;
-                    world.broker_observer = None;
-                    close_browser(world).await;
-                    world.active_session = None;
-                    world.active_session_node = None;
-                    world.active_session_has_subscription = false;
-                    world.last_server_error = None;
-                    if let Some(mut cluster) = world.cluster.take() {
-                        let errors = cluster.shutdown_for_teardown().await;
-                        for error in errors {
+                let Some(world) = world else {
+                    return;
+                };
+                world.enter_phase(ScenarioPhase::BodyComplete, &format!("result={body}"));
+
+                world.enter_phase(ScenarioPhase::TeardownStarted, "");
+                world.stop_durable_catch_up_work();
+                world.fault_injection.release_all_health_responses();
+                world.fault_injection.release_all_domain_clock_progress();
+                world.fault_injection.release_all_command_pauses();
+
+                world.enter_phase(ScenarioPhase::Diagnostics, "");
+                // Scenarios run many at a time, so a status line says which scenario left it.
+                let statuses = match &world.active_scenario {
+                    Some(registration) => format!("scenario teardown {}", registration.identity()),
+                    None => "scenario teardown".to_string(),
+                };
+                append_cluster_statuses(world, &statuses).await;
+                append_cucumber_log_line(&format!(
+                    "scenario context: domain={} test_id={} last_command_error={:?} \
+                     last_command_output={:?} last_server_error={:?} \
+                     last_subscription_payload={:?} last_broker_payload={:?}",
+                    world.domain,
+                    world.test_id,
+                    world.last_command_error,
+                    world.last_command_output,
+                    world.last_server_error,
+                    world.last_subscription_payload,
+                    world.last_broker_payload
+                ));
+
+                world.enter_phase(ScenarioPhase::Stopping, "");
+                world.server_process_http_load = None;
+                world.held_resource_upload = None;
+                world.server_process = None;
+                world.broker_observer = None;
+                close_browser(world).await;
+                world.active_session = None;
+                world.active_session_node = None;
+                world.active_session_has_subscription = false;
+                world.last_server_error = None;
+                let cluster_cleanup = match world.cluster.take() {
+                    Some(mut cluster) => {
+                        let teardown = cluster.shutdown_for_teardown().await;
+                        for panicked in teardown.panics() {
                             append_cucumber_log_line(&format!(
-                                "cluster teardown forced node shutdown after error: {error}"
+                                "scenario teardown failed: {panicked}"
                             ));
                         }
+                        for forced in teardown.forced() {
+                            append_cucumber_log_line(&format!("scenario cleanup forced: {forced}"));
+                        }
+                        if teardown.was_forced() {
+                            // Cleanup that has to take a node apart is usually cleanup that ran
+                            // beside work heavy enough to starve it, so name what else was live.
+                            for active in ActiveScenario::active() {
+                                append_cucumber_log_line(&format!(
+                                    "scenario live during forced cleanup: {active}"
+                                ));
+                            }
+                        }
+                        // Dropping the cluster gives back the temporary storage its nodes wrote to.
+                        drop(cluster);
+                        format!("teardown={teardown}")
                     }
-                    world.web_console_scenario_permit = None;
-                    world.wasm_state_reset_scenario_permit = None;
-                    world.scenario_execution_permit = None;
-                }
+                    None => "teardown=no cluster".to_string(),
+                };
+                // The faults a scenario injected into the network outlast its nodes otherwise: a
+                // proxy standing in front of a node and a socket held silently open against it are
+                // harness state, and they are given back once the nodes they fronted have ended.
+                world.stallable_tcp_proxies.clear();
+                world.silent_interconnect_peers.clear();
+                world.web_console_scenario_permit = None;
+                world.wasm_state_reset_scenario_permit = None;
+                world.scenario_execution_permit = None;
+
+                world.enter_phase(
+                    ScenarioPhase::Finished,
+                    &format!("body={body} {cluster_cleanup}"),
+                );
             })
         })
         .with_writer(writer)

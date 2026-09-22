@@ -21,7 +21,7 @@ use nervix_connector_kafka::{
 
 use super::{
     super::*,
-    source::{BrokerSourceHost, BrokerSourceHostSpec, run_source_instance},
+    source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_source_instance},
 };
 
 pub(crate) struct KafkaIngestor;
@@ -349,7 +349,7 @@ impl KafkaIngestor {
                     ingestor: ingestor.name.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
-            let host = BrokerSourceHost::build(BrokerSourceHostSpec {
+            let host = RuntimeSourceHost::build(RuntimeSourceHostSpec {
                 runtime: runtime.clone(),
                 domain: domain.clone(),
                 ingestor: ingestor.name.clone(),

@@ -111,11 +111,13 @@ nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-connector-clickhouse = { workspace = true }
+nervix-connector-http = { workspace = true }
 nervix-connector-kafka = { workspace = true }
 nervix-connector-mongodb = { workspace = true }
 nervix-connector-mysql = { workspace = true }
 nervix-connector-otel = { workspace = true }
 nervix-connector-postgres = { workspace = true }
+nervix-connector-prometheus = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-execution = { workspace = true }
@@ -255,11 +257,13 @@ members = [
   "crates/client-wire",
   "crates/connector",
   "crates/connectors/clickhouse",
+  "crates/connectors/http",
   "crates/connectors/kafka",
   "crates/connectors/mongodb",
   "crates/connectors/mysql",
   "crates/connectors/otel",
   "crates/connectors/postgres",
+  "crates/connectors/prometheus",
   "crates/consensus",
   "crates/dataflow-graph",
   "crates/execution",
@@ -407,11 +411,13 @@ nervix-client-core = { package = "nervix-client-core", path = "crates/client-cor
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
 nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = "crates/connectors/clickhouse" }
+nervix-connector-http = { package = "nervix-connector-http", path = "crates/connectors/http" }
 nervix-connector-kafka = { package = "nervix-connector-kafka", path = "crates/connectors/kafka" }
 nervix-connector-mongodb = { package = "nervix-connector-mongodb", path = "crates/connectors/mongodb" }
 nervix-connector-mysql = { package = "nervix-connector-mysql", path = "crates/connectors/mysql" }
 nervix-connector-otel = { package = "nervix-connector-otel", path = "crates/connectors/otel" }
 nervix-connector-postgres = { package = "nervix-connector-postgres", path = "crates/connectors/postgres" }
+nervix-connector-prometheus = { package = "nervix-connector-prometheus", path = "crates/connectors/prometheus" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
 nervix-execution = { package = "nervix-execution", path = "crates/execution" }

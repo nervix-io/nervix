@@ -9,7 +9,7 @@
 //! - **Must not know.** How the domain's graph is scheduled or executed.
 
 use error_stack::Report;
-use nervix_consensus::DomainMutationLease;
+use nervix_consensus::{ConsensusError, DomainMutationLease};
 use nervix_interconnect::DomainDrainStatusEnvelope;
 use nervix_models::{
     AlterDomain, ClusterNodeName, CreateDomain, CreateStatement, DomainClockState, DomainName,
@@ -27,6 +27,7 @@ use super::{
     },
     ownership_handoff::{mark_complete_ownership_transitions, planned_relocation_count},
     session_service::SessionServiceImpl,
+    transaction::{QuiescenceAttempt, TransactionStepImpactRecorder},
 };
 use crate::proto::CommandResult;
 #[derive(Debug, Error)]
@@ -154,24 +155,59 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<(), Report<DomainAlterError>> {
-        self.inner
+        impact: Option<&TransactionStepImpactRecorder>,
+    ) -> Result<Option<QuiescenceAttempt>, Report<DomainAlterError>> {
+        let attempt = impact.map(|impact| {
+            impact.request(nervix_models::PauseRequirement::Domain {
+                domain: domain.clone(),
+            })
+        });
+        if let Err(error) = self
+            .inner
             .consensus
             .pause_domain(domain.clone(), mutation)
             .await
-            .map_err(|error| {
-                let reason = error.to_string();
+        {
+            let reason = error.to_string();
+            if let (Some(impact), Some(attempt)) = (impact, attempt) {
+                if matches!(&error, ConsensusError::Conflict(_)) {
+                    impact.fail(
+                        attempt,
+                        nervix_models::ImpactDiagnosticKind::Quiescence,
+                        reason.clone(),
+                    );
+                } else {
+                    impact.uncertain(
+                        attempt,
+                        nervix_models::ImpactDiagnosticKind::Quiescence,
+                        reason.clone(),
+                    );
+                }
+            }
+            return Err(
                 Report::new(error).change_context(DomainAlterError::PauseDomain {
                     domain: domain.clone(),
                     reason,
-                })
-            })?;
+                }),
+            );
+        }
+        if let (Some(impact), Some(attempt)) = (impact, attempt) {
+            impact.confirm(attempt);
+        }
 
         if let Err(error) = self.apply_current_cluster_state().await {
+            if let (Some(impact), Some(attempt)) = (impact, attempt) {
+                impact.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Quiescence,
+                    error.to_string(),
+                );
+            }
             return Err(self
                 .abort_domain_alter_pause(
                     domain,
                     mutation,
+                    impact.zip(attempt),
                     Report::new(DomainAlterError::StopIngestion {
                         domain: domain.clone(),
                         reason: error.to_string(),
@@ -181,10 +217,19 @@ impl SessionServiceImpl {
         }
 
         match self.wait_for_paused_domain_drain(domain).await {
-            Ok(()) => Ok(()),
-            Err(reason) => Err(self
-                .abort_domain_alter_pause(domain, mutation, reason)
-                .await),
+            Ok(()) => Ok(attempt),
+            Err(reason) => {
+                if let (Some(impact), Some(attempt)) = (impact, attempt) {
+                    impact.fail(
+                        attempt,
+                        nervix_models::ImpactDiagnosticKind::Quiescence,
+                        reason.to_string(),
+                    );
+                }
+                Err(self
+                    .abort_domain_alter_pause(domain, mutation, impact.zip(attempt), reason)
+                    .await)
+            }
         }
     }
 
@@ -201,6 +246,22 @@ impl SessionServiceImpl {
         }
         nodes.sort();
         nodes.dedup();
+
+        #[cfg(feature = "testing")]
+        if self.inner.runtime.take_forced_domain_drain_timeout(domain) {
+            return Err(Report::new(DomainAlterError::QuiesceTimeout {
+                outstanding: DrainOutstanding {
+                    domain: domain.clone(),
+                    node: None,
+                    active_ingestors: 0,
+                    active_generators: 0,
+                    outstanding_acks: 0,
+                    buffered_emitter_messages: 0,
+                    emitter_publishing: Vec::new(),
+                    status_error: Some("injected domain drain timeout".to_string()),
+                },
+            }));
+        }
 
         let deadline = tokio::time::Instant::now() + self.inner.runtime.domain_drain_timeout();
         let mut polling = interval(Duration::from_millis(50));
@@ -273,11 +334,24 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         mutation: Option<&DomainMutationLease>,
+        impact: Option<(&TransactionStepImpactRecorder, QuiescenceAttempt)>,
         reason: Report<DomainAlterError>,
     ) -> Report<DomainAlterError> {
         match self.resume_domain_after_alter(domain, mutation).await {
-            Ok(()) => reason,
+            Ok(()) => {
+                if let Some((impact, attempt)) = impact {
+                    impact.release(attempt);
+                }
+                reason
+            }
             Err(resume_error) => {
+                if let Some((impact, attempt)) = impact {
+                    impact.fail(
+                        attempt,
+                        nervix_models::ImpactDiagnosticKind::Recovery,
+                        resume_error.to_string(),
+                    );
+                }
                 let reason = format!("{reason}; automatic resume failed: {resume_error}");
                 resume_error.change_context(DomainAlterError::Rollback {
                     domain: domain.clone(),
@@ -309,6 +383,28 @@ impl SessionServiceImpl {
                 reason: error.to_string(),
             })
         })
+    }
+
+    pub(in crate::application) async fn resume_domain_after_alter_with_impact(
+        &self,
+        domain: &DomainName,
+        mutation: Option<&DomainMutationLease>,
+        impact: Option<(&TransactionStepImpactRecorder, QuiescenceAttempt)>,
+    ) -> Result<(), Report<DomainAlterError>> {
+        if let Err(error) = self.resume_domain_after_alter(domain, mutation).await {
+            if let Some((impact, attempt)) = impact {
+                impact.fail(
+                    attempt,
+                    nervix_models::ImpactDiagnosticKind::Recovery,
+                    error.to_string(),
+                );
+            }
+            return Err(error);
+        }
+        if let Some((impact, attempt)) = impact {
+            impact.release(attempt);
+        }
+        Ok(())
     }
 
     /// Stops a domain whose start could not be completed, and says so when the stop fails too.
@@ -568,7 +664,8 @@ impl SessionServiceImpl {
             .await
         {
             if let Some(handoff) = handoff {
-                self.abort_planned_ownership_handoff(domain, handoff).await;
+                self.abort_planned_ownership_handoff(domain, handoff, None)
+                    .await;
             }
             return self
                 .consensus_error_response(
@@ -583,7 +680,7 @@ impl SessionServiceImpl {
         let activation_error = self.apply_current_cluster_state().await.err();
         if let Some(error) = activation_error {
             if let Some(handoff) = handoff {
-                self.defer_planned_ownership_handoff_release(domain, handoff, &error);
+                self.defer_planned_ownership_handoff_release(domain, handoff, &error, None);
             }
             return command_error(format!(
                 "committed placement and schedule for domain '{}', but the destination failed to \
@@ -592,7 +689,9 @@ impl SessionServiceImpl {
             ));
         }
         if let Some(handoff) = handoff
-            && let Err(error) = self.finish_planned_ownership_handoff(domain, handoff).await
+            && let Err(error) = self
+                .finish_planned_ownership_handoff(domain, handoff, None)
+                .await
         {
             return command_error(format!(
                 "committed placement and schedule for domain '{}', but ownership state activation \
