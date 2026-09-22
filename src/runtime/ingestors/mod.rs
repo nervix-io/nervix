@@ -2,7 +2,6 @@ use super::*;
 
 pub(in crate::runtime) mod endpoint;
 pub(in crate::runtime) mod http;
-mod http_source;
 pub(in crate::runtime) mod kafka;
 pub(in crate::runtime) mod mqtt;
 pub(in crate::runtime) mod nats;

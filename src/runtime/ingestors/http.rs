@@ -10,10 +10,10 @@
 //!   placement computation.
 
 use nervix_connector::{SourceAckPolicy, SourceCapabilities, SourceConnector, SourcePlan};
+use nervix_connector_http::{HttpSource, HttpSourcePlan};
 
 use super::{
     super::*,
-    http_source::{HttpSource, HttpSourcePlan},
     source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_paced_source},
 };
 
