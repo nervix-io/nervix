@@ -167,6 +167,10 @@ relay. Do not use them to scan across branches.
 - ClickHouse, Postgres, MySQL, and MongoDB emitter sinks declare a positive `WITH MAX BATCH`.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
+- Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
+  that range is rejected through `ON MESSAGE ERROR` instead of being written or used as an
+  `ON CONFLICT` target, so map such a column to `STRING` when the full unsigned range must reach
+  the collection.
 - Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
   duration, and is absent when immediate input execution is intended. Correlator sides are checked
   independently; ingestors never declare input collection. Treat the duration as domain-logical

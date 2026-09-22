@@ -19011,6 +19011,21 @@ async fn then_mysql_table_eventually_contains_rows_from_insert_commands(
     }
 }
 
+/// The identifier one MongoDB document carries, keeping a written BSON null distinct from a number
+/// so a scenario can assert that a genuine null was published as null.
+fn mongodb_document_user_id(document: &MongoDbDocument) -> serde_json::Value {
+    match document.get("mongodb_user_id") {
+        Some(MongoDbBson::Int32(value)) => serde_json::json!(i64::from(*value)),
+        Some(MongoDbBson::Int64(value)) => serde_json::json!(*value),
+        Some(MongoDbBson::Double(value)) => {
+            let value: i64 = (*value).checked_approx_into().unwrap_or_default();
+            serde_json::json!(value)
+        }
+        Some(MongoDbBson::Null) => serde_json::Value::Null,
+        _ => serde_json::json!(0),
+    }
+}
+
 #[then("the MongoDB collection eventually contains a document")]
 async fn then_mongodb_collection_eventually_contains_document(
     world: &mut ScenarioWorld,
@@ -19041,14 +19056,7 @@ async fn then_mongodb_collection_eventually_contains_document(
         let observed = documents
             .into_iter()
             .map(|document| {
-                let user_id = match document.get("mongodb_user_id") {
-                    Some(MongoDbBson::Int32(value)) => i64::from(*value),
-                    Some(MongoDbBson::Int64(value)) => *value,
-                    Some(MongoDbBson::Double(value)) => {
-                        (*value).checked_approx_into().unwrap_or_default()
-                    }
-                    _ => 0,
-                };
+                let user_id = mongodb_document_user_id(&document);
                 let action = document.get_str("mongodb_action").unwrap_or_default();
                 serde_json::json!({
                     "mongodb_user_id": user_id,
