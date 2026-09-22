@@ -1,0 +1,32 @@
+[package]
+description = "The WebSocket source and signaling protocol engine for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-websockets"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+error-stack = { workspace = true }
+futures-util = { workspace = true }
+humantime = { workspace = true }
+nervix-jaq = { workspace = true }
+nervix-models = { workspace = true }
+prost = { workspace = true }
+prost-reflect = { workspace = true, features = ["serde"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = [
+  "io-util",
+  "macros",
+  "rt",
+  "sync",
+  "time",
+] }
+tokio-tungstenite = { workspace = true, features = ["__rustls-tls", "connect"] }
+triomphe = { workspace = true }
+
+[dev-dependencies]
+parking_lot = { workspace = true }

@@ -9,6 +9,7 @@ use nervix_connector::{
     ClientConfigResult, RustlsClientConfigSource, ServiceUrl, client_config_value,
     physical_time::actual_utc_now,
 };
+use nervix_connector_websockets::{SignalingDataSink, WebsocketSignalingSession};
 use nervix_models::{DomainName, IngestorName};
 use tokio_tungstenite::{Connector, connect_async, connect_async_tls_with_config};
 

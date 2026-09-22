@@ -6664,6 +6664,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-connector-websockets"
+version = "0.1.0-dev"
+dependencies = [
+ "error-stack",
+ "futures-util",
+ "humantime",
+ "nervix-jaq",
+ "nervix-models",
+ "parking_lot",
+ "prost 0.13.5",
+ "prost-reflect",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "triomphe",
+]
+
+[[package]]
 name = "nervix-consensus"
 version = "0.1.0-dev"
 dependencies = [
@@ -6977,6 +6996,7 @@ dependencies = [
  "nervix-client-wire",
  "nervix-connector",
  "nervix-connector-kafka",
+ "nervix-connector-websockets",
  "nervix-consensus",
  "nervix-dataflow-graph",
  "nervix-execution",
