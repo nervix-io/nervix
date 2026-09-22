@@ -19,7 +19,7 @@ use url::Url;
 
 use super::*;
 use crate::runtime::emitters::{
-    MongoDbClient, MySqlPool, MySqlSharedPool, PgPool, RedisCommandPool,
+    MongoDbClient, MySqlPool, MySqlSharedPool, PgPool, RedisClientError, RedisCommandPool,
 };
 
 /// Why one client's connector instance could not be opened.
@@ -43,6 +43,27 @@ pub(in crate::runtime) enum OpenClientError {
         transport: &'static str,
         reason: String,
     },
+}
+
+impl OpenClientError {
+    /// How the Redis connector's own client failure reads as a client this node could not open.
+    fn from_redis(error: Report<RedisClientError>) -> Report<Self> {
+        let context = match error.current_context() {
+            RedisClientError::MissingConfig { key } => Self::MissingConfig {
+                transport: "Redis",
+                key,
+            },
+            RedisClientError::InvalidConfig { reason } => Self::InvalidConfig {
+                transport: "Redis",
+                reason: reason.clone(),
+            },
+            RedisClientError::Connect { reason } => Self::Connect {
+                transport: "Redis",
+                reason: reason.clone(),
+            },
+        };
+        error.change_context(context)
+    }
 }
 
 /// Configuration keys and address parameters that would size a pool behind NSPL's back.
@@ -352,6 +373,7 @@ impl Runtime {
             PooledTransport::Redis => SharedClientInstance::Redis(
                 emitters::open_redis_command_pool(config, pool.bounds)
                     .await
+                    .map_err(OpenClientError::from_redis)
                     .map_err(opened)?,
             ),
         };

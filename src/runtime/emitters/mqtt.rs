@@ -1,19 +1,80 @@
-use std::{future::Future, pin::Pin};
+//! MQTT sink connector.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff, the
+//!   quality of service each record is published at, and confirmation classification.
+//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
+//!   `rumqttc`.
+//! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
+//!   connector implementation.
 
+use std::{collections::VecDeque, future::Future, num::NonZeroUsize, pin::Pin, time::Duration};
+
+use async_trait::async_trait;
+use error_stack::Report;
 use futures_util::FutureExt;
-use nervix_connector::{ParsedRetryPolicy, client_tls_paths, optional_client_config_value};
-use nervix_models::TopicName;
+use meticulous::OptionExt as _;
+use nervix_connector::{
+    AckConfirmation, ParsedRetryPolicy, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost,
+    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
+    SinkStartError, SinkStartResult, client_config_value, client_tls_paths, next_retry_delay,
+    optional_client_config_value, read_tls_file,
+};
+use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
 use rumqttc::{
     AsyncClient, ClientError as MqttClientError, Event, MqttOptions,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNoticeError,
     PublishOptions, SessionMode, TlsConfiguration, Transport as MqttTransport, ValidatedTopic,
 };
+use tokio::{
+    sync::watch,
+    time::{Instant, sleep},
+};
+use tracing::warn;
 use url::{Host, Url};
 
-use super::*;
+const MQTT: &str = "mqtt";
 
-pub(in crate::runtime) struct MqttEmitter {
-    client: Option<AsyncClient>,
+/// The quality of service an MQTT sink publishes at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MqttPublishingMode {
+    Qos0,
+    Qos1(AckConfirmation),
+    Qos2(AckConfirmation),
+}
+
+impl MqttPublishingMode {
+    fn publish_options(self) -> PublishOptions {
+        match self {
+            Self::Qos0 => PublishOptions::at_most_once(),
+            Self::Qos1(_) => PublishOptions::at_least_once(),
+            Self::Qos2(_) => PublishOptions::exactly_once(),
+        }
+    }
+
+    fn confirmation_settings(self) -> Option<AckConfirmation> {
+        match self {
+            Self::Qos0 => None,
+            Self::Qos1(confirmation) | Self::Qos2(confirmation) => Some(confirmation),
+        }
+    }
+}
+
+/// What one MQTT sink publishes through: its client entries, topic, quality of service, the
+/// backoff its event loop reconnects on, and the client id to use when the configuration
+/// declares none.
+pub struct MqttSinkConfig {
+    pub config: Vec<ClientConfigEntry>,
+    pub topic: TopicName,
+    pub mode: MqttPublishingMode,
+    pub retry_policy: ParsedRetryPolicy,
+    pub default_client_id: String,
+}
+
+pub struct MqttSink {
+    client: AsyncClient,
+    topic: TopicName,
     mode: MqttPublishingMode,
     eventloop_shutdown: watch::Sender<bool>,
 }
@@ -22,30 +83,51 @@ type MqttConfirmation = Pin<Box<dyn Future<Output = Result<(), PublishNoticeErro
 
 struct PendingMqttConfirmation {
     position: SinkRecordPosition,
-    acks: AckSet,
+    occurred_at: Timestamp,
     deadline: Instant,
     confirmation: MqttConfirmation,
 }
 
-impl MqttEmitter {
-    pub(in crate::runtime) fn new(
-        plan: &MqttSinkPlan,
-        context: &EmitterSinkContext,
-        retry_policy: ParsedRetryPolicy,
-    ) -> EmitterRuntimeResult<Self> {
-        let mode = plan.mode;
-        let (client, mut eventloop) = Self::client_from_config(
-            &plan.client.config.entries,
-            &format!("{}-{}", context.domain.as_str(), context.emitter.as_str()),
-            mode,
-        )?;
-        let domain = context.domain.clone();
-        let emitter = context.emitter.clone();
-        let events = context.runtime.events().clone();
-        let runtime = context.runtime.clone();
+/// The delay before the event loop's next reconnect attempt, doubling up to the declared ceiling.
+struct MqttReconnectBackoff {
+    policy: ParsedRetryPolicy,
+    next: Duration,
+}
+
+impl MqttReconnectBackoff {
+    fn from_policy(policy: ParsedRetryPolicy) -> Self {
+        Self {
+            policy,
+            next: policy.backoff,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.next = self.policy.backoff;
+    }
+
+    fn take_next_delay(&mut self) -> Duration {
+        let delay = self.next;
+        self.next = next_retry_delay(self.next, self.policy);
+        delay
+    }
+}
+
+struct MqttSinkAddr {
+    host: String,
+    port: u16,
+    tls: bool,
+}
+
+impl MqttSink {
+    pub fn new(config: MqttSinkConfig, host: SinkHost) -> SinkStartResult<Self> {
+        let mode = config.mode;
+        let (client, mut eventloop) =
+            Self::client_from_config(&config.config, &config.default_client_id, mode)?;
+        let retry_policy = config.retry_policy;
         let (eventloop_shutdown, mut eventloop_shutdown_rx) = watch::channel(false);
         tokio::spawn(async move {
-            let mut backoff = RuntimeReconnectBackoff::from_policy(retry_policy);
+            let mut backoff = MqttReconnectBackoff::from_policy(retry_policy);
             loop {
                 tokio::task::consume_budget().await;
                 let polled = tokio::select! {
@@ -58,32 +140,22 @@ impl MqttEmitter {
                     polled = eventloop.poll() => polled,
                 };
                 match polled {
-                    Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) | Ok(Event::Auth(_)) => {
+                    Ok(Event::Incoming(_) | Event::Outgoing(_) | Event::Auth(_)) => {
                         backoff.reset();
-                        runtime.clear_emitter_transient_error(&domain, &emitter);
+                        host.clear_transient_error();
                     }
                     Err(error) => {
                         let wait = backoff.take_next_delay();
-                        runtime.record_emitter_transient_error_with_backoff(
-                            &domain,
-                            &emitter,
-                            error.to_string(),
-                            wait,
-                        );
-                        events.report_error(format!(
-                            "mqtt emitter event loop failed for '{}' in domain '{}'; reconnecting \
-                             in {}: {}",
-                            emitter.as_str(),
-                            domain.as_str(),
+                        host.record_transient_error(error.to_string(), wait);
+                        host.report_error(format!(
+                            "mqtt event loop failed; reconnecting in {}: {}",
                             humantime::format_duration(wait),
                             error
                         ));
                         warn!(
-                            domain = domain.as_str(),
-                            emitter = emitter.as_str(),
                             error = %error,
                             retry_in = %humantime::format_duration(wait),
-                            "mqtt emitter event loop reconnecting"
+                            "mqtt sink event loop reconnecting"
                         );
                         tokio::select! {
                             changed = eventloop_shutdown_rx.changed() => {
@@ -97,20 +169,21 @@ impl MqttEmitter {
                 }
             }
         });
-        ValidatedTopic::new(plan.topic.as_str()).map_err(emitter_config_error)?;
+        ValidatedTopic::new(config.topic.as_str()).map_err(Self::config_error)?;
         Ok(Self {
-            client: Some(client),
+            client,
+            topic: config.topic,
             mode,
             eventloop_shutdown,
         })
     }
 
     fn client_from_config(
-        config: &[nervix_models::ClientConfigEntry],
+        config: &[ClientConfigEntry],
         default_client_id: &str,
         mode: MqttPublishingMode,
-    ) -> EmitterRuntimeResult<(AsyncClient, rumqttc::EventLoop)> {
-        let addr = emitter_config_value(config, "addr", "MQTT")?;
+    ) -> SinkStartResult<(AsyncClient, rumqttc::EventLoop)> {
+        let addr = Self::config_value(config, "addr")?;
         let client_id = match optional_client_config_value(config, "client_id") {
             Some(client_id) => client_id.to_owned(),
             None => default_client_id.to_string(),
@@ -127,20 +200,20 @@ impl MqttEmitter {
         if mqtt_addr.tls {
             let tls = client_tls_paths(config);
             let ca = if let Some(ca_file) = tls.ca_file.as_ref() {
-                emitter_read_tls_file(ca_file, "TLS CA certificate")?
+                Self::read_tls_file(ca_file, "TLS CA certificate")?
             } else {
-                return Err(emitter_config_error(
+                return Err(Self::config_error(
                     "MQTT TLS requires client config key 'tls_ca_file'",
                 ));
             };
             let client_auth = match (&tls.cert_file, &tls.key_file) {
                 (Some(cert_file), Some(key_file)) => Some((
-                    emitter_read_tls_file(cert_file, "TLS certificate")?,
-                    emitter_read_tls_file(key_file, "TLS private key")?,
+                    Self::read_tls_file(cert_file, "TLS certificate")?,
+                    Self::read_tls_file(key_file, "TLS private key")?,
                 )),
                 (None, None) => None,
                 _ => {
-                    return Err(emitter_config_error(
+                    return Err(Self::config_error(
                         "MQTT TLS client authentication requires both 'tls_cert_file' and \
                          'tls_key_file'",
                     ));
@@ -161,19 +234,19 @@ impl MqttEmitter {
         AsyncClient::builder(options)
             .capacity(request_capacity.get())
             .try_build()
-            .map_err(|error| emitter_config_error(format!("invalid MQTT client config: {error}")))
+            .map_err(|error| Self::config_error(format!("invalid MQTT client config: {error}")))
     }
 
-    fn parse_addr(addr: &str) -> EmitterRuntimeResult<MqttEmitterAddr> {
+    fn parse_addr(addr: &str) -> SinkStartResult<MqttSinkAddr> {
         let url = Url::parse(addr).map_err(|source| {
-            emitter_config_error(format!("invalid MQTT addr '{addr}': {source}"))
+            Self::config_error(format!("invalid MQTT addr '{addr}': {source}"))
         })?;
         let tls = if url.scheme() == "mqtt" {
             false
         } else if url.scheme() == "mqtts" {
             true
         } else {
-            return Err(emitter_config_error(format!(
+            return Err(Self::config_error(format!(
                 "unsupported MQTT addr scheme '{}', expected mqtt:// or mqtts://",
                 url.scheme()
             )));
@@ -185,154 +258,63 @@ impl MqttEmitter {
             None => String::new(),
         };
         if host.is_empty() {
-            return Err(emitter_config_error(format!(
+            return Err(Self::config_error(format!(
                 "missing host in MQTT addr '{addr}'"
             )));
         }
         let port = url
             .port()
-            .ok_or_else(|| emitter_config_error(format!("missing port in MQTT addr '{addr}'")))?;
-        Ok(MqttEmitterAddr { host, port, tls })
-    }
-
-    pub(super) async fn publish_records(
-        &self,
-        topic: &TopicName,
-        records: Vec<EncodedBrokerRecord>,
-    ) -> PerRecordPublishOutcome {
-        let mut outcome = PerRecordPublishOutcome::empty();
-        let Some(client) = self.client.as_ref() else {
-            outcome.fail(
-                Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("no initialized mqtt sink client"),
-            );
-            return outcome;
-        };
-        outcome.delivered.reserve(records.len());
-        let mut pending: VecDeque<PendingMqttConfirmation> = VecDeque::new();
-        for record in records {
-            tokio::task::consume_budget().await;
-            for confirmation in &pending {
-                confirmation.acks.ack_alive();
-            }
-            record.acks.ack_alive();
-            let position = record.position();
-            if let MqttPublishingMode::Qos0 = self.mode {
-                match client.try_publish(
-                    topic.as_str(),
-                    record.payload,
-                    PublishOptions::at_most_once(),
-                ) {
-                    Ok(()) => outcome.deliver(position),
-                    Err(error) if Self::is_record_client_rejection(&error) => {
-                        outcome.reject(position, format!("mqtt rejected record: {error}"));
-                    }
-                    Err(error) => {
-                        outcome.fail(emitter_publish_error(error));
-                        return outcome;
-                    }
-                }
-                continue;
-            }
-
-            let notice = match client.try_publish_tracked(
-                topic.as_str(),
-                record.payload,
-                self.mode.publish_options(),
-            ) {
-                Ok(notice) => notice,
-                Err(error) if Self::is_record_client_rejection(&error) => {
-                    outcome.reject(position, format!("mqtt rejected record: {error}"));
-                    continue;
-                }
-                Err(error) => {
-                    outcome.fail(emitter_publish_error(error));
-                    return outcome;
-                }
-            };
-            let AckConfirmation {
-                max_in_flight,
-                timeout,
-            } = self.mode.confirmation_settings().verified(
-                "this path only runs for the confirmed publishing mode, which carries the settings",
-            );
-            pending.push_back(PendingMqttConfirmation {
-                position,
-                acks: record.acks,
-                deadline: Instant::now() + timeout,
-                confirmation: Box::pin(notice.wait_completion_async()),
-            });
-            if pending.len() >= max_in_flight.get()
-                && let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
-            {
-                outcome.fail(error);
-                return outcome;
-            }
-        }
-        while !pending.is_empty() {
-            tokio::task::consume_budget().await;
-            let AckConfirmation { timeout, .. } = self.mode.confirmation_settings().verified(
-                "this path only runs for the confirmed publishing mode, which carries the settings",
-            );
-            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
-                outcome.fail(error);
-                return outcome;
-            }
-        }
-        outcome
+            .ok_or_else(|| Self::config_error(format!("missing port in MQTT addr '{addr}'")))?;
+        Ok(MqttSinkAddr { host, port, tls })
     }
 
     async fn confirm_oldest(
         pending: &mut VecDeque<PendingMqttConfirmation>,
         timeout: Duration,
-        outcome: &mut PerRecordPublishOutcome,
-    ) -> EmitterRuntimeResult<()> {
-        loop {
-            tokio::task::consume_budget().await;
-            for confirmation in pending.iter() {
-                confirmation.acks.ack_alive();
+        outcome: &mut PerRecordOutcome,
+    ) -> SinkPublishResult<()> {
+        let Some(oldest) = pending.front_mut() else {
+            return Err(Self::publish_error(
+                "mqtt acknowledgment window unexpectedly became empty",
+            ));
+        };
+        let remaining = oldest
+            .deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            Self::harvest_ready_after_oldest_failure(pending, outcome);
+            return Err(Self::confirm_timeout_error(timeout));
+        }
+        let result = tokio::select! {
+            biased;
+            result = &mut oldest.confirmation => Some(result),
+            _ = sleep(remaining) => None,
+        };
+        let Some(result) = result else {
+            Self::harvest_ready_after_oldest_failure(pending, outcome);
+            return Err(Self::confirm_timeout_error(timeout));
+        };
+        let position = oldest.position;
+        let occurred_at = oldest.occurred_at;
+        match result {
+            Ok(()) => {
+                pending.pop_front();
+                outcome.deliver(position);
+                Ok(())
             }
-            let Some(oldest) = pending.front_mut() else {
-                return Err(emitter_publish_error(
-                    "mqtt acknowledgment window unexpectedly became empty",
+            Err(error) if Self::is_record_notice_rejection(&error) => {
+                pending.pop_front();
+                outcome.reject(RejectedSinkRecord::external(
+                    position,
+                    occurred_at,
+                    format!("mqtt rejected record: {error}"),
                 ));
-            };
-            let remaining = oldest
-                .deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                Self::harvest_ready_after_oldest_failure(pending, outcome);
-                return Err(emitter_publish_error(format!(
-                    "mqtt publish confirmation exceeded ACK TIMEOUT {}",
-                    humantime::format_duration(timeout)
-                )));
+                Ok(())
             }
-            let wait = remaining.min(REMOTE_ACK_ALIVE_INTERVAL);
-            let result = tokio::select! {
-                biased;
-                result = &mut oldest.confirmation => Some(result),
-                _ = sleep(wait) => None,
-            };
-            let Some(result) = result else {
-                continue;
-            };
-            let position = oldest.position;
-            match result {
-                Ok(()) => {
-                    pending.pop_front();
-                    outcome.deliver(position);
-                    return Ok(());
-                }
-                Err(error) if Self::is_record_notice_rejection(&error) => {
-                    pending.pop_front();
-                    outcome.reject(position, format!("mqtt rejected record: {error}"));
-                    return Ok(());
-                }
-                Err(error) => {
-                    Self::harvest_ready_after_oldest_failure(pending, outcome);
-                    return Err(emitter_publish_error(error));
-                }
+            Err(error) => {
+                Self::harvest_ready_after_oldest_failure(pending, outcome);
+                Err(Self::publish_error(error))
             }
         }
     }
@@ -346,7 +328,7 @@ impl MqttEmitter {
     /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingMqttConfirmation>,
-        outcome: &mut PerRecordPublishOutcome,
+        outcome: &mut PerRecordOutcome,
     ) {
         let mut index = 1;
         while index < pending.len() {
@@ -363,10 +345,13 @@ impl MqttEmitter {
             );
             match result {
                 Ok(()) => outcome.deliver(confirmation.position),
-                Err(error) if Self::is_record_notice_rejection(&error) => outcome.reject(
-                    confirmation.position,
-                    format!("mqtt rejected record: {error}"),
-                ),
+                Err(error) if Self::is_record_notice_rejection(&error) => {
+                    outcome.reject(RejectedSinkRecord::external(
+                        confirmation.position,
+                        confirmation.occurred_at,
+                        format!("mqtt rejected record: {error}"),
+                    ));
+                }
                 Err(_) => {}
             }
         }
@@ -390,98 +375,198 @@ impl MqttEmitter {
             )
         )
     }
+
+    fn confirm_timeout_error(timeout: Duration) -> Report<SinkPublishError> {
+        Self::publish_error(format!(
+            "mqtt publish confirmation exceeded ACK TIMEOUT {}",
+            humantime::format_duration(timeout)
+        ))
+    }
+
+    fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
+        client_config_value(config, key, "MQTT").map_err(|error| {
+            let message = error.current_context().to_string();
+            error
+                .change_context(SinkStartError::InvalidConfiguration { sink: MQTT })
+                .attach_printable(message)
+        })
+    }
+
+    fn read_tls_file(path: &std::path::PathBuf, label: &str) -> SinkStartResult<Vec<u8>> {
+        read_tls_file(path, label).map_err(|error| {
+            let message = error.current_context().to_string();
+            error
+                .change_context(SinkStartError::InvalidConfiguration { sink: MQTT })
+                .attach_printable(message)
+        })
+    }
+
+    fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
+        Report::new(SinkStartError::InvalidConfiguration { sink: MQTT })
+            .attach_printable(error.to_string())
+    }
+
+    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
+        Report::new(SinkPublishError::Publish { sink: MQTT }).attach_printable(error.to_string())
+    }
 }
 
-impl Drop for MqttEmitter {
+impl Drop for MqttSink {
     fn drop(&mut self) {
         self.eventloop_shutdown.send_replace(true);
     }
 }
 
-impl MqttPublishingMode {
-    fn publish_options(self) -> PublishOptions {
-        match self {
-            Self::Qos0 => PublishOptions::at_most_once(),
-            Self::Qos1(_) => PublishOptions::at_least_once(),
-            Self::Qos2(_) => PublishOptions::exactly_once(),
-        }
-    }
-
-    fn confirmation_settings(self) -> Option<AckConfirmation> {
-        match self {
-            Self::Qos0 => None,
-            Self::Qos1(confirmation) | Self::Qos2(confirmation) => Some(confirmation),
-        }
+#[async_trait]
+impl SinkLifecycle for MqttSink {
+    /// A publish failure leaves the client connected: its event loop reconnects on its own
+    /// schedule, and dropping it would discard the session the broker still holds.
+    fn keeps_client_on_publish_failure(&self) -> bool {
+        true
     }
 }
 
-struct MqttEmitterAddr {
-    host: String,
-    port: u16,
-    tls: bool,
+#[async_trait]
+impl RecordSink for MqttSink {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
+        let mut pending: VecDeque<PendingMqttConfirmation> = VecDeque::new();
+        for record in records {
+            tokio::task::consume_budget().await;
+            let position = record.position;
+            let occurred_at = record.occurred_at;
+            if let MqttPublishingMode::Qos0 = self.mode {
+                match self.client.try_publish(
+                    self.topic.as_str(),
+                    record.payload,
+                    PublishOptions::at_most_once(),
+                ) {
+                    Ok(()) => outcome.deliver(position),
+                    Err(error) if Self::is_record_client_rejection(&error) => {
+                        outcome.reject(RejectedSinkRecord::external(
+                            position,
+                            occurred_at,
+                            format!("mqtt rejected record: {error}"),
+                        ));
+                    }
+                    Err(error) => {
+                        outcome.fail(Self::publish_error(error));
+                        return outcome;
+                    }
+                }
+                continue;
+            }
+
+            let notice = match self.client.try_publish_tracked(
+                self.topic.as_str(),
+                record.payload,
+                self.mode.publish_options(),
+            ) {
+                Ok(notice) => notice,
+                Err(error) if Self::is_record_client_rejection(&error) => {
+                    outcome.reject(RejectedSinkRecord::external(
+                        position,
+                        occurred_at,
+                        format!("mqtt rejected record: {error}"),
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    outcome.fail(Self::publish_error(error));
+                    return outcome;
+                }
+            };
+            let AckConfirmation {
+                max_in_flight,
+                timeout,
+            } = self.mode.confirmation_settings().verified(
+                "this path only runs for the confirmed publishing mode, which carries the settings",
+            );
+            let Some(deadline) = Instant::now().checked_add(timeout) else {
+                outcome.fail(Self::publish_error(
+                    "mqtt ACK TIMEOUT exceeds the monotonic clock range",
+                ));
+                return outcome;
+            };
+            pending.push_back(PendingMqttConfirmation {
+                position,
+                occurred_at,
+                deadline,
+                confirmation: Box::pin(notice.wait_completion_async()),
+            });
+            if pending.len() >= max_in_flight.get()
+                && let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await
+            {
+                outcome.fail(error);
+                return outcome;
+            }
+        }
+        while !pending.is_empty() {
+            tokio::task::consume_budget().await;
+            let AckConfirmation { timeout, .. } = self.mode.confirmation_settings().verified(
+                "this path only runs for the confirmed publishing mode, which carries the settings",
+            );
+            if let Err(error) = Self::confirm_oldest(&mut pending, timeout, &mut outcome).await {
+                outcome.fail(error);
+                return outcome;
+            }
+        }
+        outcome
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn position(row_index: usize) -> SinkRecordPosition {
+        SinkRecordPosition {
+            batch_index: 0,
+            row_index,
+        }
+    }
+
+    fn pending(
+        row_index: usize,
+        confirmation: MqttConfirmation,
+        deadline: Instant,
+    ) -> PendingMqttConfirmation {
+        PendingMqttConfirmation {
+            position: position(row_index),
+            occurred_at: Timestamp::from_unix_nanos(0),
+            deadline,
+            confirmation,
+        }
+    }
+
     #[test]
     fn ready_younger_confirmations_are_accounted_before_retrying_oldest() {
         let deadline = Instant::now() + Duration::from_secs(1);
-        let mut pending = VecDeque::from([
-            PendingMqttConfirmation {
-                position: SinkRecordPosition {
-                    batch_index: 0,
-                    row_index: 0,
-                },
-                acks: AckSet::empty(),
-                deadline,
-                confirmation: Box::pin(std::future::pending()),
-            },
-            PendingMqttConfirmation {
-                position: SinkRecordPosition {
-                    batch_index: 0,
-                    row_index: 1,
-                },
-                acks: AckSet::empty(),
-                deadline,
-                confirmation: Box::pin(async { Ok(()) }),
-            },
-            PendingMqttConfirmation {
-                position: SinkRecordPosition {
-                    batch_index: 0,
-                    row_index: 2,
-                },
-                acks: AckSet::empty(),
-                deadline,
-                confirmation: Box::pin(async {
+        let mut window = VecDeque::from([
+            pending(0, Box::pin(std::future::pending()), deadline),
+            pending(1, Box::pin(async { Ok(()) }), deadline),
+            pending(
+                2,
+                Box::pin(async {
                     Err(PublishNoticeError::V5PubAck(
                         MqttPubAckReason::NotAuthorized,
                     ))
                 }),
-            },
-            PendingMqttConfirmation {
-                position: SinkRecordPosition {
-                    batch_index: 0,
-                    row_index: 3,
-                },
-                acks: AckSet::empty(),
                 deadline,
-                confirmation: Box::pin(async { Err(PublishNoticeError::SessionReset) }),
-            },
+            ),
+            pending(
+                3,
+                Box::pin(async { Err(PublishNoticeError::SessionReset) }),
+                deadline,
+            ),
         ]);
-        let mut outcome = PerRecordPublishOutcome::empty();
+        let mut outcome = PerRecordOutcome::empty();
 
-        MqttEmitter::harvest_ready_after_oldest_failure(&mut pending, &mut outcome);
+        MqttSink::harvest_ready_after_oldest_failure(&mut window, &mut outcome);
+        let outcome = outcome.into_parts();
 
-        assert_eq!(pending.len(), 1, "only the unresolved oldest must remain");
-        assert_eq!(
-            outcome.delivered,
-            vec![SinkRecordPosition {
-                batch_index: 0,
-                row_index: 1,
-            }]
-        );
+        assert_eq!(window.len(), 1, "only the unresolved oldest must remain");
+        assert_eq!(outcome.delivered, vec![position(1)]);
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(outcome.rejected[0].position.row_index, 2);
         assert!(outcome.infrastructure_error.is_none());
@@ -494,7 +579,7 @@ mod tests {
             MqttPubAckReason::TopicNameInvalid,
             MqttPubAckReason::PayloadFormatInvalid,
         ] {
-            assert!(MqttEmitter::is_record_notice_rejection(
+            assert!(MqttSink::is_record_notice_rejection(
                 &PublishNoticeError::V5PubAck(reason)
             ));
         }
@@ -503,7 +588,7 @@ mod tests {
             MqttPubRecReason::TopicNameInvalid,
             MqttPubRecReason::PayloadFormatInvalid,
         ] {
-            assert!(MqttEmitter::is_record_notice_rejection(
+            assert!(MqttSink::is_record_notice_rejection(
                 &PublishNoticeError::V5PubRec(reason)
             ));
         }
@@ -511,10 +596,10 @@ mod tests {
 
     #[test]
     fn quota_and_session_failures_remain_infrastructure_failures() {
-        assert!(!MqttEmitter::is_record_notice_rejection(
+        assert!(!MqttSink::is_record_notice_rejection(
             &PublishNoticeError::V5PubAck(MqttPubAckReason::QuotaExceeded)
         ));
-        assert!(!MqttEmitter::is_record_notice_rejection(
+        assert!(!MqttSink::is_record_notice_rejection(
             &PublishNoticeError::SessionReset
         ));
     }

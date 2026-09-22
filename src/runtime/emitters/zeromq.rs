@@ -1,73 +1,90 @@
-use ::zeromq::{PushSocket, Socket, SocketSend};
-use nervix_connector::optional_client_config_value;
+//! ZeroMQ sink connector.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** ZeroMQ push-socket configuration, whether the socket binds or connects, and
+//!   per-record publication through it.
+//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, and
+//!   `zeromq`.
+//! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
+//!   connector implementation.
 
-use super::*;
+use async_trait::async_trait;
+use error_stack::Report;
+use nervix_connector::{
+    PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord,
+    SinkStartError, SinkStartResult, client_config_value, optional_client_config_value,
+};
+use nervix_models::ClientConfigEntry;
+use zeromq::{PushSocket, Socket, SocketSend};
 
-pub(in crate::runtime) struct ZeroMqEmitter {
-    socket: Option<PushSocket>,
+const ZEROMQ: &str = "zeromq";
+
+/// What one ZeroMQ sink publishes through: the entries its client configures its socket with.
+pub struct ZeroMqSinkConfig {
+    pub config: Vec<ClientConfigEntry>,
 }
 
-impl ZeroMqEmitter {
-    pub(in crate::runtime) async fn new(plan: &ZeroMqSinkPlan) -> EmitterRuntimeResult<Self> {
-        let socket = Self::push_socket_from_config(&plan.client.config.entries).await?;
-        Ok(Self {
-            socket: Some(socket),
-        })
+pub struct ZeroMqSink {
+    socket: PushSocket,
+}
+
+impl ZeroMqSink {
+    pub async fn new(config: ZeroMqSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+        let socket = Self::push_socket_from_config(&config.config).await?;
+        Ok(Self { socket })
     }
 
-    async fn push_socket_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<PushSocket> {
+    async fn push_socket_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<PushSocket> {
         let addr = Self::addr_from_config(config)?;
         let bind = Self::bind_from_config(config);
         let mut socket = PushSocket::new();
         if bind {
-            socket.bind(&addr).await.map_err(emitter_init_error)?;
+            socket.bind(&addr).await.map_err(Self::start_error)?;
         } else {
-            socket.connect(&addr).await.map_err(emitter_init_error)?;
+            socket.connect(&addr).await.map_err(Self::start_error)?;
         }
         Ok(socket)
     }
 
-    fn addr_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<String> {
-        emitter_config_value(config, "addr", "ZeroMQ")
+    fn addr_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<String> {
+        client_config_value(config, "addr", "ZeroMQ").map_err(|error| {
+            let message = error.current_context().to_string();
+            error
+                .change_context(SinkStartError::InvalidConfiguration { sink: ZEROMQ })
+                .attach_printable(message)
+        })
     }
 
-    fn bind_from_config(config: &[nervix_models::ClientConfigEntry]) -> bool {
+    fn bind_from_config(config: &[ClientConfigEntry]) -> bool {
         match optional_client_config_value(config, "bind") {
             Some(value) => value.eq_ignore_ascii_case("true"),
             None => false,
         }
     }
 
-    pub(in crate::runtime) async fn publish(
-        &mut self,
-        payload: Vec<u8>,
-    ) -> EmitterRuntimeResult<()> {
-        let Some(socket) = self.socket.as_mut() else {
-            return Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
-                .attach_printable("no initialized zeromq sink client"));
-        };
-        socket
-            .send(payload.into())
-            .await
-            .map_err(emitter_publish_error)
+    fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
+        Report::new(SinkStartError::Initialize { sink: ZEROMQ }).attach_printable(error.to_string())
     }
 
-    pub(in crate::runtime) async fn publish_records(
-        &mut self,
-        records: Vec<EncodedBrokerRecord>,
-    ) -> PerRecordPublishOutcome {
-        let mut outcome = PerRecordPublishOutcome::empty();
+    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
+        Report::new(SinkPublishError::Publish { sink: ZEROMQ }).attach_printable(error.to_string())
+    }
+}
+
+#[async_trait]
+impl SinkLifecycle for ZeroMqSink {}
+
+#[async_trait]
+impl RecordSink for ZeroMqSink {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position();
-            match await_emitter_confirmation(&record.acks, self.publish(record.payload)).await {
-                Ok(()) => outcome.deliver(position),
+            match self.socket.send(record.payload.into()).await {
+                Ok(()) => outcome.deliver(record.position),
                 Err(error) => {
-                    outcome.fail(error);
+                    outcome.fail(Self::publish_error(error));
                     break;
                 }
             }

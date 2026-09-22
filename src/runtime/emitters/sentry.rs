@@ -1,120 +1,120 @@
-//! Sentry emission at the external data-plane boundary.
+//! Sentry sink connector.
 //!
-//! Layer: data plane.
-//! - **Owns.** Sentry envelopes, event timestamp defaults and HTTP retry interpretation.
-//! - **Depends on.** Validated emitter plans, Arrow batches and the Sentry HTTP protocol.
-//! - **Must not know.** NSPL parsing, placement decisions or control-plane transactions.
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The Sentry DSN and envelope endpoint, envelope encoding with its event defaults,
+//!   per-record response classification, and the retry delay a rate-limited project asks for.
+//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, `reqwest`
+//!   and `sentry-types`.
+//! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
+//!   connector implementation.
 
-use nervix_connector::HttpClientConfig;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use error_stack::Report;
+use nervix_connector::{
+    HttpClientConfig, PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError,
+    SinkRecord, SinkRetryAfter, SinkStartError, SinkStartResult, client_config_value,
+    physical_time::actual_utc_now,
+};
+use nervix_models::{ClientConfigEntry, Timestamp};
 use reqwest::{
     Client as HttpClient, StatusCode,
     header::{CONTENT_TYPE, HeaderValue, RETRY_AFTER},
 };
 use sentry_types::{Dsn, protocol::v7::Event};
+use thiserror::Error;
 
-use super::*;
-
+const SENTRY: &str = "sentry";
 const SENTRY_AUTH_HEADER: &str = "x-sentry-auth";
 const SENTRY_ENVELOPE_CONTENT_TYPE: &str = "application/x-sentry-envelope";
 const SENTRY_CLIENT_AGENT: &str = concat!("nervix/", env!("CARGO_PKG_VERSION"));
 const SENTRY_RATE_LIMITS_HEADER: &str = "x-sentry-rate-limits";
 
-pub(in crate::runtime) struct SentryEmitter {
-    client: Option<HttpClient>,
+/// What one Sentry sink sends with: the entries naming its project DSN and HTTP client settings.
+pub struct SentrySinkConfig {
+    pub config: Vec<ClientConfigEntry>,
+}
+
+pub struct SentrySink {
+    client: HttpClient,
     envelope_url: url::Url,
     auth: HeaderValue,
 }
 
-impl SentryEmitter {
-    pub(in crate::runtime) fn new(plan: &SentrySinkPlan) -> EmitterRuntimeResult<Self> {
-        let config = plan.client.config.entries.as_slice();
-        let dsn = emitter_config_value(config, "dsn", "Sentry")?
+/// Why one record's payload is not a Sentry event this sink can send.
+#[derive(Debug, Error)]
+enum SentryEventError {
+    #[error("Sentry codec payload is not a valid event JSON object: {source}")]
+    EventJson {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("Sentry codec payload is not a valid event: {source}")]
+    Event {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to serialize Sentry event: {source}")]
+    SerializeEvent {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to serialize Sentry envelope header: {source}")]
+    SerializeEnvelopeHeader {
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("failed to serialize Sentry envelope item header: {source}")]
+    SerializeItemHeader {
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+impl SentrySink {
+    pub fn new(config: SentrySinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+        let config = config.config.as_slice();
+        let dsn = Self::config_value(config, "dsn")?
             .parse::<Dsn>()
-            .map_err(|error| emitter_config_error(format!("invalid Sentry dsn: {error}")))?;
+            .map_err(|error| Self::config_error(format!("invalid Sentry dsn: {error}")))?;
         let client = HttpClientConfig::new(config, "Sentry")
             .build()
-            .map_err(emitter_config_error)?;
+            .map_err(|error| {
+                let message = error.current_context().to_string();
+                error
+                    .change_context(SinkStartError::InvalidConfiguration { sink: SENTRY })
+                    .attach_printable(message)
+            })?;
         let envelope_url = dsn.envelope_api_url();
         let auth = HeaderValue::from_str(&dsn.to_auth(Some(SENTRY_CLIENT_AGENT)).to_string())
             .map_err(|error| {
-                emitter_config_error(format!("invalid Sentry authentication header: {error}"))
+                Self::config_error(format!("invalid Sentry authentication header: {error}"))
             })?;
         Ok(Self {
-            client: Some(client),
+            client,
             envelope_url,
             auth,
         })
     }
 
-    pub(super) async fn publish(
-        &self,
-        records: Vec<EncodedBrokerRecord>,
-    ) -> PerRecordPublishOutcome {
-        let mut outcome = PerRecordPublishOutcome::empty();
-        let Some(client) = self.client.as_ref() else {
-            outcome.fail(
-                Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("no initialized Sentry sink client"),
-            );
-            return outcome;
-        };
+    fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
+        client_config_value(config, key, "Sentry").map_err(|error| {
+            let message = error.current_context().to_string();
+            error
+                .change_context(SinkStartError::InvalidConfiguration { sink: SENTRY })
+                .attach_printable(message)
+        })
+    }
 
-        for record in records {
-            tokio::task::consume_budget().await;
-            let position = record.position();
-            let body = match Self::encode_envelope(&record.payload, record.execution_now) {
-                Ok(body) => body,
-                Err(error) => {
-                    outcome.reject(position, emitter_error_message(&error));
-                    continue;
-                }
-            };
-            let request = client
-                .post(self.envelope_url.clone())
-                .header(SENTRY_AUTH_HEADER, self.auth.clone())
-                .header(CONTENT_TYPE, SENTRY_ENVELOPE_CONTENT_TYPE)
-                .body(body)
-                .send();
-            let response = match await_emitter_confirmation(&record.acks, request).await {
-                Ok(response) => response,
-                Err(error) => {
-                    outcome.fail(emitter_publish_error(format!(
-                        "Sentry envelope request failed: {error}"
-                    )));
-                    return outcome;
-                }
-            };
-            let status = response.status();
-            if status.is_success() {
-                outcome.deliver(position);
-                continue;
-            }
-            if Self::is_record_status(status) {
-                outcome.reject(
-                    position,
-                    format!("Sentry rejected the event with HTTP status {status}"),
-                );
-                continue;
-            }
-            let retry_delay = Self::server_retry_delay(
-                response
-                    .headers()
-                    .get(RETRY_AFTER)
-                    .and_then(|value| value.to_str().ok()),
-                response
-                    .headers()
-                    .get(SENTRY_RATE_LIMITS_HEADER)
-                    .and_then(|value| value.to_str().ok()),
-                nervix_connector::physical_time::actual_utc_now().into_datetime(),
-            );
-            let error = format!("Sentry envelope request returned HTTP status {status}");
-            outcome.fail(match retry_delay {
-                Some(delay) => emitter_publish_error_with_minimum_retry_delay(error, delay),
-                None => emitter_publish_error(error),
-            });
-            return outcome;
-        }
-        outcome
+    fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
+        Report::new(SinkStartError::InvalidConfiguration { sink: SENTRY })
+            .attach_printable(error.to_string())
+    }
+
+    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
+        Report::new(SinkPublishError::Publish { sink: SENTRY }).attach_printable(error.to_string())
     }
 
     fn is_record_status(status: StatusCode) -> bool {
@@ -178,24 +178,16 @@ impl SentryEmitter {
         retry_after.into_iter().chain(sentry_rate_limits).max()
     }
 
-    fn encode_envelope(payload: &[u8], execution_now: Timestamp) -> EmitterRuntimeResult<Vec<u8>> {
-        let mut event = serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(
-            payload,
-        )
-        .map_err(|error| {
-            emitter_report(
-                EmitterRuntimeError::EncodeBatch,
-                format!("Sentry codec payload is not a valid event JSON object: {error}"),
-            )
-        })?;
+    fn encode_envelope(
+        payload: &[u8],
+        occurred_at: Timestamp,
+    ) -> Result<Vec<u8>, Report<SentryEventError>> {
+        let mut event =
+            serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(payload)
+                .map_err(|source| Report::new(SentryEventError::EventJson { source }))?;
         let parsed =
             serde_json::from_value::<Event<'static>>(serde_json::Value::Object(event.clone()))
-                .map_err(|error| {
-                    emitter_report(
-                        EmitterRuntimeError::EncodeBatch,
-                        format!("Sentry codec payload is not a valid event: {error}"),
-                    )
-                })?;
+                .map_err(|source| Report::new(SentryEventError::Event { source }))?;
         let event_id = parsed.event_id.simple().to_string();
         event.insert(
             "event_id".to_string(),
@@ -207,39 +199,94 @@ impl SentryEmitter {
         if !event.contains_key("timestamp") {
             event.insert(
                 "timestamp".to_string(),
-                serde_json::Value::String(execution_now.as_datetime().to_rfc3339()),
+                serde_json::Value::String(occurred_at.as_datetime().to_rfc3339()),
             );
         }
 
-        let event = serde_json::to_vec(&event).map_err(|error| {
-            emitter_report(
-                EmitterRuntimeError::EncodeBatch,
-                format!("failed to serialize Sentry event: {error}"),
-            )
-        })?;
+        let event = serde_json::to_vec(&event)
+            .map_err(|source| Report::new(SentryEventError::SerializeEvent { source }))?;
         let envelope_header = serde_json::json!({ "event_id": event_id });
         let item_header = serde_json::json!({
             "type": "event",
             "length": event.len(),
             "content_type": "application/json",
         });
-        let mut envelope = serde_json::to_vec(&envelope_header).map_err(|error| {
-            emitter_report(
-                EmitterRuntimeError::EncodeBatch,
-                format!("failed to serialize Sentry envelope header: {error}"),
-            )
-        })?;
+        let mut envelope = serde_json::to_vec(&envelope_header)
+            .map_err(|source| Report::new(SentryEventError::SerializeEnvelopeHeader { source }))?;
         envelope.push(b'\n');
-        serde_json::to_writer(&mut envelope, &item_header).map_err(|error| {
-            emitter_report(
-                EmitterRuntimeError::EncodeBatch,
-                format!("failed to serialize Sentry envelope item header: {error}"),
-            )
-        })?;
+        serde_json::to_writer(&mut envelope, &item_header)
+            .map_err(|source| Report::new(SentryEventError::SerializeItemHeader { source }))?;
         envelope.push(b'\n');
         envelope.extend_from_slice(&event);
         envelope.push(b'\n');
         Ok(envelope)
+    }
+}
+
+#[async_trait]
+impl SinkLifecycle for SentrySink {}
+
+#[async_trait]
+impl RecordSink for SentrySink {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
+        for record in records {
+            tokio::task::consume_budget().await;
+            let body = match Self::encode_envelope(&record.payload, record.occurred_at) {
+                Ok(body) => body,
+                Err(error) => {
+                    outcome.reject(record.rejected(error.current_context().to_string()));
+                    continue;
+                }
+            };
+            let request = self
+                .client
+                .post(self.envelope_url.clone())
+                .header(SENTRY_AUTH_HEADER, self.auth.clone())
+                .header(CONTENT_TYPE, SENTRY_ENVELOPE_CONTENT_TYPE)
+                .body(body)
+                .send();
+            let response = match request.await {
+                Ok(response) => response,
+                Err(error) => {
+                    outcome.fail(Self::publish_error(format!(
+                        "Sentry envelope request failed: {error}"
+                    )));
+                    return outcome;
+                }
+            };
+            let status = response.status();
+            if status.is_success() {
+                outcome.deliver(record.position);
+                continue;
+            }
+            if Self::is_record_status(status) {
+                outcome.reject(record.rejected(format!(
+                    "Sentry rejected the event with HTTP status {status}"
+                )));
+                continue;
+            }
+            let retry_delay = Self::server_retry_delay(
+                response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok()),
+                response
+                    .headers()
+                    .get(SENTRY_RATE_LIMITS_HEADER)
+                    .and_then(|value| value.to_str().ok()),
+                actual_utc_now().into_datetime(),
+            );
+            let error = Self::publish_error(format!(
+                "Sentry envelope request returned HTTP status {status}"
+            ));
+            outcome.fail(match retry_delay {
+                Some(delay) => error.attach(SinkRetryAfter(delay)),
+                None => error,
+            });
+            return outcome;
+        }
+        outcome
     }
 }
 
@@ -249,10 +296,10 @@ mod tests {
 
     #[test]
     fn envelope_preserves_event_fields_and_adds_protocol_defaults() {
-        let execution_now = Timestamp::from_unix_nanos(946_684_800_000_000_000);
-        let envelope = SentryEmitter::encode_envelope(
+        let occurred_at = Timestamp::from_unix_nanos(946_684_800_000_000_000);
+        let envelope = SentrySink::encode_envelope(
             br#"{"message":"failed","environment":"test","future":{"nested":true}}"#,
-            execution_now,
+            occurred_at,
         )
         .expect("event should encode");
         let mut lines = envelope.split(|byte| *byte == b'\n');
@@ -267,13 +314,13 @@ mod tests {
         assert_eq!(item_header["type"], "event");
         assert_eq!(item_header["length"], event_bytes.len());
         assert_eq!(event["platform"], "other");
-        assert_eq!(event["timestamp"], execution_now.as_datetime().to_rfc3339());
+        assert_eq!(event["timestamp"], occurred_at.as_datetime().to_rfc3339());
         assert_eq!(event["future"]["nested"], true);
     }
 
     #[test]
     fn envelope_preserves_an_explicit_event_timestamp() {
-        let envelope = SentryEmitter::encode_envelope(
+        let envelope = SentrySink::encode_envelope(
             br#"{"message":"failed","timestamp":"2010-05-06T07:08:09Z"}"#,
             Timestamp::from_unix_nanos(946_684_800_000_000_000),
         )
@@ -291,21 +338,21 @@ mod tests {
     #[test]
     fn classifies_only_definitive_client_responses_as_record_errors() {
         for status in [
-            reqwest::StatusCode::BAD_REQUEST,
-            reqwest::StatusCode::PAYLOAD_TOO_LARGE,
-            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::BAD_REQUEST,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            StatusCode::UNPROCESSABLE_ENTITY,
         ] {
-            assert!(SentryEmitter::is_record_status(status));
+            assert!(SentrySink::is_record_status(status));
         }
         for status in [
-            reqwest::StatusCode::UNAUTHORIZED,
-            reqwest::StatusCode::FORBIDDEN,
-            reqwest::StatusCode::NOT_FOUND,
-            reqwest::StatusCode::REQUEST_TIMEOUT,
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::REQUEST_TIMEOUT,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
         ] {
-            assert!(!SentryEmitter::is_record_status(status));
+            assert!(!SentrySink::is_record_status(status));
         }
     }
 
@@ -314,7 +361,7 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-05T12:00:00Z")
             .expect("fixed timestamp should parse")
             .with_timezone(&chrono::Utc);
-        let delay = SentryEmitter::server_retry_delay(
+        let delay = SentrySink::server_retry_delay(
             Some("15"),
             Some("60:error;transaction:organization:quota, 30::project"),
             now,
@@ -329,19 +376,8 @@ mod tests {
             .expect("fixed timestamp should parse")
             .with_timezone(&chrono::Utc);
         let delay =
-            SentryEmitter::server_retry_delay(Some("Wed, 05 Aug 2026 12:00:20 +0000"), None, now);
+            SentrySink::server_retry_delay(Some("Wed, 05 Aug 2026 12:00:20 +0000"), None, now);
 
         assert_eq!(delay, Some(Duration::from_secs(20)));
-    }
-
-    #[test]
-    fn server_delay_attachment_survives_publish_error_classification() {
-        let error = emitter_publish_error_with_minimum_retry_delay(
-            "Sentry rate limited the request",
-            Duration::from_secs(45),
-        );
-
-        assert!(emitter_publish_error_is_retryable(&error));
-        assert_eq!(emitter_minimum_retry_delay(&error), Duration::from_secs(45));
     }
 }

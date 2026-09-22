@@ -56,7 +56,8 @@ pub use sink::{
     RecordSink, RejectedSinkRecord, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
     SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices,
     SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
-    SinkStagingDirectory, SinkStartError, SinkStartResult, SinkTransientErrorStatus,
+    SinkRetryAfter, SinkStagingDirectory, SinkStartError, SinkStartResult,
+    SinkTransientErrorStatus,
 };
 pub use source::{
     SourceAckPolicy, SourceAcknowledgement, SourceAcknowledgementOutcome,

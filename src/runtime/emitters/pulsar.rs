@@ -1,39 +1,68 @@
-use ::pulsar::{
+//! Pulsar sink connector.
+//!
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** Pulsar client and producer configuration, its TLS options, topic qualification,
+//!   record and property publication, and send-receipt classification.
+//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
+//!   `pulsar`.
+//! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
+//!   connector implementation.
+
+use std::{collections::VecDeque, time::Duration};
+
+use async_trait::async_trait;
+use error_stack::Report;
+use futures_util::FutureExt;
+use meticulous::OptionExt as _;
+use nervix_connector::{
+    AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
+    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
+    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    optional_bool_client_config_value, optional_client_config_value, read_tls_file,
+};
+use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
+use pulsar::{
     ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
     TlsOptions as PulsarTlsOptions, TokioExecutor,
     producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
 };
-use futures_util::FutureExt;
-use nervix_connector::{client_tls_paths, optional_client_config_value};
+use tokio::time::{Instant, sleep};
 
-use super::*;
+const PULSAR: &str = "pulsar";
 
-pub(in crate::runtime) struct PulsarEmitter {
-    producer: Option<::pulsar::Producer<TokioExecutor>>,
+/// What one Pulsar sink publishes through: its client entries, topic and publishing mode.
+pub struct PulsarSinkConfig {
+    pub config: Vec<ClientConfigEntry>,
+    pub topic: TopicName,
+    pub mode: BrokerPublishingMode,
+}
+
+pub struct PulsarSink {
+    producer: pulsar::Producer<TokioExecutor>,
     mode: BrokerPublishingMode,
 }
 
 struct PendingPulsarConfirmation {
     position: SinkRecordPosition,
-    acks: AckSet,
+    occurred_at: Timestamp,
     deadline: Instant,
     confirmation: PulsarSendFuture,
 }
 
-impl PulsarEmitter {
-    pub(super) async fn new(plan: &PulsarSinkPlan) -> EmitterRuntimeResult<Self> {
-        let producer =
-            Self::producer_from_config(&plan.client.config.entries, plan.topic.as_str()).await?;
+impl PulsarSink {
+    pub async fn new(config: PulsarSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+        let producer = Self::producer_from_config(&config.config, config.topic.as_str()).await?;
         Ok(Self {
-            producer: Some(producer),
-            mode: plan.mode,
+            producer,
+            mode: config.mode,
         })
     }
 
     async fn producer_from_config(
-        config: &[nervix_models::ClientConfigEntry],
+        config: &[ClientConfigEntry],
         topic: &str,
-    ) -> EmitterRuntimeResult<::pulsar::Producer<TokioExecutor>> {
+    ) -> SinkStartResult<pulsar::Producer<TokioExecutor>> {
         let pulsar = Self::client_from_config(config).await?;
         let topic_name = Self::topic_from_config(config, topic);
         pulsar
@@ -41,13 +70,13 @@ impl PulsarEmitter {
             .with_topic(topic_name)
             .build()
             .await
-            .map_err(emitter_init_error)
+            .map_err(Self::start_error)
     }
 
     async fn client_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<Pulsar<TokioExecutor>> {
-        let addr = emitter_config_value(config, "addr", "Pulsar")?;
+        config: &[ClientConfigEntry],
+    ) -> SinkStartResult<Pulsar<TokioExecutor>> {
+        let addr = Self::config_value(config, "addr")?;
         let (connection_retry_options, operation_retry_options) = Self::retry_options();
         let mut builder = Pulsar::builder(addr, TokioExecutor)
             .with_connection_retry_options(connection_retry_options)
@@ -62,7 +91,7 @@ impl PulsarEmitter {
                     tls_options.tls_hostname_verification_enabled,
                 );
         }
-        builder.build().await.map_err(emitter_init_error)
+        builder.build().await.map_err(Self::start_error)
     }
 
     fn retry_options() -> (ConnectionRetryOptions, OperationRetryOptions) {
@@ -78,21 +107,21 @@ impl PulsarEmitter {
         )
     }
 
-    pub(in crate::runtime) fn tls_options_from_config(
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> EmitterRuntimeResult<Option<PulsarTlsOptions>> {
+    fn tls_options_from_config(
+        config: &[ClientConfigEntry],
+    ) -> SinkStartResult<Option<PulsarTlsOptions>> {
         let tls = client_tls_paths(config);
         if tls.cert_file.is_some() || tls.key_file.is_some() {
-            return Err(emitter_config_error(
+            return Err(Self::config_error(
                 "Pulsar TLS currently supports only 'tls_ca_file'; client authentication via \
                  'tls_cert_file' and 'tls_key_file' is not supported",
             ));
         }
 
         let allow_insecure_connection =
-            emitter_optional_bool_client_config_value(config, "tls_allow_insecure_connection")?;
+            Self::optional_bool_config_value(config, "tls_allow_insecure_connection")?;
         let tls_hostname_verification_enabled =
-            emitter_optional_bool_client_config_value(config, "tls_hostname_verification_enabled")?;
+            Self::optional_bool_config_value(config, "tls_hostname_verification_enabled")?;
 
         if tls.ca_file.is_none()
             && allow_insecure_connection.is_none()
@@ -103,8 +132,14 @@ impl PulsarEmitter {
 
         let mut tls_options = PulsarTlsOptions::default();
         if let Some(ca_file) = tls.ca_file.as_ref() {
-            tls_options.certificate_chain =
-                Some(emitter_read_tls_file(ca_file, "TLS CA certificate")?);
+            tls_options.certificate_chain = Some(
+                read_tls_file(ca_file, "TLS CA certificate").map_err(|error| {
+                    let message = error.current_context().to_string();
+                    error
+                        .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                        .attach_printable(message)
+                })?,
+            );
         }
         if let Some(allow_insecure_connection) = allow_insecure_connection {
             tls_options.allow_insecure_connection = allow_insecure_connection;
@@ -115,7 +150,7 @@ impl PulsarEmitter {
         Ok(Some(tls_options))
     }
 
-    fn topic_from_config(config: &[nervix_models::ClientConfigEntry], topic: &str) -> String {
+    fn topic_from_config(config: &[ClientConfigEntry], topic: &str) -> String {
         if topic.contains("://") {
             return topic.to_string();
         }
@@ -125,62 +160,31 @@ impl PulsarEmitter {
         format!("persistent://{namespace}/{topic}")
     }
 
-    pub(super) async fn publish(
-        &mut self,
-        records: Vec<EncodedBrokerRecord>,
-    ) -> PerRecordPublishOutcome {
-        let mut outcome = PerRecordPublishOutcome::empty();
-        let Some(producer) = self.producer.as_mut() else {
-            outcome.fail(
-                Report::new(EmitterRuntimeError::SinkNotInitialized)
-                    .attach_printable("no initialized pulsar sink client"),
-            );
-            return outcome;
-        };
-
-        outcome.delivered.reserve(records.len());
-        match self.mode {
-            BrokerPublishingMode::NoAck => {
-                Self::publish_unconfirmed(producer, records, &mut outcome).await;
-            }
-            BrokerPublishingMode::Ack(confirmation) => {
-                Self::publish_confirmed(producer, records, confirmation, &mut outcome).await;
-            }
-        }
-        outcome
-    }
-
     /// `MODE NO_ACK`: a record is delivered once the producer accepts it, and the send receipt it
     /// would have produced is dropped rather than awaited.
     async fn publish_unconfirmed(
-        producer: &mut ::pulsar::Producer<TokioExecutor>,
-        records: Vec<EncodedBrokerRecord>,
-        outcome: &mut PerRecordPublishOutcome,
+        &mut self,
+        records: Vec<SinkRecord>,
+        outcome: &mut PerRecordOutcome,
     ) {
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position();
-            let acks = record.acks.clone();
-            match await_emitter_confirmation(
-                &acks,
-                producer.send_non_blocking(PulsarProducerMessage {
-                    payload: record.payload,
-                    properties: record.headers.into_iter().collect(),
-                    partition_key: record.key,
-                    ..Default::default()
-                }),
-            )
-            .await
-            {
+            let position = record.position;
+            let occurred_at = record.occurred_at;
+            match self.producer.send_non_blocking(Self::message(record)).await {
                 Ok(confirmation) => {
                     drop(confirmation);
                     outcome.deliver(position);
                 }
                 Err(source) if Self::is_record_rejection(&source) => {
-                    outcome.reject(position, format!("pulsar rejected record: {source}"));
+                    outcome.reject(RejectedSinkRecord::external(
+                        position,
+                        occurred_at,
+                        format!("pulsar rejected record: {source}"),
+                    ));
                 }
                 Err(source) => {
-                    outcome.fail(emitter_publish_error(format!(
+                    outcome.fail(Self::publish_error(format!(
                         "failed to enqueue pulsar message: {source}"
                     )));
                     return;
@@ -193,51 +197,46 @@ impl PulsarEmitter {
     /// awaited before the batch finishes. The window carries the confirmation settings, so the
     /// drain below never has to ask a mode that has no confirmations what its timeout is.
     async fn publish_confirmed(
-        producer: &mut ::pulsar::Producer<TokioExecutor>,
-        records: Vec<EncodedBrokerRecord>,
+        &mut self,
+        records: Vec<SinkRecord>,
         AckConfirmation {
             max_in_flight,
             timeout,
         }: AckConfirmation,
-        outcome: &mut PerRecordPublishOutcome,
+        outcome: &mut PerRecordOutcome,
     ) {
         let mut pending: VecDeque<PendingPulsarConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let enqueue_acks = AckSet::merged(
-                pending
-                    .iter()
-                    .map(|confirmation| confirmation.acks.clone())
-                    .chain(std::iter::once(record.acks.clone())),
-            );
-            let position = record.position();
-            let confirmation = match await_emitter_confirmation(
-                &enqueue_acks,
-                producer.send_non_blocking(PulsarProducerMessage {
-                    payload: record.payload,
-                    properties: record.headers.into_iter().collect(),
-                    partition_key: record.key,
-                    ..Default::default()
-                }),
-            )
-            .await
-            {
+            let position = record.position;
+            let occurred_at = record.occurred_at;
+            let confirmation = match self.producer.send_non_blocking(Self::message(record)).await {
                 Ok(confirmation) => confirmation,
                 Err(source) if Self::is_record_rejection(&source) => {
-                    outcome.reject(position, format!("pulsar rejected record: {source}"));
+                    outcome.reject(RejectedSinkRecord::external(
+                        position,
+                        occurred_at,
+                        format!("pulsar rejected record: {source}"),
+                    ));
                     continue;
                 }
                 Err(source) => {
-                    outcome.fail(emitter_publish_error(format!(
+                    outcome.fail(Self::publish_error(format!(
                         "failed to enqueue pulsar message: {source}"
                     )));
                     return;
                 }
             };
+            let Some(deadline) = Instant::now().checked_add(timeout) else {
+                outcome.fail(Self::publish_error(
+                    "pulsar ACK TIMEOUT exceeds the monotonic clock range",
+                ));
+                return;
+            };
             pending.push_back(PendingPulsarConfirmation {
                 position,
-                acks: record.acks,
-                deadline: Instant::now() + timeout,
+                occurred_at,
+                deadline,
                 confirmation,
             });
             if pending.len() >= max_in_flight.get()
@@ -256,57 +255,68 @@ impl PulsarEmitter {
         }
     }
 
+    fn message(record: SinkRecord) -> PulsarProducerMessage {
+        PulsarProducerMessage {
+            payload: record.payload,
+            properties: record.headers.into_iter().collect(),
+            partition_key: record.key,
+            ..Default::default()
+        }
+    }
+
     async fn confirm_oldest(
         pending: &mut VecDeque<PendingPulsarConfirmation>,
         timeout: Duration,
-        outcome: &mut PerRecordPublishOutcome,
-    ) -> EmitterRuntimeResult<()> {
-        loop {
-            tokio::task::consume_budget().await;
-            for confirmation in pending.iter() {
-                confirmation.acks.ack_alive();
+        outcome: &mut PerRecordOutcome,
+    ) -> SinkPublishResult<()> {
+        let Some(oldest) = pending.front_mut() else {
+            return Err(Self::publish_error(
+                "pulsar acknowledgment window unexpectedly became empty",
+            ));
+        };
+        let remaining = oldest
+            .deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or(Duration::ZERO);
+        if remaining.is_zero() {
+            Self::harvest_ready_after_oldest_failure(pending, outcome);
+            return Err(Self::publish_error(format!(
+                "pulsar receipt exceeded ACK TIMEOUT {}",
+                humantime::format_duration(timeout)
+            )));
+        }
+        let result = tokio::select! {
+            biased;
+            result = &mut oldest.confirmation => Some(result),
+            _ = sleep(remaining) => None,
+        };
+        let Some(result) = result else {
+            Self::harvest_ready_after_oldest_failure(pending, outcome);
+            return Err(Self::publish_error(format!(
+                "pulsar receipt exceeded ACK TIMEOUT {}",
+                humantime::format_duration(timeout)
+            )));
+        };
+        let position = oldest.position;
+        let occurred_at = oldest.occurred_at;
+        match result {
+            Ok(_receipt) => {
+                pending.pop_front();
+                outcome.deliver(position);
+                Ok(())
             }
-            let Some(oldest) = pending.front_mut() else {
-                return Err(emitter_publish_error(
-                    "pulsar acknowledgment window unexpectedly became empty",
+            Err(source) if Self::is_record_rejection(&source) => {
+                pending.pop_front();
+                outcome.reject(RejectedSinkRecord::external(
+                    position,
+                    occurred_at,
+                    format!("pulsar rejected record: {source}"),
                 ));
-            };
-            let remaining = oldest
-                .deadline
-                .checked_duration_since(Instant::now())
-                .unwrap_or(Duration::ZERO);
-            if remaining.is_zero() {
-                Self::harvest_ready_after_oldest_failure(pending, outcome);
-                return Err(emitter_publish_error(format!(
-                    "pulsar receipt exceeded ACK TIMEOUT {}",
-                    humantime::format_duration(timeout)
-                )));
+                Ok(())
             }
-            let wait = remaining.min(REMOTE_ACK_ALIVE_INTERVAL);
-            let result = tokio::select! {
-                biased;
-                result = &mut oldest.confirmation => Some(result),
-                _ = sleep(wait) => None,
-            };
-            let Some(result) = result else {
-                continue;
-            };
-            let position = oldest.position;
-            match result {
-                Ok(_receipt) => {
-                    pending.pop_front();
-                    outcome.deliver(position);
-                    return Ok(());
-                }
-                Err(source) if Self::is_record_rejection(&source) => {
-                    pending.pop_front();
-                    outcome.reject(position, format!("pulsar rejected record: {source}"));
-                    return Ok(());
-                }
-                Err(source) => {
-                    Self::harvest_ready_after_oldest_failure(pending, outcome);
-                    return Err(emitter_publish_error(source));
-                }
+            Err(source) => {
+                Self::harvest_ready_after_oldest_failure(pending, outcome);
+                Err(Self::publish_error(source))
             }
         }
     }
@@ -320,7 +330,7 @@ impl PulsarEmitter {
     /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingPulsarConfirmation>,
-        outcome: &mut PerRecordPublishOutcome,
+        outcome: &mut PerRecordOutcome,
     ) {
         let mut index = 1;
         while index < pending.len() {
@@ -337,10 +347,13 @@ impl PulsarEmitter {
             );
             match result {
                 Ok(_receipt) => outcome.deliver(confirmation.position),
-                Err(source) if Self::is_record_rejection(&source) => outcome.reject(
-                    confirmation.position,
-                    format!("pulsar rejected record: {source}"),
-                ),
+                Err(source) if Self::is_record_rejection(&source) => {
+                    outcome.reject(RejectedSinkRecord::external(
+                        confirmation.position,
+                        confirmation.occurred_at,
+                        format!("pulsar rejected record: {source}"),
+                    ));
+                }
                 Err(_) => {}
             }
         }
@@ -349,11 +362,65 @@ impl PulsarEmitter {
     fn is_record_rejection(_error: &PulsarError) -> bool {
         false
     }
+
+    fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
+        client_config_value(config, key, "Pulsar").map_err(|error| {
+            let message = error.current_context().to_string();
+            error
+                .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                .attach_printable(message)
+        })
+    }
+
+    fn optional_bool_config_value(
+        config: &[ClientConfigEntry],
+        key: &str,
+    ) -> SinkStartResult<Option<bool>> {
+        optional_bool_client_config_value(config, key).map_err(|error| {
+            let message = error.current_context().to_string();
+            error
+                .change_context(SinkStartError::InvalidConfiguration { sink: PULSAR })
+                .attach_printable(message)
+        })
+    }
+
+    fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
+        Report::new(SinkStartError::InvalidConfiguration { sink: PULSAR })
+            .attach_printable(error.to_string())
+    }
+
+    fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
+        Report::new(SinkStartError::Initialize { sink: PULSAR }).attach_printable(error.to_string())
+    }
+
+    fn publish_error(error: impl std::fmt::Display) -> Report<SinkPublishError> {
+        Report::new(SinkPublishError::Publish { sink: PULSAR }).attach_printable(error.to_string())
+    }
+}
+
+#[async_trait]
+impl SinkLifecycle for PulsarSink {}
+
+#[async_trait]
+impl RecordSink for PulsarSink {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+        let mut outcome = PerRecordOutcome::with_capacity(records.len());
+        match self.mode {
+            BrokerPublishingMode::NoAck => {
+                self.publish_unconfirmed(records, &mut outcome).await;
+            }
+            BrokerPublishingMode::Ack(confirmation) => {
+                self.publish_confirmed(records, confirmation, &mut outcome)
+                    .await;
+            }
+        }
+        outcome
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use ::pulsar::{
+    use pulsar::{
         error::ConnectionError as PulsarConnectionError,
         message::proto::ServerError as PulsarServerError,
     };
@@ -365,9 +432,16 @@ mod tests {
         PulsarError::Connection(PulsarConnectionError::PulsarError(Some(kind), None))
     }
 
+    fn entry(key: &str, value: &str) -> ClientConfigEntry {
+        ClientConfigEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
     #[test]
     fn checksum_failure_remains_an_infrastructure_failure() {
-        assert!(!PulsarEmitter::is_record_rejection(&server_error(
+        assert!(!PulsarSink::is_record_rejection(&server_error(
             PulsarServerError::ChecksumError
         )));
     }
@@ -379,13 +453,13 @@ mod tests {
             PulsarServerError::IncompatibleSchema,
             PulsarServerError::ServiceNotReady,
         ] {
-            assert!(!PulsarEmitter::is_record_rejection(&server_error(kind)));
+            assert!(!PulsarSink::is_record_rejection(&server_error(kind)));
         }
     }
 
     #[test]
     fn client_retries_are_disabled_in_favor_of_the_declared_retry_policy() {
-        let (connection, operation) = PulsarEmitter::retry_options();
+        let (connection, operation) = PulsarSink::retry_options();
 
         assert_eq!(connection.max_retries, 0);
         assert_eq!(operation.max_retries, Some(0));
@@ -398,19 +472,10 @@ mod tests {
         let ca_path = tempdir.path().join("ca.pem");
         std::fs::write(&ca_path, "test-ca").expect("ca file should be written");
 
-        let options = emitters::pulsar::PulsarEmitter::tls_options_from_config(&[
-            ClientConfigEntry {
-                key: "tls_ca_file".to_string(),
-                value: ca_path.display().to_string(),
-            },
-            ClientConfigEntry {
-                key: "tls_allow_insecure_connection".to_string(),
-                value: "true".to_string(),
-            },
-            ClientConfigEntry {
-                key: "tls_hostname_verification_enabled".to_string(),
-                value: "false".to_string(),
-            },
+        let options = PulsarSink::tls_options_from_config(&[
+            entry("tls_ca_file", &ca_path.display().to_string()),
+            entry("tls_allow_insecure_connection", "true"),
+            entry("tls_hostname_verification_enabled", "false"),
         ])
         .expect("pulsar tls options should load")
         .expect("tls options should be present");
@@ -427,15 +492,9 @@ mod tests {
 
     #[test]
     fn pulsar_tls_options_reject_client_auth_material() {
-        let error = emitters::pulsar::PulsarEmitter::tls_options_from_config(&[
-            ClientConfigEntry {
-                key: "tls_cert_file".to_string(),
-                value: "/tmp/client.crt".to_string(),
-            },
-            ClientConfigEntry {
-                key: "tls_key_file".to_string(),
-                value: "/tmp/client.key".to_string(),
-            },
+        let error = PulsarSink::tls_options_from_config(&[
+            entry("tls_cert_file", "/tmp/client.crt"),
+            entry("tls_key_file", "/tmp/client.key"),
         ])
         .expect_err("pulsar mTLS material should be rejected");
         let error = format!("{error:?}");
@@ -447,11 +506,8 @@ mod tests {
     #[test]
     fn pulsar_tls_options_reject_invalid_boolean_values() {
         let error =
-            emitters::pulsar::PulsarEmitter::tls_options_from_config(&[ClientConfigEntry {
-                key: "tls_allow_insecure_connection".to_string(),
-                value: "maybe".to_string(),
-            }])
-            .expect_err("invalid pulsar tls boolean should be rejected");
+            PulsarSink::tls_options_from_config(&[entry("tls_allow_insecure_connection", "maybe")])
+                .expect_err("invalid pulsar tls boolean should be rejected");
         let error = format!("{error:?}");
 
         assert!(error.contains("tls_allow_insecure_connection"));
