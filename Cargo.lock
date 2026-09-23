@@ -6980,6 +6980,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "shuttle-tokio",
+ "thiserror 2.0.20",
  "tokio",
  "zeromq",
 ]

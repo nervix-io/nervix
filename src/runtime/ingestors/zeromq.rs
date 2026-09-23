@@ -9,9 +9,7 @@
 //! - **Must not know.** The ZeroMQ driver, socket lifecycle, NSPL parsing, registry validation,
 //!   or placement computation.
 
-mod source;
-
-use source::{ZeroMqSource, ZeroMqSourcePlan};
+use nervix_connector_zeromq::{ZeroMqSource, ZeroMqSourcePlan};
 
 use super::{
     super::*,
