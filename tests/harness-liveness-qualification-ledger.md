@@ -87,6 +87,16 @@ back at the end of its cleanup. `a_draw_that_keeps_landing_on_reserved_ports_end
 `a_released_port_can_be_drawn_again` and
 `ports_drawn_from_the_operating_system_are_distinct_and_reserved` are its regressions.
 
+## Finding: the default-budget regression read the environment it was asserting against
+
+The suite budget option reads `NERVIX_TEST_SUITE_BUDGET`, and the focused regression that asserts
+its default parsed the option in whatever environment the test process had. The first `tests` job
+of this change set that variable to end the suite four minutes in, and the regression failed before
+a single scenario ran, asserting the policy default against the four minutes the environment gave.
+The regression now expects the environment's budget when one is given and the policy default only
+when none is, so a run that injects a budget is qualified by the same regressions as one that does
+not.
+
 ## Validation record
 
 Recorded on 23 September 2026 from the task worktree at revision `b7396449` and its predecessors
@@ -104,6 +114,7 @@ left behind.
 | `NERVIX_TEST_CONCURRENCY_FACTOR=2 just test-scenarios --suite-budget 4m` | Suite timeout, exit status 124 after 313s: the 240s budget, the 60.0s cleanup window and 13s of dependency and runtime teardown. The diagnostic named 49 registered scenarios: 47 queued behind an exclusive scenario with phase ages up to 128s, one in its body for 59s holding `node-1` and `node-2`, and one already finished whose world the ordered writer still held. The cleanup asked both live nodes to stop, reported `node-1` still running when the window passed (its scenario injects consensus commit delays that only its after hook releases), dropped the run, and stopped every dependency. |
 | `NERVIX_TEST_CONCURRENCY_FACTOR=2 just test-scenarios` with `tests/features/runtime/harness_induced_failure.feature` present | Failed as induced, exit status 101 reporting `3 step(s) failed`, after 1,676s: 182 features, 1,753 scenarios, 19,623 steps. The induced scenario failed its assertion on all three attempts about 14s into each; every attempt published body complete, teardown started, teardown diagnostics with all three nodes' status text, stopping and finished, the last within 0.32s of the body's end. 1,750 scenario identities passed, 1,722 on the first attempt, 23 on the second and 8 on the third; the two example rows of `NATS emitter drains a wide columnar batch in order without duplicates` timed out their 90s, 32,768-message drain on all three attempts on this loaded machine, which is a throughput assertion rather than a harness outcome. 3,926 startups: median 1.94s, 99th percentile 4.14s, slowest 21.4s; the eight failed attempts were all listen-address or interconnect bind failures, classified transient, relaunched on fresh ports and ready on the next attempt. 1,756 cleanups: median 0.10s, six forced at the 60s budget, each recorded with the aborted node and the scenarios live beside it. |
 | `NERVIX_TEST_CONCURRENCY_FACTOR=2 just test-scenarios` | Failed on this machine, exit status 101 reporting `3 step(s) failed`, after 1,490s: 181 features, 1,752 scenarios and 19,746 steps at 48 concurrent scenarios. 1,749 scenario identities passed, 1,719 on the first attempt, 22 on the second and 11 on the third. Three did not pass on any attempt: the three-node row of `NATS emitter drains a wide columnar batch in order without duplicates`, `NATS emitter honors its flush deadline during sustained input collection` and `Postgres poison isolation delivers healthy rows and routes only the rejected record`, each a throughput or deadline assertion on a shared workstation whose load average stayed above 10 for the whole run; all three passed in the healthy `tests` job of 22 September 2026. 3,937 startups: median 1.90s, 99th percentile 4.27s, slowest 20.7s; the one failed attempt was an HTTPS listen-address bind failure, relaunched on fresh ports and ready on its second attempt. 1,760 cleanups: median 0.10s, 99th percentile 10.5s, four forced at the 60s budget, all of WASM scenarios whose setup had failed with `not-a-leader` and which passed when retried. |
+| `just test-scenarios --input 'tests/features/runtime/\{nats_emission,postgres_emission\}.feature' --retry 0` | Pass: the two features whose scenarios failed under load, 26 scenarios and 306 steps, in 43s with retries disabled; 56 startups, the slowest 3.2s, and no forced cleanup. |
 | `just validate` | Pass in 13m35s: formatting, all-target Clippy with warnings denied, protocol lint, web console build, skill publication checks, documented NSPL parsing, clock-boundary and Shuttle-dependency checks. |
 | `just ratchet` | Pass: every tracked architecture-debt count at its baseline. |
 
@@ -141,4 +152,12 @@ Feature: Harness qualification induced failure
 
 ## Continuous integration evidence
 
-Recorded from the pull request's check runs in the final revision of this ledger.
+Both runs are `tests` jobs of [pull request #387](https://github.com/nervix-io/nervix/pull/387)
+on `blacksmith-16vcpu-ubuntu-2404` at the CI concurrency factor of two scenarios per CPU, 32
+concurrent scenarios, with cucumber's two retries and the `test-logs` artifact uploaded whatever
+the job's result.
+
+| Run | Result |
+| --- | --- |
+| [Run 35833648770](https://github.com/nervix-io/nervix/actions/runs/35833648770), the suite given `NERVIX_TEST_SUITE_BUDGET=4m` by a commit reverted before merge | The job ended itself in 16m30s. The 48 focused regressions passed under the injected budget; the scenario binary started 11m54s into the job, finished 181 scenarios, and its budget expired 240s later with 32 scenarios active, 29 in their body and 3 stopping, each named with its attempt, phase, phase age and nodes. The cleanup asked 53 nodes to stop and every one ended itself within 9.96s of the 60s window, the dependencies stopped, the process exited 124, and the [`test-logs` artifact](https://github.com/nervix-io/nervix/actions/runs/35833648770/artifacts/10738414221) was uploaded 2s later, its `cucumber.log` ending with that diagnostic. |
+| The run of the revision merged to `main`, with the suite's own 37-minute budget restored | The pull request merges only once this job passes with every scenario and uploads the same artifact; its run is linked from the pull request's checks. |
