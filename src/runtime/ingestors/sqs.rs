@@ -9,9 +9,7 @@
 //! - **Must not know.** The SQS SDK, queue polling, NSPL parsing, registry validation, or
 //!   placement computation.
 
-mod source;
-
-use source::{SqsSource, SqsSourcePlan};
+use nervix_connector_sqs::{SqsSource, SqsSourcePlan};
 
 use super::{
     super::*,
