@@ -509,8 +509,13 @@ impl SessionServiceImpl {
                         .consensus
                         .acquire_command_domain_mutation(
                             execution.reference.clone(),
-                            execution.owner.clone(),
-                            execution.request_digest,
+                            execution
+                                .owner()
+                                .verified("drain executes only an applying durable command")
+                                .clone(),
+                            execution
+                                .request_digest()
+                                .verified("drain executes only an applying durable command"),
                             domain.clone(),
                         )
                         .await

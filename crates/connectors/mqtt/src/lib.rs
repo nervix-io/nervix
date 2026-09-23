@@ -1,9 +1,11 @@
-//! MQTT sink connector.
+//! MQTT source and sink connector.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff, the
-//!   quality of service each record is published at, and confirmation classification.
+//! - **Owns.** The MQTT client a configuration declares, its event loop and reconnect backoff,
+//!   the session, quality of service and shared subscription a source reads through, manual
+//!   acknowledgement and local replay of publishes, the quality of service each record is
+//!   published at, and confirmation classification.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
 //!   `rumqttc`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -11,6 +13,8 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
+
+mod source;
 
 use std::{collections::VecDeque, future::Future, num::NonZeroUsize, pin::Pin, time::Duration};
 
@@ -29,6 +33,10 @@ use rumqttc::{
     AsyncClient, ClientError as MqttClientError, Event, MqttOptions,
     PubAckReason as MqttPubAckReason, PubRecReason as MqttPubRecReason, PublishNoticeError,
     PublishOptions, SessionMode, TlsConfiguration, Transport as MqttTransport, ValidatedTopic,
+};
+pub use source::{
+    MqttClientIdError, MqttSource, MqttSourceError, MqttSourceMessage, MqttSourcePlan,
+    MqttSourcePosition, MqttSourceSettings,
 };
 use tokio::{
     sync::watch,

@@ -15,13 +15,6 @@ use nervix_connector::IngestMetadataRow;
 
 use super::*;
 
-/// Why an ingestor that keeps running discards the summary a flush returns.
-///
-/// See [`Runtime::flush_ingest_collector`], which routes every failure through the ingestor's
-/// error policy before returning that summary.
-pub(in crate::runtime) const INGEST_FLUSH_FAILURES_ARE_HANDLED: &str =
-    "the ingestor's error policy already handled every failure this flush produced";
-
 /// Chosen operational bound for how many decoded source messages accumulate before an ingest group
 /// executes and becomes one Arrow batch per (relay, branch key). A group closes once it holds this
 /// many or more: every message of one payload joins the same group, so a payload that unfolds past

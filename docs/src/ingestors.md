@@ -491,6 +491,11 @@ MODE ACK SEQUENTIAL
 ON QUIESCE SUSPEND
 ```
 
+Each instance consumes with a prefetch window of one delivery, which it acknowledges once the
+records decoded from it have been acknowledged through the graph. A delivery whose acknowledgement
+fails, or whose payload cannot be decoded, is negatively acknowledged with requeue, so RabbitMQ
+delivers it again and the ingestor retries it on its declared `RETRY POLICY` cadence.
+
 Suspension cancels the consumer and RabbitMQ requeues unacknowledged in-flight deliveries. Other
 consumers on the same queue continue. Queue length, message TTL, overflow, and auto-expiry policies
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator

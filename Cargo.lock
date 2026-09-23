@@ -6704,6 +6704,7 @@ dependencies = [
 name = "nervix-connector-mqtt"
 version = "0.1.0-dev"
 dependencies = [
+ "arch-into",
  "async-trait",
  "error-stack",
  "futures-util",
@@ -6711,8 +6712,11 @@ dependencies = [
  "meticulous",
  "nervix-connector",
  "nervix-models",
+ "nonzero_ext",
  "rumqttc-next",
  "shuttle-tokio",
+ "tempfile",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "url",
@@ -6744,6 +6748,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-nats",
  "async-trait",
+ "bytes",
  "error-stack",
  "futures-util",
  "humantime",
@@ -6751,6 +6756,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "shuttle-tokio",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
@@ -6836,7 +6842,9 @@ dependencies = [
  "pulsar",
  "shuttle-tokio",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -6852,6 +6860,8 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "shuttle-tokio",
+ "tempfile",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
@@ -6862,6 +6872,7 @@ dependencies = [
  "async-trait",
  "bb8",
  "error-stack",
+ "futures-util",
  "nervix-connector",
  "nervix-models",
  "redis",
@@ -6961,6 +6972,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "shuttle-tokio",
+ "thiserror 2.0.20",
  "tokio",
  "zeromq",
 ]
@@ -7238,7 +7250,6 @@ dependencies = [
  "aws-sdk-sqs",
  "aws-smithy-http-client",
  "base64 0.22.1",
- "bb8",
  "blake3",
  "bytes",
  "chitchat",
@@ -7494,6 +7505,7 @@ dependencies = [
  "nervix-recovery",
  "prost 0.13.5",
  "url",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
