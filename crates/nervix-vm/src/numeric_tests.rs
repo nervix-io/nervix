@@ -13,6 +13,7 @@ use arrow_array::{
 };
 
 use super::*;
+use crate::operand::Operand;
 
 /// Lane counts on both sides of every bitmap word boundary.
 const LANE_COUNTS: [usize; 7] = [0, 1, 63, 64, 65, 128, 130];
@@ -33,7 +34,8 @@ fn integer_sum_fails_exactly_the_overflowing_lanes_at_every_word_boundary() {
         }));
         let right = Int8Array::from_iter_values((0..lanes).map(|_| 1));
 
-        let checked = Arithmetic::Add.evaluate_integers(&left, &right);
+        let checked =
+            Arithmetic::Add.evaluate_integers(Operand::Column(&left), Operand::Column(&right));
 
         let expected = (0..lanes).filter(|lane| lane % 5 == 3).collect::<Vec<_>>();
         assert_eq!(failed_lanes(&checked), expected, "{lanes} lanes");
@@ -54,8 +56,9 @@ fn a_failed_lane_holds_the_default_value_instead_of_the_wrapped_result() {
     let left = Int64Array::from(vec![i64::MAX, 2, i64::MIN]);
     let right = Int64Array::from(vec![1, 3, -1]);
 
-    let sum = Arithmetic::Add.evaluate_integers(&left, &right);
-    let product = Arithmetic::Mul.evaluate_integers(&left, &right);
+    let sum = Arithmetic::Add.evaluate_integers(Operand::Column(&left), Operand::Column(&right));
+    let product =
+        Arithmetic::Mul.evaluate_integers(Operand::Column(&left), Operand::Column(&right));
 
     assert_eq!(failed_lanes(&sum), [0, 2]);
     assert_eq!(sum.column.values().as_ref(), &[0, 5, 0]);
@@ -69,7 +72,8 @@ fn null_lanes_never_fail_whatever_their_operands_hold() {
     let left = Int32Array::from(vec![Some(7), None, Some(9), None]);
     let right = Int32Array::from(vec![Some(0), Some(0), None, None]);
 
-    let quotient = Arithmetic::Div.evaluate_integers(&left, &right);
+    let quotient =
+        Arithmetic::Div.evaluate_integers(Operand::Column(&left), Operand::Column(&right));
 
     assert_eq!(failed_lanes(&quotient), [0]);
     assert!((0..4).all(|lane| quotient.column.is_null(lane)));
@@ -94,8 +98,9 @@ fn sliced_operands_are_read_from_their_offset() {
     let left = UInt16Array::from(vec![u16::MAX, 10, 20, 30, u16::MAX]).slice(1, 3);
     let right = UInt16Array::from(vec![u16::MAX, 3, 30, 7, u16::MAX]).slice(1, 3);
 
-    let difference = Arithmetic::Sub.evaluate_integers(&left, &right);
-    let less = Comparison::Lt.evaluate(&left, &right);
+    let difference =
+        Arithmetic::Sub.evaluate_integers(Operand::Column(&left), Operand::Column(&right));
+    let less = Comparison::Lt.evaluate(Operand::Column(&left), Operand::Column(&right));
 
     assert_eq!(failed_lanes(&difference), [1]);
     assert_eq!(difference.column.value(0), 7);
@@ -109,8 +114,10 @@ fn the_remainder_of_the_minimum_value_by_minus_one_is_zero() {
     let left = Int64Array::from(vec![i64::MIN, i64::MIN, 7, 7]);
     let right = Int64Array::from(vec![-1, 0, -1, 0]);
 
-    let remainder = Arithmetic::Rem.evaluate_integers(&left, &right);
-    let quotient = Arithmetic::Div.evaluate_integers(&left, &right);
+    let remainder =
+        Arithmetic::Rem.evaluate_integers(Operand::Column(&left), Operand::Column(&right));
+    let quotient =
+        Arithmetic::Div.evaluate_integers(Operand::Column(&left), Operand::Column(&right));
 
     assert_eq!(failed_lanes(&remainder), [1, 3]);
     assert_eq!(remainder.column.value(0), 0);
@@ -168,8 +175,8 @@ fn float_arithmetic_fails_non_finite_results_and_keeps_the_exact_width() {
     let left = Float32Array::from(vec![f32::MAX, 1.0, 0.0, f32::NAN, 16_777_216.0]);
     let right = Float32Array::from(vec![f32::MAX, 0.0, 0.0, 1.0, 1.0]);
 
-    let sum = Arithmetic::Add.evaluate_floats(&left, &right);
-    let quotient = Arithmetic::Div.evaluate_floats(&left, &right);
+    let sum = Arithmetic::Add.evaluate_floats(Operand::Column(&left), Operand::Column(&right));
+    let quotient = Arithmetic::Div.evaluate_floats(Operand::Column(&left), Operand::Column(&right));
 
     assert_eq!(failed_lanes(&sum), [0, 3]);
     // `F32` arithmetic rounds at 32 bits: 16777217 is a tie between the two nearest `F32` values
@@ -231,10 +238,10 @@ fn float_comparison_follows_ieee_754_rather_than_the_total_order() {
     let left = Float64Array::from(vec![Some(f64::NAN), Some(0.0), Some(-1.0), None]);
     let right = Float64Array::from(vec![Some(f64::NAN), Some(-0.0), Some(f64::NAN), Some(1.0)]);
 
-    let equal = Comparison::Eq.evaluate(&left, &right);
-    let not_equal = Comparison::NotEq.evaluate(&left, &right);
-    let at_least = Comparison::GtEq.evaluate(&left, &right);
-    let less = Comparison::Lt.evaluate(&left, &right);
+    let equal = Comparison::Eq.evaluate(Operand::Column(&left), Operand::Column(&right));
+    let not_equal = Comparison::NotEq.evaluate(Operand::Column(&left), Operand::Column(&right));
+    let at_least = Comparison::GtEq.evaluate(Operand::Column(&left), Operand::Column(&right));
+    let less = Comparison::Lt.evaluate(Operand::Column(&left), Operand::Column(&right));
 
     assert_eq!(
         equal,
@@ -359,4 +366,91 @@ fn binary_math_functions_evaluate_log_with_its_base_first() {
         BinaryMathFunction::Pow.failure(),
         SideErrorReason::NonFiniteResult(FloatOperation::Pow)
     );
+}
+
+#[test]
+fn scalar_operands_agree_with_their_broadcast_columns() {
+    let column = Int64Array::from(vec![Some(7), None, Some(i64::MAX), Some(-4)]);
+    let scalar = Int64Array::from(vec![Some(3)]);
+    let broadcast = Int64Array::from(vec![Some(3); 4]);
+
+    for operator in [
+        Arithmetic::Add,
+        Arithmetic::Sub,
+        Arithmetic::Mul,
+        Arithmetic::Div,
+        Arithmetic::Rem,
+    ] {
+        let with_scalar =
+            operator.evaluate_integers(Operand::Column(&column), Operand::Scalar(&scalar));
+        let with_column =
+            operator.evaluate_integers(Operand::Column(&column), Operand::Column(&broadcast));
+        assert_eq!(with_scalar.column, with_column.column, "{operator:?}");
+        assert_eq!(failed_lanes(&with_scalar), failed_lanes(&with_column));
+
+        let scalar_left =
+            operator.evaluate_integers(Operand::Scalar(&scalar), Operand::Column(&column));
+        let column_left =
+            operator.evaluate_integers(Operand::Column(&broadcast), Operand::Column(&column));
+        assert_eq!(scalar_left.column, column_left.column, "{operator:?}");
+        assert_eq!(failed_lanes(&scalar_left), failed_lanes(&column_left));
+    }
+
+    for comparison in [
+        Comparison::Eq,
+        Comparison::NotEq,
+        Comparison::Lt,
+        Comparison::LtEq,
+        Comparison::Gt,
+        Comparison::GtEq,
+    ] {
+        assert_eq!(
+            comparison.evaluate(Operand::Column(&column), Operand::Scalar(&scalar)),
+            comparison.evaluate(Operand::Column(&column), Operand::Column(&broadcast)),
+            "{comparison:?}"
+        );
+        assert_eq!(
+            comparison.evaluate(Operand::Scalar(&scalar), Operand::Column(&column)),
+            comparison.evaluate(Operand::Column(&broadcast), Operand::Column(&column)),
+            "{comparison:?}"
+        );
+    }
+}
+
+#[test]
+fn a_null_scalar_operand_nulls_every_lane_without_failing_one() {
+    let column = Int64Array::from(vec![Some(7), Some(0), Some(i64::MAX)]);
+    let null = Int64Array::from(vec![None]);
+
+    let quotient =
+        Arithmetic::Div.evaluate_integers(Operand::Column(&column), Operand::Scalar(&null));
+    assert_eq!(quotient.column.null_count(), 3);
+    assert!(failed_lanes(&quotient).is_empty());
+
+    let product =
+        Arithmetic::Mul.evaluate_integers(Operand::Scalar(&null), Operand::Column(&column));
+    assert_eq!(product.column.len(), 3);
+    assert_eq!(product.column.null_count(), 3);
+    assert!(failed_lanes(&product).is_empty());
+
+    let less = Comparison::Lt.evaluate(Operand::Column(&column), Operand::Scalar(&null));
+    assert_eq!(less.len(), 3);
+    assert_eq!(less.null_count(), 3);
+}
+
+#[test]
+fn float_scalar_operands_keep_ieee_comparison_and_finite_checks() {
+    let column = Float64Array::from(vec![Some(1.5), Some(f64::NAN), None, Some(-0.0)]);
+    let scalar = Float64Array::from(vec![Some(0.0)]);
+
+    let equal = Comparison::Eq.evaluate(Operand::Column(&column), Operand::Scalar(&scalar));
+    assert_eq!(
+        equal.iter().collect::<Vec<_>>(),
+        [Some(false), Some(false), None, Some(true)]
+    );
+
+    let quotient =
+        Arithmetic::Div.evaluate_floats(Operand::Column(&column), Operand::Scalar(&scalar));
+    assert_eq!(failed_lanes(&quotient), [0, 1, 3]);
+    assert!(quotient.column.is_null(2));
 }

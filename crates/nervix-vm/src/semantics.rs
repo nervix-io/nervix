@@ -17,6 +17,7 @@ use arrow_schema::{DataType, TimeUnit};
 use crate::{
     CompileError, RegisterType,
     program::{BinaryOp, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
+    regexp::{RegexpCall, RegexpFunction},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -312,9 +313,9 @@ pub enum BuiltinLowering {
     Lpad,
     Md5,
     Pow,
-    RegexpLike,
-    RegexpReplace,
-    RegexpSubstr,
+    /// A regular-expression builtin, with the pattern it was lowered with: compiled once when it
+    /// was a constant, or read from the pattern argument on every row.
+    Regexp(RegexpCall),
     Repeat,
     Replace,
     Reverse,
@@ -346,6 +347,24 @@ pub enum BuiltinLowering {
     ShiftRight,
     BitCount,
     Datetime(DatetimeFunction),
+}
+
+impl RegexpFunction {
+    /// How many row-valued arguments the builtin takes, the pattern included.
+    pub const fn arity(self) -> usize {
+        match self {
+            Self::Like | Self::Substr => 2,
+            Self::Replace => 3,
+        }
+    }
+
+    /// The type of the builtin's result.
+    pub fn output_type(self) -> DataType {
+        match self {
+            Self::Like => DataType::Boolean,
+            Self::Replace | Self::Substr => DataType::Utf8,
+        }
+    }
 }
 
 /// A row-valued argument of a datetime builtin, after the constants that select what it computes.
@@ -630,9 +649,15 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Lpad => BuiltinLowering::Lpad,
         FunctionName::Md5 => BuiltinLowering::Md5,
         FunctionName::Pow => BuiltinLowering::Pow,
-        FunctionName::RegexpLike => BuiltinLowering::RegexpLike,
-        FunctionName::RegexpReplace => BuiltinLowering::RegexpReplace,
-        FunctionName::RegexpSubstr => BuiltinLowering::RegexpSubstr,
+        FunctionName::RegexpLike => {
+            BuiltinLowering::Regexp(RegexpCall::reading_pattern_argument(RegexpFunction::Like))
+        }
+        FunctionName::RegexpReplace => BuiltinLowering::Regexp(
+            RegexpCall::reading_pattern_argument(RegexpFunction::Replace),
+        ),
+        FunctionName::RegexpSubstr => {
+            BuiltinLowering::Regexp(RegexpCall::reading_pattern_argument(RegexpFunction::Substr))
+        }
         FunctionName::Repeat => BuiltinLowering::Repeat,
         FunctionName::Replace => BuiltinLowering::Replace,
         FunctionName::Reverse => BuiltinLowering::Reverse,
@@ -775,9 +800,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Ln
         | BuiltinLowering::Log
         | BuiltinLowering::Pow
-        | BuiltinLowering::RegexpLike
-        | BuiltinLowering::RegexpReplace
-        | BuiltinLowering::RegexpSubstr
+        | BuiltinLowering::Regexp(_)
         | BuiltinLowering::Round
         | BuiltinLowering::Sqrt
         | BuiltinLowering::Sum
@@ -1048,10 +1071,15 @@ fn builtin_output_type(
             require_numeric_arg(function, input, span)?;
             Ok(element)
         }
-        BuiltinLowering::Contains
-        | BuiltinLowering::StartsWith
-        | BuiltinLowering::EndsWith
-        | BuiltinLowering::RegexpLike => {
+        BuiltinLowering::Regexp(call) => {
+            require_builtin_arity_exact(function, arg_types, call.function.arity(), span.clone())?;
+            for arg_type in arg_types {
+                let input = require_supported_register_type(function, arg_type, span.clone())?;
+                require_utf8_arg(function, input, span.clone())?;
+            }
+            Ok(call.function.output_type())
+        }
+        BuiltinLowering::Contains | BuiltinLowering::StartsWith | BuiltinLowering::EndsWith => {
             require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
             let left = require_supported_register_type(function, &arg_types[0], span.clone())?;
             let right = require_supported_register_type(function, &arg_types[1], span.clone())?;
@@ -1100,20 +1128,12 @@ fn builtin_output_type(
             require_numeric_arg(function, right, span)?;
             Ok(DataType::Float64)
         }
-        BuiltinLowering::RegexpReplace | BuiltinLowering::Replace | BuiltinLowering::Translate => {
+        BuiltinLowering::Replace | BuiltinLowering::Translate => {
             require_builtin_arity_exact(function, arg_types, 3, span.clone())?;
             for arg_type in arg_types {
                 let input = require_supported_register_type(function, arg_type, span.clone())?;
                 require_utf8_arg(function, input, span.clone())?;
             }
-            Ok(DataType::Utf8)
-        }
-        BuiltinLowering::RegexpSubstr => {
-            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
-            let string = require_supported_register_type(function, &arg_types[0], span.clone())?;
-            let pattern = require_supported_register_type(function, &arg_types[1], span.clone())?;
-            require_utf8_arg(function, string, span.clone())?;
-            require_utf8_arg(function, pattern, span)?;
             Ok(DataType::Utf8)
         }
         BuiltinLowering::SplitPart => {
