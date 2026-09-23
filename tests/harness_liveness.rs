@@ -3,11 +3,11 @@
 //! Outside the layer order: a harness test crate.
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
-//!   status-request, cluster-teardown and scenario-phase regressions with Rust's test runner, and
-//!   the stand-in nodes those regressions talk to.
+//!   status-request, cluster-teardown, scenario-phase and suite-watchdog regressions with Rust's
+//!   test runner, and the stand-in nodes those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request,
-//!   cluster-teardown and scenario-phase harness modules, and the generated session service they
-//!   send status requests to.
+//!   cluster-teardown, scenario-phase and suite-watchdog harness modules, and the generated
+//!   session service they send status requests to.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -22,6 +22,8 @@ mod phase_deadline;
 mod scenario_phase;
 #[path = "common/status_request.rs"]
 mod status_request;
+#[path = "common/suite_watchdog.rs"]
+mod suite_watchdog;
 
 mod tests {
     use std::{
@@ -29,10 +31,14 @@ mod tests {
         future, io,
         net::{Ipv4Addr, SocketAddr},
         path::PathBuf,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            Arc as StdArc, LazyLock,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
+    use clap::Parser as _;
     use error_stack::Report;
     use meticulous::{OptionExt as _, ResultExt as _};
     use nervix_client_core::{
@@ -73,10 +79,17 @@ mod tests {
             StartableNode, StartupEnd, StartupRetry, cluster_startup_budget,
         },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
-        scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioPhase},
+        scenario_phase::{
+            ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
+        },
         status_request::{
             STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint, StatusOperation,
             StatusRequestError, StatusTransport,
+        },
+        suite_watchdog::{
+            DEPENDENCY_SHUTDOWN_BUDGET, LiveCluster, LiveClusterHandle, LiveClusterRegistration,
+            NodeStop, SUITE_BUDGET, StalledScenario, SuiteOutcome, SuiteRun, SuiteTeardown,
+            SuiteTimeout, SuiteWatchdog, SuiteWatchdogArgs,
         },
     };
 
@@ -106,6 +119,10 @@ mod tests {
             && STALLED_REQUEST_GUARD.as_nanos() < STATUS_REQUEST_TIMEOUT.as_nanos(),
         "a stalled-request regression must tell its phase deadline from the request timeout"
     );
+    /// Where a stand-in scenario claims to begin in its feature file. The registry keys attempts
+    /// by identity, and a scenario's line is part of that identity, so every regression that must
+    /// be told apart from another gives its own line rather than sharing this one.
+    const STAND_IN_SCENARIO_LINE: usize = 1;
     const TEST_AUTHORIZATION: &str = "Basic c3RhbmQtaW46c3RhbmQtaW4=";
     const HEALTHY_STATUS: &str = "raft.state: Leader\nraft.current_leader: node-1";
     /// How often a startup regression probes its stand-in. The startup regressions run on a
@@ -1515,6 +1532,7 @@ mod tests {
         let scenario = Arc::new(ActiveScenarioRegistration::start(
             "Harness liveness",
             "cleanup publishes truthful phases",
+            STAND_IN_SCENARIO_LINE,
         ));
         let log = Arc::new(CleanupLog::default());
         let mut nodes = [
@@ -1540,7 +1558,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_active_scenario_publishes_its_phase_and_the_age_of_that_phase() {
-        let scenario = ActiveScenarioRegistration::start("Harness liveness", "phase ages");
+        let scenario = ActiveScenarioRegistration::start(
+            "Harness liveness",
+            "phase ages",
+            STAND_IN_SCENARIO_LINE,
+        );
         let queued = published(&scenario);
         assert_eq!(&queued.identity, scenario.identity());
         assert_eq!(queued.phase, ScenarioPhase::Queued);
@@ -1947,6 +1969,493 @@ mod tests {
             construction.elapsed() <= ceiling,
             "building a cluster one node at a time must stay inside the derived budget: {:?}",
             construction.elapsed()
+        );
+    }
+
+    /// The suite watchdog reads registries the whole process shares and stops every node in them,
+    /// so the regressions that drive it run one at a time. Two of them running together would see
+    /// each other's scenarios and stop each other's nodes. It is an async mutex because a
+    /// regression holds it across the budget it waits out.
+    static WATCHDOG_REGRESSIONS: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    /// A suite budget short enough that a regression reaches its expiry at once. Every regression
+    /// that spends it runs on a paused clock, so no wall-clock time is spent reaching it.
+    const TEST_SUITE_BUDGET: Duration = Duration::from_secs(30);
+    /// The cleanup window a watchdog regression gives every live node to end within. It is
+    /// unmistakably shorter than the suite budget, so a regression can tell which of the two a
+    /// measured elapsed time belongs to.
+    const TEST_CLEANUP_WINDOW: Duration = Duration::from_secs(5);
+    const _: () = assert!(
+        TEST_CLEANUP_WINDOW.as_nanos() < TEST_SUITE_BUDGET.as_nanos(),
+        "a watchdog regression must tell its cleanup window from its suite budget"
+    );
+
+    /// Whether a stand-in node ends when the watchdog asks it to.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum StandInStopBehavior {
+        /// The node ends as soon as it is asked, the way a healthy node does.
+        StopsWhenAsked,
+        /// The node ignores the request, the way a wedged node does.
+        IgnoresTheRequest,
+    }
+
+    /// The stop a stand-in node publishes to the live-cluster registry.
+    struct StandInNodeStop {
+        stop: CancellationToken,
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl NodeStop for StandInNodeStop {
+        fn request_stop(&self) {
+            self.requests.fetch_add(1, Ordering::Relaxed);
+            self.stop.cancel();
+        }
+    }
+
+    /// A node the watchdog can reach: it publishes itself to the live-cluster registry for as long
+    /// as its task runs, and it ends only the way the regression asked.
+    struct StandInLiveNode {
+        task: OwnedNodeTask,
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl StandInLiveNode {
+        fn start(cluster: &LiveClusterHandle, name: &str, behavior: StandInStopBehavior) -> Self {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let stop = CancellationToken::new();
+            let published = StdArc::new(StandInNodeStop {
+                stop: stop.clone(),
+                requests: requests.clone(),
+            });
+            let live = cluster.node_started(name, published);
+            let task = OwnedNodeTask::spawn(async move {
+                let _live = live;
+                match behavior {
+                    StandInStopBehavior::StopsWhenAsked => stop.cancelled().await,
+                    StandInStopBehavior::IgnoresTheRequest => future::pending::<()>().await,
+                }
+                Ok(())
+            });
+            Self { task, requests }
+        }
+
+        fn stop_requests(&self) -> usize {
+            self.requests.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Drop for StandInLiveNode {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    /// A scenario run that never finishes, and that records whether the watchdog dropped it.
+    struct StalledRun {
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Drop for StalledRun {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// What one watchdog regression set up: the scenario it registered, the cluster that scenario
+    /// holds, and the nodes of that cluster.
+    struct WatchdogRegression {
+        identity: ScenarioIdentity,
+        scenario: Option<ActiveScenarioRegistration>,
+        _cluster: LiveClusterRegistration,
+        nodes: Vec<StandInLiveNode>,
+    }
+
+    impl WatchdogRegression {
+        /// Registers a scenario in `phase` holding a cluster whose nodes behave as `nodes` says.
+        fn start(
+            scenario_name: &str,
+            line: usize,
+            phase: ScenarioPhase,
+            nodes: &[(&str, StandInStopBehavior)],
+        ) -> Self {
+            let scenario =
+                ActiveScenarioRegistration::start("Harness liveness", scenario_name, line);
+            scenario.enter(phase);
+            let identity = scenario.identity().clone();
+            let cluster = LiveClusterRegistration::start(identity.clone());
+            let handle = cluster.handle();
+            let mut started = Vec::new();
+            for (name, behavior) in nodes {
+                started.push(StandInLiveNode::start(&handle, name, *behavior));
+            }
+            Self {
+                identity,
+                scenario: Some(scenario),
+                _cluster: cluster,
+                nodes: started,
+            }
+        }
+
+        fn identity(&self) -> &ScenarioIdentity {
+            &self.identity
+        }
+
+        /// Drops the scenario registration while this regression keeps holding its cluster.
+        ///
+        /// A world drops its scenario registration before the cluster it also holds, so a cluster
+        /// whose scenario has already left the registry is a state the suite really reaches.
+        fn scenario_leaves_the_registry(&mut self) {
+            self.scenario = None;
+        }
+
+        /// Whether every node of this cluster was asked to stop exactly once.
+        fn every_node_was_asked_to_stop(&self) -> bool {
+            self.nodes.iter().all(|node| node.stop_requests() == 1)
+        }
+    }
+
+    /// The entry a suite timeout published for one regression's scenario.
+    fn stalled(timeout: &SuiteTimeout, identity: &ScenarioIdentity) -> StalledScenario {
+        timeout
+            .stall
+            .scenarios
+            .iter()
+            .find(|stalled| &stalled.active.identity == identity)
+            .verified("a registered scenario is published until its registration is dropped")
+            .clone()
+    }
+
+    /// Runs `watchdog` against a run that never finishes, and returns what the timeout reported.
+    async fn time_out(watchdog: SuiteWatchdog) -> SuiteTimeout {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let guard = StalledRun {
+            dropped: dropped.clone(),
+        };
+        let bounded = watchdog
+            .bound(async move {
+                let _run = guard;
+                future::pending::<()>().await;
+            })
+            .await;
+        let SuiteRun::TimedOut(timeout) = bounded else {
+            panic!("a run that never finishes must end at the suite budget");
+        };
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            1,
+            "a timed-out suite must drop the run it was holding, so the scenarios it still owns \
+             are aborted"
+        );
+        timeout
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_finishes_inside_its_budget_keeps_what_it_produced() {
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let watchdog = SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW);
+
+        let bounded = watchdog
+            .bound(async { "the writer the run produced" })
+            .await;
+
+        let SuiteRun::Completed(output) = bounded else {
+            panic!("a run that finishes inside its budget must not be timed out");
+        };
+        assert_eq!(output, "the writer the run produced");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes() {
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let regression = WatchdogRegression::start(
+            "a body that never returns",
+            10,
+            ScenarioPhase::Body,
+            &[
+                ("node-1", StandInStopBehavior::StopsWhenAsked),
+                ("node-2", StandInStopBehavior::StopsWhenAsked),
+            ],
+        );
+        let stalled_before_the_budget = Duration::from_secs(7);
+        tokio::time::advance(stalled_before_the_budget).await;
+
+        let timeout = time_out(SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)).await;
+
+        let stalled = stalled(&timeout, regression.identity());
+        assert_eq!(stalled.active.phase, ScenarioPhase::Body);
+        assert_eq!(stalled.active.attempt, 1);
+        let stalled_for = stalled_before_the_budget
+            .checked_add(TEST_SUITE_BUDGET)
+            .assured("a stall of seconds and a test budget of seconds fit in Duration");
+        assert!(
+            stalled.active.phase_age() >= stalled_for,
+            "a scenario already stalled when the budget started must age through the whole of it: \
+             {:?}",
+            stalled.active.phase_age()
+        );
+        assert_eq!(
+            stalled.nodes,
+            vec!["node-1".to_string(), "node-2".to_string()]
+        );
+        assert_eq!(timeout.stall.budget, TEST_SUITE_BUDGET);
+        assert!(
+            regression.every_node_was_asked_to_stop(),
+            "every node of a live cluster must be asked to stop"
+        );
+        assert!(
+            !timeout.cleanup.was_forced(),
+            "nodes that stop when asked must end inside the cleanup window: {}",
+            timeout.cleanup
+        );
+        assert!(timeout.cleanup.asked >= 2, "{}", timeout.cleanup);
+        assert!(
+            timeout.cleanup.elapsed <= TEST_CLEANUP_WINDOW,
+            "the cleanup must end within the window it was given: {}",
+            timeout.cleanup
+        );
+
+        let diagnostic = timeout.to_string();
+        assert!(
+            diagnostic.contains("a body that never returns"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("attempt=1"), "{diagnostic}");
+        assert!(diagnostic.contains("phase=started"), "{diagnostic}");
+        assert!(
+            diagnostic.contains("nodes=[node-1, node-2]"),
+            "{diagnostic}"
+        );
+        drop(regression);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in() {
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let regression = WatchdogRegression::start(
+            "a teardown diagnostic that never returns",
+            20,
+            ScenarioPhase::Diagnostics,
+            &[("node-1", StandInStopBehavior::StopsWhenAsked)],
+        );
+
+        let timeout = time_out(SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)).await;
+
+        let stalled = stalled(&timeout, regression.identity());
+        assert_eq!(stalled.active.phase, ScenarioPhase::Diagnostics);
+        assert_eq!(stalled.nodes, vec!["node-1".to_string()]);
+        assert!(
+            regression.every_node_was_asked_to_stop(),
+            "a scenario stalled in its diagnostics must still have its nodes asked to stop"
+        );
+        assert!(!timeout.cleanup.was_forced(), "{}", timeout.cleanup);
+        assert!(
+            timeout.to_string().contains("phase=teardown diagnostics"),
+            "{timeout}"
+        );
+        drop(regression);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window() {
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let regression = WatchdogRegression::start(
+            "a node stop that never returns",
+            30,
+            ScenarioPhase::Stopping,
+            &[("node-1", StandInStopBehavior::IgnoresTheRequest)],
+        );
+
+        let timeout = time_out(SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)).await;
+
+        assert!(
+            regression.every_node_was_asked_to_stop(),
+            "a node that ignores the request must still have been asked"
+        );
+        assert!(
+            timeout.cleanup.was_forced(),
+            "a node that never stops must still be live at the end of the window: {}",
+            timeout.cleanup
+        );
+        assert!(
+            timeout.cleanup.still_live.contains(&LiveCluster {
+                scenario: regression.identity().clone(),
+                nodes: vec!["node-1".to_string()],
+            }),
+            "the cleanup must name the cluster it could not stop: {}",
+            timeout.cleanup
+        );
+        assert!(
+            timeout.cleanup.elapsed >= TEST_CLEANUP_WINDOW,
+            "a cleanup that could not stop a node spends its whole window: {}",
+            timeout.cleanup
+        );
+        assert!(
+            timeout.cleanup.elapsed < TEST_SUITE_BUDGET,
+            "the cleanup must not run past the window into a second budget: {}",
+            timeout.cleanup
+        );
+        drop(regression);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cluster_that_outlives_its_scenario_is_named_as_unclaimed() {
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let mut regression = WatchdogRegression::start(
+            "a cluster left behind",
+            40,
+            ScenarioPhase::Stopping,
+            &[("node-1", StandInStopBehavior::StopsWhenAsked)],
+        );
+        let identity = regression.identity().clone();
+        regression.scenario_leaves_the_registry();
+
+        let timeout = time_out(SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)).await;
+
+        assert!(
+            timeout.stall.unclaimed.contains(&LiveCluster {
+                scenario: identity.clone(),
+                nodes: vec!["node-1".to_string()],
+            }),
+            "a cluster no active scenario claims must be named on its own: {timeout}"
+        );
+        assert!(
+            !timeout
+                .stall
+                .scenarios
+                .iter()
+                .any(|stalled| stalled.active.identity == identity),
+            "a scenario that has left the registry must not be reported as active: {timeout}"
+        );
+        assert!(
+            timeout.to_string().contains("unclaimed cluster"),
+            "{timeout}"
+        );
+        drop(regression);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_retried_scenario_publishes_which_attempt_is_running() {
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let first = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
+        assert_eq!(published(&first).attempt, 1);
+        drop(first);
+
+        let retry = ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 50);
+        assert_eq!(
+            published(&retry).attempt,
+            2,
+            "a scenario the suite takes up again is on its next attempt"
+        );
+
+        // An outline expands into one scenario per example row, and those rows share the outline's
+        // name. They are separate scenarios, so neither counts as a retry of the other.
+        let example =
+            ActiveScenarioRegistration::start("Harness liveness", "a retried scenario", 51);
+        assert_eq!(published(&example).attempt, 1);
+        assert_ne!(published(&retry).identity, published(&example).identity);
+    }
+
+    /// A command line that carries only the suite watchdog's own options, so the injection point
+    /// a run configures the budget through can be parsed on its own.
+    #[derive(clap::Parser)]
+    struct StandInSuiteCli {
+        #[command(flatten)]
+        watchdog: SuiteWatchdogArgs,
+    }
+
+    #[test]
+    fn the_suite_budget_is_injectable_and_defaults_to_the_suite_policy() {
+        let configured = StandInSuiteCli::try_parse_from(["scenarios", "--suite-budget", "90s"])
+            .expect("the suite budget option must parse a duration");
+        assert_eq!(
+            configured.watchdog.watchdog().budget(),
+            Duration::from_secs(90),
+            "a run that gives its own budget must be bounded by it"
+        );
+
+        // The option also reads `NERVIX_TEST_SUITE_BUDGET`, so a run that sets it in the
+        // environment sees that value here instead of the policy default.
+        let default = StandInSuiteCli::try_parse_from(["scenarios"])
+            .expect("the suite budget option must have a default");
+        assert_eq!(default.watchdog.watchdog().budget(), SUITE_BUDGET);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one() {
+        let _serialized = WATCHDOG_REGRESSIONS.lock().await;
+        let regression = WatchdogRegression::start(
+            "a suite that has to be ended",
+            60,
+            ScenarioPhase::Body,
+            &[("node-1", StandInStopBehavior::StopsWhenAsked)],
+        );
+
+        let timeout = time_out(SuiteWatchdog::new(TEST_SUITE_BUDGET, TEST_CLEANUP_WINDOW)).await;
+        let reported = SuiteOutcome::TimedOut(timeout);
+
+        let SuiteOutcome::TimedOut(timeout) = &reported else {
+            panic!("a timed-out suite must be reported as one: {reported:?}");
+        };
+        assert!(
+            timeout.to_string().contains("a suite that has to be ended"),
+            "{timeout}"
+        );
+        // A passing suite ends the process by returning, which is what running this is.
+        SuiteOutcome::Passed.end_process();
+        drop(regression);
+    }
+
+    #[test]
+    #[should_panic(expected = "3 step(s) failed")]
+    fn a_failing_suite_ends_the_process_by_unwinding() {
+        SuiteOutcome::Failed("3 step(s) failed".to_string()).end_process();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dependency_stop_that_never_returns_is_abandoned_at_its_budget() {
+        let started = Instant::now();
+
+        let teardown = SuiteTeardown::bounded(async {
+            future::pending::<()>().await;
+            Vec::new()
+        })
+        .await;
+
+        assert!(
+            matches!(teardown, SuiteTeardown::Abandoned(budget) if budget == DEPENDENCY_SHUTDOWN_BUDGET),
+            "a stop that never returns must be abandoned at its budget: {teardown}"
+        );
+        assert!(
+            started.elapsed() >= DEPENDENCY_SHUTDOWN_BUDGET,
+            "the stop must be given its whole budget before it is abandoned: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !teardown.is_clean(),
+            "a teardown that never finished has not stopped anything: {teardown}"
+        );
+        assert!(
+            teardown.to_string().contains("left to the runner"),
+            "{teardown}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dependency_stop_that_finishes_keeps_what_it_reported() {
+        let clean = SuiteTeardown::bounded(async { Vec::new() }).await;
+        assert!(clean.is_clean(), "{clean}");
+
+        let failed =
+            SuiteTeardown::bounded(async { vec!["redis container did not stop".to_string()] })
+                .await;
+        assert!(
+            !failed.is_clean(),
+            "a dependency that reported a failure is not a clean teardown: {failed}"
+        );
+        assert!(
+            failed.to_string().contains("redis container did not stop"),
+            "{failed}"
         );
     }
 }

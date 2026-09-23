@@ -3,7 +3,8 @@
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
 //! - **Owns.** The phases a scenario passes through, the registry of the scenarios that have
-//!   started and not yet finished, and when each of them entered the phase it is in.
+//!   started and not yet finished, which attempt of a scenario each of them is, and when each of
+//!   them entered the phase it is in.
 //! - **Depends on.** Tokio's monotonic clock.
 //! - **Must not know.** What a phase does, how a cluster is torn down, or scenario state.
 
@@ -56,14 +57,18 @@ pub(crate) enum ScenarioPhase {
 pub(crate) struct ScenarioIdentity {
     pub(crate) feature: String,
     pub(crate) scenario: String,
+    /// Where the scenario begins in its feature file. An outline is expanded into one scenario per
+    /// example row, and those rows usually share the outline's name, so the line is what tells
+    /// them apart.
+    pub(crate) line: usize,
 }
 
 impl fmt::Display for ScenarioIdentity {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "feature={:?} scenario={:?}",
-            self.feature, self.scenario
+            "feature={:?} scenario={:?} line={}",
+            self.feature, self.scenario, self.line
         )
     }
 }
@@ -72,6 +77,8 @@ impl fmt::Display for ScenarioIdentity {
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveScenario {
     pub(crate) identity: ScenarioIdentity,
+    /// Which run of this scenario is in flight, counted from one.
+    pub(crate) attempt: u32,
     pub(crate) phase: ScenarioPhase,
     started_at: Instant,
     phase_started_at: Instant,
@@ -98,8 +105,9 @@ impl fmt::Display for ActiveScenario {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "{} phase={} phase_age={:?} age={:?}",
+            "{} attempt={} phase={} phase_age={:?} age={:?}",
             self.identity,
+            self.attempt,
             self.phase,
             self.phase_age(),
             self.age()
@@ -113,6 +121,14 @@ impl fmt::Display for ActiveScenario {
 static ACTIVE_SCENARIOS: LazyLock<Mutex<BTreeMap<u64, ActiveScenario>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 static NEXT_REGISTRATION: AtomicU64 = AtomicU64::new(0);
+
+/// How many times the suite has taken up each scenario.
+///
+/// Cucumber retries a failed scenario by running it again, and the hook that registers a scenario
+/// is not told which run it is in. Counting here is exact: a retry is taken up only once the run
+/// before it has ended, so the count a registration reads is its own attempt.
+static SCENARIO_ATTEMPTS: LazyLock<Mutex<BTreeMap<ScenarioIdentity, u32>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 /// One scenario's entry in the active-scenario registry.
 ///
@@ -131,15 +147,18 @@ impl ActiveScenarioRegistration {
     /// Registering here rather than once the scenario is running is what makes a scenario that
     /// never gets its permits visible, and it gives every scenario an entry its own cleanup can
     /// reach.
-    pub(crate) fn start(feature: &str, scenario: &str) -> Self {
+    pub(crate) fn start(feature: &str, scenario: &str, line: usize) -> Self {
         let registration = NEXT_REGISTRATION.fetch_add(1, Ordering::Relaxed);
         let identity = ScenarioIdentity {
             feature: feature.to_string(),
             scenario: scenario.to_string(),
+            line,
         };
+        let attempt = Self::take_up(&identity);
         let started_at = Instant::now();
         let active = ActiveScenario {
             identity: identity.clone(),
+            attempt,
             phase: ScenarioPhase::Queued,
             started_at,
             phase_started_at: started_at,
@@ -149,6 +168,16 @@ impl ActiveScenarioRegistration {
             registration,
             identity,
         }
+    }
+
+    /// Counts one more run of `identity` and returns which run it is.
+    fn take_up(identity: &ScenarioIdentity) -> u32 {
+        let mut attempts = SCENARIO_ATTEMPTS.lock();
+        let taken_up = attempts.entry(identity.clone()).or_insert(0);
+        *taken_up = taken_up
+            .checked_add(1)
+            .assured("cucumber retries a scenario a handful of times, not four billion");
+        *taken_up
     }
 
     pub(crate) fn identity(&self) -> &ScenarioIdentity {
