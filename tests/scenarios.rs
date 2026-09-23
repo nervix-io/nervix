@@ -275,6 +275,9 @@ struct ScenarioWorld {
     zeromq_emit_addr: String,
     syslog_ingest_addr: String,
     syslog_emit_addr: String,
+    /// Every port this scenario drew for fixtures of its own: the ZeroMQ and syslog addresses its
+    /// nodes and its observers bind. Given back once cleanup has stopped both.
+    scenario_ports: Vec<u16>,
     syslog_udp_observer: Option<tokio::net::UdpSocket>,
     placeholders: BTreeMap<String, String>,
     mqtt_ingestors_by_domain: BTreeMap<String, BTreeSet<String>>,
@@ -555,20 +558,25 @@ fn initialize_scenario_identity(world: &mut ScenarioWorld) {
     world.test_id = format!("t{}", Uuid::now_v7().as_simple());
     world.zeromq_ingest_addr = format!(
         "tcp://127.0.0.1:{}",
-        crate::common::port_pool::next_port().expect("failed to allocate ZeroMQ ingest port")
+        draw_scenario_port(world, "ZeroMQ ingest")
     );
     world.zeromq_emit_addr = format!(
         "tcp://127.0.0.1:{}",
-        crate::common::port_pool::next_port().expect("failed to allocate ZeroMQ emit port")
+        draw_scenario_port(world, "ZeroMQ emit")
     );
-    world.syslog_ingest_addr = format!(
-        "127.0.0.1:{}",
-        crate::common::port_pool::next_port().expect("failed to allocate Syslog ingest port")
-    );
-    world.syslog_emit_addr = format!(
-        "127.0.0.1:{}",
-        crate::common::port_pool::next_port().expect("failed to allocate Syslog emit port")
-    );
+    world.syslog_ingest_addr = format!("127.0.0.1:{}", draw_scenario_port(world, "Syslog ingest"));
+    world.syslog_emit_addr = format!("127.0.0.1:{}", draw_scenario_port(world, "Syslog emit"));
+}
+
+/// Draws one port for a fixture this scenario binds itself, and records it so the scenario's
+/// cleanup gives it back once that fixture is gone.
+fn draw_scenario_port(world: &mut ScenarioWorld, purpose: &str) -> u16 {
+    let port = match crate::common::port_pool::next_port() {
+        Ok(port) => port,
+        Err(error) => panic!("failed to allocate the scenario's {purpose} port: {error}"),
+    };
+    world.scenario_ports.push(port);
+    port
 }
 
 fn refresh_dependency_configuration(world: &mut ScenarioWorld) {
@@ -15237,8 +15245,7 @@ async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, a
         tokio::task::consume_budget().await;
         let replacement = format!(
             "tcp://127.0.0.1:{}",
-            crate::common::port_pool::next_port()
-                .expect("failed to allocate replacement ZeroMQ emit port")
+            draw_scenario_port(world, "replacement ZeroMQ emit")
         );
         if let Ok(observer) = world.cluster().observe_zeromq(&replacement).await {
             world.zeromq_emit_addr = replacement;
@@ -20834,6 +20841,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.held_resource_upload = None;
                 world.server_process = None;
                 world.broker_observer = None;
+                world.syslog_udp_observer = None;
                 close_browser(world).await;
                 world.active_session = None;
                 world.active_session_node = None;
@@ -20873,6 +20881,11 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.web_console_scenario_permit = None;
                 world.wasm_state_reset_scenario_permit = None;
                 world.scenario_execution_permit = None;
+                // The ZeroMQ and syslog ports the scenario drew for itself were bound by its nodes
+                // and its observers, and both are gone by now, so the ports go back to the pool
+                // the next scenario draws from.
+                let scenario_ports = std::mem::take(&mut world.scenario_ports);
+                crate::common::port_pool::release_test_ports(&scenario_ports);
 
                 world.enter_phase(
                     ScenarioPhase::Finished,

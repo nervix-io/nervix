@@ -3,9 +3,9 @@
 //! Outside the layer order: a harness test crate.
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
-//!   status-request, cluster-teardown, scenario-phase and suite-watchdog regressions with Rust's
-//!   test runner, and the stand-in nodes those regressions talk to.
-//! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request,
+//!   status-request, port-pool, cluster-teardown, scenario-phase and suite-watchdog regressions
+//!   with Rust's test runner, and the stand-in nodes those regressions talk to.
+//! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
 //!   cluster-teardown, scenario-phase and suite-watchdog harness modules, and the generated
 //!   session service they send status requests to.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
@@ -18,6 +18,8 @@ mod node_liveness;
 mod node_startup;
 #[path = "common/phase_deadline.rs"]
 mod phase_deadline;
+#[path = "common/port_pool.rs"]
+mod port_pool;
 #[path = "common/scenario_phase.rs"]
 mod scenario_phase;
 #[path = "common/status_request.rs"]
@@ -27,7 +29,7 @@ mod suite_watchdog;
 
 mod tests {
     use std::{
-        collections::{BTreeMap, VecDeque},
+        collections::{BTreeMap, BTreeSet, VecDeque},
         future, io,
         net::{Ipv4Addr, SocketAddr},
         path::PathBuf,
@@ -79,6 +81,9 @@ mod tests {
             StartableNode, StartupEnd, StartupRetry, cluster_startup_budget,
         },
         phase_deadline::{BeforeDeadline, PhaseDeadline},
+        port_pool::{
+            PORT_DRAW_LIMIT, PortPoolError, next_port, next_ports, release_test_ports, reserve,
+        },
         scenario_phase::{
             ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase,
         },
@@ -1970,6 +1975,155 @@ mod tests {
             "building a cluster one node at a time must stay inside the derived budget: {:?}",
             construction.elapsed()
         );
+    }
+
+    /// Ports the port-pool regressions draw. Nothing binds them, and they sit below the ephemeral
+    /// range, so they cannot collide with the loopback ports the stand-in nodes above take from
+    /// the operating system. Each regression draws its own so they can run side by side.
+    const POOL_REGRESSION_PORTS: [u16; 6] = [1_024, 1_025, 1_026, 1_027, 1_028, 1_029];
+
+    /// The draw limit as a number of draws a regression counts.
+    fn draw_limit() -> usize {
+        usize::try_from(PORT_DRAW_LIMIT).assured("the draw limit is a small count")
+    }
+
+    #[test]
+    fn a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit() {
+        let [taken, fresh, ..] = POOL_REGRESSION_PORTS;
+        assert_eq!(
+            reserve(1, || Ok(taken)).assured("a port nothing holds is reserved at once"),
+            vec![taken]
+        );
+
+        // Every draw inside the limit lands on the port already taken, and the draw after the
+        // limit would find a fresh one: a pool that keeps drawing past its limit succeeds here,
+        // and one that gives up reports exhaustion without ever reaching the fresh port.
+        let draws = AtomicUsize::new(0);
+        let outcome = reserve(1, || {
+            let draw = draws.fetch_add(1, Ordering::Relaxed);
+            if draw < draw_limit() {
+                Ok(taken)
+            } else {
+                Ok(fresh)
+            }
+        });
+
+        let Err(PortPoolError::Exhausted { reserved, misses }) = outcome else {
+            panic!("a draw that only finds reserved ports must report exhaustion: {outcome:?}");
+        };
+        assert_eq!(misses, PORT_DRAW_LIMIT);
+        assert!(
+            reserved >= 1,
+            "the diagnostic names how many ports were held: {reserved}"
+        );
+        assert_eq!(
+            draws.load(Ordering::Relaxed),
+            draw_limit(),
+            "the draw must stop at the limit rather than spin until a port frees up"
+        );
+        release_test_ports(&[taken]);
+    }
+
+    #[test]
+    fn an_exhausted_draw_gives_back_the_ports_it_had_reserved() {
+        let [_, _, taken, partial, ..] = POOL_REGRESSION_PORTS;
+        reserve(1, || Ok(taken)).assured("a port nothing holds is reserved at once");
+
+        // The first draw of two lands on a fresh port and the rest on the taken one, so the draw
+        // ends exhausted holding a port it must not keep.
+        let draws = AtomicUsize::new(0);
+        let outcome = reserve(2, || {
+            let draw = draws.fetch_add(1, Ordering::Relaxed);
+            if draw == 0 { Ok(partial) } else { Ok(taken) }
+        });
+        assert!(
+            matches!(outcome, Err(PortPoolError::Exhausted { .. })),
+            "{outcome:?}"
+        );
+
+        assert_eq!(
+            reserve(1, || Ok(partial))
+                .assured("the port an exhausted draw gave back is free again"),
+            vec![partial]
+        );
+        release_test_ports(&[taken, partial]);
+    }
+
+    #[test]
+    fn a_draw_the_operating_system_refuses_is_reported_as_its_own_failure() {
+        let [_, _, _, _, reserved_first, ..] = POOL_REGRESSION_PORTS;
+        let draws = AtomicUsize::new(0);
+        let outcome = reserve(2, || {
+            let draw = draws.fetch_add(1, Ordering::Relaxed);
+            if draw == 0 {
+                Ok(reserved_first)
+            } else {
+                Err(io::Error::other("no sockets left"))
+            }
+        });
+
+        let Err(PortPoolError::Draw(error)) = outcome else {
+            panic!(
+                "a refused draw must be reported as the operating system's failure: {outcome:?}"
+            );
+        };
+        assert_eq!(error.to_string(), "no sockets left");
+        assert_eq!(
+            reserve(1, || Ok(reserved_first)).assured("a refused draw gives back what it reserved"),
+            vec![reserved_first]
+        );
+        release_test_ports(&[reserved_first]);
+    }
+
+    #[test]
+    fn ports_drawn_from_the_operating_system_are_distinct_and_reserved() {
+        let drawn = next_ports(3).assured("the loopback interface hands out ephemeral ports");
+        let extra = next_port().assured("the loopback interface hands out one more port");
+        let mut all = drawn.clone();
+        all.push(extra);
+        let distinct = all.iter().copied().collect::<BTreeSet<u16>>();
+        assert_eq!(
+            distinct.len(),
+            all.len(),
+            "every drawn port is distinct: {all:?}"
+        );
+
+        // Every port the pool holds is refused to a later draw, however that draw finds it.
+        assert!(
+            matches!(
+                reserve(1, || Ok(extra)),
+                Err(PortPoolError::Exhausted { .. })
+            ),
+            "a port the operating system handed out is held by the pool"
+        );
+
+        release_test_ports(&all);
+        assert_eq!(
+            reserve(1, || Ok(extra)).assured("a released port is drawn again"),
+            vec![extra]
+        );
+        release_test_ports(&[extra]);
+    }
+
+    #[test]
+    fn a_released_port_can_be_drawn_again() {
+        let [.., port] = POOL_REGRESSION_PORTS;
+        reserve(1, || Ok(port)).assured("a port nothing holds is reserved at once");
+        assert!(
+            matches!(
+                reserve(1, || Ok(port)),
+                Err(PortPoolError::Exhausted { .. })
+            ),
+            "a port that is still held cannot be drawn again"
+        );
+
+        release_test_ports(&[port]);
+
+        assert_eq!(
+            reserve(1, || Ok(port)).assured("a released port is drawn again"),
+            vec![port]
+        );
+        release_test_ports(&[port]);
     }
 
     /// The suite watchdog reads registries the whole process shares and stops every node in them,
