@@ -33,6 +33,7 @@ macro_rules! with_typed_registers {
 
 mod batch;
 mod compiler;
+mod count;
 mod datetime;
 mod error;
 mod frontend;
@@ -43,6 +44,7 @@ pub mod program;
 mod regexp;
 mod runtime;
 mod semantics;
+mod text_column;
 pub mod window;
 
 pub use batch::{TypedArray, TypedBatch};
@@ -65,7 +67,7 @@ pub use datetime::{
 pub use error::{
     CompileError, DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation,
     IntegerOperation, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, ShiftOperation,
-    SideError, SideErrorReason,
+    SideError, SideErrorReason, TextOperation,
 };
 pub use frontend::{
     ArgumentCount, AssignmentTargetSet, CastTargetKind, DatetimeLiteral, FrontendError,

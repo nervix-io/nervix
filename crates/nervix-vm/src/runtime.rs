@@ -10,6 +10,7 @@
 use std::{
     cell::OnceCell,
     fmt::{self, Write as _},
+    num::NonZeroUsize,
     ops::Range,
     sync::Arc as StdArc,
 };
@@ -56,10 +57,11 @@ use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
     batch::{TypedArray, TypedBatch},
+    count::{CountOperand, SignedCount},
     datetime::{self, FormattedColumn, TextFailure, UnitCounts, UnresolvedLocalTime},
     error::{
         DatetimeOperation, FloatOperation, IntegerOperation, RowErrorMask, RowErrors, RuntimeError,
-        SideError, SideErrorReason,
+        SideError, SideErrorReason, TextOperation,
     },
     ir::{
         AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
@@ -78,6 +80,7 @@ use crate::{
         BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, Volatility,
         builtin_semantics_for_lowering,
     },
+    text_column::TextColumnBuilder,
 };
 
 pub const SPAWN_BLOCKING_ROW_THRESHOLD: usize = 1_024;
@@ -99,6 +102,34 @@ enum Register<A> {
 enum Shape {
     Column,
     Scalar,
+}
+
+/// The rows of a batch one computation of an instruction produces values for.
+#[derive(Clone, Copy)]
+enum Extent {
+    /// One value for each of this many rows.
+    PerRow(usize),
+    /// One value that each of this many rows shares, computed over a single row.
+    Shared(usize),
+}
+
+impl Extent {
+    /// How many values the computation produces.
+    fn values(self) -> usize {
+        match self {
+            Self::PerRow(rows) => rows,
+            Self::Shared(_) => 1,
+        }
+    }
+
+    /// How many rows of the batch each value the computation produces stands for.
+    fn rows_per_value(self) -> NonZeroUsize {
+        match self {
+            Self::PerRow(_) => NonZeroUsize::MIN,
+            // An empty batch still computes the value its rows would share, once.
+            Self::Shared(rows) => NonZeroUsize::new(rows).unwrap_or(NonZeroUsize::MIN),
+        }
+    }
 }
 
 impl<A: Broadcast> Register<A> {
@@ -823,9 +854,9 @@ impl Instruction {
                     volatile,
                     row_count,
                     row_errors,
-                    |registers, rows, row_errors| {
+                    |registers, extent, row_errors| {
                         execute_builtin(
-                            lowering, registers, inputs, rows, row_errors, self.span, context,
+                            lowering, registers, inputs, extent, row_errors, self.span, context,
                         )
                     },
                 )
@@ -919,7 +950,7 @@ impl Instruction {
         volatile: bool,
         row_count: usize,
         row_errors: &mut RowErrors,
-        compute: impl FnOnce(&RegisterBank, usize, &mut RowErrors) -> Result<TypedArray, RuntimeError>,
+        compute: impl FnOnce(&RegisterBank, Extent, &mut RowErrors) -> Result<TypedArray, RuntimeError>,
     ) -> Result<(), RuntimeError> {
         let shared = !volatile
             && self
@@ -928,12 +959,12 @@ impl Instruction {
                 .iter()
                 .all(|operand| registers.is_scalar(*operand));
         if !shared {
-            let output = compute(registers, row_count, row_errors)?;
+            let output = compute(registers, Extent::PerRow(row_count), row_errors)?;
             return registers.set(dst, output, Shape::Column);
         }
         let mut shared_errors = RowErrors::new(1);
         registers.rows = 1;
-        let computed = compute(registers, 1, &mut shared_errors);
+        let computed = compute(registers, Extent::Shared(row_count), &mut shared_errors);
         registers.rows = row_count;
         let output = computed?;
         for error in shared_errors.row(0) {
@@ -1461,14 +1492,14 @@ fn execute_builtin(
     lowering: &BuiltinLowering,
     registers: &RegisterBank,
     inputs: &[RegisterRef],
-    row_count: usize,
+    extent: Extent,
     row_errors: &mut RowErrors,
     span: Span,
     context: &ExecutionContext,
 ) -> Result<TypedArray, RuntimeError> {
     // Each kernel reads its operands in the shape it can use. A kernel with a scalar form reads a
-    // text operand as it is, so a literal argument stays one value; a kernel that walks the batch
-    // reads a column, which expands a scalar once per batch.
+    // text operand or a count as it is, so a literal argument stays one value; a kernel that walks
+    // the batch reads a column, which expands a scalar once per batch.
     let column = |index: usize| registers.read_array(inputs[index]);
     let columns = || {
         inputs
@@ -1477,11 +1508,29 @@ fn execute_builtin(
             .collect::<Result<Vec<_>, _>>()
     };
     let text = |index: usize| registers.operand::<StringArray>(inputs[index]);
+    let count = |index: usize| {
+        let operand = registers.any_operand(inputs[index])?;
+        match CountOperand::of(operand) {
+            Some(count) => Ok(count),
+            None => Err(RuntimeError::InvalidBatch {
+                message: format!(
+                    "builtin {lowering:?} requires an integer count, found {:?}",
+                    operand.array().data_type()
+                ),
+            }),
+        }
+    };
+    let row_count = extent.values();
 
     match lowering {
         BuiltinLowering::Now => Ok(TypedArray::Datetime(execute_now(row_count, context.now))),
         BuiltinLowering::UuidV4 => Ok(TypedArray::Utf8(execute_uuid_v4(row_count))),
-        BuiltinLowering::UuidV7 => Ok(TypedArray::Utf8(execute_uuid_v7(row_count, context.now))),
+        BuiltinLowering::UuidV7 => Ok(TypedArray::Utf8(execute_uuid_v7(
+            row_count,
+            context.now,
+            row_errors,
+            span,
+        ))),
         BuiltinLowering::Lower => Ok(TypedArray::Utf8(
             CaseMapping::Lower.execute(as_utf8(&column(0)?)?),
         )),
@@ -1516,10 +1565,10 @@ fn execute_builtin(
             Ok(TypedArray::Utf8(execute_concat(row_count, &parts)))
         }
         BuiltinLowering::Sum => execute_list_sum(&column(0)?, row_errors, span),
-        BuiltinLowering::First => execute_list_item(&column(0)?, ListItem::First, None),
-        BuiltinLowering::Last => execute_list_item(&column(0)?, ListItem::Last, None),
+        BuiltinLowering::First => execute_list_item(&column(0)?, ListItem::First),
+        BuiltinLowering::Last => execute_list_item(&column(0)?, ListItem::Last),
         BuiltinLowering::Count => Ok(TypedArray::Int64(execute_list_count(&column(0)?)?)),
-        BuiltinLowering::Nth => execute_list_item(&column(0)?, ListItem::Nth, Some(&column(1)?)),
+        BuiltinLowering::Nth => execute_list_item(&column(0)?, ListItem::Nth(count(1)?)),
         BuiltinLowering::Contains => Ok(TypedArray::Boolean(execute_contains(text(0)?, text(1)?))),
         BuiltinLowering::Cos => execute_math(&column(0)?, MathFunction::Cos, row_errors, span),
         BuiltinLowering::StartsWith => {
@@ -1531,16 +1580,18 @@ fn execute_builtin(
         BuiltinLowering::Initcap => Ok(TypedArray::Utf8(execute_initcap(as_utf8(&column(0)?)?))),
         BuiltinLowering::Left => Ok(TypedArray::Utf8(execute_left(
             as_utf8(&column(0)?)?,
-            &column(1)?,
-        )?)),
+            count(1)?,
+        ))),
         BuiltinLowering::Ln => execute_math(&column(0)?, MathFunction::Ln, row_errors, span),
         BuiltinLowering::Log => execute_log(&columns()?, row_errors, span),
-        BuiltinLowering::Lpad => Ok(TypedArray::Utf8(execute_pad(
+        BuiltinLowering::Lpad => Ok(TypedArray::Utf8(PadSide::Left.execute(
             as_utf8(&column(0)?)?,
-            &column(1)?,
+            count(1)?,
             text(2)?,
-            PadSide::Left,
-        )?)),
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
         BuiltinLowering::Md5 => Ok(TypedArray::Utf8(execute_md5(as_utf8(&column(0)?)?))),
         BuiltinLowering::Pow => execute_binary_math(
             &column(0)?,
@@ -1552,8 +1603,11 @@ fn execute_builtin(
         BuiltinLowering::Regexp(call) => execute_regexp(call, registers, inputs, row_errors, span),
         BuiltinLowering::Repeat => Ok(TypedArray::Utf8(execute_repeat(
             as_utf8(&column(0)?)?,
-            &column(1)?,
-        )?)),
+            count(1)?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
         BuiltinLowering::Replace => Ok(TypedArray::Utf8(execute_replace(
             as_utf8(&column(0)?)?,
             text(1)?,
@@ -1562,8 +1616,8 @@ fn execute_builtin(
         BuiltinLowering::Reverse => Ok(TypedArray::Utf8(execute_reverse(as_utf8(&column(0)?)?))),
         BuiltinLowering::Right => Ok(TypedArray::Utf8(execute_right(
             as_utf8(&column(0)?)?,
-            &column(1)?,
-        )?)),
+            count(1)?,
+        ))),
         BuiltinLowering::Round => {
             let values = columns()?;
             match values.as_slice() {
@@ -1572,32 +1626,35 @@ fn execute_builtin(
                 _ => execute_rounding(&values[0], Rounding::Round, row_errors, span),
             }
         }
-        BuiltinLowering::Rpad => Ok(TypedArray::Utf8(execute_pad(
+        BuiltinLowering::Rpad => Ok(TypedArray::Utf8(PadSide::Right.execute(
             as_utf8(&column(0)?)?,
-            &column(1)?,
+            count(1)?,
             text(2)?,
-            PadSide::Right,
-        )?)),
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
         BuiltinLowering::SplitPart => Ok(TypedArray::Utf8(execute_split_part(
             as_utf8(&column(0)?)?,
             text(1)?,
-            &column(2)?,
-        )?)),
+            count(2)?,
+        ))),
         BuiltinLowering::Sqrt => execute_math(&column(0)?, MathFunction::Sqrt, row_errors, span),
         BuiltinLowering::Strpos => Ok(TypedArray::Int64(execute_strpos(
             as_utf8(&column(0)?)?,
             text(1)?,
         ))),
         BuiltinLowering::Substr => {
+            // Without a length argument the substring runs to the end of the text.
             let length = match inputs.get(2) {
-                Some(length) => Some(registers.read_array(*length)?),
+                Some(_) => Some(count(2)?),
                 None => None,
             };
             Ok(TypedArray::Utf8(execute_substr(
                 as_utf8(&column(0)?)?,
-                &column(1)?,
-                length.as_ref(),
-            )?))
+                count(1)?,
+                length,
+            )))
         }
         BuiltinLowering::Tan => execute_math(&column(0)?, MathFunction::Tan, row_errors, span),
         BuiltinLowering::ToHex => Ok(TypedArray::Utf8(execute_to_hex(&column(0)?)?)),
@@ -1825,11 +1882,13 @@ fn record_datetime_failures(
     TypedArray::Datetime(checked.column)
 }
 
+/// The element a list item builtin selects from each row's list.
 #[derive(Clone, Copy)]
-enum ListItem {
+enum ListItem<'a> {
     First,
     Last,
-    Nth,
+    /// The element at each row's index, counting from zero.
+    Nth(CountOperand<'a>),
 }
 
 #[derive(Clone, Copy)]
@@ -2047,53 +2106,7 @@ fn execute_list_sum(
     }
 }
 
-fn list_nth_indices(index_input: Option<&TypedArray>) -> Result<Int64Array, RuntimeError> {
-    let Some(index_input) = index_input else {
-        return Err(RuntimeError::InvalidBatch {
-            message: "nth requires an index input".to_string(),
-        });
-    };
-    match index_input {
-        TypedArray::UInt8(_)
-        | TypedArray::Int8(_)
-        | TypedArray::UInt16(_)
-        | TypedArray::Int16(_)
-        | TypedArray::UInt32(_)
-        | TypedArray::Int32(_)
-        | TypedArray::UInt64(_)
-        | TypedArray::Int64(_) => {}
-        other => {
-            return Err(RuntimeError::InvalidBatch {
-                message: format!(
-                    "builtin requires integer input, found {:?}",
-                    other.data_type()
-                ),
-            });
-        }
-    }
-    let options = CastOptions {
-        safe: true,
-        ..CastOptions::default()
-    };
-    let indices = cast_with_options(index_input.as_array(), &DataType::Int64, &options)
-        .map_err(|error| arrow_kernel_error("list index cast kernel failed", error))?;
-    indices
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .cloned()
-        .ok_or_else(|| RuntimeError::InvalidBatch {
-            message: format!(
-                "list index cast produced {:?} instead of Int64",
-                indices.data_type()
-            ),
-        })
-}
-
-fn execute_list_item(
-    input: &TypedArray,
-    item: ListItem,
-    index_input: Option<&TypedArray>,
-) -> Result<TypedArray, RuntimeError> {
+fn execute_list_item(input: &TypedArray, item: ListItem<'_>) -> Result<TypedArray, RuntimeError> {
     let list = ListColumn::from_typed(input)?;
     match list.element_data_type() {
         DataType::UInt8
@@ -2117,10 +2130,6 @@ fn execute_list_item(
         }
     }
 
-    let nth_indices = match item {
-        ListItem::Nth => Some(list_nth_indices(index_input)?),
-        ListItem::First | ListItem::Last => None,
-    };
     let indices = UInt64Array::from_iter((0..list.len()).map(|row| {
         if list.is_null(row) {
             return None;
@@ -2129,20 +2138,11 @@ fn execute_list_item(
         let relative = match item {
             ListItem::First => (!range.is_empty()).then_some(0),
             ListItem::Last => range.len().checked_sub(1),
-            ListItem::Nth => {
-                let indices = nth_indices.as_ref()?;
-                if indices.is_null(row) {
-                    return None;
-                }
-                let index = indices.value(row);
-                if index < 0 {
-                    return None;
-                }
-                let Ok(index) = usize::try_from(index) else {
-                    return None;
-                };
-                (index < range.len()).then_some(index)
-            }
+            ListItem::Nth(index) => match index.value(row) {
+                Some(SignedCount::NonNegative(index)) => (index < range.len()).then_some(index),
+                // A null index selects nothing, and a negative one lies before the first element.
+                Some(SignedCount::Negative(_)) | None => None,
+            },
         }?;
         Some((range.start + relative).arch_into())
     }));
@@ -2309,12 +2309,29 @@ fn execute_uuid_v4(row_count: usize) -> StringArray {
     StringArray::from_iter_values((0..row_count).map(|_| Uuid::new_v4().to_string()))
 }
 
-fn execute_uuid_v7(row_count: usize, now: Timestamp) -> StringArray {
-    let datetime = now.into_datetime();
-    let seconds = u64::try_from(datetime.timestamp()).unwrap_or(0);
-    let nanos = datetime.timestamp_subsec_nanos();
-    let ts = UuidTimestamp::from_unix(NoContext, seconds, nanos);
-    StringArray::from_iter_values((0..row_count).map(|_| Uuid::new_v7(ts).to_string()))
+/// The bits a version 7 UUID holds its time in, as milliseconds since the Unix epoch.
+const UUID_V7_TIME_BITS: u32 = 48;
+const NANOSECONDS_PER_MILLISECOND: i64 = 1_000_000;
+
+// The latest DATETIME's milliseconds fit the field, so the only execution time a version 7 UUID
+// cannot encode is one before the epoch.
+const _: () = assert!(i64::MAX / NANOSECONDS_PER_MILLISECOND < 1_i64 << UUID_V7_TIME_BITS);
+
+/// A new version 7 UUID for every row, whose time is the execution time. An execution time before
+/// the Unix epoch has no encoding, so every row reports an error instead of another instant's UUID.
+fn execute_uuid_v7(
+    row_count: usize,
+    now: Timestamp,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> StringArray {
+    let Some(since_epoch) = now.duration_since(Timestamp::from_unix_nanos(0)) else {
+        row_errors.push_failures(0..row_count, span, |_| SideErrorReason::UuidTimeBeforeEpoch);
+        return StringArray::new_null(row_count);
+    };
+    let timestamp =
+        UuidTimestamp::from_unix(NoContext, since_epoch.as_secs(), since_epoch.subsec_nanos());
+    StringArray::from_iter_values((0..row_count).map(|_| Uuid::new_v7(timestamp).to_string()))
 }
 
 fn as_utf8(value: &TypedArray) -> Result<&StringArray, RuntimeError> {
@@ -2878,45 +2895,80 @@ fn execute_concat(row_count: usize, parts: &[Operand<'_, StringArray>]) -> Strin
     builder.finish()
 }
 
-fn execute_left(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
+fn execute_left(input: &StringArray, count: CountOperand<'_>) -> StringArray {
     let mut builder = string_builder_like(input);
     for row in 0..input.len() {
-        if input.is_null(row) || count.is_null(row) {
+        if input.is_null(row) {
             builder.append_null();
             continue;
         }
-        let count = integral_value_at(count, row)?.unwrap_or(0);
+        let Some(count) = count.value(row) else {
+            builder.append_null();
+            continue;
+        };
         builder.append_value(string_left(input.value(row), count));
     }
-    Ok(builder.finish())
+    builder.finish()
 }
 
-fn execute_right(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
+fn execute_right(input: &StringArray, count: CountOperand<'_>) -> StringArray {
     let mut builder = string_builder_like(input);
     for row in 0..input.len() {
-        if input.is_null(row) || count.is_null(row) {
+        if input.is_null(row) {
             builder.append_null();
             continue;
         }
-        let count = integral_value_at(count, row)?.unwrap_or(0);
+        let Some(count) = count.value(row) else {
+            builder.append_null();
+            continue;
+        };
         builder.append_value(string_right(input.value(row), count));
     }
-    Ok(builder.finish())
+    builder.finish()
 }
 
-fn execute_repeat(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
-    let mut builder = StringBuilder::new();
+/// Repeats each row's text its count of times. A result its STRING column cannot hold is refused
+/// before anything is allocated for it: that row reports an error and is null.
+fn execute_repeat(
+    input: &StringArray,
+    count: CountOperand<'_>,
+    rows_per_value: NonZeroUsize,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> StringArray {
+    let mut column = TextColumnBuilder::new(StringBuilder::new(), rows_per_value);
     for row in 0..input.len() {
-        if input.is_null(row) || count.is_null(row) {
-            builder.append_null();
+        if input.is_null(row) {
+            column.append_null();
             continue;
         }
-        let count = integral_value_at(count, row)?.unwrap_or(0);
-        let repeat = usize::try_from(count.max(0))
-            .assured("a non-negative i64 fits usize on every supported host architecture");
-        builder.append_value(input.value(row).repeat(repeat));
+        let Some(count) = count.value(row) else {
+            column.append_null();
+            continue;
+        };
+        let times = match count {
+            SignedCount::NonNegative(times) => times,
+            // A negative count repeats the text no times, as zero does.
+            SignedCount::Negative(_) => 0,
+        };
+        let text = input.value(row);
+        // A length that does not fit `usize` fits no column.
+        let appended = match text.len().checked_mul(times) {
+            Some(bytes) if column.fits(bytes) => column.append_value(&text.repeat(times)),
+            Some(_) | None => false,
+        };
+        if !appended {
+            column.append_null();
+            row_errors.push(
+                row,
+                SideError {
+                    reason: SideErrorReason::TextTooLong(TextOperation::Repeat),
+                    span,
+                },
+            );
+        }
     }
-    Ok(builder.finish())
+    column.finish()
 }
 
 /// The side of a value `lpad` and `rpad` extend.
@@ -2926,60 +2978,114 @@ enum PadSide {
     Right,
 }
 
-fn execute_pad(
-    input: &StringArray,
-    length: &TypedArray,
-    fill: Operand<'_, StringArray>,
-    side: PadSide,
-) -> Result<StringArray, RuntimeError> {
-    let mut builder = string_builder_like(input);
-    let mut result = String::new();
-    for row in 0..input.len() {
-        if input.is_null(row) || length.is_null(row) || fill.is_null(row) {
-            builder.append_null();
-            continue;
+impl PadSide {
+    /// The operation this side's builtin reports a refused result as.
+    fn operation(self) -> TextOperation {
+        match self {
+            Self::Left => TextOperation::Lpad,
+            Self::Right => TextOperation::Rpad,
         }
-        let target_len = usize::try_from(integral_value_at(length, row)?.unwrap_or(0).max(0))
-            .assured("a non-negative i64 fits usize on every supported host architecture");
-        let source = input.value(row);
-        let fill = fill.array().value(fill.index(row));
-        let source_len = source.chars().count();
-        if target_len == 0 {
-            builder.append_value("");
-            continue;
-        }
-        if source_len >= target_len {
-            builder.append_value(string_prefix(source, target_len));
-            continue;
-        }
-        if fill.is_empty() {
-            builder.append_value(source);
-            continue;
-        }
-        let missing = target_len - source_len;
-        result.clear();
-        // The reservation is only a hint: a requested pad width that cannot be sized in
-        // `usize` leaves the buffer to grow as the fill is written.
-        let mut reservation = source.len();
-        if let Some(padding) = missing.checked_mul(fill.len())
-            && let Some(reserved) = source.len().checked_add(padding)
-        {
-            reservation = reserved;
-        }
-        result.reserve(reservation);
-        match side {
-            PadSide::Left => {
-                result.extend(fill.chars().cycle().take(missing));
-                result.push_str(source);
-            }
-            PadSide::Right => {
-                result.push_str(source);
-                result.extend(fill.chars().cycle().take(missing));
-            }
-        }
-        builder.append_value(&result);
     }
-    Ok(builder.finish())
+
+    /// Pads each row's text on this side with its fill to its length. A result its STRING column
+    /// cannot hold is refused before anything is allocated for it: that row reports an error and
+    /// is null.
+    fn execute(
+        self,
+        input: &StringArray,
+        length: CountOperand<'_>,
+        fill: Operand<'_, StringArray>,
+        rows_per_value: NonZeroUsize,
+        row_errors: &mut RowErrors,
+        span: Span,
+    ) -> StringArray {
+        let mut column = TextColumnBuilder::new(string_builder_like(input), rows_per_value);
+        let mut padded = String::new();
+        for row in 0..input.len() {
+            if input.is_null(row) || fill.is_null(row) {
+                column.append_null();
+                continue;
+            }
+            let Some(length) = length.value(row) else {
+                column.append_null();
+                continue;
+            };
+            let target_len = match length {
+                SignedCount::NonNegative(target_len) => target_len,
+                // A negative length pads to an empty string, as zero does.
+                SignedCount::Negative(_) => 0,
+            };
+            let source = input.value(row);
+            let fill = fill.array().value(fill.index(row));
+            if !self.append_padded(&mut column, source, fill, target_len, &mut padded) {
+                column.append_null();
+                row_errors.push(
+                    row,
+                    SideError {
+                        reason: SideErrorReason::TextTooLong(self.operation()),
+                        span,
+                    },
+                );
+            }
+        }
+        column.finish()
+    }
+
+    /// Appends `source` padded on this side with `fill` to `target_len` characters, or answers
+    /// false without appending anything when the result does not fit in `column`. `padded` is a
+    /// buffer the rows of one batch reuse.
+    fn append_padded(
+        self,
+        column: &mut TextColumnBuilder,
+        source: &str,
+        fill: &str,
+        target_len: usize,
+        padded: &mut String,
+    ) -> bool {
+        // Text longer than the target is cut to its first `target_len` characters.
+        let Some(missing) = target_len.checked_sub(source.chars().count()) else {
+            return column.append_value(string_prefix(source, target_len));
+        };
+        // An empty fill cannot lengthen the text, which stays as it is.
+        let Some(fill_chars) = NonZeroUsize::new(fill.chars().count()) else {
+            return column.append_value(source);
+        };
+        // A length that does not fit `usize` fits no column.
+        let Some(fill_bytes) = cycled_bytes(fill, fill_chars, missing) else {
+            return false;
+        };
+        let Some(bytes) = source.len().checked_add(fill_bytes) else {
+            return false;
+        };
+        if !column.fits(bytes) {
+            return false;
+        }
+        padded.clear();
+        padded.reserve(bytes);
+        match self {
+            Self::Left => {
+                padded.extend(fill.chars().cycle().take(missing));
+                padded.push_str(source);
+            }
+            Self::Right => {
+                padded.push_str(source);
+                padded.extend(fill.chars().cycle().take(missing));
+            }
+        }
+        column.append_value(padded)
+    }
+}
+
+/// The bytes of the first `count` characters of `fill` repeated without end, whose characters
+/// number `fill_chars`, or `None` when they exceed `usize`.
+fn cycled_bytes(fill: &str, fill_chars: NonZeroUsize, count: usize) -> Option<usize> {
+    let whole_fills = count / fill_chars;
+    let (partial_bytes, _) = fill.char_indices().nth(count % fill_chars).verified(
+        "a remainder of dividing by the fill's character count indexes one of its characters",
+    );
+    whole_fills
+        .checked_mul(fill.len())?
+        .checked_add(partial_bytes)
 }
 
 fn execute_md5(input: &StringArray) -> StringArray {
@@ -3252,35 +3358,36 @@ fn execute_reverse(input: &StringArray) -> StringArray {
 fn execute_split_part(
     input: &StringArray,
     delimiter: Operand<'_, StringArray>,
-    index: &TypedArray,
-) -> Result<StringArray, RuntimeError> {
+    index: CountOperand<'_>,
+) -> StringArray {
     let mut builder = string_builder_like(input);
     for row in 0..input.len() {
-        if input.is_null(row) || delimiter.is_null(row) || index.is_null(row) {
+        if input.is_null(row) || delimiter.is_null(row) {
             builder.append_null();
             continue;
         }
-        let index = integral_value_at(index, row)?.unwrap_or(0);
-        if index <= 0 {
+        let Some(index) = index.value(row) else {
+            builder.append_null();
+            continue;
+        };
+        // Parts count from one, so an index at or below zero names no part.
+        let part = match index {
+            SignedCount::NonNegative(index) => index.checked_sub(1),
+            SignedCount::Negative(_) => None,
+        };
+        let Some(part) = part else {
             builder.append_value("");
             continue;
-        }
+        };
         let string = input.value(row);
         let delimiter = delimiter.array().value(delimiter.index(row));
         if delimiter.is_empty() {
-            builder.append_value(if index == 1 { string } else { "" });
+            builder.append_value(if part == 0 { string } else { "" });
             continue;
         }
-        let value = string
-            .split(delimiter)
-            .nth(
-                usize::try_from(index - 1)
-                    .assured("the index was checked to be a positive i64 above"),
-            )
-            .unwrap_or("");
-        builder.append_value(value);
+        builder.append_value(string.split(delimiter).nth(part).unwrap_or(""));
     }
-    Ok(builder.finish())
+    builder.finish()
 }
 
 fn execute_strpos(input: &StringArray, needle: Operand<'_, StringArray>) -> Int64Array {
@@ -3305,38 +3412,44 @@ fn execute_strpos(input: &StringArray, needle: Operand<'_, StringArray>) -> Int6
 
 fn execute_substr(
     input: &StringArray,
-    start: &TypedArray,
-    length: Option<&TypedArray>,
-) -> Result<StringArray, RuntimeError> {
+    start: CountOperand<'_>,
+    length: Option<CountOperand<'_>>,
+) -> StringArray {
     let mut builder = string_builder_like(input);
     for row in 0..input.len() {
-        if input.is_null(row)
-            || start.is_null(row)
-            || length.is_some_and(|value| value.is_null(row))
-        {
+        if input.is_null(row) {
             builder.append_null();
             continue;
         }
-        let start = integral_value_at(start, row)?.unwrap_or(1);
-        let length = match length {
-            Some(value) => Some(integral_value_at(value, row)?.unwrap_or(0)),
-            None => None,
+        let Some(start) = start.value(row) else {
+            builder.append_null();
+            continue;
         };
+        // Without a length the substring runs to the end of the text.
+        let mut limit = None;
+        if let Some(length) = length {
+            let Some(length) = length.value(row) else {
+                builder.append_null();
+                continue;
+            };
+            // A negative length takes no characters, as zero does.
+            let characters = match length {
+                SignedCount::NonNegative(characters) => characters,
+                SignedCount::Negative(_) => 0,
+            };
+            limit = Some(characters);
+        }
         // SQL positions count from one, so a start at or before the first position begins at
         // the start of the string.
         let mut begin = 0;
-        if let Some(offset) = start.checked_sub(1)
-            && let Ok(offset) = usize::try_from(offset)
+        if let SignedCount::NonNegative(position) = start
+            && let Some(offset) = position.checked_sub(1)
         {
             begin = offset;
         }
-        let length = length.map(|value| {
-            usize::try_from(value.max(0))
-                .assured("a non-negative i64 fits usize on every supported host architecture")
-        });
-        builder.append_value(string_substr(input.value(row), begin, length));
+        builder.append_value(string_substr(input.value(row), begin, limit));
     }
-    Ok(builder.finish())
+    builder.finish()
 }
 
 fn execute_to_hex(input: &TypedArray) -> Result<StringArray, RuntimeError> {
@@ -3465,33 +3578,6 @@ impl TranslateTable {
     }
 }
 
-fn integral_value_at(input: &TypedArray, row: usize) -> Result<Option<i64>, RuntimeError> {
-    match input {
-        TypedArray::UInt8(array) => Ok((!array.is_null(row)).then(|| i64::from(array.value(row)))),
-        TypedArray::Int8(array) => Ok((!array.is_null(row)).then(|| i64::from(array.value(row)))),
-        TypedArray::UInt16(array) => Ok((!array.is_null(row)).then(|| i64::from(array.value(row)))),
-        TypedArray::Int16(array) => Ok((!array.is_null(row)).then(|| i64::from(array.value(row)))),
-        TypedArray::UInt32(array) => Ok((!array.is_null(row)).then(|| i64::from(array.value(row)))),
-        TypedArray::Int32(array) => Ok((!array.is_null(row)).then(|| i64::from(array.value(row)))),
-        TypedArray::UInt64(array) => {
-            Ok((!array.is_null(row)).then(|| i64::try_from(array.value(row)).unwrap_or(i64::MAX)))
-        }
-        TypedArray::Int64(array) => Ok((!array.is_null(row)).then(|| array.value(row))),
-        TypedArray::Float32(_)
-        | TypedArray::Float64(_)
-        | TypedArray::Boolean(_)
-        | TypedArray::Utf8(_)
-        | TypedArray::Datetime(_)
-        | TypedArray::Generic(_)
-        | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
-            message: format!(
-                "builtin requires integer input, found {:?}",
-                input.data_type()
-            ),
-        }),
-    }
-}
-
 fn string_prefix(value: &str, count: usize) -> &str {
     let end = match value.char_indices().nth(count) {
         Some((index, _)) => index,
@@ -3512,43 +3598,39 @@ fn string_substr(value: &str, start: usize, length: Option<usize>) -> &str {
     }
 }
 
-fn string_left(value: &str, count: i64) -> &str {
-    if count >= 0 {
-        string_prefix(
-            value,
-            usize::try_from(count).assured("count is a non-negative i64 on this branch"),
-        )
-    } else {
-        let remove = count.unsigned_abs().arch_into();
-        if remove == 0 {
-            return value;
+fn string_left(value: &str, count: SignedCount) -> &str {
+    match count {
+        SignedCount::NonNegative(keep) => string_prefix(value, keep),
+        SignedCount::Negative(remove) => {
+            // The last `remove` characters begin where the kept prefix ends, and text with no
+            // more characters than that keeps none.
+            let end = match value.char_indices().rev().take(remove.get()).last() {
+                Some((index, _)) => index,
+                None => 0,
+            };
+            &value[..end]
         }
-        let end = match value.char_indices().rev().nth(remove - 1) {
-            Some((index, _)) => index,
-            None => 0,
-        };
-        &value[..end]
     }
 }
 
-fn string_right(value: &str, count: i64) -> &str {
-    if count >= 0 {
-        let keep = usize::try_from(count).assured("count is a non-negative i64 on this branch");
-        if keep == 0 {
-            return &value[value.len()..];
+fn string_right(value: &str, count: SignedCount) -> &str {
+    match count {
+        SignedCount::NonNegative(keep) => {
+            // The last `keep` characters begin at the `keep`th character from the end, and
+            // shorter text is kept whole.
+            let start = match value.char_indices().rev().take(keep).last() {
+                Some((index, _)) => index,
+                None => value.len(),
+            };
+            &value[start..]
         }
-        let start = match value.char_indices().rev().nth(keep - 1) {
-            Some((index, _)) => index,
-            None => 0,
-        };
-        &value[start..]
-    } else {
-        let skip = count.unsigned_abs().arch_into();
-        let start = match value.char_indices().nth(skip) {
-            Some((index, _)) => index,
-            None => value.len(),
-        };
-        &value[start..]
+        SignedCount::Negative(skip) => {
+            let start = match value.char_indices().nth(skip.get()) {
+                Some((index, _)) => index,
+                None => value.len(),
+            };
+            &value[start..]
+        }
     }
 }
 
@@ -4174,10 +4256,17 @@ mod tests {
     fn optimized_string_slices_and_translation_preserve_unicode_semantics() {
         let value = "aé🙂z";
 
-        assert_eq!(string_left(value, 2), "aé");
-        assert_eq!(string_left(value, -1), "aé🙂");
-        assert_eq!(string_right(value, 2), "🙂z");
-        assert_eq!(string_right(value, -1), "é🙂z");
+        assert_eq!(string_left(value, SignedCount::NonNegative(2)), "aé");
+        assert_eq!(
+            string_left(value, SignedCount::Negative(NonZeroUsize::MIN)),
+            "aé🙂"
+        );
+        assert_eq!(string_right(value, SignedCount::NonNegative(0)), "");
+        assert_eq!(string_right(value, SignedCount::NonNegative(2)), "🙂z");
+        assert_eq!(
+            string_right(value, SignedCount::Negative(NonZeroUsize::MIN)),
+            "é🙂z"
+        );
         assert_eq!(string_substr(value, 1, Some(2)), "é🙂");
 
         let from = StringArray::from(vec!["é🙂", "aab", "xy"]);
@@ -5557,6 +5646,292 @@ mod tests {
         );
     }
 
+    /// Executes `program` over a batch whose every row holds `text`, one of the counts in `count`,
+    /// and a two-element list.
+    fn execute_counted_text(
+        program: &str,
+        text: &str,
+        count: TypedArray,
+        outputs: Vec<Field>,
+    ) -> TypedBatch {
+        let rows = count.len();
+        let values: ArrayRef = StdArc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(
+            std::iter::repeat_n(Some(vec![Some(10), Some(20)]), rows),
+        ));
+        let parsed = parse_program(program).expect("must parse");
+        let schema = schema(vec![
+            Field::new("text", DataType::Utf8, false),
+            Field::new("count", count.data_type(), true),
+            Field::new("values", values.data_type().clone(), false),
+        ]);
+        let compiled = compile_program_with_output_fields(&parsed, schema.clone(), outputs);
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Utf8(StringArray::from_iter_values(std::iter::repeat_n(
+                    text, rows,
+                ))),
+                count,
+                TypedArray::Generic(values),
+            ],
+        )
+        .expect("batch must build");
+        execute_program_sync(&compiled, &batch).expect("execution must succeed")
+    }
+
+    fn text_output<'a>(batch: &'a TypedBatch, name: &str) -> &'a StringArray {
+        let TypedArray::Utf8(values) = output_column(batch, name) else {
+            panic!("{name} must be Utf8");
+        };
+        values
+    }
+
+    #[test]
+    fn count_and_position_builtins_read_integer_arguments_at_their_full_range() {
+        const PROGRAM: &str = "SET lefted = left(input.text, input.count), righted = \
+                               right(input.text, input.count), tail = substr(input.text, \
+                               input.count), piece = substr(input.text, 2, input.count), part = \
+                               split_part(input.text, '.', input.count), item = nth(input.values, \
+                               input.count)";
+        let outputs = || {
+            vec![
+                Field::new("lefted", DataType::Utf8, true),
+                Field::new("righted", DataType::Utf8, true),
+                Field::new("tail", DataType::Utf8, true),
+                Field::new("piece", DataType::Utf8, true),
+                Field::new("part", DataType::Utf8, true),
+                Field::new("item", DataType::Int64, true),
+            ]
+        };
+
+        // Unsigned counts above the signed range keep their value: they reach past the end of any
+        // text or list, exactly as the largest signed count does.
+        let unsigned = TypedArray::UInt64(UInt64Array::from(vec![
+            Some(u64::MAX),
+            Some(1 << 63),
+            Some(1),
+            None,
+        ]));
+        let output = execute_counted_text(PROGRAM, "hé.llo", unsigned, outputs());
+        let lefted = text_output(&output, "lefted");
+        let righted = text_output(&output, "righted");
+        let tail = text_output(&output, "tail");
+        let piece = text_output(&output, "piece");
+        let part = text_output(&output, "part");
+        let TypedArray::Int64(item) = output_column(&output, "item") else {
+            panic!("item must be Int64");
+        };
+        for row in 0..2 {
+            assert_eq!(lefted.value(row), "hé.llo");
+            assert_eq!(righted.value(row), "hé.llo");
+            assert_eq!(tail.value(row), "");
+            assert_eq!(piece.value(row), "é.llo");
+            assert_eq!(part.value(row), "");
+            assert!(item.is_null(row));
+        }
+        assert_eq!(lefted.value(2), "h");
+        assert_eq!(righted.value(2), "o");
+        assert_eq!(tail.value(2), "hé.llo");
+        assert_eq!(piece.value(2), "é");
+        assert_eq!(part.value(2), "hé");
+        assert_eq!(item.value(2), 20);
+        for column in [lefted, righted, tail, piece, part] {
+            assert!(column.is_null(3));
+        }
+        assert!(item.is_null(3));
+        assert!(output.errors().is_error_free());
+
+        // The most negative count keeps its distance below zero.
+        let signed = TypedArray::Int64(Int64Array::from(vec![
+            Some(i64::MIN),
+            Some(i64::MAX),
+            Some(-1),
+            None,
+        ]));
+        let output = execute_counted_text(PROGRAM, "hé.llo", signed, outputs());
+        let lefted = text_output(&output, "lefted");
+        let righted = text_output(&output, "righted");
+        let tail = text_output(&output, "tail");
+        let piece = text_output(&output, "piece");
+        let part = text_output(&output, "part");
+        let TypedArray::Int64(item) = output_column(&output, "item") else {
+            panic!("item must be Int64");
+        };
+        assert_eq!(lefted.value(0), "");
+        assert_eq!(righted.value(0), "");
+        assert_eq!(tail.value(0), "hé.llo");
+        assert_eq!(piece.value(0), "");
+        assert_eq!(part.value(0), "");
+        assert!(item.is_null(0));
+        assert_eq!(lefted.value(1), "hé.llo");
+        assert_eq!(righted.value(1), "hé.llo");
+        assert_eq!(tail.value(1), "");
+        assert_eq!(piece.value(1), "é.llo");
+        assert_eq!(part.value(1), "");
+        assert!(item.is_null(1));
+        assert_eq!(lefted.value(2), "hé.ll");
+        assert_eq!(righted.value(2), "é.llo");
+        assert_eq!(tail.value(2), "hé.llo");
+        assert_eq!(piece.value(2), "");
+        assert_eq!(part.value(2), "");
+        assert!(item.is_null(2));
+        for column in [lefted, righted, tail, piece, part] {
+            assert!(column.is_null(3));
+        }
+        assert!(item.is_null(3));
+        assert!(output.errors().is_error_free());
+    }
+
+    /// The code and message of every error `row` reported.
+    fn reported_errors(batch: &TypedBatch, row: usize) -> Vec<(ErrorCode, String)> {
+        batch
+            .errors()
+            .row(row)
+            .iter()
+            .map(|error| (error.code(), error.reason.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn count_sized_text_reports_results_a_string_column_cannot_hold() {
+        const PROGRAM: &str = "SET repeated = repeat(input.text, input.count), left_padded = \
+                               lpad(input.text, input.count, '*'), right_padded = \
+                               rpad(input.text, input.count, '*')";
+        let outputs = || {
+            vec![
+                Field::new("repeated", DataType::Utf8, true),
+                Field::new("left_padded", DataType::Utf8, true),
+                Field::new("right_padded", DataType::Utf8, true),
+            ]
+        };
+        let refused = [
+            "repeat result exceeds the text one STRING column holds",
+            "lpad result exceeds the text one STRING column holds",
+            "rpad result exceeds the text one STRING column holds",
+        ]
+        .map(|message| (ErrorCode::Overflow, message.to_string()));
+
+        // Successes, refusals, typed nulls and empty results share one batch, and each refused
+        // row fails alone without anything being allocated for it.
+        let unsigned = TypedArray::UInt64(UInt64Array::from(vec![
+            Some(3),
+            Some(u64::MAX),
+            None,
+            Some(0),
+        ]));
+        let output = execute_counted_text(PROGRAM, "ab", unsigned, outputs());
+        let repeated = text_output(&output, "repeated");
+        let left_padded = text_output(&output, "left_padded");
+        let right_padded = text_output(&output, "right_padded");
+        assert_eq!(repeated.value(0), "ababab");
+        assert_eq!(left_padded.value(0), "*ab");
+        assert_eq!(right_padded.value(0), "ab*");
+        for column in [repeated, left_padded, right_padded] {
+            assert!(column.is_null(1));
+            assert!(column.is_null(2));
+            assert_eq!(column.value(3), "");
+        }
+        assert!(output.errors().row(0).is_empty());
+        assert_eq!(reported_errors(&output, 1), refused);
+        assert!(output.errors().row(2).is_empty());
+        assert!(output.errors().row(3).is_empty());
+
+        // A negative count repeats and pads to nothing, as zero does.
+        let signed = TypedArray::Int64(Int64Array::from(vec![
+            Some(i64::MAX),
+            Some(i64::MIN),
+            Some(2),
+            None,
+        ]));
+        let output = execute_counted_text(PROGRAM, "ab", signed, outputs());
+        let repeated = text_output(&output, "repeated");
+        let left_padded = text_output(&output, "left_padded");
+        let right_padded = text_output(&output, "right_padded");
+        for column in [repeated, left_padded, right_padded] {
+            assert!(column.is_null(0));
+            assert_eq!(column.value(1), "");
+            assert!(column.is_null(3));
+        }
+        assert_eq!(repeated.value(2), "abab");
+        assert_eq!(left_padded.value(2), "ab");
+        assert_eq!(right_padded.value(2), "ab");
+        assert_eq!(reported_errors(&output, 0), refused);
+        for row in 1..4 {
+            assert!(output.errors().row(row).is_empty());
+        }
+    }
+
+    #[test]
+    fn count_sized_text_in_an_unselected_arm_neither_allocates_nor_fails() {
+        let parsed = parse_program(
+            "SET guarded = CASE WHEN input.count < (10 AS U64) THEN repeat(input.text, \
+             input.count) ELSE 'skipped' END",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("text", DataType::Utf8, false),
+            Field::new("count", DataType::UInt64, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![Field::new("guarded", DataType::Utf8, true)],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec!["ab", "ab", "ab"])),
+                TypedArray::UInt64(UInt64Array::from(vec![Some(2), Some(u64::MAX), None])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Utf8(guarded) = output_column(&output, "guarded") else {
+            panic!("guarded must be Utf8");
+        };
+
+        assert_eq!(guarded.value(0), "abab");
+        assert_eq!(guarded.value(1), "skipped");
+        assert_eq!(guarded.value(2), "skipped");
+        assert!(output.errors().is_error_free());
+    }
+
+    #[test]
+    fn shared_count_sized_text_is_charged_for_every_row_it_stands_for() {
+        // Two bytes repeated 600,000,000 times fit one STRING column once, but a value every
+        // message shares fills the column once per message, and two of them exceed it.
+        let parsed = parse_program("SET repeated = repeat('ab', 600000000)").expect("must parse");
+        let schema = schema(vec![Field::new("sequence", DataType::Int64, false)]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![Field::new("repeated", DataType::Utf8, true)],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![TypedArray::Int64(Int64Array::from(vec![1, 2]))],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        let TypedArray::Utf8(repeated) = output_column(&output, "repeated") else {
+            panic!("repeated must be Utf8");
+        };
+
+        for row in 0..2 {
+            assert!(repeated.is_null(row));
+            let [error] = output.errors().row(row) else {
+                panic!("row {row} must report one error");
+            };
+            assert_eq!(error.code(), ErrorCode::Overflow);
+            assert_eq!(
+                error.reason.to_string(),
+                "repeat result exceeds the text one STRING column holds"
+            );
+        }
+    }
+
     #[test]
     fn compares_nan_floats_with_ieee_semantics() {
         let parsed = parse_program(
@@ -5946,6 +6321,103 @@ mod tests {
         assert_eq!(regex_replaced.value(0), "XX");
         assert_eq!(regex_piece.value(0), "hello");
         assert!(output.errors().row(0).is_empty());
+    }
+
+    /// Executes `program`, which reads a Boolean `stamp` field, over three rows at `unix_nanos`.
+    fn execute_stamped_at(program: &str, unix_nanos: i64) -> TypedBatch {
+        let parsed = parse_program(program).expect("must parse");
+        let schema = schema(vec![Field::new("stamp", DataType::Boolean, true)]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![Field::new("id", DataType::Utf8, true)],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![TypedArray::Boolean(BooleanArray::from(vec![
+                Some(true),
+                Some(false),
+                None,
+            ]))],
+        )
+        .expect("batch must build");
+        execute_program_in_context_sync(
+            &compiled,
+            &batch,
+            &ExecutionContext {
+                now: Timestamp::from_unix_nanos(unix_nanos),
+                injector: None,
+            },
+        )
+        .expect("execution must succeed")
+        .batch
+    }
+
+    /// The Unix seconds and subsecond nanoseconds a version 7 UUID's timestamp field encodes.
+    fn uuid_v7_time(text: &str) -> (u64, u32) {
+        let uuid = Uuid::parse_str(text).expect("uuid_v7 must produce a UUID");
+        assert_eq!(uuid.get_version(), Some(Version::SortRand));
+        uuid.get_timestamp()
+            .expect("a version 7 UUID carries a timestamp")
+            .to_unix()
+    }
+
+    #[test]
+    fn uuid_v7_encodes_execution_times_from_the_unix_epoch() {
+        const PROGRAM: &str = "SET id = uuid_v7()";
+
+        // The epoch is the first instant the 48-bit millisecond field encodes.
+        let at_epoch = execute_stamped_at(PROGRAM, 0);
+        let ids = text_output(&at_epoch, "id");
+        for row in 0..3 {
+            assert_eq!(uuid_v7_time(ids.value(row)), (0, 0));
+        }
+        assert!(at_epoch.errors().is_error_free());
+
+        // The latest DATETIME lies well inside the field, truncated to its millisecond.
+        let at_latest = execute_stamped_at(PROGRAM, i64::MAX);
+        let ids = text_output(&at_latest, "id");
+        for row in 0..3 {
+            assert_eq!(uuid_v7_time(ids.value(row)), (9_223_372_036, 854_000_000));
+        }
+        assert!(at_latest.errors().is_error_free());
+
+        // A nanosecond before the epoch has no encoding, so every row reports a range error
+        // instead of receiving a UUID for another instant.
+        let before_epoch = execute_stamped_at(PROGRAM, -1);
+        let ids = text_output(&before_epoch, "id");
+        for row in 0..3 {
+            assert!(ids.is_null(row));
+            assert_eq!(
+                reported_errors(&before_epoch, row),
+                [(
+                    ErrorCode::Overflow,
+                    "uuid_v7 execution time is before the Unix epoch".to_string()
+                )]
+            );
+        }
+    }
+
+    #[test]
+    fn uuid_v7_before_the_epoch_fails_only_rows_that_select_it() {
+        let output = execute_stamped_at(
+            "SET id = CASE WHEN input.stamp THEN uuid_v7() ELSE 'unstamped' END",
+            -1_000_000_000,
+        );
+        let ids = text_output(&output, "id");
+
+        assert!(ids.is_null(0));
+        assert_eq!(
+            reported_errors(&output, 0),
+            [(
+                ErrorCode::Overflow,
+                "uuid_v7 execution time is before the Unix epoch".to_string()
+            )]
+        );
+        assert_eq!(ids.value(1), "unstamped");
+        assert_eq!(ids.value(2), "unstamped");
+        assert!(output.errors().row(1).is_empty());
+        assert!(output.errors().row(2).is_empty());
     }
 
     #[test]
