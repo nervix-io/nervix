@@ -879,15 +879,10 @@ impl VmFunctionInjector for WindowAggregateResults {
                 let indices = UInt64Array::from_iter_values(
                     selected.iter().map(|row| -> u64 { (*row).arch_into() }),
                 );
-                take_arrow_array(result.as_ref(), &indices, None).map_err(|error| {
-                    nervix_vm::RuntimeError::InvalidBatch {
-                        message: format!(
-                            "window aggregate {} could not be read for the selected output rows: \
-                             {error}",
-                            invocation.function.nspl_name()
-                        ),
-                    }
-                })?
+                take_arrow_array(result.as_ref(), &indices, None).verified(
+                    "the fit check above keeps every selected row within the result, and take is \
+                     defined for every array type an aggregate yields",
+                )
             }
         };
         let output = VmTypedArray::try_from_array_ref(output)?;
@@ -1091,6 +1086,77 @@ mod tests {
 
     fn at(nanos: i64) -> Timestamp {
         Timestamp::from_unix_nanos(nanos)
+    }
+
+    #[test]
+    fn window_aggregates_answer_the_selected_output_rows_by_identity() {
+        let invocation = WindowAggregateInvocation {
+            demand_id: 0,
+            function: WindowAggregateFunction::Sum,
+            percentile: None,
+        };
+        let function = FunctionName::WindowAggregate(invocation.clone());
+        let aggregate: ArrayRef = StdArc::new(Int64Array::from(vec![10, 20, 30]));
+        let mut results = BTreeMap::new();
+        results.insert(invocation, aggregate);
+        let injector = WindowAggregateResults { results };
+        let span: nervix_vm::program::Span = (0..0).into();
+
+        let every_row = injector
+            .inject_with_context(
+                &function,
+                &[],
+                &nervix_vm::RowSelection::All(3),
+                span,
+                at(0),
+                nervix_vm::RowErrorMask::none(3),
+            )
+            .expect("every output row is answered");
+        assert_eq!(
+            every_row.output,
+            VmTypedArray::Int64(Int64Array::from(vec![10, 20, 30]))
+        );
+
+        let selected = injector
+            .inject_with_context(
+                &function,
+                &[],
+                &nervix_vm::RowSelection::Selected(vec![2, 0]),
+                span,
+                at(0),
+                nervix_vm::RowErrorMask::none(2),
+            )
+            .expect("the selected output rows are answered");
+        assert_eq!(
+            selected.output,
+            VmTypedArray::Int64(Int64Array::from(vec![30, 10])),
+            "each selected row reads its own aggregate value"
+        );
+
+        let beyond = injector.inject_with_context(
+            &function,
+            &[],
+            &nervix_vm::RowSelection::Selected(vec![3]),
+            span,
+            at(0),
+            nervix_vm::RowErrorMask::none(1),
+        );
+        assert!(
+            matches!(beyond, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            "a row past the evaluated output rows is refused"
+        );
+        let short = injector.inject_with_context(
+            &function,
+            &[],
+            &nervix_vm::RowSelection::All(2),
+            span,
+            at(0),
+            nervix_vm::RowErrorMask::none(2),
+        );
+        assert!(
+            matches!(short, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            "a batch of another size than the evaluated output rows is refused"
+        );
     }
 
     /// One compiled single-route window processor state, driven the way its branch task drives it.

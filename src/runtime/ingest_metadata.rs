@@ -883,6 +883,69 @@ mod tests {
         assert_eq!(selected_offset.values(), &[43]);
     }
 
+    #[test]
+    fn header_functions_read_the_selected_rows_by_identity() {
+        let first_headers = TestIngestHeaders(&[("route", "primary")]);
+        let second_headers = TestIngestHeaders(&[("route", "secondary")]);
+        let metadata = ingest_metadata_for_test(
+            IngestMetadataKind::Headers,
+            &[
+                IngestMetadataRow::Headers {
+                    headers: &first_headers,
+                },
+                IngestMetadataRow::Headers {
+                    headers: &second_headers,
+                },
+            ],
+        );
+        let injector = IngestHeaderFunctionInjector::from_metadata(Some(&metadata), 2);
+        let span: nervix_vm::program::Span = (0..0).into();
+        let names = [VmTypedArray::Utf8(arrow_array::StringArray::from(vec![
+            Some("route"),
+        ]))];
+
+        let second_only = injector
+            .inject_with_context(
+                &FunctionName::ReadHeader,
+                &names,
+                &nervix_vm::RowSelection::Selected(vec![1]),
+                span,
+                Timestamp::from_unix_nanos(0),
+                nervix_vm::RowErrorMask::none(1),
+            )
+            .expect("a selected row reads its own headers");
+        assert_eq!(
+            second_only.output,
+            VmTypedArray::Utf8(arrow_array::StringArray::from(vec![Some("secondary")])),
+            "the header comes from the message the selected row was decoded from"
+        );
+
+        let beyond = injector.inject_with_context(
+            &FunctionName::ReadHeader,
+            &names,
+            &nervix_vm::RowSelection::Selected(vec![2]),
+            span,
+            Timestamp::from_unix_nanos(0),
+            nervix_vm::RowErrorMask::none(1),
+        );
+        assert!(
+            matches!(beyond, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            "a row past the header context is refused"
+        );
+        let short = injector.inject_with_context(
+            &FunctionName::ReadHeader,
+            &names,
+            &nervix_vm::RowSelection::All(1),
+            span,
+            Timestamp::from_unix_nanos(0),
+            nervix_vm::RowErrorMask::none(1),
+        );
+        assert!(
+            matches!(short, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            "a batch of another size than the header context is refused"
+        );
+    }
+
     #[tokio::test]
     async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() {
         let input_schema = test_schema(&[
