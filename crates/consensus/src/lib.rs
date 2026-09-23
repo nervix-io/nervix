@@ -90,8 +90,9 @@ mod replication;
 mod retention;
 mod snapshot;
 pub use command_execution::{
-    CommandExecution, CommandExecutionChildResult, CommandExecutionDiagnostic,
-    CommandExecutionEffect, CommandExecutionPreviewStale, CommandExecutionRequestConflict,
+    CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
+    CommandExecutionChildResult, CommandExecutionDiagnostic, CommandExecutionEffect,
+    CommandExecutionPreviewStale, CommandExecutionReconciliation, CommandExecutionRequestConflict,
     CommandExecutionResult, CommandExecutionResultKind, CommandExecutionState,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionStatus, CommandExecutionTransactionTarget,
@@ -345,6 +346,7 @@ pub enum ConsensusCommand {
     AdmitCommandExecution {
         execution: Box<CommandExecution>,
         mutation_domains: BTreeSet<DomainName>,
+        policy: CommandExecutionAdmissionPolicy,
     },
     AcquireCommandDomainMutation {
         reference: nervix_models::CommandExecutionReference,
@@ -359,9 +361,9 @@ pub enum ConsensusCommand {
         at: nervix_models::Timestamp,
         result: Box<CommandExecutionResult>,
     },
-    ExpireCommandExecutions {
+    ReclaimCommandExecutions {
         finished_before: nervix_models::Timestamp,
-        at: nervix_models::Timestamp,
+        retry_fence: nervix_models::Timestamp,
     },
     ReplaceDomainSchedule {
         inputs: Box<DomainPlanningInputs>,
@@ -547,7 +549,7 @@ impl std::fmt::Display for ConsensusCommand {
             Self::FinishCommandExecution { reference, .. } => {
                 write!(f, "finish-command-execution:{reference}")
             }
-            Self::ExpireCommandExecutions { .. } => f.write_str("expire-command-executions"),
+            Self::ReclaimCommandExecutions { .. } => f.write_str("reclaim-command-executions"),
             Self::ReplaceDomainSchedule {
                 inputs, schedule, ..
             } => {
@@ -1002,7 +1004,7 @@ struct StateMachineData {
     transactions: Records<String, ReplicatedTransaction>,
     transaction_commit_plans: transaction_plan::TransactionCommitPlanRecords,
     transaction_reports: TransactionReportRecords,
-    command_executions: Records<nervix_models::CommandExecutionReference, CommandExecution>,
+    command_executions: command_execution::CommandExecutionRecords,
 }
 
 impl StateMachineData {
@@ -2367,10 +2369,17 @@ impl Observer {
             .get(reference)
             .cloned()
     }
-    pub async fn current_command_executions(
+    pub async fn command_execution_reconciliation(
         &self,
-    ) -> BTreeMap<nervix_models::CommandExecutionReference, CommandExecution> {
-        (&self.inner.store.inner.state().command_executions).into()
+        finished_before: nervix_models::Timestamp,
+        retry_fence: nervix_models::Timestamp,
+    ) -> CommandExecutionReconciliation {
+        self.inner
+            .store
+            .inner
+            .state()
+            .command_executions
+            .reconciliation(finished_before, retry_fence)
     }
     pub async fn current_runtime_state(&self) -> ConsensusRuntimeState {
         let state = self.inner.store.inner.state();
@@ -2634,6 +2643,7 @@ impl Proposer {
         &self,
         execution: CommandExecution,
         mutation_domains: BTreeSet<DomainName>,
+        policy: CommandExecutionAdmissionPolicy,
     ) -> Result<CommandExecution, Report<ConsensusError>> {
         let reference = execution.reference.clone();
         let response = self
@@ -2641,6 +2651,7 @@ impl Proposer {
             .client_write(ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(execution),
                 mutation_domains,
+                policy,
             })
             .await?;
         match response.data {
@@ -2719,15 +2730,15 @@ impl Proposer {
         }
     }
 
-    pub async fn expire_command_executions(
+    pub async fn reclaim_command_executions(
         &self,
         finished_before: nervix_models::Timestamp,
-        at: nervix_models::Timestamp,
+        retry_fence: nervix_models::Timestamp,
     ) -> Result<(), Report<ConsensusError>> {
         self.inner
-            .client_write(ConsensusCommand::ExpireCommandExecutions {
+            .client_write(ConsensusCommand::ReclaimCommandExecutions {
                 finished_before,
-                at,
+                retry_fence,
             })
             .await
             .map(|_| ())
@@ -4369,15 +4380,26 @@ fn apply_consensus_command_at(
         ConsensusCommand::AdmitCommandExecution {
             execution,
             mutation_domains,
+            policy,
         } => {
             if let Some(existing) = state.command_executions.get(&execution.reference) {
+                if existing.is_expired() {
+                    return AppliedConsensusCommand::conflict(format!(
+                        "command execution reference '{}' has expired",
+                        execution.reference,
+                    ));
+                }
                 if !existing.same_request(execution) {
                     let conflict = existing
                         .request_conflict(
-                            &execution.owner,
-                            execution.domain.as_ref(),
-                            execution.expected_transaction_position,
-                            execution.request_digest,
+                            execution
+                                .owner()
+                                .verified("a proposed command execution is applying"),
+                            execution.domain(),
+                            execution.expected_transaction_position(),
+                            execution
+                                .request_digest()
+                                .verified("a proposed command execution is applying"),
                         )
                         .unwrap_or(CommandExecutionRequestConflict::Position);
                     return AppliedConsensusCommand::conflict(format!(
@@ -4386,6 +4408,15 @@ fn apply_consensus_command_at(
                     ));
                 }
             } else {
+                if let Err(reason) = state
+                    .command_executions
+                    .validate_admission(&execution.reference, policy)
+                {
+                    return AppliedConsensusCommand::conflict(format!(
+                        "command execution reference '{}' {reason}",
+                        execution.reference,
+                    ));
+                }
                 let owner = DomainMutationOwner::command(execution.reference.clone());
                 let admitted = match admit_domain_mutations(state, mutation_domains, &owner) {
                     Ok(admitted) => admitted,
@@ -4395,9 +4426,7 @@ fn apply_consensus_command_at(
                 for (domain, lease) in admitted {
                     execution.bind_domain_mutation(domain, lease);
                 }
-                state
-                    .command_executions
-                    .insert(execution.reference.clone(), execution);
+                state.command_executions.insert_admitted(execution, policy);
             }
         }
         ConsensusCommand::AcquireCommandDomainMutation {
@@ -4411,13 +4440,15 @@ fn apply_consensus_command_at(
                     "command execution reference '{reference}' is unknown"
                 ));
             };
-            if &execution.owner != owner || execution.request_digest != *request_digest {
+            if execution.owner() != Some(owner)
+                || execution.request_digest() != Some(*request_digest)
+            {
                 return AppliedConsensusCommand::conflict(format!(
                     "command execution reference '{reference}' is bound to a different owner or \
                      request"
                 ));
             }
-            if !matches!(execution.state, CommandExecutionState::Applying) {
+            if !execution.is_applying() {
                 return AppliedConsensusCommand::conflict(format!(
                     "command execution reference '{reference}' is no longer applying"
                 ));
@@ -4433,9 +4464,7 @@ fn apply_consensus_command_at(
                     Err(reason) => return AppliedConsensusCommand::conflict(reason.to_string()),
                 };
                 execution.bind_domain_mutation(domain.clone(), lease);
-                state
-                    .command_executions
-                    .insert(reference.clone(), execution);
+                state.command_executions.replace(execution);
             }
         }
         ConsensusCommand::FinishCommandExecution {
@@ -4449,24 +4478,21 @@ fn apply_consensus_command_at(
                 Some(log_id) => log_id.index,
                 None => 0,
             };
-            let Some(mut execution) = state.command_executions.get(reference).cloned() else {
+            let Some(execution) = state.command_executions.get(reference).cloned() else {
                 return AppliedConsensusCommand::conflict(format!(
                     "command execution reference '{reference}' is unknown"
                 ));
             };
-            if &execution.owner != owner || execution.request_digest != *request_digest {
+            if execution.owner() != Some(owner)
+                || execution.request_digest() != Some(*request_digest)
+            {
                 return AppliedConsensusCommand::conflict(format!(
                     "command execution reference '{reference}' is bound to a different owner or \
                      request"
                 ));
             }
             match &execution.state {
-                CommandExecutionState::Applying => {
-                    execution.state = CommandExecutionState::Finished {
-                        outcome_revision,
-                        finished_at: *at,
-                        result: result.clone(),
-                    };
+                CommandExecutionState::Applying { .. } => {
                     for (domain, lease) in execution.domain_mutations() {
                         if let Err(reason) = validate_domain_mutation(state, domain, Some(lease)) {
                             return AppliedConsensusCommand::conflict(reason.to_string());
@@ -4477,9 +4503,10 @@ fn apply_consensus_command_at(
                             "every command mutation lease was validated against this same state",
                         );
                     }
-                    state
-                        .command_executions
-                        .insert(reference.clone(), execution);
+                    let execution = execution
+                        .into_finished(outcome_revision, *at, result.clone())
+                        .verified("the applying branch above established the execution state");
+                    state.command_executions.replace(execution);
                 }
                 CommandExecutionState::Finished {
                     result: existing, ..
@@ -4490,29 +4517,20 @@ fn apply_consensus_command_at(
                          terminal result"
                     ));
                 }
-                CommandExecutionState::Expired { .. } => {
+                CommandExecutionState::Expired => {
                     return AppliedConsensusCommand::conflict(format!(
                         "command execution reference '{reference}' has expired"
                     ));
                 }
             }
         }
-        ConsensusCommand::ExpireCommandExecutions {
+        ConsensusCommand::ReclaimCommandExecutions {
             finished_before,
-            at,
+            retry_fence,
         } => {
-            let references = state.command_executions.keys().cloned().collect::<Vec<_>>();
-            for reference in references {
-                let execution = state
-                    .command_executions
-                    .get_mut(&reference)
-                    .verified("the reference came from this same record set");
-                if let CommandExecutionState::Finished { finished_at, .. } = &execution.state
-                    && *finished_at <= *finished_before
-                {
-                    execution.state = CommandExecutionState::Expired { expired_at: *at };
-                }
-            }
+            state
+                .command_executions
+                .reclaim(*finished_before, *retry_fence);
         }
         ConsensusCommand::ReplaceDomainSchedule {
             inputs,
@@ -5782,15 +5800,16 @@ mod tests {
 
     use super::{
         AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
-        CommandExecutionEffect, CommandExecutionResult, CommandExecutionResultKind,
-        CommandExecutionState, ConsensusCommand, ConsensusResponse, FjallLogReader, FjallStore,
-        GossipNode, GossipState, LeaderTenure, MembershipMutation, MembershipSnapshot,
-        ProtocolOriginError, ResourceRecords, StateMachineChanges, StateMachineData,
-        TransactionApplicationOutcome, TransactionCommandResult, TransactionCommitAdmissionFailure,
-        TransactionMutationError, TransactionOutcome, TransactionStatement,
-        TransactionStatementRequest, TransactionStepEffect, TransactionStepResult, TypeConfig,
-        UserCredentials, apply_consensus_command, apply_consensus_command_at,
-        apply_transaction_step_effect, io_error, storage_decode, validate_protocol_origin,
+        CommandExecutionAdmissionPolicy, CommandExecutionEffect, CommandExecutionResult,
+        CommandExecutionResultKind, CommandExecutionState, ConsensusCommand, ConsensusResponse,
+        FjallLogReader, FjallStore, GossipNode, GossipState, LeaderTenure, MembershipMutation,
+        MembershipSnapshot, ProtocolOriginError, ResourceRecords, StateMachineChanges,
+        StateMachineData, TransactionApplicationOutcome, TransactionCommandResult,
+        TransactionCommitAdmissionFailure, TransactionMutationError, TransactionOutcome,
+        TransactionStatement, TransactionStatementRequest, TransactionStepEffect,
+        TransactionStepResult, TypeConfig, UserCredentials, apply_consensus_command,
+        apply_consensus_command_at, apply_transaction_step_effect, io_error, storage_decode,
+        validate_protocol_origin,
     };
     use crate::{
         ClusterNodeName, ConsensusError, LogIdOf, ReplicatedTransaction, TransactionActivity,
@@ -5807,6 +5826,21 @@ mod tests {
 
     fn transaction_activity(at: i64) -> TransactionActivity {
         TransactionActivity::from_timeout(Timestamp::from_unix_nanos(at), Duration::from_nanos(10))
+    }
+
+    fn command_reference(index: u64) -> nervix_models::CommandExecutionReference {
+        nervix_models::CommandExecutionReference::parse(format!(
+            "018bcfe5-6800-7000-8000-{index:012x}"
+        ))
+        .assured("the test command reference is a UUIDv7 value")
+    }
+
+    fn command_policy(capacity: usize) -> CommandExecutionAdmissionPolicy {
+        CommandExecutionAdmissionPolicy::at(
+            Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
+            Duration::from_secs(60),
+            capacity,
+        )
     }
 
     #[test]
@@ -6845,6 +6879,29 @@ mod tests {
 
     #[test]
     fn command_execution_identity_retains_one_terminal_outcome() {
+        fn execution(
+            reference: &nervix_models::CommandExecutionReference,
+            owner: UserName,
+            domain: DomainName,
+            position: Option<TransactionPosition>,
+            request_digest: [u8; 32],
+        ) -> CommandExecution {
+            CommandExecution::applying_at_position(
+                reference.clone(),
+                owner,
+                Some(domain),
+                position,
+                request_digest,
+                Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
+                CommandExecutionEffect::CreateUser {
+                    if_not_exists: false,
+                    name: UserName::parse("created_user")
+                        .assured("the created test user is an identifier-shaped literal"),
+                    password_hash: "argon2-hash".to_string(),
+                },
+            )
+        }
+
         fn assert_identity_conflict(
             state: &mut StateMachineData,
             execution: CommandExecution,
@@ -6856,6 +6913,7 @@ mod tests {
                 &ConsensusCommand::AdmitCommandExecution {
                     execution: Box::new(execution),
                     mutation_domains: BTreeSet::new(),
+                    policy: command_policy(10),
                 },
             );
             let expected =
@@ -6866,52 +6924,54 @@ mod tests {
             ));
         }
 
-        let reference = nervix_models::CommandExecutionReference::parse("request-1")
-            .assured("the test reference contains only admitted characters");
+        let reference = command_reference(1);
         let owner =
             UserName::parse("app_user").assured("the test owner is an identifier-shaped literal");
-        let execution = CommandExecution::applying(
-            reference.clone(),
-            owner.clone(),
-            Some(domain("tenant")),
-            [7; 32],
-            Timestamp::from_unix_nanos(1),
-            CommandExecutionEffect::CreateUser {
-                if_not_exists: false,
-                name: UserName::parse("created_user")
-                    .assured("the created test user is an identifier-shaped literal"),
-                password_hash: "argon2-hash".to_string(),
-            },
-        );
+        let original = execution(&reference, owner.clone(), domain("tenant"), None, [7; 32]);
         let mut state = StateMachineData::default();
 
-        for admitted in [execution.clone(), execution.clone()] {
+        for admitted in [original.clone(), original.clone()] {
             let response = apply_consensus_command(
                 &mut state,
                 &ConsensusCommand::AdmitCommandExecution {
                     execution: Box::new(admitted),
                     mutation_domains: BTreeSet::new(),
+                    policy: command_policy(10),
                 },
             );
             assert!(matches!(response.response, ConsensusResponse::Applied));
         }
         assert_eq!(state.command_executions.len(), 1);
 
-        let mut conflicting = execution.clone();
-        conflicting.request_digest = [8; 32];
+        let conflicting = execution(&reference, owner.clone(), domain("tenant"), None, [8; 32]);
         assert_identity_conflict(&mut state, conflicting, "content");
 
-        let mut conflicting = execution.clone();
-        conflicting.domain = Some(domain("other_tenant"));
+        let conflicting = execution(
+            &reference,
+            owner.clone(),
+            domain("other_tenant"),
+            None,
+            [7; 32],
+        );
         assert_identity_conflict(&mut state, conflicting, "domain");
 
-        let mut conflicting = execution.clone();
-        conflicting.owner = UserName::parse("other_user")
-            .assured("the conflicting test owner is an identifier-shaped literal");
+        let conflicting = execution(
+            &reference,
+            UserName::parse("other_user")
+                .assured("the conflicting test owner is an identifier-shaped literal"),
+            domain("tenant"),
+            None,
+            [7; 32],
+        );
         assert_identity_conflict(&mut state, conflicting, "owner");
 
-        let mut conflicting = execution.clone();
-        conflicting.expected_transaction_position = Some(TransactionPosition::new(1));
+        let conflicting = execution(
+            &reference,
+            owner.clone(),
+            domain("tenant"),
+            Some(TransactionPosition::new(1)),
+            [7; 32],
+        );
         assert_identity_conflict(&mut state, conflicting, "position");
 
         let result = CommandExecutionResult {
@@ -6932,7 +6992,7 @@ mod tests {
                     reference: reference.clone(),
                     owner: owner.clone(),
                     request_digest: [7; 32],
-                    at: Timestamp::from_unix_nanos(2),
+                    at: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
                     result: Box::new(terminal),
                 },
             );
@@ -6946,43 +7006,69 @@ mod tests {
                 .state,
             CommandExecutionState::Finished { .. }
         ));
+        assert!(
+            state
+                .command_executions
+                .get(&reference)
+                .verified("the execution was finished above")
+                .effect()
+                .is_none(),
+            "finished command state must release its executable effect"
+        );
+
+        let retry = apply_consensus_command(
+            &mut state,
+            &ConsensusCommand::AdmitCommandExecution {
+                execution: Box::new(original.clone()),
+                mutation_domains: BTreeSet::new(),
+                policy: command_policy(10),
+            },
+        );
+        assert_eq!(retry.response, ConsensusResponse::Applied);
+        state
+            .transaction_reports
+            .insert(crate::transaction_report::test_report_archive(
+                "independent-report",
+                &domain("tenant"),
+                1,
+            ))
+            .assured("the test report archive is internally consistent");
+        let retained_reports = state.transaction_reports.clone();
 
         apply_consensus_command(
             &mut state,
-            &ConsensusCommand::ExpireCommandExecutions {
-                finished_before: Timestamp::from_unix_nanos(2),
-                at: Timestamp::from_unix_nanos(3),
+            &ConsensusCommand::ReclaimCommandExecutions {
+                finished_before: Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
+                retry_fence: Timestamp::from_unix_nanos(1_700_000_020_000_000_000),
             },
         );
+        assert!(state.command_executions.get(&reference).is_none());
+        assert_eq!(state.transaction_reports, retained_reports);
         let response = apply_consensus_command(
             &mut state,
             &ConsensusCommand::AdmitCommandExecution {
-                execution: Box::new(execution),
+                execution: Box::new(original),
                 mutation_domains: BTreeSet::new(),
+                policy: command_policy(10),
             },
         );
-        assert!(matches!(response.response, ConsensusResponse::Applied));
         assert!(matches!(
-            &state
-                .command_executions
-                .get(&reference)
-                .verified("expiry retains the admitted execution identity")
-                .state,
-            CommandExecutionState::Expired { .. }
+            response.response,
+            ConsensusResponse::Conflict(reason) if reason.contains("has expired")
         ));
+        assert!(state.command_executions.get(&reference).is_none());
     }
 
     #[test]
     fn domain_mutation_ownership_joins_conflicts_releases_and_fences() {
         fn execution(
-            reference: &str,
+            reference: u64,
             owner: &UserName,
             domain: &DomainName,
             request_digest: [u8; 32],
         ) -> CommandExecution {
             CommandExecution::applying(
-                nervix_models::CommandExecutionReference::parse(reference)
-                    .assured("the test command reference is an accepted literal"),
+                command_reference(reference),
                 owner.clone(),
                 Some(domain.clone()),
                 request_digest,
@@ -6999,8 +7085,8 @@ mod tests {
         let tenant = domain("tenant");
         let independent = domain("independent");
         let owner = UserName::parse("app_user").assured("the test owner is an accepted literal");
-        let first = execution("request-1", &owner, &tenant, [1; 32]);
-        let second = execution("request-2", &owner, &tenant, [2; 32]);
+        let first = execution(1, &owner, &tenant, [1; 32]);
+        let second = execution(2, &owner, &tenant, [2; 32]);
         let mutation_domains = BTreeSet::from([tenant.clone()]);
         let mut state = StateMachineData {
             last_applied_log_id: Some(LogIdOf::new(committed_leader(1), 11)),
@@ -7013,6 +7099,7 @@ mod tests {
                 &ConsensusCommand::AdmitCommandExecution {
                     execution: Box::new(admitted),
                     mutation_domains: mutation_domains.clone(),
+                    policy: command_policy(10),
                 },
             );
             assert_eq!(response.response, ConsensusResponse::Applied);
@@ -7031,12 +7118,13 @@ mod tests {
             &ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(second.clone()),
                 mutation_domains: mutation_domains.clone(),
+                policy: command_policy(10),
             },
         );
         assert!(matches!(
             conflict.response,
             ConsensusResponse::Conflict(reason)
-                if reason.contains("mutation is owned by command 'request-1'")
+                if reason.contains(&format!("mutation is owned by command '{}'", first.reference))
         ));
         assert!(!state.command_executions.contains_key(&second.reference));
 
@@ -7076,12 +7164,13 @@ mod tests {
             ConsensusResponse::Conflict(_)
         ));
 
-        let dynamic = execution("request-drain", &owner, &tenant, [3; 32]);
+        let dynamic = execution(3, &owner, &tenant, [3; 32]);
         let admitted_dynamic = apply_consensus_command(
             &mut state,
             &ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(dynamic.clone()),
                 mutation_domains: BTreeSet::new(),
+                policy: command_policy(10),
             },
         );
         assert_eq!(admitted_dynamic.response, ConsensusResponse::Applied);
@@ -7155,6 +7244,7 @@ mod tests {
             &ConsensusCommand::AdmitCommandExecution {
                 execution: Box::new(second.clone()),
                 mutation_domains,
+                policy: command_policy(10),
             },
         );
         assert_eq!(acquired.response, ConsensusResponse::Applied);

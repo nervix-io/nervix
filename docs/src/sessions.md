@@ -40,9 +40,10 @@ Sessions are runtime-facing protocol interactions, not part of the persisted nam
 
 Persistent administrative commands carry a stable execution reference. The cluster binds that
 reference to the authenticated owner, selected domain, and semantic command, continues admitted
-work after the session disconnects, and retains one terminal result for at least 15 minutes. The
-CLI, web console, and Rust client reuse the reference through redirects and reconnects. Reuse for
-changed content fails. While a long command waits, transport keepalives, server events, and
+work after the session disconnects, and retains one terminal result for the command retry
+validity, 15 minutes by default. The reference is a UUIDv7 whose creation time bounds how long it
+may be retried. The CLI, web console, and Rust client reuse the reference through redirects and
+reconnects. Reuse for changed content fails. While a long command waits, transport keepalives, server events, and
 subscription delivery continue independently. See [Command Completion](command-completion.md).
 
 ## Transaction Binding

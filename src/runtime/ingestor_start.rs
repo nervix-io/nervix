@@ -706,19 +706,27 @@ mod tests {
 
         result.expect("fixed mqtt client_id conflict should be reported by ingestor state");
 
-        let describe = runtime
-            .describe_local_ingestor(&domain, &ingestor)
-            .expect("describe should succeed for scheduled ingestor");
-        assert!(describe.running);
-        assert!(
-            describe
-                .transient_error
-                .as_deref()
-                .is_some_and(|error| error
-                    .contains("MQTT client_id 'fixed-client' is shared by 2 instances")),
-            "describe should expose mqtt client_id conflict, got {:?}",
-            describe.transient_error
-        );
+        // Each instance reports the conflict when its source loop first tries to resume, so the
+        // status is read until it shows it, within a bound generous enough for a loaded machine.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let describe = runtime
+                .describe_local_ingestor(&domain, &ingestor)
+                .expect("describe should succeed for scheduled ingestor");
+            assert!(describe.running);
+            let reported = describe.transient_error.as_deref().is_some_and(|error| {
+                error.contains("MQTT client_id 'fixed-client' is shared by 2 instances")
+            });
+            if reported {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "describe should expose mqtt client_id conflict, got {:?}",
+                describe.transient_error
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]

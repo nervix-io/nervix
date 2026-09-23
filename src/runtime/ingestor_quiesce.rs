@@ -361,6 +361,7 @@ pub(in crate::runtime) enum BufferedIngestMetadata {
 
 impl BufferedIngestMetadata {
     /// The metadata of a buffered message whose source carries no transport headers.
+    #[cfg(test)]
     pub(in crate::runtime) fn without_headers() -> Self {
         Self::Headers(RetainedIngestHeaders::none())
     }

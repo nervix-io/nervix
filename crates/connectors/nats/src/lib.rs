@@ -1,9 +1,10 @@
-//! NATS sink connector.
+//! NATS source and sink connector.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The NATS connection a client configures, its reconnect delay, core and JetStream
-//!   publication, header mapping, and per-record rejection classification.
+//! - **Owns.** The NATS connection a client configures, its reconnect delay, the queue
+//!   subscription a source reads through, core and JetStream publication, header mapping
+//!   in both directions, and per-record rejection classification.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
 //!   `async-nats`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -11,6 +12,8 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
+
+mod source;
 
 use std::{
     collections::VecDeque,
@@ -43,6 +46,9 @@ use nervix_connector::{
     SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, SubjectName, Timestamp};
+pub use source::{
+    NatsMessageHeaders, NatsSource, NatsSourceError, NatsSourceMessage, NatsSourcePlan,
+};
 use tokio::time::{Instant, sleep};
 
 const NATS: &str = "nats";
