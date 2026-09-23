@@ -8,3 +8,4 @@ pub(crate) mod phase_deadline;
 pub(crate) mod scenario_phase;
 pub(crate) mod server_process;
 pub(crate) mod status_request;
+pub(crate) mod suite_watchdog;
