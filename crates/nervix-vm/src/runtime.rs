@@ -1773,8 +1773,11 @@ fn execute_coalesce(
 }
 
 /// A conditional selects, for each row, the value of the first arm whose mask holds, and the
-/// `otherwise` value when none does. Masks are columns; values are operands, so a literal arm is
-/// zipped in as one scalar.
+/// `otherwise` value when none does. Masks are columns. Two literal arms are zipped as scalars,
+/// which Arrow answers in one pass over the mask; a literal arm beside a column is read as the
+/// column repeating it, built once per register, because Arrow copies a scalar row by row into
+/// every gap of the mask, and a mask that alternates has more gaps than the arm's kernel has
+/// rows.
 fn execute_select(
     registers: &RegisterBank,
     arms: &[SelectArm],
@@ -1783,11 +1786,19 @@ fn execute_select(
     let mut selected: Option<ArrayRef> = None;
     for arm in arms.iter().rev() {
         let mask = registers.column::<BooleanArray>(arm.mask)?;
-        let value = registers.any_operand(arm.value)?;
         let zipped = match &selected {
-            Some(fallback) => zip(mask, &value, fallback),
-            None => {
+            Some(fallback) => {
+                let value = registers.read_array(arm.value)?.into_array_ref();
+                zip(mask, &value, fallback)
+            }
+            None if registers.is_scalar(arm.value) && registers.is_scalar(otherwise) => {
+                let value = registers.any_operand(arm.value)?;
                 let fallback = registers.any_operand(otherwise)?;
+                zip(mask, &value, &fallback)
+            }
+            None => {
+                let value = registers.read_array(arm.value)?.into_array_ref();
+                let fallback = registers.read_array(otherwise)?.into_array_ref();
                 zip(mask, &value, &fallback)
             }
         };
