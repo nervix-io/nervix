@@ -60,7 +60,7 @@ pub async fn open_redis_command_pool(
     let Some(addr) = optional_client_config_value(config, "addr") else {
         return Err(Report::new(RedisClientError::MissingConfig { key: "addr" }));
     };
-    let client = client_from_config(addr, config)?;
+    let client = redis_client(addr, config)?;
     bb8::Pool::builder()
         .max_size(bounds.maximum().get())
         .min_idle(Some(bounds.minimum()))
@@ -73,7 +73,12 @@ pub async fn open_redis_command_pool(
         })
 }
 
-fn client_from_config(
+/// The Redis client one named client's configuration declares, with the TLS material a
+/// `rediss://` address names.
+///
+/// The command pool draws its connections from it, and a Pub/Sub source opens its dedicated
+/// subscription connection from the same client.
+pub fn redis_client(
     addr: &str,
     config: &[ClientConfigEntry],
 ) -> Result<RedisClient, Report<RedisClientError>> {
