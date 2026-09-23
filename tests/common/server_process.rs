@@ -47,11 +47,12 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use super::{
     cluster::{
         InterconnectTestCa, TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestCertificateValidity,
-        TestSession, next_port, open_raw_session, publish_http_uri_with_headers,
-        release_test_ports, run_command_via_client, test_basic_authorization,
+        TestSession, open_raw_session, publish_http_uri_with_headers, run_command_via_client,
+        test_basic_authorization,
     },
     node_liveness::{LastReadinessOutcome, ReadinessProbeOutcome},
     phase_deadline::PhaseDeadline,
+    port_pool::{next_port, release_test_ports},
     status_request::{
         STATUS_REQUEST_TIMEOUT, STATUS_REQUESTS_PER_STARTUP, StatusEndpoint, StatusTransport,
     },
