@@ -128,7 +128,6 @@ def main() -> int:
         runtime_root / "ingestors/kafka.rs",
         runtime_root / "ingestors/mqtt.rs",
         runtime_root / "ingestors/nats.rs",
-        runtime_root / "ingestors/rabbitmq.rs",
         runtime_root / "ingestors/redis_pubsub.rs",
         runtime_root / "ingestors/source.rs",
         runtime_root / "ingestors/sqs.rs",
