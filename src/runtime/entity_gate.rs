@@ -210,7 +210,7 @@ impl EntityGateOperation {
 pub(crate) enum EmitterPublishingDrainState {
     AwaitingConfirmation,
     RetryingInfrastructure,
-    RetryingIcebergCommit,
+    RetryingCommit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1279,7 +1279,7 @@ impl Runtime {
         let retry = self.inner.emitter_retry_statuses.get(key)?;
         let state = match retry.kind {
             EmitterRetryKind::Infrastructure => EmitterPublishingDrainState::RetryingInfrastructure,
-            EmitterRetryKind::IcebergCommit => EmitterPublishingDrainState::RetryingIcebergCommit,
+            EmitterRetryKind::Commit => EmitterPublishingDrainState::RetryingCommit,
         };
         Some(EmitterPublishingDrainStatus {
             emitter: EmitterName::from(key.identifier()),
@@ -1413,9 +1413,7 @@ impl Runtime {
                 EmitterRetryKind::Infrastructure => {
                     EmitterPublishingDrainState::RetryingInfrastructure
                 }
-                EmitterRetryKind::IcebergCommit => {
-                    EmitterPublishingDrainState::RetryingIcebergCommit
-                }
+                EmitterRetryKind::Commit => EmitterPublishingDrainState::RetryingCommit,
             };
             emitter_publishing.push(EmitterPublishingDrainStatus {
                 emitter: EmitterName::from(key.identifier()),
@@ -1474,12 +1472,12 @@ mod tests {
         let domain = domain("default");
         let confirming = named::<EmitterName>("confirming");
         let retrying = named::<EmitterName>("retrying");
-        let iceberg = named::<EmitterName>("iceberg");
+        let committing = named::<EmitterName>("held_for_commit");
 
         for (emitter, pending_messages) in [
             (&confirming, 3_usize),
             (&retrying, 2_usize),
-            (&iceberg, 5_usize),
+            (&committing, 5_usize),
         ] {
             runtime.inner.emitter_buffers.insert(
                 DomainNodeRef::node_in(domain.clone(), ModelKind::Emitter, emitter.clone()),
@@ -1494,9 +1492,9 @@ mod tests {
             "sensitive infrastructure detail that drain status must not expose",
             Duration::from_secs(2),
         );
-        runtime.record_iceberg_commit_failure_with_backoff(
+        runtime.record_commit_failure_with_backoff(
             &domain,
-            &iceberg,
+            &committing,
             "sensitive catalog detail that drain status must not expose",
             Duration::from_secs(3),
         );
@@ -1514,10 +1512,10 @@ mod tests {
                 retry_wait: None,
             }
         );
-        assert_eq!(status.emitter_publishing[1].emitter, iceberg);
+        assert_eq!(status.emitter_publishing[1].emitter, committing);
         assert_eq!(
             status.emitter_publishing[1].state,
-            EmitterPublishingDrainState::RetryingIcebergCommit
+            EmitterPublishingDrainState::RetryingCommit
         );
         assert_eq!(
             status.emitter_publishing[1].retry_backoff,

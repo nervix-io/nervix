@@ -8,9 +8,9 @@
 use error_stack::{AttachmentKind, FrameKind, Report, ResultExt as _};
 use nervix_connector::{
     MappedSinkRows, PerRecordOutcome, RecordSink, RowSink, SinkAcknowledgementServices,
-    SinkAcknowledgements, SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost,
-    SinkPublishError, SinkRecord, SinkRecordPosition, SinkRetryDelay, SinkStagingDirectory,
-    SinkStartError, SinkTransientErrorStatus,
+    SinkAcknowledgements, SinkCommitReport, SinkDeadline, SinkEventReporter,
+    SinkGeneralErrorHandler, SinkHost, SinkPublishError, SinkRecord, SinkRecordPosition,
+    SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkTransientErrorStatus,
     physical_time::{PhysicalDeadline, PhysicalDeadlineCapability, actual_utc_now},
 };
 use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
@@ -41,7 +41,7 @@ mod iceberg;
 mod mapped_values;
 mod pooled_clients;
 
-use iceberg::{IcebergEmitter, IcebergEmitterError, IcebergEmitterInit, IcebergEmitterResult};
+use iceberg::{IcebergCommitPolicy, IcebergSink, IcebergSinkConfig};
 use mapped_values::{MappedValuesProjection, MappedValuesProjectionInit};
 use pooled_clients::PooledSinkClient;
 
@@ -49,37 +49,39 @@ const RETRY_ACK_ALIVE_EACH: Duration = Duration::from_millis(100);
 
 pub(in crate::runtime) struct EmitterTask;
 
+/// What one emitter still holds: the batches its own buffer collected, and the rows a sink that
+/// publishes on its commit boundary staged out of that buffer.
 #[derive(Debug)]
 struct EmitterBufferedMessages {
     reported: Arc<AtomicUsize>,
-    generic: AtomicUsize,
-    iceberg: AtomicUsize,
+    buffered: AtomicUsize,
+    staged: AtomicUsize,
 }
 
 impl EmitterBufferedMessages {
     fn new(reported: Arc<AtomicUsize>) -> Self {
         Self {
             reported,
-            generic: AtomicUsize::new(0),
-            iceberg: AtomicUsize::new(0),
+            buffered: AtomicUsize::new(0),
+            staged: AtomicUsize::new(0),
         }
     }
 
-    fn set_generic(&self, messages: usize) {
-        self.generic.store(messages, Ordering::Release);
+    fn set_buffered(&self, messages: usize) {
+        self.buffered.store(messages, Ordering::Release);
         self.report_total();
     }
 
-    fn set_iceberg(&self, messages: usize) {
-        self.iceberg.store(messages, Ordering::Release);
+    fn set_staged(&self, messages: usize) {
+        self.staged.store(messages, Ordering::Release);
         self.report_total();
     }
 
     fn report_total(&self) {
         self.reported.store(
-            self.generic
+            self.buffered
                 .load(Ordering::Acquire)
-                .checked_add(self.iceberg.load(Ordering::Acquire))
+                .checked_add(self.staged.load(Ordering::Acquire))
                 .assured("both counts total messages this node already holds in memory"),
             Ordering::Release,
         );
@@ -316,7 +318,11 @@ impl EmitterPublishBatch {
         self.delivered.get(row).copied().unwrap_or(false)
     }
 
-    fn mark_delivered(&mut self, row: usize) -> EmitterRuntimeResult<()> {
+    fn mark_delivered(
+        &mut self,
+        row: usize,
+        acknowledgements: DeliveredAcknowledgements,
+    ) -> EmitterRuntimeResult<()> {
         let delivered_rows = self.delivered.len();
         let delivered = self.delivered.get_mut(row).ok_or_else(|| {
             Report::new(EmitterRuntimeError::DeliveryRowOutOfBounds {
@@ -332,7 +338,10 @@ impl EmitterPublishBatch {
                     row_count: ack_rows,
                 })
             })?;
-            acks.ack_success();
+            match acknowledgements {
+                DeliveredAcknowledgements::Host => acks.ack_success(),
+                DeliveredAcknowledgements::Sink => {}
+            }
             *delivered = true;
         }
         Ok(())
@@ -364,6 +373,54 @@ impl EmitterPublishBatch {
             .filter(|row| !self.delivered.get(*row).copied().unwrap_or(false))
             .collect()
     }
+
+    /// The acknowledgements of `rows`, for a sink that takes them with the write.
+    fn acks_for_rows(&self, rows: &[usize]) -> AckSet {
+        AckSet::merged(
+            rows.iter()
+                .filter_map(|row| self.batch.acks.get(*row).cloned()),
+        )
+    }
+}
+
+/// Why the host is asking a sink to publish what it staged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SinkCommitReason {
+    /// Only the sink's own commit deadline releases what it staged.
+    Cadence,
+    /// A retry publishes everything staged, and a shutdown that cuts its backoff short leaves the
+    /// rest for the attempt after it.
+    Retry,
+    /// A drain publishes everything staged, and a shutdown that cuts its backoff short fails it.
+    Drain,
+}
+
+impl SinkCommitReason {
+    fn forces_commit(self) -> bool {
+        match self {
+            Self::Cadence => false,
+            Self::Retry | Self::Drain => true,
+        }
+    }
+
+    /// This reason once an attempt has already started committing, which every further attempt
+    /// finishes whatever the cadence says.
+    fn forced(self) -> Self {
+        match self {
+            Self::Cadence => Self::Retry,
+            Self::Retry => Self::Retry,
+            Self::Drain => Self::Drain,
+        }
+    }
+}
+
+/// Who resolves the acknowledgements of the rows one write delivered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveredAcknowledgements {
+    /// The host resolves them as the write returns.
+    Host,
+    /// The sink took them with the rows and resolves them when its own commit succeeds.
+    Sink,
 }
 
 #[derive(Debug)]
@@ -626,7 +683,13 @@ impl EmitterBatchBuffer {
 
     fn update_buffered_messages(&self) {
         self.buffered_messages
-            .set_generic(self.pending_messages.arch_into());
+            .set_buffered(self.pending_messages.arch_into());
+    }
+
+    /// Publishes what a sink that commits separately still holds, which a drain reads together
+    /// with this buffer's own pending batches.
+    fn report_staged_messages(&self, messages: u64) {
+        self.buffered_messages.set_staged(messages.arch_into());
     }
 
     fn reconfigure(
@@ -775,7 +838,7 @@ impl EmitterBatchBuffer {
 impl Drop for EmitterBatchBuffer {
     fn drop(&mut self) {
         self.pending_acks().no_ack("emitter dropped buffered batch");
-        self.buffered_messages.set_generic(0);
+        self.buffered_messages.set_buffered(0);
     }
 }
 
@@ -1115,24 +1178,6 @@ fn compile_sql_values_program(
     })
 }
 
-fn compile_iceberg_values_program(
-    domain: &DomainName,
-    emitter: &EmitterName,
-    values: &[IcebergValueMapping],
-    input_schema: StdArc<arrow_schema::Schema>,
-    udfs: Option<&UdfExecutor>,
-) -> Result<CompiledSqlValuesProgram, RuntimeError> {
-    compile_sql_values_program(
-        "Iceberg",
-        "iceberg",
-        domain,
-        emitter,
-        values,
-        input_schema,
-        udfs,
-    )
-}
-
 fn mapped_column_names(mappings: &[ClickHouseValueMapping]) -> Vec<String> {
     mappings
         .iter()
@@ -1217,14 +1262,14 @@ fn emitter_retry_delay(
         .max(emitter_minimum_retry_delay(error))
 }
 
-async fn await_emitter_confirmation<F>(acks: &AckSet, future: F) -> F::Output
+async fn await_emitter_confirmation<F>(acks: &impl AcknowledgementKeepalive, future: F) -> F::Output
 where
     F: std::future::Future,
 {
     tokio::pin!(future);
     loop {
         tokio::task::consume_budget().await;
-        acks.ack_alive();
+        acks.keep_alive();
         tokio::select! {
             result = &mut future => return result,
             _ = sleep(REMOTE_ACK_ALIVE_INTERVAL) => {}
@@ -1315,6 +1360,32 @@ impl EmitterSinkContext {
         self.clock
             .snapshot()
             .change_context(EmitterRuntimeError::FlushTiming)
+    }
+
+    /// The commit cadence and maximum commit size a sink that publishes on its own commit
+    /// boundary was declared with, resolved here so the connector receives typed policy.
+    fn parse_commit_policy(
+        &self,
+        kind: &str,
+        commit_each: &str,
+        max_commit_size: &str,
+    ) -> EmitterRuntimeResult<IcebergCommitPolicy> {
+        let interval = Runtime::parse_runtime_node_duration_setting(
+            &self.domain,
+            kind,
+            &self.emitter,
+            "commit_each",
+            commit_each,
+        )
+        .map_err(|error| emitter_report(EmitterRuntimeError::InvalidSinkConfig, error))?;
+        let max_size = max_commit_size
+            .parse::<ubyte::ByteUnit>()
+            .map_err(|error| {
+                Report::new(EmitterRuntimeError::InvalidSinkConfig)
+                    .attach_printable(format!("max_commit_size '{max_commit_size}': {error}"))
+            })?
+            .as_u64();
+        Ok(IcebergCommitPolicy { interval, max_size })
     }
 
     fn parse_flush_policy(&self, kind: &str, policy: &FlushPolicy) -> Option<RuntimeFlushPolicy> {
@@ -1434,12 +1505,7 @@ impl SinkGeneralErrorHandler for EmitterSinkContext {
 enum SinkEmitter {
     Record(Box<dyn RecordSink>),
     Row(RowSinkEmitter),
-    /// Boxed because the Iceberg sink carries its catalog client, staging directory, mapped
-    /// schema, and both cadence timers, which would otherwise set the size of every sink variant.
-    Iceberg(Box<IcebergEmitter>),
-    Missing {
-        reason: String,
-    },
+    Missing { reason: String },
 }
 
 impl From<Box<dyn RecordSink>> for SinkEmitter {
@@ -1470,6 +1536,10 @@ impl RowSinkEmitter {
         context: &EmitterSinkContext,
         batches: &mut [EmitterPublishBatch],
     ) -> EmitterRuntimeResult<()> {
+        let acknowledgements = match self.sink.retains_acknowledgements() {
+            true => DeliveredAcknowledgements::Sink,
+            false => DeliveredAcknowledgements::Host,
+        };
         for batch_index in 0..batches.len() {
             tokio::task::consume_budget().await;
             let mut projected = {
@@ -1494,8 +1564,19 @@ impl RowSinkEmitter {
             if projected.is_empty() {
                 continue;
             }
-            let outcome = self.sink.publish(projected.rows()).await;
-            finish_record_sink_publish(context, batches, outcome).await?;
+            // A sink that resolves acknowledgements on its own commit boundary takes the ones its
+            // write carries, so the host stops owning them the moment the write accepts the rows.
+            let retained = match acknowledgements {
+                DeliveredAcknowledgements::Sink => {
+                    let batch = &batches[batch_index];
+                    Some(SinkAcknowledgements::new(
+                        batch.acks_for_rows(projected.selected_rows()),
+                    ))
+                }
+                DeliveredAcknowledgements::Host => None,
+            };
+            let outcome = self.sink.publish(projected.rows(retained)).await;
+            finish_record_sink_publish(context, batches, outcome, acknowledgements).await?;
         }
         Ok(())
     }
@@ -1504,12 +1585,10 @@ impl RowSinkEmitter {
 #[derive(Clone)]
 struct SinkEmitterRuntime {
     input_schema: Arc<CompiledSchema>,
-    buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
 struct SinkEmitterInit<'a> {
     plan: &'a EmitterStartPlan,
-    flush_policy: &'a FlushPolicy,
     context: &'a EmitterSinkContext,
     runtime: SinkEmitterRuntime,
 }
@@ -1531,14 +1610,10 @@ impl SinkEmitter {
     async fn new(init: SinkEmitterInit<'_>) -> Self {
         let SinkEmitterInit {
             plan,
-            flush_policy,
             context,
             runtime,
         } = init;
-        let SinkEmitterRuntime {
-            input_schema,
-            buffered_messages,
-        } = runtime;
+        let SinkEmitterRuntime { input_schema } = runtime;
         match &plan.sink {
             EmitterSinkPlan::Kafka(sink) => Self::from_record_sink_result(
                 "kafka",
@@ -1887,17 +1962,57 @@ impl SinkEmitter {
                     }
                 }
             }
-            EmitterSinkPlan::Iceberg(sink) => Self::from_iceberg_result(
-                context,
-                IcebergEmitter::new(IcebergEmitterInit {
-                    plan: sink,
+            EmitterSinkPlan::Iceberg(sink) => {
+                match Self::values_projection(
                     context,
-                    flush_policy,
-                    input_schema,
-                    buffered_messages,
-                })
-                .await,
-            ),
+                    MappedValuesProjectionInit {
+                        label: "Iceberg",
+                        namespace: "iceberg",
+                        domain: &context.domain,
+                        emitter: &context.emitter,
+                        values: &sink.values,
+                        input_schema: input_schema.arrow_schema(),
+                        udfs: context.udfs.as_ref(),
+                        // One commit reads every staged file back at once, so a staged write
+                        // carries the whole batch the host released to it.
+                        max_batch: None,
+                    },
+                ) {
+                    SinkEmitterResult::Missing { reason } => Self::Missing { reason },
+                    SinkEmitterResult::Ready(projection) => {
+                        let commit = match context.parse_commit_policy(
+                            "iceberg emitter",
+                            &sink.commit_each,
+                            &sink.max_commit_size,
+                        ) {
+                            Ok(commit) => commit,
+                            Err(error) => {
+                                return Self::missing_after_emitter_init_error(
+                                    "iceberg", context, &error,
+                                );
+                            }
+                        };
+                        let mapped_schema = projection.mapped_schema().clone();
+                        let opened = IcebergSink::new(
+                            IcebergSinkConfig {
+                                backend: sink.backend,
+                                storage_config: sink.storage.config.entries.clone(),
+                                catalog_name: sink.catalog.name.as_str().to_string(),
+                                catalog_config: sink.catalog.config.entries.clone(),
+                                namespace: context.domain.as_str().to_string(),
+                                table: sink.table.clone(),
+                                location: sink.location.clone(),
+                                mapped_schema,
+                                commit,
+                                writer: context.emitter.as_str().to_string(),
+                            },
+                            context.sink_host(),
+                        )
+                        .await;
+                        Self::from_row_sink_result("iceberg", context, projection, opened)
+                    }
+                }
+            }
         }
     }
 
@@ -1975,45 +2090,50 @@ impl SinkEmitter {
         Self::Missing { reason }
     }
 
-    fn from_iceberg_result(
-        context: &EmitterSinkContext,
-        result: IcebergEmitterResult<IcebergEmitter>,
-    ) -> Self {
-        match result {
-            Ok(emitter) => Self::Iceberg(Box::new(emitter)),
-            Err(error) => {
-                let reason = iceberg_error_message(&error);
-                context.report_init_error("iceberg", &reason);
-                Self::Missing { reason }
-            }
-        }
-    }
-
-    /// The wake that releases this emitter's buffered work on its own flush cadence.
+    /// The wake that releases this emitter's buffered work on its own flush cadence and its
+    /// sink's staged work on that sink's commit boundary.
     fn cadence_wake(&self, clock: &DomainClock, buffer: &EmitterBatchBuffer) -> RuntimeWake {
         let wake = match buffer.deadline() {
             Some(deadline) => RuntimeWake::never().with_buffer(clock, deadline),
             None => RuntimeWake::never(),
         };
+        match self.commit_deadline() {
+            Some(SinkDeadline::Domain(due_at)) => wake.with_buffer(
+                clock,
+                BranchBufferDeadline::Logical(clock.deadline_at(due_at)),
+            ),
+            Some(SinkDeadline::Physical(deadline)) => wake.with_physical(deadline),
+            None => wake,
+        }
+    }
+
+    /// When the staged work this sink holds has to be published.
+    fn commit_deadline(&self) -> Option<SinkDeadline> {
         match self {
-            Self::Iceberg(emitter) => emitter.cadence_wake(clock, wake),
-            Self::Record(sink) => match sink.commit_deadline() {
-                Some(SinkDeadline::Domain(due_at)) => wake.with_buffer(
-                    clock,
-                    BranchBufferDeadline::Logical(clock.deadline_at(due_at)),
-                ),
-                Some(SinkDeadline::Physical(deadline)) => wake.with_physical(deadline),
-                None => wake,
-            },
-            Self::Row(row) => match row.sink.commit_deadline() {
-                Some(SinkDeadline::Domain(due_at)) => wake.with_buffer(
-                    clock,
-                    BranchBufferDeadline::Logical(clock.deadline_at(due_at)),
-                ),
-                Some(SinkDeadline::Physical(deadline)) => wake.with_physical(deadline),
-                None => wake,
-            },
-            _ => wake,
+            Self::Record(sink) => sink.commit_deadline(),
+            Self::Row(row) => row.sink.commit_deadline(),
+            Self::Missing { .. } => None,
+        }
+    }
+
+    /// Whether this sink publishes what it accepts later, on its own commit boundary.
+    ///
+    /// Such a sink neither acknowledges a row nor counts it as sent when the host's write returns:
+    /// its commit does both.
+    fn publishes_on_commit(&self) -> bool {
+        match self {
+            Self::Record(sink) => sink.retains_acknowledgements(),
+            Self::Row(row) => row.sink.retains_acknowledgements(),
+            Self::Missing { .. } => false,
+        }
+    }
+
+    /// How many messages this sink staged out of the host's buffer and has not published yet.
+    fn staged_messages(&self) -> u64 {
+        match self {
+            Self::Record(sink) => sink.staged_messages(),
+            Self::Row(row) => row.sink.staged_messages(),
+            Self::Missing { .. } => 0,
         }
     }
 
@@ -2029,23 +2149,20 @@ impl SinkEmitter {
         match self {
             Self::Record(sink) => !sink.keeps_client_on_publish_failure(),
             Self::Row(row) => !row.sink.keeps_client_on_publish_failure(),
-            Self::Iceberg(_) | Self::Missing { .. } => true,
+            Self::Missing { .. } => true,
         }
     }
 
     fn pending_acks(&self, buffer: &EmitterBatchBuffer) -> EmitterAcknowledgements {
-        let runtime = match self {
-            Self::Iceberg(emitter) => {
-                AckSet::merged([buffer.pending_acks(), emitter.pending_acks()])
-            }
-            _ => buffer.pending_acks(),
-        };
         let sink = match self {
             Self::Record(sink) => sink.pending_acks(),
             Self::Row(row) => row.sink.pending_acks(),
-            _ => None,
+            Self::Missing { .. } => None,
         };
-        EmitterAcknowledgements { runtime, sink }
+        EmitterAcknowledgements {
+            runtime: buffer.pending_acks(),
+            sink,
+        }
     }
 
     async fn finish_transport(&mut self, deadline: Instant) -> EmitterRuntimeResult<()> {
@@ -2056,7 +2173,7 @@ impl SinkEmitter {
                 .finish(deadline)
                 .await
                 .map_err(sink_publish_failure),
-            Self::Iceberg(_) | Self::Missing { .. } => Ok(()),
+            Self::Missing { .. } => Ok(()),
         }
     }
 
@@ -2064,21 +2181,8 @@ impl SinkEmitter {
         if let EmitterRuntimeError::PublishStalled = error.current_context() {
             false
         } else {
-            self.requires_publish_failure_reinitialization() && !matches!(self, Self::Iceberg(_))
+            self.requires_publish_failure_reinitialization()
         }
-    }
-
-    fn reconfigure_flush_policy(
-        &mut self,
-        context: &EmitterSinkContext,
-        flush_policy: &FlushPolicy,
-    ) -> IcebergEmitterResult<()> {
-        if let Self::Iceberg(emitter) = self
-            && let Some(policy) = context.parse_flush_policy("iceberg emitter", flush_policy)
-        {
-            emitter.reconfigure_flush_policy(context, policy)?;
-        }
-        Ok(())
     }
 
     async fn flush_due(
@@ -2090,79 +2194,20 @@ impl SinkEmitter {
         buffer: &mut EmitterBatchBuffer,
         retry: bool,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
-        if let Self::Iceberg(_) = self
-            && let EmitterSinkPlan::Iceberg(_) = sink
-        {
-            let accepted = self
-                .transfer_retry_buffer_to_iceberg(context, control, buffer, retry)
-                .await?;
-            let Self::Iceberg(emitter) = self else {
-                unreachable!("checked Iceberg emitter must remain Iceberg")
-            };
-            let mut result = {
-                let _confirmation_wait = context
-                    .runtime
-                    .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-                await_until_emitter_stop_deadline(control.stop_rx, async {
-                    if retry {
-                        emitter.finish(context).await
-                    } else {
-                        emitter.flush_due(context).await
-                    }
-                })
-                .await
-                .map_err(|()| emitter_stop_deadline_elapsed())?
-            };
-            loop {
-                tokio::task::consume_budget().await;
-                Self::finish_iceberg_rejected_records(context, emitter, control.stop_rx).await?;
-                match result {
-                    Ok(published) => {
-                        control.backoff.reset();
-                        context
-                            .runtime
-                            .clear_emitter_transient_error(&context.domain, &context.emitter);
-                        return Ok(PublishReport::merge_optional(accepted, published));
-                    }
-                    Err(error) if error.current_context().is_retryable_publish_failure() => {
-                        let acks = emitter.pending_acks();
-                        if !Self::wait_for_iceberg_retry(
-                            sink.label(),
-                            context,
-                            control,
-                            &acks,
-                            &error,
-                        )
-                        .await?
-                        {
-                            return Ok(None);
-                        }
-                        result = {
-                            let _confirmation_wait = context
-                                .runtime
-                                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-                            await_until_emitter_stop_deadline(
-                                control.stop_rx,
-                                emitter.finish(context),
-                            )
-                            .await
-                            .map_err(|()| emitter_stop_deadline_elapsed())?
-                        };
-                    }
-                    Err(error) => {
-                        let message = iceberg_error_message(&error);
-                        context.report_flush_error(sink.label(), &message);
-                        return Err(Report::new(EmitterRuntimeError::InvalidSinkConfig)
-                            .attach_printable(message));
-                    }
-                }
-            }
-        }
-        if !buffer.should_flush(context, retry)? {
-            return Ok(None);
-        }
-        self.flush_buffer(sink, context, control, codec, buffer)
-            .await
+        let flushed = if buffer.should_flush(context, retry)? {
+            self.flush_buffer(sink, context, control, codec, buffer)
+                .await?
+        } else {
+            None
+        };
+        let reason = match retry {
+            true => SinkCommitReason::Retry,
+            false => SinkCommitReason::Cadence,
+        };
+        let committed = self
+            .commit_staged(sink.label(), context, control, buffer, reason)
+            .await?;
+        Ok(PublishReport::merge_optional(flushed, committed))
     }
 
     async fn flush_all(
@@ -2173,120 +2218,66 @@ impl SinkEmitter {
         codec: Option<Arc<CompiledCodec>>,
         buffer: &mut EmitterBatchBuffer,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
-        if let EmitterSinkPlan::Iceberg(_) = sink
-            && let Self::Iceberg(_) = self
-        {
-            let accepted = self
-                .transfer_retry_buffer_to_iceberg(context, control, buffer, true)
-                .await?;
-            let Self::Iceberg(emitter) = self else {
-                unreachable!("checked Iceberg emitter must remain Iceberg")
-            };
-            let mut result = {
-                let _confirmation_wait = context
-                    .runtime
-                    .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-                await_until_emitter_stop_deadline(control.stop_rx, emitter.finish(context))
+        let flushed;
+        loop {
+            tokio::task::consume_budget().await;
+            match self
+                .flush_buffer(sink, context, control, codec.clone(), buffer)
+                .await
+            {
+                Ok(report) => {
+                    control.backoff.reset();
+                    context
+                        .runtime
+                        .clear_emitter_transient_error(&context.domain, &context.emitter);
+                    flushed = report;
+                    break;
+                }
+                Err(error)
+                    if error.current_context() == &EmitterRuntimeError::StopDeadlineElapsed =>
+                {
+                    return Err(error);
+                }
+                Err(error) if emitter_publish_error_is_retryable(&error) => {
+                    let reason = emitter_error_message(&error);
+                    let wait = emitter_retry_delay(control.backoff, &error);
+                    context.runtime.record_emitter_transient_error_with_backoff(
+                        &context.domain,
+                        &context.emitter,
+                        reason.clone(),
+                        wait,
+                    );
+                    context.report_flush_error(sink.label(), &reason);
+                    let waited = await_until_emitter_stop_deadline(
+                        control.stop_rx,
+                        RuntimeReconnectBackoff::wait_duration_with_ack_alive(
+                            wait,
+                            control.shutdown_rx,
+                            &buffer.pending_acks(),
+                        ),
+                    )
                     .await
-                    .map_err(|()| emitter_stop_deadline_elapsed())?
-            };
-            loop {
-                tokio::task::consume_budget().await;
-                Self::finish_iceberg_rejected_records(context, emitter, control.stop_rx).await?;
-                match result {
-                    Ok(published) => {
-                        control.backoff.reset();
-                        context
-                            .runtime
-                            .clear_emitter_transient_error(&context.domain, &context.emitter);
-                        return Ok(PublishReport::merge_optional(accepted, published));
-                    }
-                    Err(error) if error.current_context().is_retryable_publish_failure() => {
-                        let acks = emitter.pending_acks();
-                        if !Self::wait_for_iceberg_retry(
-                            sink.label(),
-                            context,
-                            control,
-                            &acks,
-                            &error,
-                        )
-                        .await?
-                        {
-                            return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled)
-                                .attach_printable(
-                                    "emitter drain stopped while Iceberg work remained pending",
-                                ));
-                        }
-                        result = {
-                            let _confirmation_wait = context
-                                .runtime
-                                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-                            await_until_emitter_stop_deadline(
-                                control.stop_rx,
-                                emitter.finish(context),
-                            )
-                            .await
-                            .map_err(|()| emitter_stop_deadline_elapsed())?
-                        };
-                    }
-                    Err(error) => {
-                        let message = iceberg_error_message(&error);
-                        context.report_flush_error(sink.label(), &message);
-                        return Err(Report::new(EmitterRuntimeError::InvalidSinkConfig)
-                            .attach_printable(message));
+                    .map_err(|()| emitter_stop_deadline_elapsed())?;
+                    if !waited {
+                        return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
                     }
                 }
-            }
-        } else {
-            loop {
-                tokio::task::consume_budget().await;
-                match self
-                    .flush_buffer(sink, context, control, codec.clone(), buffer)
-                    .await
-                {
-                    Ok(report) => {
-                        control.backoff.reset();
-                        context
-                            .runtime
-                            .clear_emitter_transient_error(&context.domain, &context.emitter);
-                        return Ok(report);
-                    }
-                    Err(error)
-                        if error.current_context() == &EmitterRuntimeError::StopDeadlineElapsed =>
-                    {
-                        return Err(error);
-                    }
-                    Err(error) if emitter_publish_error_is_retryable(&error) => {
-                        let reason = emitter_error_message(&error);
-                        let wait = emitter_retry_delay(control.backoff, &error);
-                        context.runtime.record_emitter_transient_error_with_backoff(
-                            &context.domain,
-                            &context.emitter,
-                            reason.clone(),
-                            wait,
-                        );
-                        context.report_flush_error(sink.label(), &reason);
-                        let waited = await_until_emitter_stop_deadline(
-                            control.stop_rx,
-                            RuntimeReconnectBackoff::wait_duration_with_ack_alive(
-                                wait,
-                                control.shutdown_rx,
-                                &buffer.pending_acks(),
-                            ),
-                        )
-                        .await
-                        .map_err(|()| emitter_stop_deadline_elapsed())?;
-                        if !waited {
-                            return Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled));
-                        }
-                    }
-                    Err(error) => {
-                        context.report_flush_error(sink.label(), &emitter_error_message(&error));
-                        return Err(error);
-                    }
+                Err(error) => {
+                    context.report_flush_error(sink.label(), &emitter_error_message(&error));
+                    return Err(error);
                 }
             }
         }
+        let committed = self
+            .commit_staged(
+                sink.label(),
+                context,
+                control,
+                buffer,
+                SinkCommitReason::Drain,
+            )
+            .await?;
+        Ok(PublishReport::merge_optional(flushed, committed))
     }
 
     async fn publish_batch(
@@ -2298,96 +2289,141 @@ impl SinkEmitter {
         buffer: &mut EmitterBatchBuffer,
         batch: EmitterPublishBatch,
     ) -> EmitterPublishResult {
-        if let EmitterSinkPlan::Iceberg(_) = sink
-            && let Self::Iceberg(_) = self
-        {
-            self.check_fault_injection(context, control)
-                .map_err(EmitterPublishFailure::caller)?;
-            let Self::Iceberg(emitter) = self else {
-                unreachable!("checked Iceberg emitter must remain Iceberg")
-            };
-            let result = {
-                let _confirmation_wait = context
-                    .runtime
-                    .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-                await_until_emitter_stop_deadline(
-                    control.stop_rx,
-                    emitter.publish_batch(context, batch.batch, batch.execution_now),
-                )
-                .await
-                .map_err(|()| EmitterPublishFailure::sink(emitter_stop_deadline_elapsed()))?
-            };
-            Self::finish_iceberg_rejected_records(context, emitter, control.stop_rx)
-                .await
-                .map_err(EmitterPublishFailure::sink)?;
-            return match result {
-                Ok(report) => Ok(report),
-                Err(error) if error.current_context().is_retryable_publish_failure() => {
-                    Err(EmitterPublishFailure::sink(
-                        Report::new(EmitterRuntimeError::PublishBatch)
-                            .attach_printable(iceberg_error_message(&error)),
-                    ))
-                }
-                Err(error) => {
-                    let message = iceberg_error_message(&error);
-                    context.report_flush_error("iceberg", &message);
-                    Err(EmitterPublishFailure::sink(
-                        Report::new(EmitterRuntimeError::InvalidSinkConfig)
-                            .attach_printable(message),
-                    ))
-                }
-            };
-        }
-
-        if buffer
+        if !buffer
             .push(context, batch)
             .map_err(EmitterPublishFailure::caller)?
         {
-            self.flush_buffer(sink, context, control, codec, buffer)
-                .await
-                .map_err(EmitterPublishFailure::buffer)
-        } else {
-            Ok(None)
+            return Ok(None);
+        }
+        let flushed = self
+            .flush_buffer(sink, context, control, codec, buffer)
+            .await
+            .map_err(EmitterPublishFailure::buffer)?;
+        // The write may have reached the sink's commit boundary, which publishes here rather than
+        // waiting for the next wake. Its failure belongs to the sink: the rows it staged are no
+        // longer in this buffer.
+        let committed = self
+            .commit_staged_once(context, control, buffer, SinkCommitReason::Cadence)
+            .await
+            .map_err(EmitterPublishFailure::sink)?;
+        Ok(PublishReport::merge_optional(flushed, committed))
+    }
+
+    /// Whether a sink-owned deadline has been reached.
+    fn sink_deadline_reached(
+        context: &EmitterSinkContext,
+        deadline: SinkDeadline,
+    ) -> EmitterRuntimeResult<bool> {
+        match deadline {
+            SinkDeadline::Domain(due_at) => {
+                let snapshot = context.execution_snapshot()?;
+                context
+                    .clock
+                    .deadline_reached(&context.clock.deadline_at(due_at), &snapshot)
+                    .change_context(EmitterRuntimeError::FlushTiming)
+            }
+            SinkDeadline::Physical(deadline) => {
+                Ok(PhysicalDeadlineCapability::operational().is_reached(deadline))
+            }
         }
     }
 
-    async fn transfer_retry_buffer_to_iceberg(
+    /// Publishes what the sink staged when its commit boundary is reached, retrying a failed
+    /// commit on the emitter's declared backoff while the acknowledgements it holds stay alive.
+    async fn commit_staged(
         &mut self,
+        label: &str,
         context: &EmitterSinkContext,
         control: &mut EmitterPublishControl<'_>,
-        buffer: &mut EmitterBatchBuffer,
-        force: bool,
+        buffer: &EmitterBatchBuffer,
+        reason: SinkCommitReason,
     ) -> EmitterRuntimeResult<Option<PublishReport>> {
-        if !buffer.should_flush(context, force)? {
-            return Ok(None);
-        }
-        self.check_fault_injection(context, control)?;
-        let Self::Iceberg(emitter) = self else {
-            return Ok(None);
-        };
-        let pending = buffer.drain_pending();
-        let mut pending = pending.into_iter();
-        let mut report = None;
-        while let Some(batch) = pending.next() {
+        let mut reason = reason;
+        loop {
             tokio::task::consume_budget().await;
-            match emitter
-                .publish_batch(context, batch.batch, batch.execution_now)
+            match self
+                .commit_staged_once(context, control, buffer, reason)
                 .await
             {
-                Ok(published) => {
-                    report = PublishReport::merge_optional(report, published);
+                Ok(report) => {
+                    control.backoff.reset();
+                    context
+                        .runtime
+                        .clear_emitter_transient_error(&context.domain, &context.emitter);
+                    return Ok(report);
+                }
+                Err(error)
+                    if error.current_context() == &EmitterRuntimeError::StopDeadlineElapsed =>
+                {
+                    return Err(error);
+                }
+                Err(error) if error.current_context().is_retryable_publish_failure() => {
+                    let acks = self.pending_acks(buffer);
+                    if !Self::wait_for_commit_retry(label, context, control, &acks, &error).await? {
+                        return match reason {
+                            SinkCommitReason::Drain => {
+                                Err(Report::new(EmitterRuntimeError::ShutdownWhileStalled)
+                                    .attach_printable(
+                                        "emitter drain stopped while a staged commit remained \
+                                         pending",
+                                    ))
+                            }
+                            SinkCommitReason::Cadence | SinkCommitReason::Retry => Ok(None),
+                        };
+                    }
+                    // An attempt the cadence started keeps retrying whatever is staged, exactly as
+                    // the failure it is recovering from was already committing it.
+                    reason = reason.forced();
                 }
                 Err(error) => {
-                    for batch in pending {
-                        tokio::task::consume_budget().await;
-                        buffer.retain_without_cadence(batch)?;
-                    }
-                    return Err(Report::new(EmitterRuntimeError::PublishBatch)
-                        .attach_printable(iceberg_error_message(&error)));
+                    context.report_flush_error(label, &emitter_error_message(&error));
+                    return Err(error);
                 }
             }
         }
+    }
+
+    /// One commit attempt, bounded by the emitter's stop deadline and keeping every
+    /// acknowledgement the sink retained alive while the external system confirms it.
+    async fn commit_staged_once(
+        &mut self,
+        context: &EmitterSinkContext,
+        control: &mut EmitterPublishControl<'_>,
+        buffer: &EmitterBatchBuffer,
+        reason: SinkCommitReason,
+    ) -> EmitterRuntimeResult<Option<PublishReport>> {
+        let Some(deadline) = self.commit_deadline() else {
+            return Ok(None);
+        };
+        if !reason.forces_commit() && !Self::sink_deadline_reached(context, deadline)? {
+            return Ok(None);
+        }
+        let acks = self.pending_acks(buffer);
+        let committed = {
+            let _confirmation_wait = context
+                .runtime
+                .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
+            let commit = Box::pin(self.commit_sink());
+            await_until_emitter_stop_deadline(
+                control.stop_rx,
+                await_emitter_confirmation(&acks, commit),
+            )
+            .await
+            .map_err(|()| emitter_stop_deadline_elapsed())?
+        };
+        buffer.report_staged_messages(self.staged_messages());
+        let report = committed?.map(|report| {
+            PublishReport::flushed(report.messages, report.bytes, report.domain_timestamp)
+        });
         Ok(report)
+    }
+
+    async fn commit_sink(&mut self) -> EmitterRuntimeResult<Option<SinkCommitReport>> {
+        match self {
+            Self::Record(sink) => sink.commit().await.map_err(sink_publish_failure),
+            Self::Row(row) => row.sink.commit().await.map_err(sink_publish_failure),
+            Self::Missing { .. } => Ok(None),
+        }
     }
 
     async fn flush_buffer(
@@ -2402,7 +2438,12 @@ impl SinkEmitter {
             return Ok(None);
         }
         self.check_fault_injection(context, control)?;
-        let report = buffer.report();
+        // A sink that stages what it accepts has not published anything yet, so its commit counts
+        // these messages as sent and this write counts none.
+        let report = match self.publishes_on_commit() {
+            true => None,
+            false => buffer.report(),
+        };
         let pending_acks = buffer.pending_acks();
         {
             let _confirmation_wait = context
@@ -2414,12 +2455,13 @@ impl SinkEmitter {
                 codec,
                 buffer.pending.as_mut_slice(),
             ));
-            await_until_emitter_stop_deadline(
+            let published = await_until_emitter_stop_deadline(
                 control.stop_rx,
                 await_emitter_confirmation(&pending_acks, publish),
             )
-            .await
-            .map_err(|()| emitter_stop_deadline_elapsed())??;
+            .await;
+            buffer.report_staged_messages(self.staged_messages());
+            published.map_err(|()| emitter_stop_deadline_elapsed())??;
         }
         buffer.clear();
         Ok(report)
@@ -2458,7 +2500,13 @@ impl SinkEmitter {
             let encoded = encode_broker_records(codec, context, batches).await?;
             let records = sink_records(context, batches, encoded).await?;
             let outcome = emitter.publish(records).await;
-            return finish_record_sink_publish(context, batches, outcome).await;
+            return finish_record_sink_publish(
+                context,
+                batches,
+                outcome,
+                DeliveredAcknowledgements::Host,
+            )
+            .await;
         }
 
         Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
@@ -2509,30 +2557,21 @@ impl SinkEmitter {
         Ok(())
     }
 
-    async fn wait_for_iceberg_retry(
+    async fn wait_for_commit_retry(
         sink: &str,
         context: &EmitterSinkContext,
         control: &mut EmitterPublishControl<'_>,
-        acks: &AckSet,
-        error: &Report<IcebergEmitterError>,
+        acks: &EmitterAcknowledgements,
+        error: &Report<EmitterRuntimeError>,
     ) -> EmitterRuntimeResult<bool> {
-        let reason = iceberg_error_message(error);
+        let reason = emitter_error_message(error);
         let wait = control.backoff.next_delay();
-        if error.current_context() == &IcebergEmitterError::Commit {
-            context.runtime.record_iceberg_commit_failure_with_backoff(
-                &context.domain,
-                &context.emitter,
-                reason.clone(),
-                wait,
-            );
-        } else {
-            context.runtime.record_emitter_transient_error_with_backoff(
-                &context.domain,
-                &context.emitter,
-                reason.clone(),
-                wait,
-            );
-        }
+        context.runtime.record_commit_failure_with_backoff(
+            &context.domain,
+            &context.emitter,
+            reason.clone(),
+            wait,
+        );
         context.report_flush_error(sink, &reason);
         await_until_emitter_stop_deadline(
             control.stop_rx,
@@ -2543,61 +2582,6 @@ impl SinkEmitter {
         .await
         .map_err(|()| emitter_stop_deadline_elapsed())
     }
-
-    async fn finish_iceberg_rejected_records(
-        context: &EmitterSinkContext,
-        emitter: &mut IcebergEmitter,
-        stop_rx: &mut watch::Receiver<Option<Instant>>,
-    ) -> EmitterRuntimeResult<()> {
-        while let Some(rejected) = emitter.next_rejected_record_message() {
-            tokio::task::consume_budget().await;
-            let (message, error) = match rejected {
-                Ok(rejected) => rejected,
-                Err((reason, acks)) => {
-                    context.runtime.handle_general_error_for_acks(
-                        &context.domain,
-                        ModelKind::Emitter,
-                        &context.emitter,
-                        &context.error_policies,
-                        std::iter::once(&acks),
-                        format!(
-                            "Iceberg emitter '{}' failed to materialize rejected VALUES row: \
-                             {reason}",
-                            context.emitter.as_str()
-                        ),
-                    );
-                    emitter.finish_rejected_record();
-                    continue;
-                }
-            };
-            await_until_emitter_stop_deadline(
-                stop_rx,
-                context
-                    .runtime
-                    .handle_structured_message_error(MessageErrorHandling {
-                        domain: &context.domain,
-                        node_kind: ModelKind::Emitter,
-                        node: &ModelName::from(&context.emitter),
-                        source_route: None,
-                        policy: &context.error_policies.message,
-                        message,
-                        execution_now: error.occurred_at,
-                        error,
-                        partial_output: None,
-                        materialized_state: HashMap::default(),
-                        ingest_metadata: None,
-                    }),
-            )
-            .await
-            .map_err(|()| emitter_stop_deadline_elapsed())?;
-            emitter.finish_rejected_record();
-        }
-        Ok(())
-    }
-}
-
-fn iceberg_error_message(error: &Report<IcebergEmitterError>) -> String {
-    format!("{error:?}")
 }
 
 pub(super) fn emitter_error_message(error: &Report<EmitterRuntimeError>) -> String {
@@ -2826,6 +2810,7 @@ async fn finish_record_sink_publish(
     context: &EmitterSinkContext,
     batches: &mut [EmitterPublishBatch],
     outcome: PerRecordOutcome,
+    acknowledgements: DeliveredAcknowledgements,
 ) -> EmitterRuntimeResult<()> {
     let outcome = outcome.into_parts();
     for SinkRecordPosition {
@@ -2838,7 +2823,7 @@ async fn finish_record_sink_publish(
                 "sink confirmation references missing emitter batch {batch_index}"
             ))
         })?;
-        batch.mark_delivered(row_index)?;
+        batch.mark_delivered(row_index, acknowledgements)?;
     }
     let rejected = outcome
         .rejected
@@ -2865,7 +2850,8 @@ fn sink_publish_failure(error: Report<SinkPublishError>) -> Report<EmitterRuntim
         }
         SinkPublishError::NotInitialized { .. }
         | SinkPublishError::Publish { .. }
-        | SinkPublishError::Finish { .. } => {
+        | SinkPublishError::Finish { .. }
+        | SinkPublishError::Commit { .. } => {
             error.change_context(EmitterRuntimeError::PublishBatch)
         }
     }
@@ -3237,12 +3223,10 @@ impl EmitterTask {
                 EmitterBatchBuffer::new(&context, &task_flush_policy, buffered_messages.clone());
             let sink_runtime = SinkEmitterRuntime {
                 input_schema: input_schema.clone(),
-                buffered_messages,
             };
             let mut sink = SinkEmitter::new_until_cancelled(
                 SinkEmitterInit {
                     plan: &plan,
-                    flush_policy: &task_flush_policy,
                     context: &context,
                     runtime: sink_runtime.clone(),
                 },
@@ -3329,17 +3313,6 @@ impl EmitterTask {
                             emitter_buffer.reconfigure(&context, &config.flush_policy)
                         {
                             let reason = emitter_error_message(&error);
-                            runtime.record_emitter_transient_error(
-                                &task_domain,
-                                &task_emitter,
-                                reason.clone(),
-                            );
-                            context.report_flush_error(plan.sink.label(), &reason);
-                        }
-                        if let Err(error) =
-                            sink.reconfigure_flush_policy(&context, &config.flush_policy)
-                        {
-                            let reason = iceberg_error_message(&error);
                             runtime.record_emitter_transient_error(
                                 &task_domain,
                                 &task_emitter,
@@ -3610,13 +3583,13 @@ impl EmitterTask {
                             sink = SinkEmitter::new_until_cancelled(
                                 SinkEmitterInit {
                                     plan: &plan,
-                                    flush_policy: &task_flush_policy,
                                     context: &context,
                                     runtime: sink_runtime.clone(),
                                 },
                                 &mut work_cancel_rx,
                             )
                             .await;
+                            emitter_buffer.report_staged_messages(sink.staged_messages());
                             if let Some(reason) = sink.missing_reason() {
                                 retry_schedule.defer(
                                     &context,
@@ -4566,7 +4539,7 @@ mod tests {
         let mut delivered =
             EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
         let error = delivered
-            .mark_delivered(1)
+            .mark_delivered(1, DeliveredAcknowledgements::Host)
             .expect_err("delivery cannot address a missing row");
         assert_eq!(
             *error.current_context(),
@@ -4578,7 +4551,7 @@ mod tests {
 
         delivered.batch.acks.clear();
         let error = delivered
-            .mark_delivered(0)
+            .mark_delivered(0, DeliveredAcknowledgements::Host)
             .expect_err("delivery requires the row's acknowledgement set");
         assert_eq!(
             *error.current_context(),
@@ -4868,18 +4841,73 @@ mod tests {
         assert_eq!(buffer.pending.len(), 1);
     }
 
+    #[tokio::test]
+    async fn a_sink_that_commits_separately_takes_the_rows_it_accepted() {
+        let (first_acks, mut first_completion) = AckSet::root();
+        let (second_acks, second_completion) = AckSet::root();
+        let mut batch = EmitterPublishBatch::from_batch(
+            RelayRecordBatch::from_messages(
+                input_schema(),
+                vec![
+                    RelayMessage {
+                        key: None,
+                        record: test_runtime_row([("value".to_string(), RuntimeValue::I64(1))]),
+                        acks: first_acks,
+                    },
+                    RelayMessage {
+                        key: None,
+                        record: test_runtime_row([("value".to_string(), RuntimeValue::I64(2))]),
+                        acks: second_acks,
+                    },
+                ],
+            )
+            .expect("valid two-row emitter batch"),
+            Timestamp::from_unix_nanos(100),
+        );
+
+        let retained = batch.acks_for_rows(&[0]);
+        batch
+            .mark_delivered(0, DeliveredAcknowledgements::Sink)
+            .expect("a staged row must be marked delivered");
+        batch
+            .mark_delivered(1, DeliveredAcknowledgements::Host)
+            .expect("a published row must be marked delivered");
+
+        assert!(batch.pending_record_rows().is_empty());
+        assert_eq!(second_completion.wait().await, AckOutcome::Ack);
+        // The staged row is the sink's until its commit resolves it, so the host left it alone.
+        retained.ack_alive();
+        assert_eq!(
+            first_completion.wait_for_progress().await,
+            AckProgress::Alive
+        );
+        retained.ack_success();
+        assert_eq!(first_completion.wait().await, AckOutcome::Ack);
+    }
+
     #[test]
-    fn generic_and_iceberg_buffer_counts_are_summed_independently() {
+    fn a_started_commit_keeps_forcing_itself_through_every_retry() {
+        assert!(!SinkCommitReason::Cadence.forces_commit());
+        assert!(SinkCommitReason::Retry.forces_commit());
+        assert!(SinkCommitReason::Drain.forces_commit());
+
+        assert_eq!(SinkCommitReason::Cadence.forced(), SinkCommitReason::Retry);
+        assert_eq!(SinkCommitReason::Retry.forced(), SinkCommitReason::Retry);
+        assert_eq!(SinkCommitReason::Drain.forced(), SinkCommitReason::Drain);
+    }
+
+    #[test]
+    fn buffered_and_staged_message_counts_are_summed_independently() {
         let reported = Arc::new(AtomicUsize::new(0));
         let buffered = EmitterBufferedMessages::new(reported.clone());
 
-        buffered.set_generic(2);
-        buffered.set_iceberg(3);
+        buffered.set_buffered(2);
+        buffered.set_staged(3);
         assert_eq!(reported.load(Ordering::Acquire), 5);
 
-        buffered.set_generic(0);
+        buffered.set_buffered(0);
         assert_eq!(reported.load(Ordering::Acquire), 3);
-        buffered.set_iceberg(0);
+        buffered.set_staged(0);
         assert_eq!(reported.load(Ordering::Acquire), 0);
     }
 
@@ -4933,7 +4961,7 @@ mod tests {
         assert_eq!(buffer.pending_messages, 0);
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
 
-        buffered_messages.set_generic(7);
+        buffered_messages.set_buffered(7);
         drop(buffer);
         assert_eq!(reported_messages.load(Ordering::Acquire), 0);
     }
@@ -5595,20 +5623,20 @@ mod tests {
         let emitter = EmitterName::parse("output").expect("valid emitter name");
         let schema = input_schema().arrow_schema();
 
-        let errors = [
-            compile_iceberg_values_program(&domain, &emitter, &[], schema.clone(), None).err(),
-            MappedValuesProjection::compile(MappedValuesProjectionInit {
-                label: "ClickHouse",
-                namespace: "clickhouse",
-                domain: &domain,
-                emitter: &emitter,
-                values: &[],
-                input_schema: schema,
-                udfs: None,
-                max_batch: None,
-            })
-            .err(),
-        ];
+        let errors =
+            [("Iceberg", "iceberg"), ("ClickHouse", "clickhouse")].map(|(label, namespace)| {
+                MappedValuesProjection::compile(MappedValuesProjectionInit {
+                    label,
+                    namespace,
+                    domain: &domain,
+                    emitter: &emitter,
+                    values: &[],
+                    input_schema: schema.clone(),
+                    udfs: None,
+                    max_batch: None,
+                })
+                .err()
+            });
         for result in errors {
             let Some(error) = result else {
                 panic!("empty VALUES mappings must fail before compilation")

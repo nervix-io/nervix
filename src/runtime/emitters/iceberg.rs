@@ -1,16 +1,21 @@
-//! Iceberg emission at the external data-plane boundary.
+//! Iceberg sink connector.
 //!
-//! Layer: data plane.
-//! - **Owns.** Iceberg file staging, catalog commits and branch-local commit buffering.
-//! - **Depends on.** Validated emitter plans, Arrow batches and external Iceberg APIs.
-//! - **Must not know.** NSPL parsing, placement decisions or control-plane transactions.
+//! Layer: engines and infrastructure.
+//!
+//! - **Owns.** The REST catalog and object-store clients one Iceberg table is loaded and committed
+//!   through, the local Arrow IPC staging of every mapped batch, the `COMMIT EACH` cadence and
+//!   maximum commit size that release the staged files, the Parquet data files one commit writes,
+//!   and the acknowledgements it retains until that commit succeeds.
+//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
+//!   and the `iceberg` crates.
+//! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
+//!   connector implementation.
+//!
+//! Local staging is not an acknowledgement boundary. The sink completion point for `MODE ACK` is
+//! the successful catalog commit, and an appended row is never idempotent, as
+//! [Emitters](docs/src/emitters.md) documents.
 
-use std::{
-    collections::VecDeque,
-    fs::File,
-    path::{Path, PathBuf},
-    sync::Arc as StdArc,
-};
+use std::{fs::File, path::PathBuf, sync::Arc as StdArc, time::Duration};
 
 use ::iceberg::{
     Catalog, CatalogBuilder, NamespaceIdent, Result as IcebergResult, TableIdent,
@@ -37,53 +42,157 @@ use ::iceberg::{
     },
 };
 use ahash::{HashMap, HashSet};
-use arrow_array::{BooleanArray, RecordBatch, RecordBatchOptions};
+use arch_into::ArchInto as _;
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, TimestampMicrosecondArray,
+    TimestampNanosecondArray,
+};
 use arrow_ipc::{reader::StreamReader, writer::StreamWriter};
+use arrow_schema::{DataType, TimeUnit};
 use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array};
-use error_stack::{Report, ResultExt};
+use error_stack::{Report, ResultExt as _};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
 use iceberg_storage_opendal::OpenDalStorageFactory;
-use nervix_connector::physical_time::actual_utc_now;
+use meticulous::OptionExt as _;
+use nervix_connector::{
+    MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
+    SinkCommitReport, SinkDeadline, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
+    SinkRecordPosition, SinkStartError, SinkStartResult, physical_time::actual_utc_now,
+};
+use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
 use parquet::file::properties::WriterProperties;
-use thiserror::Error;
-use triomphe::Arc;
+use tempfile::TempDir;
+use tracing::{debug, trace};
 use url::Url;
 
-use super::*;
+const ICEBERG: &str = "iceberg";
 
-pub(in crate::runtime) struct IcebergEmitter {
-    client: IcebergEmitterClient,
+/// The snapshot property that names the append one prepared commit stands for, so a retry after an
+/// ambiguous catalog result recognizes its own work instead of appending it twice.
+const ICEBERG_APPEND_ID_PROPERTY: &str = "nervix.emitter.append-id";
+
+/// When staged data is published: the domain duration between commits, and the staged size that
+/// commits before that duration elapses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IcebergCommitPolicy {
+    pub interval: Duration,
+    pub max_size: u64,
+}
+
+/// What one Iceberg emitter stages and commits through, from its typed sink plan.
+pub struct IcebergSinkConfig {
+    pub backend: IcebergStorageBackend,
+    pub storage_config: Vec<ClientConfigEntry>,
+    pub catalog_name: String,
+    pub catalog_config: Vec<ClientConfigEntry>,
+    /// The catalog namespace this emitter's table lives in.
+    pub namespace: String,
+    pub table: TableName,
+    pub location: String,
+    /// The mapped columns every staged batch carries, as the host projects them.
+    pub mapped_schema: StdArc<arrow_schema::Schema>,
+    pub commit: IcebergCommitPolicy,
+    /// How generated staging and data files name the writer that produced them.
+    pub writer: String,
+}
+
+/// The Iceberg sink, which stages each mapped batch as a local Arrow IPC file and appends every
+/// staged file to its table in one catalog commit.
+pub struct IcebergSink {
+    client: IcebergSinkClient,
     commit_state: IcebergCommitState,
-    program: CompiledSqlValuesProgram,
-    mapped_schema: StdArc<arrow_schema::Schema>,
-    flush_policy: RuntimeFlushPolicy,
+    /// The exact Arrow schema every staged file is written and read back with, which is the host's
+    /// mapped schema with datetime columns narrowed to the microsecond resolution Iceberg stores.
+    staged_schema: StdArc<arrow_schema::Schema>,
     commit_policy: IcebergCommitPolicy,
     staging_dir: TempDir,
-    pending_sequence: u64,
-    pending_batches: Vec<IcebergPendingBatch>,
-    pending_rows: u64,
-    pending_bytes: u64,
-    /// Releases mapped batches to local Arrow IPC on the emitter's explicit `FLUSH EACH` cadence,
-    /// or on the monotonic minimum of `FLUSH IMMEDIATE`.
-    flush_cadence: BranchBufferTimer,
+    staged_sequence: u64,
     staged_batches: Vec<IcebergStagedBatch>,
     staged_rows: u64,
     staged_bytes: u64,
-    /// Publishes staged batches to the table on the emitter's explicit `COMMIT EACH` cadence.
-    commit_cadence: BranchBufferTimer,
-    rejected_records: VecDeque<IcebergRejectedRecord>,
-    buffered_messages: Arc<EmitterBufferedMessages>,
+    commit_deadline: IcebergCommitDeadline,
 }
 
-struct IcebergEmitterClient {
+/// The domain time by which the staged batches must be published.
+///
+/// The deadline is armed when the first batch is staged and left alone afterwards, so a later
+/// batch joining the same staged set neither moves the commit nor waits for a second cadence.
+/// Reaching the declared maximum commit size brings it to the staging time itself, which is when
+/// the commit became due.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct IcebergCommitDeadline {
+    due_at: Option<Timestamp>,
+}
+
+impl IcebergCommitDeadline {
+    fn arm(&mut self, policy: IcebergCommitPolicy, staged_at: Timestamp, staged_bytes: u64) {
+        if self.due_at.is_none() {
+            // Saturation is the meaning here: a commit deadline past the nanosecond range is past
+            // any domain time this emitter will reach.
+            let due_at = staged_at
+                .checked_add(policy.interval)
+                .unwrap_or_else(|_| Timestamp::from_unix_nanos(i64::MAX));
+            self.due_at = Some(due_at);
+        }
+        if staged_bytes >= policy.max_size {
+            self.due_at = Some(staged_at);
+        }
+    }
+
+    fn due_at(self) -> Option<Timestamp> {
+        self.due_at
+    }
+
+    fn clear(&mut self) {
+        self.due_at = None;
+    }
+}
+
+/// One mapped batch written to local Arrow IPC, with the acknowledgements its commit resolves.
+struct IcebergStagedBatch {
+    path: PathBuf,
+    rows: u64,
+    bytes: u64,
+    acknowledgements: Option<SinkAcknowledgements>,
+    domain_timestamp: Timestamp,
+}
+
+/// Every acknowledgement this sink retained, as one handle the host keeps alive while it waits.
+struct RetainedAcknowledgements(Vec<SinkAcknowledgements>);
+
+impl SinkAcknowledgementServices for RetainedAcknowledgements {
+    fn acknowledge(&self) {
+        for acknowledgements in &self.0 {
+            acknowledgements.acknowledge();
+        }
+    }
+
+    fn keep_alive(&self) {
+        for acknowledgements in &self.0 {
+            acknowledgements.keep_alive();
+        }
+    }
+
+    fn reject(&self, reason: String) {
+        for acknowledgements in &self.0 {
+            acknowledgements.reject(reason.clone());
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(SinkAcknowledgements::is_empty)
+    }
+}
+
+/// The catalog and table one emitter commits through, and the sequence its data files are named by.
+struct IcebergSinkClient {
     catalog: StdArc<RestCatalog>,
     table: Table,
     file_name_prefix: String,
     data_file_sequence: u64,
 }
 
-const ICEBERG_APPEND_ID_PROPERTY: &str = "nervix.emitter.append-id";
-
+/// The Parquet data files one commit appends, and the append identity that recognizes them again.
 struct IcebergPreparedCommit {
     append_id: uuid::Uuid,
     data_files: Vec<DataFile>,
@@ -146,6 +255,8 @@ impl IcebergPreparedCommit {
     }
 }
 
+/// The prepared commit a failed catalog attempt keeps, so a retry appends the same data files
+/// rather than writing them again.
 #[derive(Default)]
 struct IcebergCommitState {
     prepared: Option<IcebergPreparedCommit>,
@@ -166,130 +277,11 @@ impl IcebergCommitState {
     }
 }
 
-pub(in crate::runtime::emitters) type IcebergEmitterResult<T> =
-    Result<T, Report<IcebergEmitterError>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub(in crate::runtime::emitters) enum IcebergEmitterError {
-    #[error("invalid Iceberg flush policy")]
-    InvalidFlushPolicy,
-    #[error("invalid Iceberg commit policy")]
-    InvalidCommitPolicy,
-    #[error("failed to compile Iceberg VALUES program")]
-    CompileValues,
-    #[error("failed to create Iceberg staging directory")]
-    CreateStagingDir,
-    #[error("failed to build Iceberg table schema")]
-    BuildSchema,
-    #[error("invalid Iceberg object-store location")]
-    InvalidLocation,
-    #[error("failed to initialize Iceberg catalog")]
-    InitializeCatalog,
-    #[error("failed to initialize Iceberg table")]
-    InitializeTable,
-    #[error("failed to flush Iceberg batch to local Arrow IPC")]
-    FlushToDisk,
-    #[error("failed to map Iceberg VALUES batch")]
-    MapBatch,
-    #[error("failed to write Iceberg staged Arrow IPC")]
-    WriteStagedIpc,
-    #[error("failed to read Iceberg staged Arrow IPC")]
-    ReadStagedIpc,
-    #[error("failed to commit Iceberg staged batches")]
-    Commit,
-    #[error("could not resolve an Iceberg flush or commit cadence against the domain clock")]
-    CadenceTiming,
-}
-
-impl IcebergEmitterError {
-    pub(in crate::runtime::emitters) fn is_retryable_publish_failure(self) -> bool {
-        match self {
-            Self::FlushToDisk
-            | Self::MapBatch
-            | Self::WriteStagedIpc
-            | Self::ReadStagedIpc
-            | Self::Commit => true,
-            Self::InvalidFlushPolicy
-            | Self::InvalidCommitPolicy
-            | Self::CompileValues
-            | Self::CreateStagingDir
-            | Self::BuildSchema
-            | Self::InvalidLocation
-            | Self::InitializeCatalog
-            | Self::InitializeTable
-            | Self::CadenceTiming => false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct IcebergCommitPolicy {
-    interval: Duration,
-    max_size: u64,
-}
-
-struct IcebergPendingBatch {
-    batch: RecordBatch,
-    acks: Vec<AckSet>,
-    domain_timestamp: Timestamp,
-}
-
-struct IcebergStagedBatch {
-    path: PathBuf,
-    rows: u64,
-    bytes: u64,
-    acks: Vec<AckSet>,
-    domain_timestamp: Timestamp,
-}
-
-pub(super) struct IcebergRejectedRecord {
-    batch: RuntimeRecordBatch,
-    row: usize,
-    metadata: RuntimeRecordMetadata,
-    key: Option<BranchKey>,
-    acks: AckSet,
-    error: StructuredMessageError,
-}
-
-struct IcebergRejectedRow {
-    row: usize,
-    error: StructuredMessageError,
-}
-
-struct IcebergMappedBatch {
-    accepted: Option<RecordBatch>,
-    rejected: Vec<IcebergRejectedRow>,
-}
-
-impl IcebergRejectedRecord {
-    fn message(&self) -> Result<(RelayMessage, StructuredMessageError), (String, AckSet)> {
-        let record = self
-            .batch
-            .runtime_row(self.row, self.metadata.clone())
-            .map_err(|reason| (reason.to_string(), self.acks.clone()))?;
-        Ok((
-            RelayMessage {
-                key: self.key.clone(),
-                record,
-                acks: self.acks.clone(),
-            },
-            self.error.clone(),
-        ))
-    }
-}
-
+/// The object-store properties one backend's client configuration is translated into.
 #[derive(Debug, Clone)]
 struct IcebergObjectStoreProperties {
     backend: IcebergStorageBackend,
     props: HashMap<String, String>,
-}
-
-pub(in crate::runtime::emitters) struct IcebergEmitterInit<'a> {
-    pub(in crate::runtime::emitters) plan: &'a IcebergSinkPlan,
-    pub(in crate::runtime::emitters) context: &'a EmitterSinkContext,
-    pub(in crate::runtime::emitters) flush_policy: &'a FlushPolicy,
-    pub(in crate::runtime::emitters) input_schema: Arc<CompiledSchema>,
-    pub(in crate::runtime::emitters) buffered_messages: Arc<EmitterBufferedMessages>,
 }
 
 trait IcebergStorageBackendExt {
@@ -317,210 +309,120 @@ impl IcebergStorageBackendExt for IcebergStorageBackend {
     }
 }
 
-impl IcebergEmitter {
-    fn buffered_message_count(
-        pending_rows: u64,
-        staged_rows: u64,
-        rejected_records: usize,
-    ) -> usize {
-        let records = pending_rows
-            .checked_add(staged_rows)
-            .and_then(|rows| rows.checked_add(rejected_records.arch_into()))
-            .assured("every count totals rows this emitter already holds in memory");
-        records.arch_into()
-    }
-
-    fn update_buffered_messages(&self) {
-        self.buffered_messages
-            .set_iceberg(Self::buffered_message_count(
-                self.pending_rows,
-                self.staged_rows,
-                self.rejected_records.len(),
-            ));
-    }
-
-    pub(in crate::runtime) async fn new(
-        init: IcebergEmitterInit<'_>,
-    ) -> IcebergEmitterResult<Self> {
-        let IcebergEmitterInit {
-            plan,
-            context,
-            flush_policy,
-            input_schema,
-            buffered_messages,
-        } = init;
-        let flush_policy = Runtime::parse_runtime_node_flush_policy(
-            &context.domain,
-            "iceberg emitter",
-            &context.emitter,
-            flush_policy,
-        )
-        .map_err(|error| {
-            Report::new(IcebergEmitterError::InvalidFlushPolicy).attach_printable(error.to_string())
-        })?;
-        let commit_policy =
-            Self::parse_commit_policy(context, &plan.commit_each, &plan.max_commit_size)?;
-        let program = compile_iceberg_values_program(
-            &context.domain,
-            &context.emitter,
-            &plan.values,
-            input_schema.arrow_schema(),
-            context.udfs.as_ref(),
-        )
-        .map_err(|error| {
-            Report::new(IcebergEmitterError::CompileValues).attach_printable(error.to_string())
-        })?;
-        let mapped_schema = Self::mapped_arrow_schema(&program, &plan.values)?;
-        let staging_dir = Self::create_staging_dir(context.runtime.temp_dir())?;
-        let client = Self::client_from_config(plan, context).await?;
-        Ok(Self {
-            client,
-            commit_state: IcebergCommitState::default(),
-            program,
+impl IcebergSink {
+    pub async fn new(config: IcebergSinkConfig, host: SinkHost) -> SinkStartResult<Self> {
+        let IcebergSinkConfig {
+            backend,
+            storage_config,
+            catalog_name,
+            catalog_config,
+            namespace,
+            table,
+            location,
             mapped_schema,
-            flush_policy,
-            commit_policy,
+            commit,
+            writer,
+        } = config;
+        let staged_schema = Self::staged_arrow_schema(&mapped_schema)?;
+        let staging_dir = Self::create_staging_dir(&host)?;
+        Self::validate_blob_location(backend, "table", &location)?;
+        let properties = IcebergObjectStoreProperties::from_entries(backend, &storage_config);
+        let catalog = StdArc::new(
+            properties
+                .rest_catalog(&catalog_name, &catalog_config)
+                .await
+                .map_err(|error| {
+                    Report::new(SinkStartError::Initialize { sink: ICEBERG }).attach_printable(
+                        format!("failed to initialize Iceberg catalog '{catalog_name}': {error}"),
+                    )
+                })?,
+        );
+        let table_ident =
+            TableIdent::new(NamespaceIdent::new(namespace), table.as_str().to_string());
+        let loaded = catalog.load_table(&table_ident).await.map_err(|error| {
+            Report::new(SinkStartError::Initialize { sink: ICEBERG }).attach_printable(format!(
+                "failed to initialize Iceberg table {table_ident}: {error}"
+            ))
+        })?;
+        if loaded.metadata().location() != location {
+            return Err(
+                Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
+                    .attach_printable(format!(
+                        "table '{table_ident}' is registered at '{}' but emitter location is \
+                         '{location}'",
+                        loaded.metadata().location()
+                    )),
+            );
+        }
+        Ok(Self {
+            client: IcebergSinkClient {
+                catalog,
+                table: loaded,
+                file_name_prefix: format!(
+                    "{writer}-{}-{}-{}",
+                    table.as_str(),
+                    actual_utc_now().unix_nanos(),
+                    fastrand::u64(..)
+                ),
+                data_file_sequence: 0,
+            },
+            commit_state: IcebergCommitState::default(),
+            staged_schema,
+            commit_policy: commit,
             staging_dir,
-            pending_sequence: 0,
-            pending_batches: Vec::new(),
-            pending_rows: 0,
-            pending_bytes: 0,
-            flush_cadence: BranchBufferTimer::default(),
+            staged_sequence: 0,
             staged_batches: Vec::new(),
             staged_rows: 0,
             staged_bytes: 0,
-            commit_cadence: BranchBufferTimer::default(),
-            rejected_records: VecDeque::new(),
-            buffered_messages,
+            commit_deadline: IcebergCommitDeadline::default(),
         })
     }
 
-    fn create_staging_dir(root: &Path) -> IcebergEmitterResult<TempDir> {
-        std::fs::create_dir_all(root)
-            .change_context(IcebergEmitterError::CreateStagingDir)
-            .attach_printable(format!("staging root: {}", root.display()))?;
-        TempDir::new_in(root)
-            .change_context(IcebergEmitterError::CreateStagingDir)
-            .attach_printable(format!("staging root: {}", root.display()))
-    }
-
-    fn parse_commit_policy(
-        context: &EmitterSinkContext,
-        commit_each: &str,
-        max_commit_size: &str,
-    ) -> IcebergEmitterResult<IcebergCommitPolicy> {
-        let interval = Runtime::parse_runtime_node_duration_setting(
-            &context.domain,
-            "iceberg emitter",
-            &context.emitter,
-            "commit_each",
-            commit_each,
-        )
-        .map_err(|error| {
-            Report::new(IcebergEmitterError::InvalidCommitPolicy)
-                .attach_printable(error.to_string())
-        })?;
-        let max_size = max_commit_size
-            .parse::<ubyte::ByteUnit>()
-            .map_err(|error| {
-                Report::new(IcebergEmitterError::InvalidCommitPolicy)
-                    .attach_printable(format!("max_commit_size '{max_commit_size}': {error}"))
-            })?
-            .as_u64();
-        Ok(IcebergCommitPolicy { interval, max_size })
-    }
-
-    fn mapped_arrow_schema(
-        program: &CompiledSqlValuesProgram,
-        values: &[IcebergValueMapping],
-    ) -> IcebergEmitterResult<StdArc<arrow_schema::Schema>> {
-        let output_fields = program.program.output_schema.fields();
-        if output_fields.len() != values.len() {
-            return Err(
-                Report::new(IcebergEmitterError::BuildSchema).attach_printable(format!(
-                    "VALUES output fields: {}, mappings: {}",
-                    output_fields.len(),
-                    values.len()
-                )),
-            );
-        }
+    /// The Arrow schema staged files carry, which narrows every UTC datetime column to the
+    /// microsecond resolution an Iceberg `timestamptz` stores.
+    fn staged_arrow_schema(
+        mapped_schema: &arrow_schema::Schema,
+    ) -> SinkStartResult<StdArc<arrow_schema::Schema>> {
         let mut seen = HashSet::default();
-        let mut fields = Vec::with_capacity(output_fields.len());
-        for (field, mapping) in output_fields.iter().zip(values) {
-            if !seen.insert(mapping.column.as_str().to_string()) {
-                return Err(Report::new(IcebergEmitterError::BuildSchema)
-                    .attach_printable(format!("duplicate mapped column: {}", mapping.column)));
+        let mut fields = Vec::with_capacity(mapped_schema.fields().len());
+        for field in mapped_schema.fields() {
+            if !seen.insert(field.name().clone()) {
+                return Err(
+                    Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
+                        .attach_printable(format!("duplicate mapped column: {}", field.name())),
+                );
             }
-            fields.push(Self::iceberg_arrow_field(field, &mapping.column));
+            fields.push(arrow_schema::Field::new(
+                field.name(),
+                Self::staged_arrow_data_type(field.data_type()),
+                true,
+            ));
         }
         Ok(StdArc::new(arrow_schema::Schema::new(fields)))
     }
 
-    fn iceberg_arrow_field(field: &arrow_schema::Field, column: &str) -> arrow_schema::Field {
-        arrow_schema::Field::new(
-            column,
-            Self::iceberg_arrow_data_type(field.data_type()),
-            true,
-        )
-    }
-
-    fn iceberg_arrow_data_type(data_type: &arrow_schema::DataType) -> arrow_schema::DataType {
-        if let arrow_schema::DataType::Timestamp(arrow_schema::TimeUnit::Nanosecond, Some(tz)) =
-            data_type
-            && (tz.as_ref() == "+00:00" || tz.as_ref() == "UTC")
+    fn staged_arrow_data_type(data_type: &DataType) -> DataType {
+        if let DataType::Timestamp(TimeUnit::Nanosecond, Some(timezone)) = data_type
+            && (timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC")
         {
-            return arrow_schema::DataType::Timestamp(
-                arrow_schema::TimeUnit::Microsecond,
-                Some("+00:00".into()),
-            );
+            return DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()));
         }
         data_type.clone()
     }
 
-    /// Opens the REST catalog `plan` commits through and loads its table over the storage client.
-    async fn client_from_config(
-        plan: &IcebergSinkPlan,
-        context: &EmitterSinkContext,
-    ) -> IcebergEmitterResult<IcebergEmitterClient> {
-        let location = plan.location.as_str();
-        Self::validate_blob_location(plan.backend, "table", location)?;
-        let properties =
-            IcebergObjectStoreProperties::from_entries(plan.backend, &plan.storage.config.entries);
-        let catalog = StdArc::new(
-            properties
-                .rest_catalog(plan.catalog.name.as_str(), &plan.catalog.config.entries)
-                .await
-                .change_context(IcebergEmitterError::InitializeCatalog)?,
-        );
-        let namespace = NamespaceIdent::new(context.domain.as_str().to_string());
-        let table_name = plan.table.as_str().to_string();
-        let table_ident = TableIdent::new(namespace, table_name.clone());
-        let table = catalog
-            .load_table(&table_ident)
-            .await
-            .change_context(IcebergEmitterError::InitializeTable)
-            .attach_printable(format!("table: {table_ident}"))?;
-        if table.metadata().location() != location {
-            return Err(
-                Report::new(IcebergEmitterError::InvalidLocation).attach_printable(format!(
-                    "table '{}' is registered at '{}' but emitter location is '{}'",
-                    table_ident,
-                    table.metadata().location(),
-                    location
-                )),
-            );
-        }
-        Ok(IcebergEmitterClient {
-            catalog,
-            table,
-            file_name_prefix: format!(
-                "{}-{}-{}-{}",
-                context.emitter.as_str(),
-                table_name,
-                actual_utc_now().unix_nanos(),
-                fastrand::u64(..)
-            ),
-            data_file_sequence: 0,
+    fn create_staging_dir(host: &SinkHost) -> SinkStartResult<TempDir> {
+        let root = host.staging_directory();
+        std::fs::create_dir_all(&root).map_err(|error| {
+            Report::new(SinkStartError::Initialize { sink: ICEBERG }).attach_printable(format!(
+                "failed to create Iceberg staging directory under '{}': {error}",
+                root.display()
+            ))
+        })?;
+        TempDir::new_in(&root).map_err(|error| {
+            Report::new(SinkStartError::Initialize { sink: ICEBERG }).attach_printable(format!(
+                "failed to create Iceberg staging directory under '{}': {error}",
+                root.display()
+            ))
         })
     }
 
@@ -528,652 +430,201 @@ impl IcebergEmitter {
         backend: IcebergStorageBackend,
         label: &str,
         location: &str,
-    ) -> IcebergEmitterResult<String> {
+    ) -> SinkStartResult<()> {
+        let invalid = |reason: String| {
+            Report::new(SinkStartError::InvalidConfiguration { sink: ICEBERG })
+                .attach_printable(reason)
+        };
         let url = Url::parse(location)
-            .change_context(IcebergEmitterError::InvalidLocation)
-            .attach_printable(format!("{label} location: {location}"))?;
+            .map_err(|error| invalid(format!("{label} location '{location}': {error}")))?;
         if !backend.accepts_location_scheme(url.scheme()) {
             let expected = match backend {
                 IcebergStorageBackend::S3 => "s3://",
                 IcebergStorageBackend::Gcs => "gs://",
                 IcebergStorageBackend::AzureBlob => "wasb:// or wasbs://",
             };
-            return Err(Report::new(IcebergEmitterError::InvalidLocation)
-                .attach_printable(format!("{label} location '{location}' must use {expected}")));
+            return Err(invalid(format!(
+                "{label} location '{location}' must use {expected}"
+            )));
         }
         if url.host_str().is_none() {
-            return Err(
-                Report::new(IcebergEmitterError::InvalidLocation).attach_printable(format!(
-                    "{label} location '{location}' must include a {} bucket",
-                    backend.as_ref()
-                )),
-            );
+            return Err(invalid(format!(
+                "{label} location '{location}' must include a {} bucket",
+                backend.as_ref()
+            )));
         }
         if let IcebergStorageBackend::AzureBlob = backend {
             if url.username().is_empty() {
-                return Err(
-                    Report::new(IcebergEmitterError::InvalidLocation).attach_printable(format!(
-                        "{label} location '{location}' must include an Azure container before @"
-                    )),
-                );
+                return Err(invalid(format!(
+                    "{label} location '{location}' must include an Azure container before @"
+                )));
             }
             let host = url.host_str().unwrap_or_default();
             if !host.contains(".blob.") {
-                return Err(
-                    Report::new(IcebergEmitterError::InvalidLocation).attach_printable(format!(
-                        "{label} location '{location}' must use an Azure Blob host"
-                    )),
-                );
+                return Err(invalid(format!(
+                    "{label} location '{location}' must use an Azure Blob host"
+                )));
             }
         }
-        Ok(url.scheme().to_string())
-    }
-
-    /// Adds this sink's own flush and commit cadences to the emitter's wake.
-    pub(in crate::runtime) fn cadence_wake(
-        &self,
-        clock: &DomainClock,
-        wake: RuntimeWake,
-    ) -> RuntimeWake {
-        let wake = match self.flush_cadence.deadline() {
-            Some(deadline) => wake.with_buffer(clock, deadline),
-            None => wake,
-        };
-        match self.commit_cadence.deadline() {
-            Some(deadline) => wake.with_buffer(clock, deadline),
-            None => wake,
-        }
-    }
-
-    pub(in crate::runtime) fn reconfigure_flush_policy(
-        &mut self,
-        context: &EmitterSinkContext,
-        policy: RuntimeFlushPolicy,
-    ) -> IcebergEmitterResult<()> {
-        self.flush_policy = policy;
-        self.flush_cadence.clear();
-        if self.pending_batches.is_empty() {
-            return Ok(());
-        }
-        self.arm_flush_cadence(context)
-    }
-
-    /// Starts the flush cadence for a staging buffer that just stopped being empty. An armed
-    /// cadence is left alone, so a later batch neither moves it nor pays for a clock read.
-    fn arm_flush_cadence(&mut self, context: &EmitterSinkContext) -> IcebergEmitterResult<()> {
-        if self.flush_cadence.is_armed() {
-            return Ok(());
-        }
-        let snapshot = Self::execution_snapshot(context)?;
-        self.flush_cadence
-            .arm_flush(self.flush_policy, &context.clock, &snapshot)
-            .change_context(IcebergEmitterError::CadenceTiming)
-    }
-
-    fn execution_snapshot(
-        context: &EmitterSinkContext,
-    ) -> IcebergEmitterResult<DomainExecutionSnapshot> {
-        context
-            .clock
-            .snapshot()
-            .change_context(IcebergEmitterError::CadenceTiming)
-    }
-
-    pub(in crate::runtime) async fn publish_batch(
-        &mut self,
-        context: &EmitterSinkContext,
-        batch: RelayRecordBatch,
-        execution_now: Timestamp,
-    ) -> IcebergEmitterResult<Option<PublishReport>> {
-        let domain_timestamp = batch.domain_timestamp().unwrap_or(execution_now);
-        let mapped = self
-            .mapped_arrow_batch_from_runtime_batch(&batch.batch, &batch.keys, execution_now)
-            .await?;
-        let row_count = batch.batch.batch().num_rows();
-        let mut rejected_errors = vec![None; row_count];
-        for rejected in mapped.rejected {
-            let Some(error) = rejected_errors.get_mut(rejected.row) else {
-                return Err(
-                    Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
-                        "Iceberg VALUES rejected row {} outside {row_count} rows",
-                        rejected.row
-                    )),
-                );
-            };
-            if error.is_some() {
-                return Err(
-                    Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
-                        "Iceberg VALUES rejected row {} more than once",
-                        rejected.row
-                    )),
-                );
-            }
-            *error = Some(rejected.error);
-        }
-        let expected_accepted_rows = rejected_errors
-            .iter()
-            .filter(|error| error.is_none())
-            .count();
-        let actual_accepted_rows = match mapped.accepted.as_ref() {
-            Some(batch) => batch.num_rows(),
-            None => 0,
-        };
-        if actual_accepted_rows != expected_accepted_rows {
-            return Err(
-                Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
-                    "Iceberg VALUES selected {actual_accepted_rows} accepted rows but retained \
-                     {expected_accepted_rows} input acknowledgments"
-                )),
-            );
-        }
-        let input_batch = batch.batch.as_ref().clone();
-        let mut accepted_acks = Vec::with_capacity(actual_accepted_rows);
-        for (row, ((metadata, key), acks)) in batch
-            .metadata
-            .into_iter()
-            .zip(batch.keys)
-            .zip(batch.acks)
-            .enumerate()
-        {
-            if let Some(error) = rejected_errors[row].take() {
-                self.rejected_records.push_back(IcebergRejectedRecord {
-                    batch: input_batch.clone(),
-                    row,
-                    metadata,
-                    key,
-                    acks,
-                    error,
-                });
-            } else {
-                accepted_acks.push(acks);
-            }
-        }
-        let rows: u64 = actual_accepted_rows.arch_into();
-        let bytes = match mapped.accepted {
-            Some(mapped_batch) => {
-                let bytes: u64 = mapped_batch.get_array_memory_size().arch_into();
-                self.pending_batches.push(IcebergPendingBatch {
-                    batch: mapped_batch,
-                    acks: accepted_acks,
-                    domain_timestamp,
-                });
-                bytes
-            }
-            None => 0,
-        };
-        self.pending_rows = self
-            .pending_rows
-            .checked_add(rows)
-            .assured("both counts total rows this emitter already holds in memory");
-        self.pending_bytes = self
-            .pending_bytes
-            .checked_add(bytes)
-            .assured("both counts estimate bytes of batches this emitter already holds");
-        self.update_buffered_messages();
-        self.arm_flush_cadence(context)?;
-        let should_flush = self.flush_policy.size_boundary_reached(self.pending_bytes);
-        if should_flush {
-            self.flush_to_disk().await?;
-            self.commit_if_due(context, false).await
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub(in crate::runtime) async fn flush_due(
-        &mut self,
-        context: &EmitterSinkContext,
-    ) -> IcebergEmitterResult<Option<PublishReport>> {
-        if self.flush_cadence.is_armed() {
-            let snapshot = Self::execution_snapshot(context)?;
-            if self
-                .flush_cadence
-                .is_due(&context.clock, &snapshot)
-                .change_context(IcebergEmitterError::CadenceTiming)?
-            {
-                self.flush_to_disk().await?;
-            }
-        }
-        self.commit_if_due(context, false).await
-    }
-
-    pub(in crate::runtime) async fn finish(
-        &mut self,
-        context: &EmitterSinkContext,
-    ) -> IcebergEmitterResult<Option<PublishReport>> {
-        self.flush_to_disk().await?;
-        self.commit_if_due(context, true).await
-    }
-
-    pub(in crate::runtime) fn pending_acks(&self) -> AckSet {
-        AckSet::merged(
-            self.pending_batches
-                .iter()
-                .flat_map(|batch| batch.acks.iter().cloned())
-                .chain(
-                    self.staged_batches
-                        .iter()
-                        .flat_map(|batch| batch.acks.iter().cloned()),
-                )
-                .chain(
-                    self.rejected_records
-                        .iter()
-                        .map(|record| record.acks.clone()),
-                ),
-        )
-    }
-
-    pub(super) fn next_rejected_record_message(
-        &self,
-    ) -> Option<Result<(RelayMessage, StructuredMessageError), (String, AckSet)>> {
-        self.rejected_records
-            .front()
-            .map(IcebergRejectedRecord::message)
-    }
-
-    pub(super) fn finish_rejected_record(&mut self) {
-        self.rejected_records.pop_front().discarded(
-            "the caller is finishing the record it read from the front, so an empty queue means \
-             it read none",
-        );
-        self.update_buffered_messages();
-    }
-
-    async fn flush_to_disk(&mut self) -> IcebergEmitterResult<()> {
-        if self.pending_rows == 0 {
-            self.flush_cadence.clear();
-            return Ok(());
-        }
-        let acks = self.pending_acks();
-        await_emitter_confirmation(&acks, self.flush_pending_to_disk()).await
-    }
-
-    async fn flush_pending_to_disk(&mut self) -> IcebergEmitterResult<()> {
-        let batch = arrow_select::concat::concat_batches(
-            &self.mapped_schema,
-            self.pending_batches.iter().map(|pending| &pending.batch),
-        )
-        .change_context(IcebergEmitterError::FlushToDisk)?;
-        let accepted_rows: u64 = batch.num_rows().arch_into();
-        let path = self.next_staged_path();
-        let staged_bytes = Self::write_ipc_batch(path.clone(), batch).await?;
-        let domain_timestamp = self
-            .pending_batches
-            .iter()
-            .map(|batch| batch.domain_timestamp)
-            .max()
-            .verified("a nonzero pending row count means at least one mapped batch is pending");
-        let pending = std::mem::take(&mut self.pending_batches);
-        let accepted_acks = pending
-            .into_iter()
-            .flat_map(|batch| batch.acks)
-            .collect::<Vec<_>>();
-        self.staged_batches.push(IcebergStagedBatch {
-            path,
-            rows: accepted_rows,
-            bytes: staged_bytes,
-            acks: accepted_acks,
-            domain_timestamp,
-        });
-        self.staged_rows = self
-            .staged_rows
-            .checked_add(accepted_rows)
-            .assured("both counts total rows this emitter already staged on disk");
-        self.staged_bytes = self
-            .staged_bytes
-            .checked_add(staged_bytes)
-            .assured("both counts total bytes this emitter already staged on disk");
-        self.pending_rows = 0;
-        self.pending_bytes = 0;
-        self.update_buffered_messages();
-        self.flush_cadence.clear();
         Ok(())
     }
 
-    /// Commits the staged batches when the emitter's explicit `COMMIT EACH` cadence or maximum
-    /// commit size is reached, and unconditionally for a drain.
-    ///
-    /// The logical cadence is armed here rather than at staging time because this is the only
-    /// caller that reads it, which keeps a forced drain independent of the domain clock.
-    async fn commit_if_due(
-        &mut self,
-        context: &EmitterSinkContext,
-        force: bool,
-    ) -> IcebergEmitterResult<Option<PublishReport>> {
-        if self.staged_batches.is_empty() {
-            self.commit_cadence.clear();
-            return Ok(None);
-        }
-        let size_due = self.staged_bytes >= self.commit_policy.max_size;
-        if !force && !size_due {
-            let snapshot = Self::execution_snapshot(context)?;
-            self.commit_cadence
-                .arm_logical(&context.clock, &snapshot, self.commit_policy.interval);
-            let time_due = self
-                .commit_cadence
-                .is_due(&context.clock, &snapshot)
-                .change_context(IcebergEmitterError::CadenceTiming)?;
-            if !time_due {
-                return Ok(None);
+    /// The staged columns of one write: the rows the host selected, in this sink's exact staged
+    /// types.
+    fn staged_batch(&self, rows: &MappedSinkRows<'_>) -> SinkPublishResult<RecordBatch> {
+        let row_count = rows.batch.num_rows();
+        let selects_every_row = rows.selected_rows.len() == row_count;
+        let mut selected = vec![false; row_count];
+        if !selects_every_row {
+            for row in rows.selected_rows {
+                let Some(selected) = selected.get_mut(*row) else {
+                    return Err(Report::new(SinkPublishError::Publish { sink: ICEBERG })
+                        .attach_printable(format!(
+                            "Iceberg selected row {row} outside {row_count} mapped rows"
+                        )));
+                };
+                *selected = true;
             }
         }
-        let acks = self.pending_acks();
-        await_emitter_confirmation(&acks, self.commit_staged_batches()).await
-    }
-
-    async fn commit_staged_batches(&mut self) -> IcebergEmitterResult<Option<PublishReport>> {
-        if self.commit_state.prepared().is_none() {
-            let paths = self
-                .staged_batches
-                .iter()
-                .map(|batch| batch.path.clone())
-                .collect::<Vec<_>>();
-            let batch =
-                Self::read_ipc_batches(self.mapped_schema.clone(), paths.as_slice()).await?;
-            let prepared = self.client.prepare_batch(batch).await?;
-            self.commit_state.store(prepared);
-        }
-        self.client
-            .commit_prepared(self.commit_state.prepared().verified(
-                "the commit state holds its prepared commit from preparation until this call \
-                 completes",
-            ))
-            .await?;
-        self.commit_state.finish();
-        let staged = std::mem::take(&mut self.staged_batches);
-        let messages = staged
-            .iter()
-            .map(|batch| batch.rows)
-            .fold(0_u64, u64::saturating_add);
-        let bytes = staged
-            .iter()
-            .map(|batch| batch.bytes)
-            .fold(0_u64, u64::saturating_add);
-        let domain_timestamp = staged
-            .iter()
-            .map(|batch| batch.domain_timestamp)
-            .max()
-            .verified("commit_staged_batches returns before this point when no batch is staged");
-        let mut acks = Vec::new();
-        for batch in staged {
-            acks.extend(batch.acks);
-            if let Err(error) = tokio::fs::remove_file(&batch.path).await {
-                debug!(
-                    path = %batch.path.display(),
-                    error = %error,
-                    "failed to remove committed Iceberg staged batch"
-                );
-            }
-        }
-        self.staged_rows = 0;
-        self.staged_bytes = 0;
-        self.commit_cadence.clear();
-        self.update_buffered_messages();
-        for ack in acks {
-            ack.ack_success();
-        }
-        Ok(Some(PublishReport::flushed(
-            messages,
-            bytes,
-            domain_timestamp,
-        )))
-    }
-
-    fn no_ack_retained_batches(
-        pending_batches: &[IcebergPendingBatch],
-        staged_batches: &[IcebergStagedBatch],
-    ) {
-        for acks in pending_batches
-            .iter()
-            .flat_map(|batch| batch.acks.iter())
-            .chain(staged_batches.iter().flat_map(|batch| batch.acks.iter()))
-        {
-            acks.no_ack("Iceberg emitter dropped buffered batch");
-        }
-    }
-
-    async fn mapped_arrow_batch_from_runtime_batch(
-        &self,
-        batch: &RuntimeRecordBatch,
-        keys: &[Option<BranchKey>],
-        execution_now: Timestamp,
-    ) -> IcebergEmitterResult<IcebergMappedBatch> {
-        Self::map_values_batch(
-            &self.program,
-            &self.mapped_schema,
-            batch,
-            keys,
-            execution_now,
-        )
-        .await
-    }
-
-    async fn map_values_batch(
-        program: &CompiledSqlValuesProgram,
-        mapped_schema: &StdArc<arrow_schema::Schema>,
-        batch: &RuntimeRecordBatch,
-        keys: &[Option<BranchKey>],
-        execution_now: Timestamp,
-    ) -> IcebergEmitterResult<IcebergMappedBatch> {
-        let row_count = batch.batch().num_rows();
-        if row_count != keys.len() {
-            return Err(
-                Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
-                    "branch key count {} does not match row count {}",
-                    keys.len(),
-                    row_count
-                )),
-            );
-        }
-        let side_inputs = HashMap::default();
-        let lookup_columns = HashMap::default();
-        let input = project_vm_input_batch(
-            &program.program.input_schema,
-            &VmInputProjectionSources {
-                carrier: batch,
-                namespace_batches: &[],
-                strict_namespaces: &[],
-                keys,
-                side_inputs: &side_inputs,
-                ingest_metadata: None,
-                lookup_columns: &lookup_columns,
-                uninitialized: None,
-            },
-            None,
-        )
-        .map_err(|error| Report::new(IcebergEmitterError::MapBatch).attach_printable(error))?;
-        let result = execute_program_with_selection_in_context(
-            &program.program,
-            &input,
-            &VmExecutionContext {
-                now: execution_now,
-                injector: None,
-            },
-        )
-        .await
-        .map_err(|error| {
-            Report::new(IcebergEmitterError::MapBatch).attach_printable(error.to_string())
-        })?;
-        if result.batch.row_count() != row_count
-            || result.selected_rows.len() != row_count
-            || result
-                .selected_rows
-                .iter()
-                .enumerate()
-                .any(|(output_row, input_row)| output_row != input_row)
-        {
-            return Err(
-                Report::new(IcebergEmitterError::MapBatch).attach_printable(format!(
-                    "VALUES produced {} rows with {} selections for {row_count} staged records",
-                    result.batch.row_count(),
-                    result.selected_rows.len()
-                )),
-            );
-        }
-        let mut rejected = Vec::new();
-        let mut accepted_rows = Vec::new();
-        for (row, errors) in result.batch.errors().iter().enumerate() {
-            let Some(side_error) = errors.first() else {
-                accepted_rows.push(row);
-                continue;
+        let predicate = BooleanArray::from(selected);
+        let mut columns = Vec::with_capacity(self.staged_schema.fields().len());
+        for (index, field) in self.staged_schema.fields().iter().enumerate() {
+            let Some(column) = rows.batch.columns().get(index) else {
+                return Err(Report::new(SinkPublishError::Publish { sink: ICEBERG })
+                    .attach_printable(format!(
+                        "Iceberg mapped batch has {} columns for {} staged columns",
+                        rows.batch.num_columns(),
+                        self.staged_schema.fields().len()
+                    )));
             };
-            let reason = format!(
-                "Iceberg VALUES side error {}: {} at {}",
-                side_error.code().as_str(),
-                side_error.reason,
-                side_error.span
+            let column = Self::staged_column(column, field.data_type())?;
+            columns.push(if selects_every_row {
+                column
+            } else {
+                filter_arrow_array(column.as_ref(), &predicate)
+                    .change_context(SinkPublishError::Publish { sink: ICEBERG })?
+            });
+        }
+        if columns.is_empty() {
+            return RecordBatch::try_new_with_options(
+                self.staged_schema.clone(),
+                columns,
+                &RecordBatchOptions::new().with_row_count(Some(rows.selected_rows.len())),
+            )
+            .change_context(SinkPublishError::Publish { sink: ICEBERG });
+        }
+        RecordBatch::try_new(self.staged_schema.clone(), columns)
+            .change_context(SinkPublishError::Publish { sink: ICEBERG })
+    }
+
+    /// One mapped column in the exact type its staged file carries.
+    fn staged_column(column: &ArrayRef, data_type: &DataType) -> SinkPublishResult<ArrayRef> {
+        let DataType::Timestamp(TimeUnit::Microsecond, Some(timezone)) = data_type else {
+            return Ok(column.clone());
+        };
+        let Some(values) = column.as_any().downcast_ref::<TimestampNanosecondArray>() else {
+            return Err(
+                Report::new(SinkPublishError::Publish { sink: ICEBERG }).attach_printable(format!(
+                    "Iceberg datetime column arrived as {} instead of a nanosecond timestamp",
+                    column.data_type()
+                )),
             );
-            rejected.push(IcebergRejectedRow {
-                row,
-                error: program.structured_side_error(execution_now, reason, side_error.span),
-            });
-        }
-        if accepted_rows.is_empty() {
-            return Ok(IcebergMappedBatch {
-                accepted: None,
-                rejected,
-            });
-        }
-        let predicate = BooleanArray::from_iter(
-            result
-                .batch
-                .errors()
-                .iter()
-                .map(|errors| Some(errors.is_empty())),
-        );
-        let columns = result
-            .batch
-            .columns()
+        };
+        let microseconds = values
             .iter()
-            .zip(mapped_schema.fields())
-            .map(|(array, field)| {
-                let array = Self::typed_array_to_array_ref(array, field.data_type());
-                if accepted_rows.len() == row_count {
-                    Ok(array)
-                } else {
-                    filter_arrow_array(array.as_ref(), &predicate)
-                        .change_context(IcebergEmitterError::MapBatch)
-                }
-            })
-            .collect::<IcebergEmitterResult<Vec<_>>>()?;
-        let accepted = RecordBatch::try_new(mapped_schema.clone(), columns)
-            .change_context(IcebergEmitterError::MapBatch)?;
-        Ok(IcebergMappedBatch {
-            accepted: Some(accepted),
-            rejected,
-        })
-    }
-
-    fn typed_array_to_array_ref(
-        array: &VmTypedArray,
-        data_type: &arrow_schema::DataType,
-    ) -> arrow_array::ArrayRef {
-        match (array, data_type) {
-            (
-                VmTypedArray::Datetime(values),
-                arrow_schema::DataType::Timestamp(
-                    arrow_schema::TimeUnit::Microsecond,
-                    Some(timezone),
-                ),
-            ) if timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC" => StdArc::new(
-                values
-                    .iter()
-                    .map(|value| value.map(|nanos| nanos.div_euclid(1_000)))
-                    .collect::<arrow_array::TimestampMicrosecondArray>()
-                    .with_timezone_utc(),
-            ),
-            _ => Self::typed_array_to_native_array_ref(array),
-        }
-    }
-
-    fn typed_array_to_native_array_ref(array: &VmTypedArray) -> arrow_array::ArrayRef {
-        array.to_array_ref()
+            .map(|value| value.map(|nanos| nanos.div_euclid(1_000)))
+            .collect::<TimestampMicrosecondArray>()
+            .with_timezone(timezone.clone());
+        Ok(StdArc::new(microseconds))
     }
 
     fn next_staged_path(&mut self) -> PathBuf {
-        self.pending_sequence = self
-            .pending_sequence
+        self.staged_sequence = self
+            .staged_sequence
             .checked_add(1)
             .assured("an emitter cannot stage 2^64 batches in the lifetime of a node");
         self.staging_dir
             .path()
-            .join(format!("batch-{}.arrow", self.pending_sequence))
+            .join(format!("batch-{}.arrow", self.staged_sequence))
     }
 
-    async fn write_ipc_batch(path: PathBuf, batch: RecordBatch) -> IcebergEmitterResult<u64> {
+    async fn write_ipc_batch(path: PathBuf, batch: RecordBatch) -> SinkPublishResult<u64> {
+        let staged = |error: &dyn std::fmt::Display, path: &PathBuf| {
+            Report::new(SinkPublishError::Publish { sink: ICEBERG }).attach_printable(format!(
+                "failed to write Iceberg staged Arrow IPC '{}': {error}",
+                path.display()
+            ))
+        };
         tokio::task::spawn_blocking(move || {
-            let file = File::create(&path)
-                .change_context(IcebergEmitterError::WriteStagedIpc)
-                .attach_printable(format!("path: {}", path.display()))?;
+            let file = File::create(&path).map_err(|error| staged(&error, &path))?;
             let mut writer = StreamWriter::try_new(file, batch.schema().as_ref())
-                .change_context(IcebergEmitterError::WriteStagedIpc)
-                .attach_printable(format!("path: {}", path.display()))?;
+                .map_err(|error| staged(&error, &path))?;
             writer
                 .write(&batch)
-                .change_context(IcebergEmitterError::WriteStagedIpc)
-                .attach_printable(format!("path: {}", path.display()))?;
-            writer
-                .finish()
-                .change_context(IcebergEmitterError::WriteStagedIpc)
-                .attach_printable(format!("path: {}", path.display()))?;
+                .map_err(|error| staged(&error, &path))?;
+            writer.finish().map_err(|error| staged(&error, &path))?;
             std::fs::metadata(&path)
                 .map(|metadata| metadata.len())
-                .change_context(IcebergEmitterError::WriteStagedIpc)
-                .attach_printable(format!("path: {}", path.display()))
+                .map_err(|error| staged(&error, &path))
         })
         .await
-        .change_context(IcebergEmitterError::WriteStagedIpc)?
+        .map_err(|error| {
+            Report::new(SinkPublishError::Publish { sink: ICEBERG })
+                .attach_printable(format!("Iceberg staging task failed: {error}"))
+        })?
     }
 
     async fn read_ipc_batches(
         schema: StdArc<arrow_schema::Schema>,
         paths: &[PathBuf],
-    ) -> IcebergEmitterResult<RecordBatch> {
+    ) -> SinkPublishResult<RecordBatch> {
         let paths = paths.to_vec();
+        let staged = |error: String, path: &PathBuf| {
+            Report::new(SinkPublishError::Commit { sink: ICEBERG }).attach_printable(format!(
+                "failed to read Iceberg staged Arrow IPC '{}': {error}",
+                path.display()
+            ))
+        };
         tokio::task::spawn_blocking(move || {
             let mut batches = Vec::new();
             for path in paths {
-                let file = File::open(&path)
-                    .change_context(IcebergEmitterError::ReadStagedIpc)
-                    .attach_printable(format!("path: {}", path.display()))?;
+                let file = File::open(&path).map_err(|error| staged(error.to_string(), &path))?;
                 let reader = StreamReader::try_new(file, None)
-                    .change_context(IcebergEmitterError::ReadStagedIpc)
-                    .attach_printable(format!("path: {}", path.display()))?;
+                    .map_err(|error| staged(error.to_string(), &path))?;
                 if reader.schema().as_ref() != schema.as_ref() {
-                    return Err(
-                        Report::new(IcebergEmitterError::ReadStagedIpc).attach_printable(format!(
-                            "path {} schema does not match",
-                            path.display()
-                        )),
-                    );
+                    return Err(staged("schema does not match".to_string(), &path));
                 }
                 let path_batches = reader
                     .collect::<Result<Vec<_>, _>>()
-                    .change_context(IcebergEmitterError::ReadStagedIpc)
-                    .attach_printable(format!("path: {}", path.display()))?;
+                    .map_err(|error| staged(error.to_string(), &path))?;
                 batches.extend(path_batches);
             }
             Self::concat_arrow_batches(schema, batches)
         })
         .await
-        .change_context(IcebergEmitterError::ReadStagedIpc)?
+        .map_err(|error| {
+            Report::new(SinkPublishError::Commit { sink: ICEBERG })
+                .attach_printable(format!("Iceberg staged read task failed: {error}"))
+        })?
     }
 
     fn concat_arrow_batches(
         schema: StdArc<arrow_schema::Schema>,
         batches: Vec<RecordBatch>,
-    ) -> IcebergEmitterResult<RecordBatch> {
+    ) -> SinkPublishResult<RecordBatch> {
+        let commit_failure = |reason: &str| {
+            Report::new(SinkPublishError::Commit { sink: ICEBERG })
+                .attach_printable(format!("failed to read Iceberg staged Arrow IPC: {reason}"))
+        };
         let Some(first) = batches.first() else {
-            return Err(Report::new(IcebergEmitterError::ReadStagedIpc)
-                .attach_printable("cannot commit zero staged Iceberg batches"));
+            return Err(commit_failure("cannot commit zero staged Iceberg batches"));
         };
         if first.schema().as_ref() != schema.as_ref()
             || batches
                 .iter()
                 .any(|batch| batch.schema().as_ref() != schema.as_ref())
         {
-            return Err(Report::new(IcebergEmitterError::ReadStagedIpc)
-                .attach_printable("staged Iceberg batch schemas do not match"));
+            return Err(commit_failure("staged Iceberg batch schemas do not match"));
         }
         if batches.len() == 1 {
             return Ok(first.clone());
@@ -1189,7 +640,7 @@ impl IcebergEmitter {
                     .collect::<Vec<_>>();
                 columns.push(
                     concat_arrow_arrays(&arrays)
-                        .change_context(IcebergEmitterError::ReadStagedIpc)?,
+                        .change_context(SinkPublishError::Commit { sink: ICEBERG })?,
                 );
             }
             columns
@@ -1204,24 +655,179 @@ impl IcebergEmitter {
         } else {
             RecordBatch::try_new(schema, columns)
         }
-        .change_context(IcebergEmitterError::ReadStagedIpc)
+        .change_context(SinkPublishError::Commit { sink: ICEBERG })
+    }
+
+    /// Every acknowledgement this sink still holds, newest staged batch last.
+    fn retained_acknowledgements(&self) -> Vec<SinkAcknowledgements> {
+        self.staged_batches
+            .iter()
+            .filter_map(|batch| batch.acknowledgements.clone())
+            .collect()
     }
 }
 
-impl Drop for IcebergEmitter {
+impl Drop for IcebergSink {
     fn drop(&mut self) {
-        Self::no_ack_retained_batches(&self.pending_batches, &self.staged_batches);
-        for rejected in &self.rejected_records {
-            rejected
-                .acks
-                .no_ack("Iceberg emitter dropped rejected record");
+        for acknowledgements in self.retained_acknowledgements() {
+            acknowledgements.reject("Iceberg emitter dropped staged batch".to_string());
         }
-        self.buffered_messages.set_iceberg(0);
     }
 }
 
-impl IcebergEmitterClient {
-    fn single_attempt_table(table: &Table) -> IcebergEmitterResult<Table> {
+#[async_trait::async_trait]
+impl SinkLifecycle for IcebergSink {
+    /// A staged batch outlives its catalog client, so a publish failure keeps the client rather
+    /// than reopening it and losing what is already on disk.
+    fn keeps_client_on_publish_failure(&self) -> bool {
+        true
+    }
+
+    fn commit_deadline(&self) -> Option<SinkDeadline> {
+        self.commit_deadline.due_at().map(SinkDeadline::Domain)
+    }
+
+    fn pending_acks(&self) -> Option<SinkAcknowledgements> {
+        let retained = self.retained_acknowledgements();
+        if retained.is_empty() {
+            return None;
+        }
+        Some(SinkAcknowledgements::new(RetainedAcknowledgements(
+            retained,
+        )))
+    }
+
+    fn retains_acknowledgements(&self) -> bool {
+        true
+    }
+
+    fn staged_messages(&self) -> u64 {
+        self.staged_rows
+    }
+
+    async fn commit(&mut self) -> SinkPublishResult<Option<SinkCommitReport>> {
+        if self.staged_batches.is_empty() {
+            self.commit_deadline.clear();
+            return Ok(None);
+        }
+        if self.commit_state.prepared().is_none() {
+            let paths = self
+                .staged_batches
+                .iter()
+                .map(|batch| batch.path.clone())
+                .collect::<Vec<_>>();
+            let batch = Self::read_ipc_batches(self.staged_schema.clone(), &paths).await?;
+            let prepared = self.client.prepare_batch(batch).await?;
+            self.commit_state.store(prepared);
+        }
+        self.client
+            .commit_prepared(self.commit_state.prepared().verified(
+                "the commit state holds its prepared commit from preparation until this call \
+                 completes",
+            ))
+            .await?;
+        self.commit_state.finish();
+        let staged = std::mem::take(&mut self.staged_batches);
+        let messages = staged
+            .iter()
+            .map(|batch| batch.rows)
+            .try_fold(0_u64, u64::checked_add)
+            .assured("the total counts rows this sink already staged on disk");
+        let bytes = staged
+            .iter()
+            .map(|batch| batch.bytes)
+            .try_fold(0_u64, u64::checked_add)
+            .assured("the total counts bytes this sink already staged on disk");
+        let domain_timestamp = staged
+            .iter()
+            .map(|batch| batch.domain_timestamp)
+            .max()
+            .verified("this call returns before this point when no batch is staged");
+        let mut acknowledgements = Vec::with_capacity(staged.len());
+        for batch in staged {
+            acknowledgements.extend(batch.acknowledgements);
+            if let Err(error) = tokio::fs::remove_file(&batch.path).await {
+                debug!(
+                    path = %batch.path.display(),
+                    error = %error,
+                    "failed to remove committed Iceberg staged batch"
+                );
+            }
+        }
+        self.staged_rows = 0;
+        self.staged_bytes = 0;
+        self.commit_deadline.clear();
+        for acknowledgements in acknowledgements {
+            acknowledgements.acknowledge();
+        }
+        Ok(Some(SinkCommitReport {
+            messages,
+            bytes,
+            domain_timestamp,
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl RowSink for IcebergSink {
+    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome {
+        let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
+        let staged = match self.staged_batch(&rows) {
+            Ok(staged) => staged,
+            Err(error) => {
+                outcome.fail(error);
+                return outcome;
+            }
+        };
+        let staged_rows: u64 = staged.num_rows().arch_into();
+        let path = self.next_staged_path();
+        let staged_bytes = match Self::write_ipc_batch(path.clone(), staged).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                outcome.fail(error);
+                return outcome;
+            }
+        };
+        self.staged_batches.push(IcebergStagedBatch {
+            path,
+            rows: staged_rows,
+            bytes: staged_bytes,
+            acknowledgements: rows.acknowledgements,
+            domain_timestamp: rows.occurred_at,
+        });
+        self.staged_rows = self
+            .staged_rows
+            .checked_add(staged_rows)
+            .assured("both counts total rows this sink already staged on disk");
+        self.staged_bytes = self
+            .staged_bytes
+            .checked_add(staged_bytes)
+            .assured("both counts total bytes this sink already staged on disk");
+        self.commit_deadline
+            .arm(self.commit_policy, rows.occurred_at, self.staged_bytes);
+        for row in rows.selected_rows {
+            outcome.deliver(SinkRecordPosition {
+                batch_index: rows.batch_index,
+                row_index: *row,
+            });
+        }
+        trace!(
+            rows = staged_rows,
+            bytes = staged_bytes,
+            "emitter staged iceberg rows"
+        );
+        outcome
+    }
+}
+
+impl IcebergSinkClient {
+    /// The table this commit attempts against, with the catalog library's own retry disabled so
+    /// the emitter's declared retry policy is the only one that runs.
+    fn single_attempt_table(table: &Table) -> SinkPublishResult<Table> {
+        let commit_failure = |error: &dyn std::fmt::Display| {
+            Report::new(SinkPublishError::Commit { sink: ICEBERG })
+                .attach_printable(format!("failed to commit Iceberg staged batches: {error}"))
+        };
         let metadata = table
             .metadata()
             .clone()
@@ -1234,41 +840,46 @@ impl IcebergEmitterClient {
                 .into_iter()
                 .collect(),
             )
-            .change_context(IcebergEmitterError::Commit)?
+            .map_err(|error| commit_failure(&error))?
             .build()
-            .change_context(IcebergEmitterError::Commit)?
+            .map_err(|error| commit_failure(&error))?
             .metadata;
         let mut builder = Table::builder()
             .file_io(table.file_io().clone())
             .metadata(metadata)
             .identifier(table.identifier().clone())
-            .runtime(
-                ::iceberg::Runtime::try_current().change_context(IcebergEmitterError::Commit)?,
-            );
+            .runtime(::iceberg::Runtime::try_current().map_err(|error| commit_failure(&error))?);
         if let Some(metadata_location) = table.metadata_location() {
             builder = builder.metadata_location(metadata_location);
         }
-        builder.build().change_context(IcebergEmitterError::Commit)
+        builder.build().map_err(|error| commit_failure(&error))
     }
 
-    async fn refresh_table(&mut self) -> IcebergEmitterResult<()> {
+    async fn refresh_table(&mut self) -> SinkPublishResult<()> {
         let table_ident = self.table.identifier().clone();
         self.table = self
             .catalog
             .load_table(&table_ident)
             .await
-            .change_context(IcebergEmitterError::Commit)
-            .attach_printable(format!("table: {table_ident}"))?;
+            .map_err(|error| {
+                Report::new(SinkPublishError::Commit { sink: ICEBERG }).attach_printable(format!(
+                    "failed to load Iceberg table {table_ident} for commit: {error}"
+                ))
+            })?;
         Ok(())
     }
 
     async fn prepare_batch(
         &mut self,
         batch: RecordBatch,
-    ) -> IcebergEmitterResult<IcebergPreparedCommit> {
+    ) -> SinkPublishResult<IcebergPreparedCommit> {
+        let commit_failure = |error: &dyn std::fmt::Display| {
+            Report::new(SinkPublishError::Commit { sink: ICEBERG })
+                .attach_printable(format!("failed to commit Iceberg staged batches: {error}"))
+        };
         self.refresh_table().await?;
         let location_generator = DefaultLocationGenerator::new(self.table.metadata())
-            .change_context(IcebergEmitterError::Commit)?;
+            .map_err(|error| commit_failure(&error))?;
         self.data_file_sequence = self
             .data_file_sequence
             .checked_add(1)
@@ -1292,22 +903,23 @@ impl IcebergEmitterClient {
         let mut writer = DataFileWriterBuilder::new(rolling_writer)
             .build(None)
             .await
-            .change_context(IcebergEmitterError::Commit)?;
+            .map_err(|error| commit_failure(&error))?;
         writer
             .write(batch)
             .await
-            .change_context(IcebergEmitterError::Commit)?;
+            .map_err(|error| commit_failure(&error))?;
         let data_files = writer
             .close()
             .await
-            .change_context(IcebergEmitterError::Commit)?;
+            .map_err(|error| commit_failure(&error))?;
         Ok(IcebergPreparedCommit::new(data_files))
     }
 
-    async fn commit_prepared(
-        &mut self,
-        prepared: &IcebergPreparedCommit,
-    ) -> IcebergEmitterResult<()> {
+    async fn commit_prepared(&mut self, prepared: &IcebergPreparedCommit) -> SinkPublishResult<()> {
+        let commit_failure = |error: &dyn std::fmt::Display| {
+            Report::new(SinkPublishError::Commit { sink: ICEBERG })
+                .attach_printable(format!("failed to commit Iceberg staged batches: {error}"))
+        };
         self.refresh_table().await?;
         if prepared.is_committed_to(&self.table) {
             return Ok(());
@@ -1319,16 +931,14 @@ impl IcebergEmitterClient {
             .set_commit_uuid(prepared.append_id())
             .set_snapshot_properties(prepared.snapshot_properties().collect())
             .add_data_files(prepared.data_files().iter().cloned());
-        let tx = action
-            .apply(tx)
-            .change_context(IcebergEmitterError::Commit)?;
+        let tx = action.apply(tx).map_err(|error| commit_failure(&error))?;
         match tx.commit(self.catalog.as_ref()).await {
             Ok(table) => {
                 self.table = table;
                 Ok(())
             }
             Err(error) => {
-                let commit_error = Report::new(error).change_context(IcebergEmitterError::Commit);
+                let commit_error = commit_failure(&error);
                 let table_ident = self.table.identifier().clone();
                 if let Ok(refreshed) = self.catalog.load_table(&table_ident).await {
                     let committed = prepared.is_committed_to(&refreshed);
@@ -1344,11 +954,8 @@ impl IcebergEmitterClient {
 }
 
 impl IcebergObjectStoreProperties {
-    fn from_entries(
-        backend: IcebergStorageBackend,
-        config: &[nervix_models::ClientConfigEntry],
-    ) -> Self {
-        let mut props = HashMap::new();
+    fn from_entries(backend: IcebergStorageBackend, config: &[ClientConfigEntry]) -> Self {
+        let mut props = HashMap::default();
         for entry in config {
             props.insert(
                 Self::property_key(backend, &entry.key).to_string(),
@@ -1445,7 +1052,7 @@ impl IcebergObjectStoreProperties {
     async fn rest_catalog(
         &self,
         name: &str,
-        catalog_config: &[nervix_models::ClientConfigEntry],
+        catalog_config: &[ClientConfigEntry],
     ) -> IcebergResult<RestCatalog> {
         let props = self
             .props
@@ -1465,20 +1072,55 @@ impl IcebergObjectStoreProperties {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use ::iceberg::{
         arrow::arrow_schema_to_schema_auto_assign_ids,
         io::FileIO,
         spec::{
             DataContentType, DataFileBuilder, FormatVersion, Operation, PartitionSpec, Schema,
-            Snapshot, SortOrder, Struct, Summary, TableMetadataBuilder,
+            SortOrder, Struct, Summary, TableMetadataBuilder,
         },
     };
-    use arrow_array::{Array, Int64Array, TimestampMicrosecondArray, TimestampNanosecondArray};
-    use arrow_schema::{DataType, Field, TimeUnit};
-    use nervix_models::DomainName;
-    use tokio::time::timeout;
+    use arrow_schema::Field;
 
     use super::*;
+
+    fn commit_policy(interval_millis: u64, max_size: u64) -> IcebergCommitPolicy {
+        IcebergCommitPolicy {
+            interval: Duration::from_millis(interval_millis),
+            max_size,
+        }
+    }
+
+    /// What one acknowledgement handover was resolved as, counted by the test that shares it.
+    #[derive(Default)]
+    struct RecordedAcknowledgements {
+        acknowledged: AtomicUsize,
+        kept_alive: AtomicUsize,
+        rejected: AtomicUsize,
+    }
+
+    /// One acknowledgement handover the sink holds, recording into the shared counters.
+    struct RecordedHandover(StdArc<RecordedAcknowledgements>);
+
+    impl SinkAcknowledgementServices for RecordedHandover {
+        fn acknowledge(&self) {
+            self.0.acknowledged.fetch_add(1, Ordering::Release);
+        }
+
+        fn keep_alive(&self) {
+            self.0.kept_alive.fetch_add(1, Ordering::Release);
+        }
+
+        fn reject(&self, _reason: String) {
+            self.0.rejected.fetch_add(1, Ordering::Release);
+        }
+
+        fn is_empty(&self) -> bool {
+            false
+        }
+    }
 
     #[tokio::test]
     async fn iceberg_catalog_transaction_disables_library_internal_retries() {
@@ -1508,7 +1150,7 @@ mod tests {
             .build()
             .expect("valid in-memory table");
 
-        let single_attempt = IcebergEmitterClient::single_attempt_table(&table)
+        let single_attempt = IcebergSinkClient::single_attempt_table(&table)
             .expect("single-attempt table must build");
 
         assert_eq!(
@@ -1593,21 +1235,21 @@ mod tests {
     }
 
     #[test]
-    fn iceberg_schema_uses_microsecond_utc_timestamps() {
-        let field = Field::new(
+    fn iceberg_staged_schema_uses_microsecond_utc_timestamps() {
+        let mapped = arrow_schema::Schema::new(vec![Field::new(
             "observed_at",
             DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
             true,
-        );
+        )]);
 
-        let iceberg_field = IcebergEmitter::iceberg_arrow_field(&field, "observed_at");
+        let staged = IcebergSink::staged_arrow_schema(&mapped)
+            .expect("a mapped datetime column must narrow to microseconds");
 
         assert_eq!(
-            iceberg_field.data_type(),
+            staged.field(0).data_type(),
             &DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
         );
-        let schema = arrow_schema::Schema::new(vec![iceberg_field]);
-        let iceberg_schema = arrow_schema_to_schema_auto_assign_ids(&schema)
+        let iceberg_schema = arrow_schema_to_schema_auto_assign_ids(&staged)
             .expect("microsecond timestamp schema must convert to Iceberg");
         let serialized =
             serde_json::to_string(&iceberg_schema).expect("Iceberg schema must serialize");
@@ -1616,198 +1258,94 @@ mod tests {
     }
 
     #[test]
-    fn iceberg_datetime_arrays_are_converted_to_microseconds() {
-        let values = TimestampNanosecondArray::from(vec![Some(1_234_567), None, Some(-1)])
-            .with_timezone_utc();
+    fn iceberg_staged_schema_rejects_a_column_mapped_twice() {
+        let mapped = arrow_schema::Schema::new(vec![
+            Field::new("user_id", DataType::Int64, true),
+            Field::new("user_id", DataType::Int64, true),
+        ]);
 
-        let converted = IcebergEmitter::typed_array_to_array_ref(
-            &VmTypedArray::Datetime(values),
-            &DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
-        );
+        let error = IcebergSink::staged_arrow_schema(&mapped)
+            .expect_err("a column written twice has no single staged value");
 
         assert_eq!(
-            converted.data_type(),
+            *error.current_context(),
+            SinkStartError::InvalidConfiguration { sink: ICEBERG }
+        );
+    }
+
+    #[test]
+    fn iceberg_datetime_columns_are_staged_as_microseconds() {
+        let values: ArrayRef = StdArc::new(
+            TimestampNanosecondArray::from(vec![Some(1_234_567), None, Some(-1)])
+                .with_timezone_utc(),
+        );
+
+        let staged = IcebergSink::staged_column(
+            &values,
+            &DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into())),
+        )
+        .expect("a nanosecond datetime column must stage as microseconds");
+
+        assert_eq!(
+            staged.data_type(),
             &DataType::Timestamp(TimeUnit::Microsecond, Some("+00:00".into()))
         );
-        let converted = converted
+        let staged = staged
             .as_any()
             .downcast_ref::<TimestampMicrosecondArray>()
             .expect("Iceberg datetime column must be a microsecond timestamp array");
-        assert_eq!(converted.value(0), 1_234);
-        assert!(converted.is_null(1));
-        assert_eq!(converted.value(2), -1);
+        assert_eq!(staged.value(0), 1_234);
+        assert!(staged.is_null(1));
+        assert_eq!(staged.value(2), -1);
     }
 
     #[test]
-    fn iceberg_publish_failures_retain_records_for_declared_policy_retries() {
-        for error in [
-            IcebergEmitterError::FlushToDisk,
-            IcebergEmitterError::MapBatch,
-            IcebergEmitterError::WriteStagedIpc,
-            IcebergEmitterError::ReadStagedIpc,
-            IcebergEmitterError::Commit,
-        ] {
-            assert!(
-                error.is_retryable_publish_failure(),
-                "{error:?} must retain staged records and retry under the declared policy"
-            );
+    fn iceberg_commit_deadline_holds_its_first_cadence_until_the_maximum_size() {
+        let policy = commit_policy(100, 1_024);
+        let mut deadline = IcebergCommitDeadline::default();
+
+        deadline.arm(policy, Timestamp::from_unix_nanos(1_000), 16);
+        assert_eq!(
+            deadline.due_at(),
+            Some(Timestamp::from_unix_nanos(100_001_000))
+        );
+
+        // A later batch joins the same staged set without moving the cadence it already started.
+        deadline.arm(policy, Timestamp::from_unix_nanos(50_000_000), 32);
+        assert_eq!(
+            deadline.due_at(),
+            Some(Timestamp::from_unix_nanos(100_001_000))
+        );
+
+        // Reaching the declared maximum makes the commit due as of that staging time.
+        deadline.arm(policy, Timestamp::from_unix_nanos(60_000_000), 1_024);
+        assert_eq!(
+            deadline.due_at(),
+            Some(Timestamp::from_unix_nanos(60_000_000))
+        );
+
+        deadline.clear();
+        assert_eq!(deadline.due_at(), None);
+    }
+
+    #[test]
+    fn iceberg_retained_acknowledgements_resolve_every_staged_batch_at_once() {
+        let first = StdArc::new(RecordedAcknowledgements::default());
+        let second = StdArc::new(RecordedAcknowledgements::default());
+        let retained = RetainedAcknowledgements(vec![
+            SinkAcknowledgements::new(RecordedHandover(first.clone())),
+            SinkAcknowledgements::new(RecordedHandover(second.clone())),
+        ]);
+
+        retained.keep_alive();
+        retained.acknowledge();
+        retained.reject("Iceberg emitter dropped staged batch".to_string());
+
+        assert!(!retained.is_empty());
+        for recorded in [&first, &second] {
+            assert_eq!(recorded.kept_alive.load(Ordering::Acquire), 1);
+            assert_eq!(recorded.acknowledged.load(Ordering::Acquire), 1);
+            assert_eq!(recorded.rejected.load(Ordering::Acquire), 1);
         }
-        assert!(!IcebergEmitterError::InitializeTable.is_retryable_publish_failure());
-    }
-
-    #[test]
-    fn iceberg_drain_count_includes_pending_staged_and_rejected_records() {
-        assert_eq!(IcebergEmitter::buffered_message_count(2, 3, 4), 9);
-    }
-
-    #[test]
-    fn iceberg_rejected_record_remains_materializable_until_delivery_finishes() {
-        let schema = StdArc::new(arrow_schema::Schema::new(vec![Field::new(
-            "value",
-            DataType::Int64,
-            false,
-        )]));
-        let batch =
-            RecordBatch::try_new(schema.clone(), vec![StdArc::new(Int64Array::from(vec![7]))])
-                .expect("valid rejected-record batch");
-        let batch = RuntimeRecordBatch::from_record_batch(schema, batch)
-            .expect("matching rejected-record schema");
-        let (acks, _completion) = AckSet::root();
-        let error = structured_message_error(
-            Timestamp::from_unix_nanos(100),
-            MessageErrorCode::External,
-            "rejected".to_string(),
-            MessageErrorOperation::Publish,
-            None,
-            std::iter::empty(),
-        );
-        let rejected = IcebergRejectedRecord {
-            batch,
-            row: 0,
-            metadata: RuntimeRecordMetadata::test(),
-            key: None,
-            acks,
-            error: error.clone(),
-        };
-
-        let (_, first_error) = rejected
-            .message()
-            .expect("the queued rejection must materialize");
-        let (_, second_error) = rejected
-            .message()
-            .expect("cancellation must leave the queued rejection materializable");
-        assert_eq!(first_error.reference, error.reference);
-        assert_eq!(second_error.reference, error.reference);
-    }
-
-    #[tokio::test]
-    async fn iceberg_values_side_errors_are_isolated_from_accepted_arrow_rows() {
-        let input_schema = StdArc::new(arrow_schema::Schema::new(vec![
-            Field::new("numerator", DataType::Int64, false),
-            Field::new("denominator", DataType::Int64, false),
-        ]));
-        let input = RecordBatch::try_new(
-            input_schema.clone(),
-            vec![
-                StdArc::new(Int64Array::from(vec![10, 11, 12])),
-                StdArc::new(Int64Array::from(vec![2, 0, 3])),
-            ],
-        )
-        .expect("valid Iceberg VALUES input batch");
-        let input = RuntimeRecordBatch::from_record_batch(input_schema.clone(), input)
-            .expect("matching runtime input schema");
-        let values = vec![IcebergValueMapping {
-            column: "quotient".to_string(),
-            expression: nervix_nspl::parse_expression("input.numerator / input.denominator")
-                .expect("valid VALUES expression"),
-        }];
-        let program = compile_iceberg_values_program(
-            &DomainName::parse("test").expect("valid domain"),
-            &EmitterName::parse("iceberg_values").expect("valid emitter"),
-            &values,
-            input_schema,
-            None,
-        )
-        .expect("Iceberg VALUES program must compile");
-        let mapped_schema = IcebergEmitter::mapped_arrow_schema(&program, &values)
-            .expect("Iceberg schema must map");
-
-        let mapped = IcebergEmitter::map_values_batch(
-            &program,
-            &mapped_schema,
-            &input,
-            &[None, None, None],
-            Timestamp::from_unix_nanos(100),
-        )
-        .await
-        .expect("a row side error must not fail the batch");
-
-        assert_eq!(mapped.rejected.len(), 1);
-        assert_eq!(mapped.rejected[0].row, 1);
-        assert_eq!(mapped.rejected[0].error.code, MessageErrorCode::Evaluation);
-        assert_eq!(
-            mapped.rejected[0].error.operation,
-            MessageErrorOperation::Values
-        );
-        let accepted = mapped.accepted.expect("healthy rows must remain accepted");
-        assert_eq!(accepted.num_rows(), 2);
-        let quotient = accepted
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .expect("quotient must retain its exact INT64 type");
-        assert_eq!(quotient.values(), &[5, 4]);
-    }
-
-    #[tokio::test]
-    async fn iceberg_confirmation_waits_refresh_ack_leases() {
-        let (acks, mut completion) = AckSet::root();
-        let wait_acks = acks.clone();
-        let wait = tokio::spawn(async move {
-            await_emitter_confirmation(&wait_acks, sleep(Duration::from_millis(150))).await;
-        });
-
-        assert_eq!(
-            timeout(Duration::from_secs(1), completion.wait_for_progress())
-                .await
-                .expect("Iceberg wait must refresh its acknowledgment lease"),
-            crate::runtime_ack::AckProgress::Alive
-        );
-        wait.await.expect("confirmation wait task must finish");
-        acks.ack_success();
-        assert_eq!(completion.wait().await, crate::runtime_ack::AckOutcome::Ack);
-    }
-
-    #[tokio::test]
-    async fn iceberg_retained_batch_drop_helper_no_acks_pending_and_staged_rows() {
-        let schema = StdArc::new(arrow_schema::Schema::empty());
-        let batch = RecordBatch::try_new_with_options(
-            schema.clone(),
-            Vec::new(),
-            &RecordBatchOptions::new().with_row_count(Some(1)),
-        )
-        .expect("one-row empty batch must build");
-        let batch = RuntimeRecordBatch::from_record_batch(schema, batch)
-            .expect("runtime batch schema must match");
-        let (pending_acks, pending_completion) = AckSet::root();
-        let (staged_acks, staged_completion) = AckSet::root();
-        let pending = IcebergPendingBatch {
-            batch: batch.batch().clone(),
-            acks: vec![pending_acks],
-            domain_timestamp: Timestamp::from_unix_nanos(0),
-        };
-        let staged = IcebergStagedBatch {
-            path: PathBuf::from("unwritten-test-batch.arrow"),
-            rows: 1,
-            bytes: 0,
-            acks: vec![staged_acks],
-            domain_timestamp: Timestamp::from_unix_nanos(0),
-        };
-
-        IcebergEmitter::no_ack_retained_batches(&[pending], &[staged]);
-
-        let expected = AckOutcome::NoAck("Iceberg emitter dropped buffered batch".to_string());
-        assert_eq!(pending_completion.wait().await, expected);
-        assert_eq!(staged_completion.wait().await, expected);
     }
 }

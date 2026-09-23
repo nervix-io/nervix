@@ -265,7 +265,16 @@ impl ProjectedValueRows {
         self.selected_rows.is_empty()
     }
 
-    pub(in crate::runtime) fn rows(&self) -> MappedSinkRows<'_> {
+    /// The rows this write carries, which the host reads to hand their acknowledgements over to a
+    /// sink that resolves them on its own commit boundary.
+    pub(in crate::runtime) fn selected_rows(&self) -> &[usize] {
+        &self.selected_rows
+    }
+
+    pub(in crate::runtime) fn rows(
+        &self,
+        acknowledgements: Option<SinkAcknowledgements>,
+    ) -> MappedSinkRows<'_> {
         MappedSinkRows {
             batch_index: self.batch_index,
             batch: &self.batch,
@@ -273,6 +282,7 @@ impl ProjectedValueRows {
             selected_rows: &self.selected_rows,
             selected_row_chunks: &self.chunks,
             occurred_at: self.execution_now,
+            acknowledgements,
         }
     }
 }
@@ -345,7 +355,7 @@ mod tests {
             .await
             .expect("the mapping should project");
 
-        let rows = projected.rows();
+        let rows = projected.rows(None);
         assert_eq!(rows.batch_index, 4);
         assert_eq!(rows.target_columns, ["id", "label", "doubled"]);
         assert_eq!(rows.selected_rows, [0, 2]);
@@ -388,7 +398,7 @@ mod tests {
             .expect("the mapping should project");
 
         let rejected = projected.take_rejected();
-        assert_eq!(projected.rows().selected_rows, [1, 2]);
+        assert_eq!(projected.rows(None).selected_rows, [1, 2]);
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].position.row_index, 0);
         let error = rejected[0]
@@ -439,7 +449,7 @@ mod tests {
             narrow_projected
                 .expect("projecting a batch never waits")
                 .expect("the narrow projection should succeed")
-                .rows()
+                .rows(None)
                 .selected_rows
                 .len(),
             8
@@ -448,7 +458,7 @@ mod tests {
             wide_projected
                 .expect("projecting a batch never waits")
                 .expect("the wide projection should succeed")
-                .rows()
+                .rows(None)
                 .selected_rows
                 .len(),
             512
