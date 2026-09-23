@@ -71,16 +71,9 @@ arrow-ipc = { workspace = true }
 arrow-ord = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
-async-nats = { workspace = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 async-trait = { workspace = true }
-aws-config = { workspace = true }
-aws-credential-types = { workspace = true }
-aws-sdk-sqs = { workspace = true }
-# The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
-aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 base64 = { workspace = true }
-bb8 = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chitchat = { workspace = true }
@@ -106,7 +99,6 @@ hyper-util = { workspace = true, features = [
   "http1",
 ] }
 indexmap = { workspace = true }
-lapin = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
@@ -170,8 +162,6 @@ prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = { workspace = true }
 protox = { workspace = true }
-pulsar = { workspace = true }
-redis = { workspace = true }
 reqwest = { workspace = true, features = [
   "json",
   "rustls",
@@ -182,7 +172,6 @@ reqwest = { workspace = true, features = [
   "hickory-dns",
 ] }
 rkyv = { workspace = true }
-rumqttc = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 serde = { workspace = true }
@@ -219,10 +208,15 @@ upon = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 webpki-roots = { workspace = true }
-zeromq = { workspace = true }
 
 [dev-dependencies]
 alloc_count = { workspace = true }
+async-nats = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
+aws-sdk-sqs = { workspace = true }
+# The SDK crates disable their TLS defaults below; select AWS-LC on their shared client.
+aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 h2 = { workspace = true }
@@ -230,6 +224,7 @@ http = { workspace = true }
 iceberg = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
 iceberg-storage-opendal = { workspace = true }
+lapin = { workspace = true }
 mongodb = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
@@ -237,11 +232,15 @@ nervix-client-core = { workspace = true }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
 playwright-rs = { workspace = true }
+pulsar = { workspace = true }
 rcgen = { workspace = true }
+redis = { workspace = true }
 rstest = { workspace = true }
+rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 trybuild = { workspace = true }
+zeromq = { workspace = true }
 
 [[test]]
 harness = false

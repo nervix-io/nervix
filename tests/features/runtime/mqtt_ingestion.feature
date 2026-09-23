@@ -508,3 +508,99 @@ Feature: MQTT ingestion
       "user_id":46
       """
     And the relay subscription does not receive a payload within "1s"
+
+  @mqtt_quiesce_buffer_acknowledgement
+  Scenario Outline: MQTT publishes a buffering quiesce retains are acknowledged and replayed on release
+    Given MQTT is running
+    And entity gate deadline is configured as "30s"
+    And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the entity gate for domain "{{domain}}" pauses after engagement
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE CODEC notification_codec_v2
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_mqtt_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_mqtt_notifications;
+        CREATE CLIENT mqtt_main
+        TYPE MQTT
+        CONFIG {
+          'addr' = '{{mqtt_addr}}',
+          'client_id' = 'nervix-cucumber-ingestor-buffer-<mode_tag>-{{test_id}}'
+        };
+        CREATE INGESTOR mqtt_notifications
+        FROM MQTT mqtt_main TOPIC notifications_buffer_<mode_tag>_{{test_id}} <mode>
+        ON QUIESCE BUFFER MAX SIZE 1MiB ON OVERFLOW DROP OLDEST DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_mqtt_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    Then within "10s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
+      """
+      ready: true
+      """
+    When MQTT QoS 1 message is published to topic "notifications_buffer_<mode_tag>_{{test_id}}"
+      """
+      {"user_id":51}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":51
+      """
+    When these NSPL commands begin executing in the background
+      """
+      ALTER INGESTOR mqtt_notifications SET DECODE USING notification_codec_v2;
+      """
+    Then the entity gate pause for domain "{{domain}}" is reached
+    And within "5s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
+      """
+      quiesce state: entity hold
+      """
+    When MQTT QoS 1 message is published to topic "notifications_buffer_<mode_tag>_{{test_id}}"
+      """
+      {"user_id":52}
+      """
+    And MQTT QoS 1 message is published to topic "notifications_buffer_<mode_tag>_{{test_id}}"
+      """
+      {"user_id":53}
+      """
+    Then within "5s" DESCRIBE INGESTOR "mqtt_notifications" on the leader node contains
+      """
+      nervix_ingestor_quiesce_buffered_records: 2
+      """
+    When the entity gate pause for domain "{{domain}}" is released
+    Then the background NSPL execution succeeds
+    And within "10s" the relay subscription receives payloads
+      """
+      "user_id":52
+      "user_id":53
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count | mode_tag | mode                                                                                             |
+      | 1            | 0             | noack    | MODE NO_ACK SEQUENTIAL                                                                           |
+      | 3            | 1             | noack    | MODE NO_ACK SEQUENTIAL                                                                           |
+      | 1            | 0             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |
+      | 3            | 1             | ack      | SESSION PERSISTENT QOS 1 MODE ACK SEQUENTIAL ACK TIMEOUT 5s RETRY POLICY BACKOFF 100ms MAX 200ms |

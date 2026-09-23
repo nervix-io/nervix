@@ -124,3 +124,83 @@ Feature: RabbitMQ ingestion
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 1             |
+
+  @rabbitmq_ingestor_redelivery
+  Scenario Outline: RabbitMQ ACK SEQUENTIAL redelivers a payload whose acknowledgement failed
+    Given RabbitMQ is running
+    And MQTT is running
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And RabbitMQ queue "notifications_redelivery_{{test_id}}" exists
+    And MQTT topic "notifications_redelivery_out_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA notification (
+        user_id I64
+      );
+        CREATE WIRE JSON SCHEMA notification_wire MODE STRICT (
+        user_id integer
+      );
+        CREATE CODEC notification_codec
+        FROM WIRE JSON SCHEMA notification_wire
+        TO SCHEMA notification;
+        CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
+        CREATE IF NOT EXISTS BRANCH by_rabbit_notifications SCHEMA user_id_branch TTL 5m;
+        CREATE RELAY notifications SCHEMA notification BRANCHED BY by_rabbit_notifications;
+        CREATE CLIENT rabbit_main
+        TYPE RABBITMQ
+        CONFIG {
+          'addr' = '{{rabbitmq_addr}}'
+        };
+        CREATE CLIENT mqtt_out
+        TYPE MQTT
+        CONFIG {
+          'addr' = '{{mqtt_addr}}',
+          'client_id' = 'nervix-cucumber-rabbit-redelivery-out-{{test_id}}'
+        };
+        CREATE INGESTOR rabbit_notifications
+        FROM RABBITMQ rabbit_main QUEUE notifications_redelivery_{{test_id}} MODE ACK SEQUENTIAL ACK TIMEOUT 500ms RETRY POLICY BACKOFF 100ms MAX 200ms
+        ON QUIESCE SUSPEND DECODE USING notification_codec
+        TO notifications
+        INHERIT ALL
+        BRANCHED BY by_rabbit_notifications
+        SET user_id = message.user_id
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE EMITTER mqtt_forward FROM notifications TO MQTT mqtt_out TOPIC notifications_redelivery_out_{{test_id}} MODE QOS 0 RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING notification_codec
+        INHERIT ALL
+        FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+        CREATE SUBSCRIPTION notifications_subscription TO notifications;
+        START;
+      """
+    Then RabbitMQ queue "notifications_redelivery_{{test_id}}" eventually has 1 consumers
+    When emitter "mqtt_forward" enters fault mode
+    And RabbitMQ message is published to queue "notifications_redelivery_{{test_id}}"
+      """
+      {"user_id":44}
+      """
+    Then the relay subscription receives a payload
+      """
+      "user_id":44
+      """
+    And within "2s" the relay subscription receives payloads
+      """
+      "user_id":44
+      """
+    When emitter "mqtt_forward" leaves fault mode
+    Then the observed broker receives a payload
+      """
+      {"user_id":44}
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
