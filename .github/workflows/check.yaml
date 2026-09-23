@@ -173,6 +173,9 @@ jobs:
       CARGO_TERM_COLOR: never
       RUST_LOG_STYLE: never
       NERVIX_TEST_CONCURRENCY_FACTOR: "2"
+      # Qualification only: ends the scenario suite by its watchdog four minutes in, so the
+      # timeout path is exercised at the CI concurrency factor and its artifact is uploaded.
+      NERVIX_TEST_SUITE_BUDGET: "4m"
     steps:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98
