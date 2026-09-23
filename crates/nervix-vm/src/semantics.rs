@@ -3,9 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Each operation's accepted argument types, result type, volatility, dependency scope,
-//!   null propagation and whether it can report a per-row error, and the value contracts, such as
-//!   case mapping, floating-point classification and integer bit operations, that compile-time
-//!   folding and columnar execution both apply.
+//!   null propagation, whether it can report a per-row error and, for one that can, whether a
+//!   conditional arm runs it over the rows it selects or over the whole batch, and the value
+//!   contracts, such as case mapping, floating-point classification and integer bit operations,
+//!   that compile-time folding and columnar execution both apply.
 //! - **Depends on.** The VM program model and Arrow data types.
 //! - **Must not know.** How execution walks Arrow buffers, registers or batches, and anything about
 //!   relays, branches, connectors or the registry.
@@ -39,6 +40,23 @@ pub enum NullPropagation {
     NeverNull,
     Strict,
     Custom,
+}
+
+/// How a conditional arm executes an operation that can report a per-row error.
+///
+/// Every such operation carries the rows its arm selects, so that no unselected row reports an
+/// error. Which rows the kernel visits is a cost decision. Narrowing the operands to the selected
+/// rows and scattering the result back over the batch costs a few nanoseconds per row of the
+/// batch, so it pays off only for a kernel whose own cost per row is well above that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmExecution {
+    /// The kernel runs over the whole batch and the arm discards the errors of the rows it did
+    /// not select. Right for a vectorized kernel, whose cost per row is at or below the cost of
+    /// narrowing it.
+    WholeBatch,
+    /// The kernel runs over the selected rows only. Right for pattern matching, text parsing and
+    /// formatting, calendar arithmetic, transcendental functions and calls out of the VM.
+    SelectedRows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +441,21 @@ impl DatetimeFunction {
             | Self::ParseDatetime(_) => true,
         }
     }
+
+    /// How a conditional arm executes this builtin. Binning and unit conversion are checked
+    /// integer arithmetic; every other function walks each row through a calendar, a zone, a
+    /// format or a parser.
+    const fn arm_execution(&self) -> ArmExecution {
+        match self {
+            Self::DateBin(_) | Self::ToUnix(_) | Self::FromUnix(_) => ArmExecution::WholeBatch,
+            Self::DatePart { .. }
+            | Self::DateTrunc { .. }
+            | Self::DateAdd { .. }
+            | Self::DateDiff { .. }
+            | Self::FormatDatetime { .. }
+            | Self::ParseDatetime(_) => ArmExecution::SelectedRows,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,6 +638,125 @@ pub const fn cast_descriptor() -> CastDescriptor {
 
 pub const fn cast_semantics() -> OperationSemantics {
     cast_descriptor().semantics
+}
+
+/// How a conditional arm executes a unary operator: negation is vectorized, and `NOT` never
+/// reports an error.
+pub const fn unary_arm_execution(op: UnaryOp) -> ArmExecution {
+    match op {
+        UnaryOp::Neg | UnaryOp::Not => ArmExecution::WholeBatch,
+    }
+}
+
+/// How a conditional arm executes a binary operator: checked arithmetic is vectorized, and a
+/// comparison or Boolean connective never reports an error.
+pub const fn binary_arm_execution(op: BinaryOp) -> ArmExecution {
+    match op {
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Rem
+        | BinaryOp::Eq
+        | BinaryOp::NotEq
+        | BinaryOp::Gt
+        | BinaryOp::Lt
+        | BinaryOp::GtEq
+        | BinaryOp::LtEq
+        | BinaryOp::And
+        | BinaryOp::Or => ArmExecution::WholeBatch,
+    }
+}
+
+/// How a conditional arm executes a cast: a cast that reads or writes text parses or formats
+/// every row, while every other cast is a vectorized conversion.
+pub const fn cast_arm_execution(input: RegisterType, target: RegisterType) -> ArmExecution {
+    if matches!(input, RegisterType::Utf8) || matches!(target, RegisterType::Utf8) {
+        ArmExecution::SelectedRows
+    } else {
+        ArmExecution::WholeBatch
+    }
+}
+
+/// How a conditional arm executes a builtin.
+pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
+    match lowering {
+        // Vectorized kernels, and builtins that never report a per-row error and so never run
+        // under a selection at all.
+        BuiltinLowering::Now
+        | BuiltinLowering::UuidV4
+        | BuiltinLowering::UuidV7
+        | BuiltinLowering::Lower
+        | BuiltinLowering::Upper
+        | BuiltinLowering::Trim
+        | BuiltinLowering::Btrim
+        | BuiltinLowering::Ltrim
+        | BuiltinLowering::Rtrim
+        | BuiltinLowering::Length
+        | BuiltinLowering::CharLength
+        | BuiltinLowering::BitLength
+        | BuiltinLowering::Ascii
+        | BuiltinLowering::Coalesce
+        | BuiltinLowering::IsNull
+        | BuiltinLowering::NullIf
+        | BuiltinLowering::Abs
+        | BuiltinLowering::Ceil
+        | BuiltinLowering::Concat
+        | BuiltinLowering::Sum
+        | BuiltinLowering::Last
+        | BuiltinLowering::First
+        | BuiltinLowering::Count
+        | BuiltinLowering::Nth
+        | BuiltinLowering::Contains
+        | BuiltinLowering::StartsWith
+        | BuiltinLowering::EndsWith
+        | BuiltinLowering::Floor
+        | BuiltinLowering::Initcap
+        | BuiltinLowering::Left
+        | BuiltinLowering::Lpad
+        | BuiltinLowering::Md5
+        | BuiltinLowering::Repeat
+        | BuiltinLowering::Replace
+        | BuiltinLowering::Reverse
+        | BuiltinLowering::Right
+        | BuiltinLowering::Round
+        | BuiltinLowering::Rpad
+        | BuiltinLowering::SplitPart
+        | BuiltinLowering::Sqrt
+        | BuiltinLowering::Strpos
+        | BuiltinLowering::Substr
+        | BuiltinLowering::ToHex
+        | BuiltinLowering::Translate
+        | BuiltinLowering::Radians
+        | BuiltinLowering::Degrees
+        | BuiltinLowering::Sign
+        | BuiltinLowering::Trunc
+        | BuiltinLowering::IsNan
+        | BuiltinLowering::IsFinite
+        | BuiltinLowering::IsInfinite
+        | BuiltinLowering::BitwiseAnd
+        | BuiltinLowering::BitwiseOr
+        | BuiltinLowering::BitwiseXor
+        | BuiltinLowering::BitwiseNot
+        | BuiltinLowering::ShiftLeft
+        | BuiltinLowering::ShiftRight
+        | BuiltinLowering::BitCount => ArmExecution::WholeBatch,
+        // Transcendental functions and pattern matching cost far more per row than narrowing.
+        BuiltinLowering::Acos
+        | BuiltinLowering::Asin
+        | BuiltinLowering::Atan
+        | BuiltinLowering::Atan2
+        | BuiltinLowering::Cos
+        | BuiltinLowering::Sin
+        | BuiltinLowering::Tan
+        | BuiltinLowering::Exp
+        | BuiltinLowering::Ln
+        | BuiltinLowering::Log
+        | BuiltinLowering::Log2
+        | BuiltinLowering::Pow
+        | BuiltinLowering::Regexp(_) => ArmExecution::SelectedRows,
+        BuiltinLowering::Datetime(function) => function.arm_execution(),
+    }
 }
 
 pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> {
@@ -1544,11 +1696,19 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BitwiseOperation, DependencyScope, ExpressionSemantics, FloatClass, IntegerBits,
-        NullPropagation, Volatility, binary_op_semantics, builtin_function_semantics,
-        cast_semantics, expr_semantics, unary_op_semantics,
+        ArmExecution, BitwiseOperation, BuiltinLowering, DependencyScope, ExpressionSemantics,
+        FloatClass, IntegerBits, NullPropagation, Volatility, binary_arm_execution,
+        binary_op_semantics, builtin_arm_execution, builtin_function_semantics, cast_arm_execution,
+        cast_semantics, expr_semantics, unary_arm_execution, unary_op_semantics,
     };
-    use crate::program::{BinaryOp, Expr, FieldRef, FunctionName, Literal, SpannedNode, UnaryOp};
+    use crate::{
+        RegisterType,
+        program::{
+            BinaryOp, CalendarUnit, DatetimeFunction, DatetimeUnit, Expr, FieldRef, FixedTimeUnit,
+            FunctionName, Literal, SpannedNode, UnaryOp, Zone,
+        },
+        regexp::{RegexpCall, RegexpFunction},
+    };
 
     fn spanned(inner: Expr) -> SpannedNode<Expr> {
         SpannedNode {
@@ -1764,5 +1924,53 @@ mod tests {
             }
         );
         assert!(!semantics.supports_constant_folding());
+    }
+
+    #[test]
+    fn arms_narrow_expensive_kernels_and_run_vectorized_ones_over_the_batch() {
+        assert_eq!(unary_arm_execution(UnaryOp::Neg), ArmExecution::WholeBatch);
+        assert_eq!(
+            binary_arm_execution(BinaryOp::Div),
+            ArmExecution::WholeBatch
+        );
+        assert_eq!(
+            cast_arm_execution(RegisterType::Int32, RegisterType::Int64),
+            ArmExecution::WholeBatch
+        );
+        assert_eq!(
+            cast_arm_execution(RegisterType::Utf8, RegisterType::Int64),
+            ArmExecution::SelectedRows
+        );
+        assert_eq!(
+            cast_arm_execution(RegisterType::Datetime, RegisterType::Utf8),
+            ArmExecution::SelectedRows
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Round),
+            ArmExecution::WholeBatch
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Exp),
+            ArmExecution::SelectedRows
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Regexp(
+                RegexpCall::reading_pattern_argument(RegexpFunction::Like)
+            )),
+            ArmExecution::SelectedRows
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Datetime(DatetimeFunction::FromUnix(
+                FixedTimeUnit::Second
+            ))),
+            ArmExecution::WholeBatch
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Datetime(DatetimeFunction::DateAdd {
+                unit: DatetimeUnit::Calendar(CalendarUnit::Month),
+                zone: Zone::UTC,
+            })),
+            ArmExecution::SelectedRows
+        );
     }
 }

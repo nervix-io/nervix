@@ -181,7 +181,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
   result at one exact type; remember that omitted `CASE ELSE` yields a typed null and requires an
-  optional destination.
+  optional destination. An arm is evaluated only for the messages that select it, so a `CASE`
+  guard shields a conversion, pattern, or UDF from the messages it cannot handle.
 - Count string positions in `substr`, `split_part`, and `strpos` from 1, but `nth(list, index)`
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window

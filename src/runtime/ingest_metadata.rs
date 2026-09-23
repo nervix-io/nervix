@@ -446,11 +446,14 @@ impl IngestHeaderFunctionInjector {
 }
 
 impl VmFunctionInjector for IngestHeaderFunctionInjector {
+    /// Reads the headers of the messages the selected rows were decoded from. A conditional arm
+    /// calls this for the rows it selects only, so each row's headers are looked up by the row's
+    /// identity in the batch, which the selection names.
     fn inject_with_context(
         &self,
         function: &FunctionName,
         arguments: &[VmTypedArray],
-        row_count: usize,
+        rows: &nervix_vm::RowSelection,
         _span: nervix_vm::program::Span,
         _now: Timestamp,
         _prior_error_rows: nervix_vm::RowErrorMask<'_>,
@@ -467,18 +470,20 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
             Some(metadata) => metadata.len(),
             None => self.row_count,
         };
-        if metadata_row_count != row_count || names.len() != row_count {
+        if !rows.fits(metadata_row_count) || names.len() != rows.len() {
             return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
-                    "function '{}' header context has {} rows for a {row_count}-row batch",
+                    "function '{}' header context has {} rows for a call over {} rows of a batch \
+                     selected as {rows:?}",
                     function.as_str(),
-                    metadata_row_count
+                    metadata_row_count,
+                    names.len()
                 ),
             });
         }
         if let FunctionName::ReadHeader = function {
             let mut values = Vec::with_capacity(names.len());
-            for (row, name) in names.iter().enumerate() {
+            for (row, name) in rows.iter().zip(names.iter()) {
                 let value = if let Some(name) = name
                     && let Some(metadata) = self.metadata.as_ref()
                 {
@@ -495,7 +500,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
         if let FunctionName::ReadHeaders = function {
             let field = StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
             let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field);
-            for (row, name) in names.iter().enumerate() {
+            for (row, name) in rows.iter().zip(names.iter()) {
                 if let Some(name) = name
                     && let Some(metadata) = self.metadata.as_ref()
                 {

@@ -176,7 +176,7 @@ struct Compiler {
     layouts: RegisterLayouts,
     expr_cache: HashMap<CachedExpr, RegisterRef>,
     expr_cache_generation: usize,
-    current_error_mask: Option<RegisterRef>,
+    current_selection: Option<RegisterRef>,
     allow_header_reads: bool,
     allow_header_writes: bool,
     udf_signatures: UdfSignatures,
@@ -732,7 +732,7 @@ impl Compiler {
                 layouts,
                 expr_cache: HashMap::new(),
                 expr_cache_generation: 0,
-                current_error_mask: None,
+                current_selection: None,
                 allow_header_reads: false,
                 allow_header_writes: false,
                 udf_signatures: UdfSignatures::default(),
@@ -755,27 +755,29 @@ impl Compiler {
     }
 
     fn emit(&mut self, kind: InstructionKind, span: Span) {
-        let error_mask = if instruction_can_emit_row_errors(&kind) {
-            self.current_error_mask
+        let selection = if instruction_observes_selection(&kind) {
+            self.current_selection
         } else {
             None
         };
         self.instructions.push(Instruction {
             kind,
             span,
-            error_mask,
+            selection,
         });
     }
 
-    fn with_error_mask<T>(
+    /// Compiles `compile` with every instruction it emits confined to the rows `selection` holds,
+    /// or to every row when it is `None`.
+    fn with_selection<T>(
         &mut self,
-        mask: Option<RegisterRef>,
+        selection: Option<RegisterRef>,
         compile: impl FnOnce(&mut Self) -> Result<T, CompileError>,
     ) -> Result<T, CompileError> {
-        let previous = self.current_error_mask;
-        self.current_error_mask = mask;
+        let previous = self.current_selection;
+        self.current_selection = selection;
         let result = compile(self);
-        self.current_error_mask = previous;
+        self.current_selection = previous;
         result
     }
 
@@ -838,7 +840,7 @@ impl Compiler {
         dst
     }
 
-    fn combine_with_outer_mask(
+    fn narrow_selection(
         &mut self,
         outer: Option<RegisterRef>,
         mask: RegisterRef,
@@ -1807,7 +1809,7 @@ impl Compiler {
         result_type: &DataType,
         span: Span,
     ) -> Result<RegisterRef, CompileError> {
-        let outer_mask = self.current_error_mask;
+        let outer_selection = self.current_selection;
         let folded_operand = match operand {
             Some(operand) => fold_constant_expr(operand)?,
             None => None,
@@ -1851,7 +1853,7 @@ impl Compiler {
         }
 
         if row_dependent.is_empty() {
-            return self.compile_case_result(otherwise_result, result_type, outer_mask, span);
+            return self.compile_case_result(otherwise_result, result_type, outer_selection, span);
         }
 
         let operand_reg = match operand {
@@ -1865,11 +1867,11 @@ impl Compiler {
             // Rows an earlier branch already answered must not observe this branch at all, so both
             // the condition and the result compile under a mask narrowed to the rows still open.
             let unmatched = matched.map(|matched| self.emit_boolean_not(matched, span));
-            let condition_mask = match unmatched {
-                Some(unmatched) => Some(self.combine_with_outer_mask(outer_mask, unmatched, span)),
-                None => outer_mask,
+            let condition_selection = match unmatched {
+                Some(unmatched) => Some(self.narrow_selection(outer_selection, unmatched, span)),
+                None => outer_selection,
             };
-            let condition = self.with_error_mask(condition_mask, |compiler| {
+            let condition = self.with_selection(condition_selection, |compiler| {
                 let when = compiler.compile_expr(&branch.when)?;
                 let Some(operand) = operand_reg else {
                     return Ok(when);
@@ -1887,7 +1889,7 @@ impl Compiler {
                 }
                 None => branch_match,
             };
-            let selected = self.combine_with_outer_mask(outer_mask, first_match, span);
+            let selected = self.narrow_selection(outer_selection, first_match, span);
             let value = self.compile_case_result(
                 Some(&branch.result),
                 result_type,
@@ -1906,14 +1908,15 @@ impl Compiler {
             };
         }
 
-        let else_mask = match matched {
+        let else_selection = match matched {
             Some(matched) => {
                 let unmatched = self.emit_boolean_not(matched, span);
-                Some(self.combine_with_outer_mask(outer_mask, unmatched, span))
+                Some(self.narrow_selection(outer_selection, unmatched, span))
             }
-            None => outer_mask,
+            None => outer_selection,
         };
-        let otherwise = self.compile_case_result(otherwise_result, result_type, else_mask, span)?;
+        let otherwise =
+            self.compile_case_result(otherwise_result, result_type, else_selection, span)?;
         let output_type = Self::register_type_for_data_type(result_type, span, "CASE result")?;
         let dst = self.alloc_temp(output_type);
         self.emit(
@@ -1931,10 +1934,10 @@ impl Compiler {
         &mut self,
         result: Option<&SpannedExpr>,
         result_type: &DataType,
-        error_mask: Option<RegisterRef>,
+        selection: Option<RegisterRef>,
         span: Span,
     ) -> Result<RegisterRef, CompileError> {
-        self.with_error_mask(error_mask, |compiler| {
+        self.with_selection(selection, |compiler| {
             if let Some(result) = result
                 && !matches!(result.inner, Expr::Literal(Literal::Null))
             {
@@ -3357,7 +3360,10 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
     }
 }
 
-fn instruction_can_emit_row_errors(kind: &InstructionKind) -> bool {
+/// Whether a conditional arm confines this instruction to the rows it selects. An instruction
+/// that cannot report a per-row error and does not call out of the VM runs over the whole batch:
+/// its result on an unselected row is never observed, and nothing else it does is observable.
+fn instruction_observes_selection(kind: &InstructionKind) -> bool {
     match kind {
         InstructionKind::Unary { op, .. } => unary_descriptor(*op).semantics.can_error,
         InstructionKind::Binary { op, .. } => binary_descriptor(*op).semantics.can_error,
@@ -3382,7 +3388,7 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
     let mut peak = crate::ir::RegisterLayout::default();
 
     for (inst_idx, instruction) in instructions.iter_mut().enumerate() {
-        let logical_error_mask = instruction.error_mask;
+        let logical_selection = instruction.selection;
         let inputs = instruction_inputs(instruction);
         let mut dead_inputs = HashSet::new();
         let mut deferred_dead_inputs = HashSet::new();
@@ -3395,7 +3401,7 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
                 );
                 rewrite_temp_input(instruction, *input, physical_index);
                 if last_uses.get(input) == Some(&inst_idx) {
-                    if Some(*input) == logical_error_mask {
+                    if Some(*input) == logical_selection {
                         deferred_dead_inputs.insert(*input);
                     } else {
                         dead_inputs.insert(*input);
@@ -3441,12 +3447,12 @@ fn collect_temp_last_uses(instructions: &[Instruction]) -> HashMap<RegisterRef, 
     last_uses
 }
 
-/// The registers an instruction reads: its operands, then the error mask that selects the rows
-/// whose errors it keeps.
+/// The registers an instruction reads: its operands, then the selection that holds the rows it
+/// computes.
 fn instruction_inputs(instruction: &Instruction) -> Vec<RegisterRef> {
     let mut inputs = instruction.kind.operands();
-    if let Some(error_mask) = instruction.error_mask {
-        inputs.push(error_mask);
+    if let Some(selection) = instruction.selection {
+        inputs.push(selection);
     }
     inputs
 }
@@ -3508,8 +3514,8 @@ fn rewrite_temp_input(instruction: &mut Instruction, from: RegisterRef, to_index
             rewrite(otherwise);
         }
     }
-    if let Some(error_mask) = &mut instruction.error_mask {
-        rewrite(error_mask);
+    if let Some(selection) = &mut instruction.selection {
+        rewrite(selection);
     }
 }
 
@@ -4582,7 +4588,7 @@ mod tests {
                     value: ScalarValue::Utf8("ABC".to_string()),
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
             Instruction {
                 kind: InstructionKind::Builtin {
@@ -4591,7 +4597,7 @@ mod tests {
                     inputs: vec![literal],
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
             Instruction {
                 kind: InstructionKind::Move {
@@ -4599,7 +4605,7 @@ mod tests {
                     input: lowered,
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
             Instruction {
                 kind: InstructionKind::Literal {
@@ -4607,7 +4613,7 @@ mod tests {
                     value: ScalarValue::Utf8("unused".to_string()),
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
         ];
 
@@ -4649,7 +4655,7 @@ mod tests {
                 op: BinaryOp::Div,
             },
             span: (0..0).into(),
-            error_mask: None,
+            selection: None,
         }];
 
         optimize_instructions(&mut instructions, &[], None);
@@ -4666,7 +4672,7 @@ mod tests {
     }
 
     #[test]
-    fn temp_remapping_keeps_error_mask_live_through_boolean_output() {
+    fn temp_remapping_keeps_the_selection_live_through_boolean_output() {
         let mask = RegisterRef::new(RegisterSpace::Temp, RegisterType::Boolean, 0);
         let output = RegisterRef::new(RegisterSpace::Temp, RegisterType::Boolean, 1);
         let text = RegisterRef::new(RegisterSpace::Input, RegisterType::Utf8, 0);
@@ -4678,7 +4684,7 @@ mod tests {
                     value: ScalarValue::Boolean(true),
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
             Instruction {
                 kind: InstructionKind::Builtin {
@@ -4689,7 +4695,7 @@ mod tests {
                     inputs: vec![text, pattern],
                 },
                 span: (0..0).into(),
-                error_mask: Some(mask),
+                selection: Some(mask),
             },
         ];
         let mut layout = crate::ir::RegisterLayout {
@@ -4701,13 +4707,13 @@ mod tests {
 
         let Instruction {
             kind: InstructionKind::Builtin { dst, .. },
-            error_mask: Some(error_mask),
+            selection: Some(selection),
             ..
         } = &instructions[1]
         else {
             panic!("masked Boolean instruction must remain");
         };
-        assert_ne!(*dst, *error_mask);
+        assert_ne!(*dst, *selection);
     }
 
     #[test]

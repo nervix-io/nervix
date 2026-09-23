@@ -838,11 +838,14 @@ pub(super) struct WindowAggregateResults {
 }
 
 impl VmFunctionInjector for WindowAggregateResults {
+    /// Answers an aggregate for the selected output rows. The results hold one value per output
+    /// row of the emission, so a conditional arm that selects some rows reads those rows' values
+    /// by their identity in the output batch.
     fn inject_with_context(
         &self,
         function: &FunctionName,
         _arguments: &[VmTypedArray],
-        row_count: usize,
+        rows: &nervix_vm::RowSelection,
         _span: nervix_vm::program::Span,
         _now: Timestamp,
         _prior_error_rows: nervix_vm::RowErrorMask<'_>,
@@ -861,16 +864,33 @@ impl VmFunctionInjector for WindowAggregateResults {
                 ),
             });
         };
-        if result.len() != row_count {
+        if !rows.fits(result.len()) {
             return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
-                    "window aggregate {} evaluated {} rows for {row_count} output rows",
+                    "window aggregate {} evaluated {} rows for output rows selected as {rows:?}",
                     invocation.function.nspl_name(),
                     result.len()
                 ),
             });
         }
-        let output = VmTypedArray::try_from_array_ref(result.clone())?;
+        let output = match rows {
+            nervix_vm::RowSelection::All(_) => result.clone(),
+            nervix_vm::RowSelection::Selected(selected) => {
+                let indices = UInt64Array::from_iter_values(
+                    selected.iter().map(|row| -> u64 { (*row).arch_into() }),
+                );
+                take_arrow_array(result.as_ref(), &indices, None).map_err(|error| {
+                    nervix_vm::RuntimeError::InvalidBatch {
+                        message: format!(
+                            "window aggregate {} could not be read for the selected output rows: \
+                             {error}",
+                            invocation.function.nspl_name()
+                        ),
+                    }
+                })?
+            }
+        };
+        let output = VmTypedArray::try_from_array_ref(output)?;
         Ok(nervix_vm::InjectedResult::success(output))
     }
 }
