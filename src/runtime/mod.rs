@@ -95,7 +95,7 @@ use nervix_models::{
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq,
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
+use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::UdfExecutor;
 #[cfg(test)]
 use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
