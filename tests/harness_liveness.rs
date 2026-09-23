@@ -93,8 +93,8 @@ mod tests {
         },
         suite_watchdog::{
             DEPENDENCY_SHUTDOWN_BUDGET, LiveCluster, LiveClusterHandle, LiveClusterRegistration,
-            NodeStop, SUITE_BUDGET, StalledScenario, SuiteOutcome, SuiteRun, SuiteTeardown,
-            SuiteTimeout, SuiteWatchdog, SuiteWatchdogArgs,
+            NodeStop, SUITE_BUDGET, SUITE_BUDGET_ENV, StalledScenario, SuiteOutcome, SuiteRun,
+            SuiteTeardown, SuiteTimeout, SuiteWatchdog, SuiteWatchdogArgs,
         },
     };
 
@@ -2563,10 +2563,21 @@ mod tests {
         );
 
         // The option also reads `NERVIX_TEST_SUITE_BUDGET`, so a run that sets it in the
-        // environment sees that value here instead of the policy default.
+        // environment is bounded by that value, and only a run that does not receives the policy
+        // default. This process may be either kind of run.
+        let expected_default = match std::env::var(SUITE_BUDGET_ENV) {
+            Ok(given) => humantime::parse_duration(&given)
+                .assured("the option parsed the same environment value as a duration above"),
+            Err(_) => SUITE_BUDGET,
+        };
         let default = StandInSuiteCli::try_parse_from(["scenarios"])
             .expect("the suite budget option must have a default");
-        assert_eq!(default.watchdog.watchdog().budget(), SUITE_BUDGET);
+        assert_eq!(
+            default.watchdog.watchdog().budget(),
+            expected_default,
+            "a run that gives no budget of its own is bounded by the environment's budget, or by \
+             the policy default when the environment gives none"
+        );
     }
 
     #[tokio::test(start_paused = true)]
