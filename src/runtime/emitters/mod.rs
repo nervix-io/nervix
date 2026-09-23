@@ -126,6 +126,35 @@ impl EmitterSinkContext {
 pub(super) struct EmitterSinkStarter;
 
 impl EmitterSinkStarter {
+    /// Rejects, while the emitter is built, a client configuration its connector can already tell
+    /// will never open.
+    ///
+    /// Only Syslog reads everything it needs from its configuration alone, so it is the only sink
+    /// checked before its task starts; every other sink reports its client when it opens.
+    pub(super) fn check_client_config(plan: &EmitterStartPlan) -> EmitterRuntimeResult<()> {
+        match &plan.sink {
+            EmitterSinkPlan::Syslog(sink) => {
+                SyslogSink::check_client_config(&sink.client.config.entries)
+                    .change_context(EmitterRuntimeError::InvalidSinkConfig)
+            }
+            EmitterSinkPlan::Kafka(_)
+            | EmitterSinkPlan::Pulsar(_)
+            | EmitterSinkPlan::RabbitMq(_)
+            | EmitterSinkPlan::Redis(_)
+            | EmitterSinkPlan::Mqtt(_)
+            | EmitterSinkPlan::Nats(_)
+            | EmitterSinkPlan::ZeroMq(_)
+            | EmitterSinkPlan::Sqs(_)
+            | EmitterSinkPlan::Sentry(_)
+            | EmitterSinkPlan::Otel(_)
+            | EmitterSinkPlan::ClickHouse(_)
+            | EmitterSinkPlan::Postgres(_)
+            | EmitterSinkPlan::MySql(_)
+            | EmitterSinkPlan::MongoDb(_)
+            | EmitterSinkPlan::Iceberg(_) => Ok(()),
+        }
+    }
+
     /// Opens the connector `plan` names.
     pub(super) async fn start(
         plan: &EmitterStartPlan,
@@ -491,9 +520,69 @@ impl EmitterSinkStarter {
 
 #[cfg(test)]
 mod tests {
-    use nervix_connector::SinkStartError;
+    use nervix_connector::{ParsedRetryPolicy, ResolvedClientConfig, SinkStartError};
+    use nervix_models::ClientConfigEntry;
 
     use super::*;
+    use crate::runtime::test_fixtures::named;
+
+    fn plan(sink: EmitterSinkPlan) -> EmitterStartPlan {
+        EmitterStartPlan {
+            retry_policy: ParsedRetryPolicy {
+                backoff: Duration::from_millis(10),
+                max_backoff: Duration::from_millis(100),
+            },
+            sink,
+        }
+    }
+
+    fn client(entries: &[(&str, &str)]) -> EmitterClientSpec {
+        EmitterClientSpec {
+            name: named("collector"),
+            config: ResolvedClientConfig {
+                entries: entries
+                    .iter()
+                    .map(|(key, value)| ClientConfigEntry {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                    })
+                    .collect(),
+                mounts: None,
+            },
+        }
+    }
+
+    /// Syslog reads its transport from its configuration alone, so a configuration it could never
+    /// open is rejected while the emitter is built, and every other sink reports its client only
+    /// when it opens.
+    #[test]
+    fn only_a_syslog_client_that_could_never_open_is_rejected_before_the_emitter_starts() {
+        let valid = plan(EmitterSinkPlan::Syslog(SyslogSinkPlan {
+            client: client(&[("protocol", "udp"), ("addr", "127.0.0.1:5514")]),
+        }));
+        assert!(EmitterSinkStarter::check_client_config(&valid).is_ok());
+
+        let unopenable = plan(EmitterSinkPlan::Syslog(SyslogSinkPlan {
+            client: client(&[("protocol", "tcp"), ("addr", "missing-port")]),
+        }));
+        let Err(error) = EmitterSinkStarter::check_client_config(&unopenable) else {
+            panic!("a Syslog address without a port must fail the client check")
+        };
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::InvalidSinkConfig
+        );
+        let reason = emitter_error_message(&error);
+        assert!(
+            reason.contains("addr"),
+            "the rejection names the key the connector refused: {reason}"
+        );
+
+        let unchecked = plan(EmitterSinkPlan::ZeroMq(ZeroMqSinkPlan {
+            client: client(&[]),
+        }));
+        assert!(EmitterSinkStarter::check_client_config(&unchecked).is_ok());
+    }
 
     /// A connector decides why its own configuration is unusable, so the host states only that the
     /// sink could not be initialized and reports the connector's message as the reason it is

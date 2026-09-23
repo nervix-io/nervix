@@ -16,7 +16,6 @@ use nervix_connector::{
     SinkAcknowledgementServices, SinkAcknowledgements, SinkEventReporter, SinkGeneralErrorHandler,
     SinkHost, SinkStagingDirectory, SinkTransientErrorStatus, physical_time::actual_utc_now,
 };
-use nervix_connector_syslog::SyslogSink;
 
 use super::*;
 
@@ -528,14 +527,12 @@ impl EmitterTask {
             .clone();
         let buffered_messages =
             Arc::new(EmitterBufferedMessages::new(emitter_buffer_count.clone()));
-        if let EmitterSinkPlan::Syslog(sink) = &plan.sink
-            && let Err(error) = SyslogSink::check_client_config(&sink.client.config.entries)
-        {
-            let error = error.change_context(EmitterRuntimeError::InvalidSinkConfig);
+        if let Err(error) = EmitterSinkStarter::check_client_config(&plan) {
             return Err(RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
-                    "failed to resolve syslog emitter client: {}",
+                    "failed to resolve {} emitter client: {}",
+                    plan.sink.label(),
                     emitter_error_message(&error)
                 ),
             });
