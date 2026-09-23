@@ -1,15 +1,19 @@
-//! RabbitMQ sink connector.
+//! RabbitMQ source and sink connector.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The AMQP connection and channel a client configures, queue declaration, header
-//!   properties, publisher confirms, and returned-message classification.
+//! - **Owns.** The AMQP connection and channel a client configures, queue declaration,
+//!   the consumer and prefetch window a source reads through, AMQP headers in both
+//!   directions, per-delivery acknowledgement and requeue, publisher confirms, and
+//!   returned-message classification.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and `lapin`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
+
+mod source;
 
 use std::{collections::VecDeque, time::Duration};
 
@@ -31,6 +35,10 @@ use nervix_connector::{
     read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, QueueName, Timestamp};
+pub use source::{
+    RabbitMqDeliveryHeaders, RabbitMqSource, RabbitMqSourceError, RabbitMqSourceMessage,
+    RabbitMqSourcePlan, RabbitMqSourcePosition,
+};
 use tokio::time::{Instant, sleep};
 
 const RABBITMQ: &str = "rabbitmq";

@@ -9,9 +9,7 @@
 //! - **Must not know.** The AMQP driver, channel lifecycle, NSPL parsing, registry validation, or
 //!   placement computation.
 
-mod source;
-
-use source::{RabbitMqSource, RabbitMqSourcePlan};
+use nervix_connector_rabbitmq::{RabbitMqSource, RabbitMqSourcePlan};
 
 use super::{
     super::*,

@@ -108,7 +108,6 @@ iceberg = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
 iceberg-storage-opendal = { workspace = true }
 indexmap = { workspace = true }
-lapin = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
@@ -229,6 +228,7 @@ criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 h2 = { workspace = true }
 http = { workspace = true }
+lapin = { workspace = true }
 mongodb = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
