@@ -10,9 +10,7 @@
 //! - **Must not know.** The MQTT driver, session lifecycle, NSPL parsing, registry validation, or
 //!   placement computation.
 
-mod source;
-
-use source::{MqttSource, MqttSourcePlan, MqttSourceSettings};
+use nervix_connector_mqtt::{MqttSource, MqttSourcePlan, MqttSourceSettings};
 
 use super::{
     super::*,

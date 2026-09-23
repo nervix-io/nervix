@@ -175,7 +175,6 @@ reqwest = { workspace = true, features = [
   "hickory-dns",
 ] }
 rkyv = { workspace = true }
-rumqttc = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 serde = { workspace = true }
@@ -237,6 +236,7 @@ pulsar = { workspace = true }
 rcgen = { workspace = true }
 redis = { workspace = true }
 rstest = { workspace = true }
+rumqttc = { workspace = true }
 sqlx = { workspace = true }
 tempfile = { workspace = true }
 trybuild = { workspace = true }
