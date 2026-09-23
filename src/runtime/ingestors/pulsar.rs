@@ -9,9 +9,7 @@
 //! - **Must not know.** The Pulsar driver, consumer lifecycle, NSPL parsing, registry validation,
 //!   or placement computation.
 
-mod source;
-
-use source::{PulsarSource, PulsarSourcePlan, PulsarSourceSettings};
+use nervix_connector_pulsar::{PulsarSource, PulsarSourcePlan, PulsarSourceSettings};
 
 use super::{
     super::*,

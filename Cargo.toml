@@ -173,7 +173,6 @@ prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = { workspace = true }
 protox = { workspace = true }
-pulsar = { workspace = true }
 redis = { workspace = true }
 reqwest = { workspace = true, features = [
   "json",
@@ -237,6 +236,7 @@ nervix-client-core = { workspace = true }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
 playwright-rs = { workspace = true }
+pulsar = { workspace = true }
 rcgen = { workspace = true }
 rstest = { workspace = true }
 sqlx = { workspace = true }
