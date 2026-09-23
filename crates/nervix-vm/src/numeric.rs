@@ -39,6 +39,7 @@ use nervix_approx_into::ApproxInto as _;
 use crate::{
     batch::TypedArray,
     error::{DivisionOperation, FloatOperation, IntegerOperation, SideErrorReason},
+    operand::Operand,
     semantics::{ClassifiedFloat, FloatClass},
 };
 
@@ -165,6 +166,15 @@ pub(crate) struct Checked<T: ArrowPrimitiveType> {
 }
 
 impl<T: ArrowPrimitiveType> Checked<T> {
+    /// The result of an operation whose scalar operand is null: every lane is null, and no lane
+    /// failed because no lane had a value to operate on.
+    fn all_null(lanes: usize) -> Self {
+        Self {
+            column: PrimitiveArray::new_null(lanes),
+            failed: FailedLanes(None),
+        }
+    }
+
     pub(crate) fn from_lanes(lanes: Lanes<T::Native>, operand_nulls: Option<NullBuffer>) -> Self {
         let Lanes { mut values, failed } = lanes;
         let Some(failed) = FailedLanes::among_valid(failed, operand_nulls.as_ref()) else {
@@ -232,60 +242,45 @@ pub(crate) enum Arithmetic {
 }
 
 impl Arithmetic {
-    /// Applies this operator to two integer columns of one batch. Every lane whose result does not
-    /// fit the type fails, as does every quotient or remainder by zero.
+    /// Applies this operator to two integer operands of one batch. Every lane whose result does
+    /// not fit the type fails, as does every quotient or remainder by zero.
     pub(crate) fn evaluate_integers<T>(
         self,
-        left: &PrimitiveArray<T>,
-        right: &PrimitiveArray<T>,
+        left: Operand<'_, PrimitiveArray<T>>,
+        right: Operand<'_, PrimitiveArray<T>>,
     ) -> Checked<T>
     where
         T: ArrowPrimitiveType,
         T::Native: CheckedInteger,
     {
-        let left_values: &[T::Native] = left.values();
-        let right_values: &[T::Native] = right.values();
-        let lanes = match self {
-            Self::Add => Lanes::binary(left_values, right_values, T::Native::lane_sum),
-            Self::Sub => Lanes::binary(left_values, right_values, T::Native::lane_difference),
-            Self::Mul => Lanes::binary(left_values, right_values, T::Native::lane_product),
-            Self::Div => Lanes::binary(left_values, right_values, T::Native::lane_quotient),
-            Self::Rem => Lanes::binary(left_values, right_values, T::Native::lane_remainder),
+        let lane = match self {
+            Self::Add => T::Native::lane_sum,
+            Self::Sub => T::Native::lane_difference,
+            Self::Mul => T::Native::lane_product,
+            Self::Div => T::Native::lane_quotient,
+            Self::Rem => T::Native::lane_remainder,
         };
-        Checked::from_lanes(lanes, NullBuffer::union(left.nulls(), right.nulls()))
+        evaluate_binary(left, right, lane)
     }
 
-    /// Applies this operator to two float columns of one batch at their own width. Every lane
+    /// Applies this operator to two float operands of one batch at their own width. Every lane
     /// whose result is NaN or an infinity fails.
     pub(crate) fn evaluate_floats<T>(
         self,
-        left: &PrimitiveArray<T>,
-        right: &PrimitiveArray<T>,
+        left: Operand<'_, PrimitiveArray<T>>,
+        right: Operand<'_, PrimitiveArray<T>>,
     ) -> Checked<T>
     where
         T: ArrowPrimitiveType,
         T::Native: CheckedFloat,
     {
-        let left_values: &[T::Native] = left.values();
-        let right_values: &[T::Native] = right.values();
-        let lanes = match self {
-            Self::Add => Lanes::binary(left_values, right_values, |left, right| {
-                (left + right).finite_lane()
-            }),
-            Self::Sub => Lanes::binary(left_values, right_values, |left, right| {
-                (left - right).finite_lane()
-            }),
-            Self::Mul => Lanes::binary(left_values, right_values, |left, right| {
-                (left * right).finite_lane()
-            }),
-            Self::Div => Lanes::binary(left_values, right_values, |left, right| {
-                (left / right).finite_lane()
-            }),
-            Self::Rem => Lanes::binary(left_values, right_values, |left, right| {
-                (left % right).finite_lane()
-            }),
-        };
-        Checked::from_lanes(lanes, NullBuffer::union(left.nulls(), right.nulls()))
+        match self {
+            Self::Add => evaluate_binary(left, right, |left, right| (left + right).finite_lane()),
+            Self::Sub => evaluate_binary(left, right, |left, right| (left - right).finite_lane()),
+            Self::Mul => evaluate_binary(left, right, |left, right| (left * right).finite_lane()),
+            Self::Div => evaluate_binary(left, right, |left, right| (left / right).finite_lane()),
+            Self::Rem => evaluate_binary(left, right, |left, right| (left % right).finite_lane()),
+        }
     }
 
     /// Why an integer lane of this operator failed, given the lane's right operand. Only a quotient
@@ -303,6 +298,45 @@ impl Arithmetic {
                 }
             }
             Self::Rem => SideErrorReason::DivisionByZero(DivisionOperation::Remainder),
+        }
+    }
+}
+
+/// Computes `lane` for every lane of a binary operation whose operands are columns or scalars.
+///
+/// A scalar operand is read once and folded into the lane operation, so a column combined with a
+/// constant is one pass over the column's buffer, which the compiler vectorizes as it does the
+/// two-column pass. A null scalar makes every lane null without running the operation.
+fn evaluate_binary<T>(
+    left: Operand<'_, PrimitiveArray<T>>,
+    right: Operand<'_, PrimitiveArray<T>>,
+    mut lane: impl FnMut(T::Native, T::Native) -> (T::Native, bool),
+) -> Checked<T>
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy + Default,
+{
+    match (left, right) {
+        (Operand::Scalar(scalar), Operand::Column(column)) => {
+            if scalar.is_null(0) {
+                return Checked::all_null(column.len());
+            }
+            let value = scalar.value(0);
+            let lanes = Lanes::unary(column.values(), |right| lane(value, right));
+            Checked::from_lanes(lanes, column.nulls().cloned())
+        }
+        (Operand::Column(column), Operand::Scalar(scalar)) => {
+            if scalar.is_null(0) {
+                return Checked::all_null(column.len());
+            }
+            let value = scalar.value(0);
+            let lanes = Lanes::unary(column.values(), |left| lane(left, value));
+            Checked::from_lanes(lanes, column.nulls().cloned())
+        }
+        (Operand::Column(left), Operand::Column(right))
+        | (Operand::Scalar(left), Operand::Scalar(right)) => {
+            let lanes = Lanes::binary(left.values(), right.values(), lane);
+            Checked::from_lanes(lanes, NullBuffer::union(left.nulls(), right.nulls()))
         }
     }
 }
@@ -655,45 +689,83 @@ pub(crate) enum Comparison {
 }
 
 impl Comparison {
-    /// Compares two numeric columns lane by lane.
+    /// Compares two numeric operands lane by lane.
     ///
     /// Floats compare by IEEE 754: NaN is unequal to every value including itself, every ordering
     /// comparison with NaN is false, and `0.0` equals `-0.0`. The Arrow comparison kernels order
     /// floats by the IEEE 754 total order instead, so numeric comparison packs the operator's own
-    /// result into the bitmap, the same vectorized loop those kernels use.
+    /// result into the bitmap, the same vectorized loop those kernels use. A scalar operand is
+    /// read once and compared against every lane of the column, and a null scalar makes every
+    /// lane null.
     pub(crate) fn evaluate<T>(
         self,
-        left: &PrimitiveArray<T>,
-        right: &PrimitiveArray<T>,
+        left: Operand<'_, PrimitiveArray<T>>,
+        right: Operand<'_, PrimitiveArray<T>>,
     ) -> BooleanArray
     where
         T: ArrowPrimitiveType,
         T::Native: PartialOrd,
     {
-        let lanes = left.len();
-        let left_values = &left.values()[..lanes];
-        let right_values = &right.values()[..lanes];
-        let results = match self {
-            Self::Eq => {
-                BooleanBuffer::collect_bool(lanes, |lane| left_values[lane] == right_values[lane])
+        match (left, right) {
+            (Operand::Scalar(scalar), Operand::Column(column)) => {
+                if scalar.is_null(0) {
+                    return BooleanArray::new_null(column.len());
+                }
+                let value = scalar.value(0);
+                let results = self.collect(column.len(), |lane| (value, column.values()[lane]));
+                BooleanArray::new(results, column.nulls().cloned())
             }
-            Self::NotEq => {
-                BooleanBuffer::collect_bool(lanes, |lane| left_values[lane] != right_values[lane])
+            (Operand::Column(column), Operand::Scalar(scalar)) => {
+                if scalar.is_null(0) {
+                    return BooleanArray::new_null(column.len());
+                }
+                let value = scalar.value(0);
+                let results = self.collect(column.len(), |lane| (column.values()[lane], value));
+                BooleanArray::new(results, column.nulls().cloned())
             }
-            Self::Lt => {
-                BooleanBuffer::collect_bool(lanes, |lane| left_values[lane] < right_values[lane])
+            (Operand::Column(left), Operand::Column(right))
+            | (Operand::Scalar(left), Operand::Scalar(right)) => {
+                let lanes = left.len();
+                let left_values = &left.values()[..lanes];
+                let right_values = &right.values()[..lanes];
+                let results = self.collect(lanes, |lane| (left_values[lane], right_values[lane]));
+                BooleanArray::new(results, NullBuffer::union(left.nulls(), right.nulls()))
             }
-            Self::LtEq => {
-                BooleanBuffer::collect_bool(lanes, |lane| left_values[lane] <= right_values[lane])
-            }
-            Self::Gt => {
-                BooleanBuffer::collect_bool(lanes, |lane| left_values[lane] > right_values[lane])
-            }
-            Self::GtEq => {
-                BooleanBuffer::collect_bool(lanes, |lane| left_values[lane] >= right_values[lane])
-            }
-        };
-        BooleanArray::new(results, NullBuffer::union(left.nulls(), right.nulls()))
+        }
+    }
+
+    /// Packs this comparison of the operand pair `operands` yields for each lane into a bitmap.
+    fn collect<N: PartialOrd>(
+        self,
+        lanes: usize,
+        operands: impl Fn(usize) -> (N, N),
+    ) -> BooleanBuffer {
+        match self {
+            Self::Eq => BooleanBuffer::collect_bool(lanes, |lane| {
+                let (left, right) = operands(lane);
+                left == right
+            }),
+            Self::NotEq => BooleanBuffer::collect_bool(lanes, |lane| {
+                let (left, right) = operands(lane);
+                left != right
+            }),
+            Self::Lt => BooleanBuffer::collect_bool(lanes, |lane| {
+                let (left, right) = operands(lane);
+                left < right
+            }),
+            Self::LtEq => BooleanBuffer::collect_bool(lanes, |lane| {
+                let (left, right) = operands(lane);
+                left <= right
+            }),
+            Self::Gt => BooleanBuffer::collect_bool(lanes, |lane| {
+                let (left, right) = operands(lane);
+                left > right
+            }),
+            Self::GtEq => BooleanBuffer::collect_bool(lanes, |lane| {
+                let (left, right) = operands(lane);
+                left >= right
+            }),
+        }
     }
 }
 

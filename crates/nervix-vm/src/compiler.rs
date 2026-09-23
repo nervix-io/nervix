@@ -20,6 +20,7 @@ use crate::{
         BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
         Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
     },
+    regexp::{PatternSource, RegexpCall, RegexpFunction},
     semantics::{
         BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
@@ -1997,12 +1998,58 @@ impl Compiler {
         let output_type = builtin_signature(function, &arg_types, span)?;
         let output_type = RegisterType::from_data_type(&output_type)
             .verified("type inference above rejected every data type that has no register type");
+        if let BuiltinLowering::Regexp(call) = descriptor.lowering {
+            return self.compile_regexp_call(call.function, args, output_type);
+        }
         let compiled_args = args
             .iter()
             .map(|arg| self.compile_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
         BuiltinPlan::from_descriptor(descriptor.lowering, compiled_args, output_type, span)
+    }
+
+    /// Compiles a regular-expression call.
+    ///
+    /// A pattern that folds to a constant is compiled here, once for the program, and the call
+    /// reads only its remaining arguments. A constant pattern that does not compile is not a
+    /// compile error: the call keeps the pattern's error and reports it per row, so a pattern in
+    /// a conditional arm no row selects reports nothing. Every other pattern is read from the
+    /// pattern argument on each row.
+    fn compile_regexp_call(
+        &mut self,
+        function: RegexpFunction,
+        args: &[SpannedExpr],
+        output_type: RegisterType,
+    ) -> Result<BuiltinPlan, CompileError> {
+        let text = args
+            .first()
+            .verified("the signature check above accepted only calls with a text argument");
+        let pattern = args
+            .get(1)
+            .verified("the signature check above accepted only calls with a pattern argument");
+        let trailing = args.get(2..).unwrap_or(&[]);
+        let call = match fold_constant_expr(pattern)? {
+            Some(FoldedValue::NonNull(ScalarValue::Utf8(constant))) => {
+                RegexpCall::with_constant_pattern(function, &constant)
+            }
+            Some(FoldedValue::NonNull(_) | FoldedValue::Null(_)) | None => {
+                RegexpCall::reading_pattern_argument(function)
+            }
+        };
+        let mut inputs = Vec::with_capacity(args.len());
+        inputs.push(self.compile_expr(text)?);
+        if let PatternSource::Argument(_) = &call.pattern {
+            inputs.push(self.compile_expr(pattern)?);
+        }
+        for argument in trailing {
+            inputs.push(self.compile_expr(argument)?);
+        }
+        Ok(BuiltinPlan {
+            lowering: BuiltinLowering::Regexp(call),
+            inputs,
+            output_type,
+        })
     }
 
     fn compile_invocation(
@@ -3251,7 +3298,7 @@ fn eliminate_dead_removable_temps(
 
     let mut retained = Vec::with_capacity(instructions.len());
     for instruction in instructions.iter().rev() {
-        let output = instruction_output(&instruction.kind);
+        let output = instruction.kind.output();
         let dead_temp = output.space == RegisterSpace::Temp && !live.contains(&output);
         if dead_temp && instruction_is_removable_if_dead(&instruction.kind) {
             continue;
@@ -3282,7 +3329,7 @@ fn collect_register_definitions(instructions: &[Instruction]) -> HashMap<Registe
     instructions
         .iter()
         .enumerate()
-        .map(|(idx, instruction)| (instruction_output(&instruction.kind), idx))
+        .map(|(idx, instruction)| (instruction.kind.output(), idx))
         .collect()
 }
 
@@ -3364,7 +3411,7 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
             free.release(dead.ty, physical_index);
         }
 
-        let output = instruction_output(&instruction.kind);
+        let output = instruction.kind.output();
         if output.space == RegisterSpace::Temp {
             let physical_index = free.acquire(output.ty, &mut peak);
             active.insert(output, physical_index);
@@ -3394,59 +3441,14 @@ fn collect_temp_last_uses(instructions: &[Instruction]) -> HashMap<RegisterRef, 
     last_uses
 }
 
+/// The registers an instruction reads: its operands, then the error mask that selects the rows
+/// whose errors it keeps.
 fn instruction_inputs(instruction: &Instruction) -> Vec<RegisterRef> {
-    let mut inputs = match &instruction.kind {
-        InstructionKind::Move { input, .. }
-        | InstructionKind::Unary { input, .. }
-        | InstructionKind::Cast { input, .. } => vec![*input],
-        InstructionKind::Assign {
-            input, fallback, ..
-        } => {
-            let mut inputs = vec![*input];
-            if let AssignmentFallback::Register(previous) = fallback {
-                inputs.push(*previous);
-            }
-            inputs
-        }
-        InstructionKind::Literal { .. }
-        | InstructionKind::NullLiteral { .. }
-        | InstructionKind::Uninitialized { .. } => Vec::new(),
-        InstructionKind::Binary { left, right, .. } => vec![*left, *right],
-        InstructionKind::Builtin { inputs, .. } | InstructionKind::Inject { inputs, .. } => {
-            inputs.clone()
-        }
-        InstructionKind::Select {
-            arms, otherwise, ..
-        } => {
-            let mut inputs = Vec::with_capacity(arms.len() * 2 + 1);
-            for arm in arms {
-                inputs.push(arm.mask);
-                inputs.push(arm.value);
-            }
-            inputs.push(*otherwise);
-            inputs
-        }
-    };
+    let mut inputs = instruction.kind.operands();
     if let Some(error_mask) = instruction.error_mask {
         inputs.push(error_mask);
     }
     inputs
-}
-
-fn instruction_output(kind: &InstructionKind) -> RegisterRef {
-    match kind {
-        InstructionKind::Move { dst, .. }
-        | InstructionKind::Assign { dst, .. }
-        | InstructionKind::Literal { dst, .. }
-        | InstructionKind::NullLiteral { dst, .. }
-        | InstructionKind::Uninitialized { dst, .. }
-        | InstructionKind::Unary { dst, .. }
-        | InstructionKind::Binary { dst, .. }
-        | InstructionKind::Cast { dst, .. }
-        | InstructionKind::Builtin { dst, .. }
-        | InstructionKind::Inject { dst, .. }
-        | InstructionKind::Select { dst, .. } => *dst,
-    }
 }
 
 fn rewrite_instruction_output(kind: &mut InstructionKind, dst: RegisterRef) {
@@ -4630,7 +4632,7 @@ mod tests {
         assert!(
             instructions
                 .iter()
-                .all(|instruction| { instruction_output(&instruction.kind) != dead })
+                .all(|instruction| { instruction.kind.output() != dead })
         );
     }
 
@@ -4681,7 +4683,9 @@ mod tests {
             Instruction {
                 kind: InstructionKind::Builtin {
                     dst: output,
-                    lowering: BuiltinLowering::RegexpLike,
+                    lowering: BuiltinLowering::Regexp(RegexpCall::reading_pattern_argument(
+                        RegexpFunction::Like,
+                    )),
                     inputs: vec![text, pattern],
                 },
                 span: (0..0).into(),
@@ -4855,6 +4859,73 @@ mod tests {
         )
         .expect_err("must fail");
         assert_eq!(numeric_error.code, "unsupported_binary");
+    }
+
+    #[test]
+    fn regex_calls_prepare_constant_patterns_once_and_read_the_rest_per_row() {
+        let program = parse_program(
+            "SET literal = regexp_like(input.text, 'a+'), folded = regexp_substr(input.text, \
+             lower('B+')), per_message = regexp_replace(input.text, input.pattern, 'x'), unclosed \
+             = regexp_like(input.text, '(')",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("pattern", DataType::Utf8, true),
+        ]);
+
+        let compiled = compile_program_with_output_fields(
+            &program,
+            schema,
+            vec![
+                Field::new("literal", DataType::Boolean, true),
+                Field::new("folded", DataType::Utf8, true),
+                Field::new("per_message", DataType::Utf8, true),
+                Field::new("unclosed", DataType::Boolean, true),
+            ],
+        )
+        .expect("an invalid constant pattern is reported per row, not when compiling");
+
+        let mut calls = Vec::new();
+        for instruction in &compiled.instructions {
+            if let InstructionKind::Builtin {
+                lowering: BuiltinLowering::Regexp(call),
+                inputs,
+                ..
+            } = &instruction.kind
+            {
+                calls.push((call, inputs.len()));
+            }
+        }
+        let [literal, folded, per_message, unclosed] = calls.as_slice() else {
+            panic!("four regex calls lower to four regex builtins, found {calls:?}");
+        };
+
+        let PatternSource::Constant(pattern) = &literal.0.pattern else {
+            panic!("a literal pattern is prepared when the program is compiled");
+        };
+        assert_eq!(literal.0.function, RegexpFunction::Like);
+        assert_eq!(pattern.text(), "a+");
+        assert!(pattern.is_valid());
+        assert_eq!(literal.1, 1, "a prepared pattern is not read from an input");
+
+        let PatternSource::Constant(pattern) = &folded.0.pattern else {
+            panic!("a pattern folded from literals is prepared when the program is compiled");
+        };
+        assert_eq!(folded.0.function, RegexpFunction::Substr);
+        assert_eq!(pattern.text(), "b+");
+        assert_eq!(folded.1, 1);
+
+        assert_eq!(per_message.0.function, RegexpFunction::Replace);
+        assert!(matches!(per_message.0.pattern, PatternSource::Argument(_)));
+        assert_eq!(per_message.1, 3, "a per-row pattern is read from its input");
+
+        let PatternSource::Constant(pattern) = &unclosed.0.pattern else {
+            panic!("an invalid literal pattern is still a constant pattern");
+        };
+        assert_eq!(pattern.text(), "(");
+        assert!(!pattern.is_valid());
+        assert_eq!(unclosed.1, 1);
     }
 }
 

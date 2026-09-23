@@ -533,6 +533,7 @@ redis = { version = "1.1.0", default-features = false, features = [
 ] }
 reedline = "0.36"
 regex = "1"
+regex-automata = "0.4"
 reqwest = "0.13"
 rkyv = { version = "0.8", features = ["indexmap-2"] }
 # The fork raises Roto's Cranelift floor from 0.127 to 0.136, which carries the x86_64 JIT fixes

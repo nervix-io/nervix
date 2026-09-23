@@ -7405,6 +7405,7 @@ name = "nervix-vm"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
+ "arc-swap",
  "arch-into",
  "arrow-arith",
  "arrow-array",
@@ -7418,6 +7419,7 @@ dependencies = [
  "criterion 0.5.1",
  "error-stack",
  "humantime",
+ "indexmap 2.14.2",
  "jiff",
  "jiff-tzdb",
  "md5",
@@ -7427,6 +7429,7 @@ dependencies = [
  "nervix-nspl",
  "nonzero_ext",
  "regex",
+ "regex-automata 0.4.18",
  "rstest",
  "sorted-vec",
  "strum 0.26.3",
