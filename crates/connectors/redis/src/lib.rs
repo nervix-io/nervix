@@ -1,9 +1,10 @@
-//! Redis sink connector.
+//! Redis source and sink connector.
 //!
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The Redis client a configuration declares, the node's shared pool of command
-//!   connections, and publication of each record to a channel.
+//!   connections, the dedicated subscription connection a Pub/Sub source reads a channel
+//!   through, and publication of each record to a channel.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, `redis` and
 //!   `bb8`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -12,6 +13,8 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
+
+mod source;
 
 use async_trait::async_trait;
 use error_stack::Report;
@@ -23,6 +26,9 @@ use nervix_models::{ChannelName, ClientConfigEntry, ClientPoolBounds};
 use redis::{
     AsyncCommands, Client as RedisClient, ClientTlsConfig, ErrorKind as RedisErrorKind,
     ServerErrorKind, TlsCertificates as RedisTlsCertificates,
+};
+pub use source::{
+    RedisPubSubSource, RedisPubSubSourceError, RedisPubSubSourceMessage, RedisPubSubSourcePlan,
 };
 use thiserror::Error;
 use triomphe::Arc;
@@ -78,7 +84,7 @@ pub async fn open_redis_command_pool(
 ///
 /// The command pool draws its connections from it, and a Pub/Sub source opens its dedicated
 /// subscription connection from the same client.
-pub fn redis_client(
+fn redis_client(
     addr: &str,
     config: &[ClientConfigEntry],
 ) -> Result<RedisClient, Report<RedisClientError>> {

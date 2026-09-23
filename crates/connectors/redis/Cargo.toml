@@ -1,5 +1,5 @@
 [package]
-description = "The Redis sink connector for Nervix"
+description = "The Redis source and sink connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-redis"
@@ -20,6 +20,7 @@ shuttle = [
 async-trait = { workspace = true }
 bb8 = { workspace = true }
 error-stack = { workspace = true }
+futures-util = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
 redis = { workspace = true }

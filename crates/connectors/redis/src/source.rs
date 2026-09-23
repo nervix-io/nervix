@@ -16,10 +16,11 @@ use nervix_connector::{
     SourceBatchRequest, SourceConnector, SourceError, SourceMessage, SourceResult, SourceResume,
     client_config_value,
 };
-use nervix_connector_redis::redis_client;
 use nervix_models::{ChannelName, ClientConfigEntry};
 use redis::{Msg, aio::PubSubStream};
 use thiserror::Error;
+
+use crate::redis_client;
 
 const REDIS: &str = "redis";
 

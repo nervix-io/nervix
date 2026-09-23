@@ -9,9 +9,7 @@
 //! - **Must not know.** The Redis driver, subscription lifecycle, NSPL parsing, registry
 //!   validation, or placement computation.
 
-mod source;
-
-use source::{RedisPubSubSource, RedisPubSubSourcePlan};
+use nervix_connector_redis::{RedisPubSubSource, RedisPubSubSourcePlan};
 
 use super::{
     super::*,
