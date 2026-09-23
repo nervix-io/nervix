@@ -130,7 +130,6 @@ def main() -> int:
         runtime_root / "ingestors/nats.rs",
         runtime_root / "ingestors/redis_pubsub.rs",
         runtime_root / "ingestors/source.rs",
-        runtime_root / "ingestors/sqs.rs",
         runtime_root / "ingestors/syslog.rs",
         runtime_root / "ingestors/websockets.rs",
         runtime_root / "ingestors/zeromq.rs",
