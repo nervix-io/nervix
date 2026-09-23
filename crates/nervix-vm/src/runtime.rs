@@ -8,6 +8,7 @@
 //! - **Must not know.** Domains, branches, runtime clock installation or physical deadlines.
 
 use std::{
+    cell::OnceCell,
     fmt::{self, Write as _},
     ops::Range,
     sync::Arc as StdArc,
@@ -50,7 +51,6 @@ use chrono::DateTime;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::Timestamp;
-use regex::Regex;
 use tokio::task;
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
@@ -62,26 +62,100 @@ use crate::{
         SideError, SideErrorReason,
     },
     ir::{
-        CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
-        RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType, ScalarValue,
+        AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
+        InstructionKind, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType,
+        ScalarValue, SelectArm,
     },
     numeric::{
         self, Arithmetic, BinaryMathFunction, Checked, CheckedFloat, CheckedInteger, Comparison,
         DecimalRounding, F64Operand, IntegerRounding, MathFunction, Rounding, RoundingDigits,
         Shift, ShiftCounts, ShiftedInteger, SignedInteger,
     },
+    operand::{Broadcast, Operand},
     program::{BinaryOp, DatetimeFunction, FunctionName, Span, UnaryOp},
-    semantics::{BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass},
+    regexp::{ActivePattern, BatchPatterns, PatternSource, RegexpCall, RegexpFunction},
+    semantics::{
+        BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, Volatility,
+        builtin_semantics_for_lowering,
+    },
 };
 
 pub const SPAWN_BLOCKING_ROW_THRESHOLD: usize = 1_024;
 
+/// One register's value during an execution.
+#[derive(Clone)]
+enum Register<A> {
+    /// One value per row of the batch.
+    Column(A),
+    /// One value every row of the batch shares, held as a one-row array.
+    ///
+    /// The column repeating it over the batch's rows is built at most once, the first time a
+    /// kernel without a scalar form reads the register, and is dropped with the register.
+    Scalar { value: A, column: OnceCell<A> },
+}
+
+/// Whether a value written to a register is a column of the batch or one scalar every row shares.
+#[derive(Clone, Copy)]
+enum Shape {
+    Column,
+    Scalar,
+}
+
+impl<A: Broadcast> Register<A> {
+    fn with_shape(value: A, shape: Shape) -> Self {
+        match shape {
+            Shape::Column => Self::Column(value),
+            Shape::Scalar => Self::Scalar {
+                value,
+                column: OnceCell::new(),
+            },
+        }
+    }
+
+    fn is_scalar(&self) -> bool {
+        match self {
+            Self::Column(_) => false,
+            Self::Scalar { .. } => true,
+        }
+    }
+
+    /// The register as a column of `rows` rows. A scalar read as one row is that row itself;
+    /// otherwise it is expanded once and the expansion kept.
+    fn column(&self, rows: usize) -> &A {
+        match self {
+            Self::Column(array) => array,
+            Self::Scalar { value, .. } if rows == 1 => value,
+            Self::Scalar { value, column } => column.get_or_init(|| value.broadcast(rows)),
+        }
+    }
+
+    /// The register as a kernel operand: a column as it is, and a scalar as a scalar, except that
+    /// a scalar read as one row is a one-row column.
+    fn operand(&self, rows: usize) -> Operand<'_, A> {
+        match self {
+            Self::Column(array) => Operand::Column(array),
+            Self::Scalar { value, .. } if rows == 1 => Operand::Column(value),
+            Self::Scalar { value, .. } => Operand::Scalar(value),
+        }
+    }
+}
+
+/// An array type a register bank stores, which knows the bank slots of its type.
+trait RegisterArray: Broadcast + Clone {
+    const TYPE: RegisterType;
+    const LABEL: &'static str;
+
+    fn slot(bank: &TypedBank, index: usize) -> Option<&Register<Self>>;
+
+    fn slot_mut(bank: &mut TypedBank, index: usize) -> Option<&mut Option<Register<Self>>>;
+}
+
 macro_rules! declare_typed_bank {
     ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
         struct TypedBank {
-            $($field: Vec<Option<$Array>>,)+
-            datetime: Vec<Option<TimestampNanosecondArray>>,
-            generic: Vec<Option<ArrayRef>>,
+            $($field: Vec<Option<Register<$Array>>>,)+
+            datetime: Vec<Option<Register<TimestampNanosecondArray>>>,
+            generic: Vec<Option<Register<ArrayRef>>>,
         }
 
         impl TypedBank {
@@ -92,51 +166,53 @@ macro_rules! declare_typed_bank {
                     generic: vec![None; layout.generic],
                 }
             }
-
-            $(fn $setter(&mut self, index: usize, value: $Array) -> Result<(), ()> {
-                let Some(slot) = self.$field.get_mut(index) else {
-                    return Err(());
-                };
-                *slot = Some(value);
-                Ok(())
-            })+
-
-            fn set_datetime(
-                &mut self,
-                index: usize,
-                value: TimestampNanosecondArray,
-            ) -> Result<(), ()> {
-                let Some(slot) = self.datetime.get_mut(index) else {
-                    return Err(());
-                };
-                *slot = Some(value);
-                Ok(())
-            }
-
-            fn set_generic(&mut self, index: usize, value: ArrayRef) -> Result<(), ()> {
-                let Some(slot) = self.generic.get_mut(index) else {
-                    return Err(());
-                };
-                *slot = Some(value);
-                Ok(())
-            }
-
-            $(fn $field(&self, index: usize) -> Option<&$Array> {
-                self.$field.get(index).and_then(Option::as_ref)
-            })+
-
-            fn datetime(&self, index: usize) -> Option<&TimestampNanosecondArray> {
-                self.datetime.get(index).and_then(Option::as_ref)
-            }
-
-            fn generic(&self, index: usize) -> Option<&ArrayRef> {
-                self.generic.get(index).and_then(Option::as_ref)
-            }
         }
+
+        $(impl RegisterArray for $Array {
+            const TYPE: RegisterType = RegisterType::$Variant;
+            const LABEL: &'static str = stringify!($Array);
+
+            fn slot(bank: &TypedBank, index: usize) -> Option<&Register<Self>> {
+                bank.$field.get(index).and_then(Option::as_ref)
+            }
+
+            fn slot_mut(
+                bank: &mut TypedBank,
+                index: usize,
+            ) -> Option<&mut Option<Register<Self>>> {
+                bank.$field.get_mut(index)
+            }
+        })+
     };
 }
 
 with_typed_registers!(declare_typed_bank);
+
+impl RegisterArray for TimestampNanosecondArray {
+    const TYPE: RegisterType = RegisterType::Datetime;
+    const LABEL: &'static str = "TimestampNanosecondArray";
+
+    fn slot(bank: &TypedBank, index: usize) -> Option<&Register<Self>> {
+        bank.datetime.get(index).and_then(Option::as_ref)
+    }
+
+    fn slot_mut(bank: &mut TypedBank, index: usize) -> Option<&mut Option<Register<Self>>> {
+        bank.datetime.get_mut(index)
+    }
+}
+
+impl RegisterArray for ArrayRef {
+    const TYPE: RegisterType = RegisterType::Generic;
+    const LABEL: &'static str = "ArrayRef";
+
+    fn slot(bank: &TypedBank, index: usize) -> Option<&Register<Self>> {
+        bank.generic.get(index).and_then(Option::as_ref)
+    }
+
+    fn slot_mut(bank: &mut TypedBank, index: usize) -> Option<&mut Option<Register<Self>>> {
+        bank.generic.get_mut(index)
+    }
+}
 
 struct RegisterBank {
     inputs: TypedBank,
@@ -144,18 +220,22 @@ struct RegisterBank {
     condition: TypedBank,
     outputs: TypedBank,
     uninitialized: HashMap<RegisterRef, DataType>,
+    /// How many rows a column read from the bank has: the batch's rows, or one while an
+    /// instruction whose operands are all scalars computes its shared value over a single row.
+    rows: usize,
 }
 
 macro_rules! impl_register_bank {
     ($($Variant:ident => $field:ident, $setter:ident, $accessor:ident, $Array:ty, $data_type:path;)+) => {
         impl RegisterBank {
-            fn new(layouts: &RegisterLayouts) -> Self {
+            fn new(layouts: &RegisterLayouts, rows: usize) -> Self {
                 Self {
                     inputs: TypedBank::new(&layouts.inputs),
                     temps: TypedBank::new(&layouts.temps),
                     condition: TypedBank::new(&layouts.condition),
                     outputs: TypedBank::new(&layouts.outputs),
                     uninitialized: HashMap::new(),
+                    rows,
                 }
             }
 
@@ -165,7 +245,7 @@ macro_rules! impl_register_bank {
                 batch: &TypedBatch,
             ) -> Result<(), RuntimeError> {
                 for input in inputs {
-                    self.set_array(input.reg, batch.column(input.column_index).clone())?;
+                    self.set(input.reg, batch.column(input.column_index).clone(), Shape::Column)?;
                 }
                 Ok(())
             }
@@ -188,20 +268,111 @@ macro_rules! impl_register_bank {
                 }
             }
 
-            fn set_array(
+            fn register<A: RegisterArray>(
+                &self,
+                reg: RegisterRef,
+            ) -> Result<&Register<A>, RuntimeError> {
+                self.ensure_type(reg, A::TYPE, A::LABEL)?;
+                A::slot(self.bank(reg.space), reg.index)
+                    .ok_or(RuntimeError::MissingRegister { reg })
+            }
+
+            /// The register as a column of the current row count.
+            fn column<A: RegisterArray>(&self, reg: RegisterRef) -> Result<&A, RuntimeError> {
+                Ok(self.register::<A>(reg)?.column(self.rows))
+            }
+
+            /// The register as a kernel operand, which keeps a scalar a scalar.
+            fn operand<A: RegisterArray>(
+                &self,
+                reg: RegisterRef,
+            ) -> Result<Operand<'_, A>, RuntimeError> {
+                Ok(self.register::<A>(reg)?.operand(self.rows))
+            }
+
+            fn store<A: RegisterArray>(
+                &mut self,
+                reg: RegisterRef,
+                value: Register<A>,
+            ) -> Result<(), RuntimeError> {
+                self.ensure_type(reg, A::TYPE, A::LABEL)?;
+                let slot = A::slot_mut(self.bank_mut(reg.space), reg.index)
+                    .ok_or(RuntimeError::MissingRegister { reg })?;
+                *slot = Some(value);
+                Ok(())
+            }
+
+            /// Whether the register holds one value every row shares. A register nothing has
+            /// written yet holds no scalar; reading it reports the missing register.
+            fn is_scalar(&self, reg: RegisterRef) -> bool {
+                let register_is_scalar = match reg.ty {
+                    $(RegisterType::$Variant => {
+                        self.register::<$Array>(reg).map(Register::is_scalar)
+                    })+
+                    RegisterType::Datetime => self
+                        .register::<TimestampNanosecondArray>(reg)
+                        .map(Register::is_scalar),
+                    RegisterType::Generic => self.register::<ArrayRef>(reg).map(Register::is_scalar),
+                };
+                register_is_scalar.unwrap_or(false)
+            }
+
+            /// Copies `src` into `dst`, shape included.
+            fn copy(&mut self, dst: RegisterRef, src: RegisterRef) -> Result<(), RuntimeError> {
+                self.uninitialized.remove(&dst);
+                match src.ty {
+                    $(RegisterType::$Variant => {
+                        let value = self.register::<$Array>(src)?.clone();
+                        self.store(dst, value)
+                    })+
+                    RegisterType::Datetime => {
+                        let value = self.register::<TimestampNanosecondArray>(src)?.clone();
+                        self.store(dst, value)
+                    }
+                    RegisterType::Generic => {
+                        let value = self.register::<ArrayRef>(src)?.clone();
+                        self.store(dst, value)
+                    }
+                }
+            }
+
+            /// The register as an operand of whatever array type it holds.
+            fn any_operand(
+                &self,
+                reg: RegisterRef,
+            ) -> Result<Operand<'_, dyn Array>, RuntimeError> {
+                match reg.ty {
+                    $(RegisterType::$Variant => Ok(self.operand::<$Array>(reg)?.erased()),)+
+                    RegisterType::Datetime => {
+                        Ok(self.operand::<TimestampNanosecondArray>(reg)?.erased())
+                    }
+                    RegisterType::Generic => Ok(self.operand::<ArrayRef>(reg)?.erased()),
+                }
+            }
+
+            /// Writes `value` as a column of the batch, or as one scalar every row shares when
+            /// it is a one-row array holding that value.
+            fn set(
                 &mut self,
                 reg: RegisterRef,
                 value: TypedArray,
+                shape: Shape,
             ) -> Result<(), RuntimeError> {
                 self.uninitialized.remove(&reg);
                 match value {
-                    $(TypedArray::$Variant(array) => self.$setter(reg, array),)+
-                    TypedArray::Datetime(array) => self.set_datetime(reg, array),
-                    TypedArray::Generic(array) => self.set_generic(reg, array),
+                    $(TypedArray::$Variant(array) => {
+                        self.store(reg, Register::with_shape(array, shape))
+                    })+
+                    TypedArray::Datetime(array) => {
+                        self.store(reg, Register::with_shape(array, shape))
+                    }
+                    TypedArray::Generic(array) => {
+                        self.store(reg, Register::with_shape(array, shape))
+                    }
                     TypedArray::Uninitialized { data_type, len } => {
                         let materialized =
                             array_ref_to_typed_array(new_null_array(&data_type, len))?;
-                        self.set_array(reg, materialized)?;
+                        self.set(reg, materialized, shape)?;
                         self.uninitialized.insert(reg, data_type);
                         Ok(())
                     }
@@ -218,63 +389,19 @@ macro_rules! impl_register_bank {
                 self.read_array(reg)
             }
 
+            /// The register as a column of the current row count.
             fn read_array(&self, reg: RegisterRef) -> Result<TypedArray, RuntimeError> {
                 match reg.ty {
                     $(RegisterType::$Variant => {
-                        Ok(TypedArray::$Variant(self.$field(reg)?.clone()))
+                        Ok(TypedArray::$Variant(self.column::<$Array>(reg)?.clone()))
                     },)+
-                    RegisterType::Datetime => Ok(TypedArray::Datetime(self.datetime(reg)?.clone())),
-                    RegisterType::Generic => Ok(TypedArray::Generic(self.generic(reg)?.clone())),
+                    RegisterType::Datetime => Ok(TypedArray::Datetime(
+                        self.column::<TimestampNanosecondArray>(reg)?.clone(),
+                    )),
+                    RegisterType::Generic => {
+                        Ok(TypedArray::Generic(self.column::<ArrayRef>(reg)?.clone()))
+                    }
                 }
-            }
-
-            $(fn $setter(&mut self, reg: RegisterRef, value: $Array) -> Result<(), RuntimeError> {
-                self.ensure_type(reg, RegisterType::$Variant, stringify!($Array))?;
-                self.bank_mut(reg.space)
-                    .$setter(reg.index, value)
-                    .map_err(|()| RuntimeError::MissingRegister { reg })
-            })+
-
-            fn set_datetime(
-                &mut self,
-                reg: RegisterRef,
-                value: TimestampNanosecondArray,
-            ) -> Result<(), RuntimeError> {
-                self.ensure_type(reg, RegisterType::Datetime, "TimestampNanosecondArray")?;
-                self.bank_mut(reg.space)
-                    .set_datetime(reg.index, value)
-                    .map_err(|()| RuntimeError::MissingRegister { reg })
-            }
-
-            fn set_generic(&mut self, reg: RegisterRef, value: ArrayRef) -> Result<(), RuntimeError> {
-                self.ensure_type(reg, RegisterType::Generic, "ArrayRef")?;
-                self.bank_mut(reg.space)
-                    .set_generic(reg.index, value)
-                    .map_err(|()| RuntimeError::MissingRegister { reg })
-            }
-
-            $(fn $field(&self, reg: RegisterRef) -> Result<&$Array, RuntimeError> {
-                self.ensure_type(reg, RegisterType::$Variant, stringify!($Array))?;
-                self.bank(reg.space)
-                    .$field(reg.index)
-                    .ok_or(RuntimeError::MissingRegister { reg })
-            })+
-
-            fn datetime(
-                &self,
-                reg: RegisterRef,
-            ) -> Result<&TimestampNanosecondArray, RuntimeError> {
-                self.ensure_type(reg, RegisterType::Datetime, "TimestampNanosecondArray")?;
-                self.bank(reg.space)
-                    .datetime(reg.index)
-                    .ok_or(RuntimeError::MissingRegister { reg })
-            }
-
-            fn generic(&self, reg: RegisterRef) -> Result<&ArrayRef, RuntimeError> {
-                self.ensure_type(reg, RegisterType::Generic, "ArrayRef")?;
-                self.bank(reg.space)
-                    .generic(reg.index)
-                    .ok_or(RuntimeError::MissingRegister { reg })
             }
 
             fn ensure_type(
@@ -521,7 +648,7 @@ fn execute_program_with_selection_in_context_sync(
         return Err(RuntimeError::SchemaMismatch);
     }
 
-    let mut registers = RegisterBank::new(&program.layouts);
+    let mut registers = RegisterBank::new(&program.layouts, batch.row_count());
     registers.load_input_batch(&program.inputs, batch)?;
 
     let mut row_errors = batch.errors().clone();
@@ -536,7 +663,7 @@ fn execute_program_with_selection_in_context_sync(
             program.injector.as_ref(),
         )?;
         if let (Some(mask_reg), Some(baseline)) = (instruction.error_mask, baseline) {
-            let mask = registers.boolean(mask_reg)?;
+            let mask = registers.column::<BooleanArray>(mask_reg)?;
             row_errors.restore_unselected(&baseline, |row| row_selected(mask, row));
         }
     }
@@ -563,7 +690,7 @@ fn execute_program_with_selection_in_context_sync(
     }
 
     let global_predicate = if let Some(filter_reg) = program.filter {
-        Some(registers.boolean(filter_reg)?.clone())
+        Some(registers.column::<BooleanArray>(filter_reg)?.clone())
     } else {
         None
     };
@@ -630,82 +757,78 @@ impl Instruction {
         default_injector: Option<&triomphe::Arc<Box<dyn FunctionInjector>>>,
     ) -> Result<(), RuntimeError> {
         match &self.kind {
-            InstructionKind::Move { dst, input } => {
-                let output = registers.read_array(*input)?;
-                registers.set_array(*dst, output)
-            }
+            InstructionKind::Move { dst, input } => registers.copy(*dst, *input),
             InstructionKind::Assign {
                 dst,
                 input,
                 fallback,
-            } => {
-                let input = registers.read_array(*input)?;
-                let Some(failed) = row_errors.rows_failed_within(self.span) else {
-                    return registers.set_array(*dst, input);
-                };
-                match fallback {
-                    // The destination held no value before this assignment, so a failed row is
-                    // null. Marking those rows null reuses the input's values instead of copying
-                    // them into a new array.
-                    crate::ir::AssignmentFallback::Uninitialized(_) => {
-                        let failed = BooleanArray::new(failed, None);
-                        let output = nullif(input.as_array(), &failed).map_err(|error| {
-                            arrow_kernel_error("assignment fallback failed", error)
-                        })?;
-                        registers.set_array(*dst, array_ref_to_typed_array(output)?)
-                    }
-                    crate::ir::AssignmentFallback::Register(previous) => {
-                        let success = BooleanArray::new(!&failed, None);
-                        let previous = registers.read_array(*previous)?.into_array_ref();
-                        let input = input.into_array_ref();
-                        let input = input.as_ref();
-                        let previous = previous.as_ref();
-                        let success_input: &dyn Datum = &input;
-                        let success_previous: &dyn Datum = &previous;
-                        let output =
-                            zip(&success, success_input, success_previous).map_err(|error| {
-                                arrow_kernel_error("assignment fallback failed", error)
-                            })?;
-                        registers.set_array(*dst, array_ref_to_typed_array(output)?)
-                    }
-                }
-            }
-            InstructionKind::Literal { dst, value } => {
-                write_literal(registers, *dst, value, row_count)
-            }
+            } => self.execute_assign(registers, *dst, *input, fallback, row_errors),
+            InstructionKind::Literal { dst, value } => write_literal(registers, *dst, value),
             InstructionKind::NullLiteral { dst, data_type } => {
-                write_null_literal(registers, *dst, data_type, row_count)
+                write_null_literal(registers, *dst, data_type)
             }
-            InstructionKind::Uninitialized { dst, data_type } => registers.set_array(
+            InstructionKind::Uninitialized { dst, data_type } => registers.set(
                 *dst,
                 TypedArray::uninitialized(data_type.clone(), row_count),
+                Shape::Column,
             ),
-            InstructionKind::Unary { dst, input, op } => {
-                let output = self.execute_unary(registers, *input, *op, row_errors)?;
-                registers.set_array(*dst, output)
-            }
+            InstructionKind::Unary { dst, input, op } => self.write_computed(
+                registers,
+                *dst,
+                false,
+                row_count,
+                row_errors,
+                |registers, _, row_errors| self.execute_unary(registers, *input, *op, row_errors),
+            ),
             InstructionKind::Binary {
                 dst,
                 left,
                 right,
                 op,
-            } => {
-                let output = self.execute_binary(registers, *left, *right, *op, row_errors)?;
-                registers.set_array(*dst, output)
-            }
-            InstructionKind::Cast { dst, input, target } => {
-                let output = execute_cast(registers, *input, *target, row_errors, self.span)?;
-                registers.set_array(*dst, output)
-            }
+            } => self.write_computed(
+                registers,
+                *dst,
+                false,
+                row_count,
+                row_errors,
+                |registers, _, row_errors| {
+                    self.execute_binary(registers, *left, *right, *op, row_errors)
+                },
+            ),
+            InstructionKind::Cast { dst, input, target } => self.write_computed(
+                registers,
+                *dst,
+                false,
+                row_count,
+                row_errors,
+                |registers, _, row_errors| {
+                    cast_typed_array(
+                        registers.read_array(*input)?,
+                        *target,
+                        row_errors,
+                        self.span,
+                    )
+                },
+            ),
             InstructionKind::Builtin {
                 dst,
                 lowering,
                 inputs,
             } => {
-                let output = execute_builtin(
-                    lowering, registers, inputs, row_count, row_errors, self.span, context,
-                )?;
-                registers.set_array(*dst, output)
+                let volatile =
+                    builtin_semantics_for_lowering(lowering).volatility == Volatility::Volatile;
+                self.write_computed(
+                    registers,
+                    *dst,
+                    volatile,
+                    row_count,
+                    row_errors,
+                    |registers, rows, row_errors| {
+                        execute_builtin(
+                            lowering, registers, inputs, rows, row_errors, self.span, context,
+                        )
+                    },
+                )
             }
             InstructionKind::Inject {
                 dst,
@@ -766,26 +889,90 @@ impl Instruction {
                     }
                     row_errors.push(row, side_error);
                 }
-                registers.set_array(*dst, output)
+                registers.set(*dst, output, Shape::Column)
             }
             InstructionKind::Select {
                 dst,
                 arms,
                 otherwise,
-            } => {
-                let mut output = registers.read_array(*otherwise)?;
-                for arm in arms.iter().rev() {
-                    let mask = registers.boolean(arm.mask)?;
-                    let value = registers.read_array(arm.value)?.into_array_ref();
-                    let fallback = output.into_array_ref();
-                    let value_datum: &dyn Datum = &value.as_ref();
-                    let fallback_datum: &dyn Datum = &fallback.as_ref();
-                    let selected = zip(mask, value_datum, fallback_datum).map_err(|error| {
-                        arrow_kernel_error("conditional selection failed", error)
-                    })?;
-                    output = array_ref_to_typed_array(selected)?;
-                }
-                registers.set_array(*dst, output)
+            } => self.write_computed(
+                registers,
+                *dst,
+                false,
+                row_count,
+                row_errors,
+                |registers, _, _| execute_select(registers, arms, *otherwise),
+            ),
+        }
+    }
+
+    /// Writes the value `compute` yields to `dst`.
+    ///
+    /// When every operand is a scalar and the computation is not volatile, computing it once is
+    /// computing it for every row: it runs over a single row and `dst` becomes a scalar, and a
+    /// failure of that row is a failure of every row of the batch. Otherwise it runs over the
+    /// batch and `dst` becomes a column.
+    fn write_computed(
+        &self,
+        registers: &mut RegisterBank,
+        dst: RegisterRef,
+        volatile: bool,
+        row_count: usize,
+        row_errors: &mut RowErrors,
+        compute: impl FnOnce(&RegisterBank, usize, &mut RowErrors) -> Result<TypedArray, RuntimeError>,
+    ) -> Result<(), RuntimeError> {
+        let shared = !volatile
+            && self
+                .kind
+                .operands()
+                .iter()
+                .all(|operand| registers.is_scalar(*operand));
+        if !shared {
+            let output = compute(registers, row_count, row_errors)?;
+            return registers.set(dst, output, Shape::Column);
+        }
+        let mut shared_errors = RowErrors::new(1);
+        registers.rows = 1;
+        let computed = compute(registers, 1, &mut shared_errors);
+        registers.rows = row_count;
+        let output = computed?;
+        for error in shared_errors.row(0) {
+            for row in 0..row_count {
+                row_errors.push(row, error.clone());
+            }
+        }
+        registers.set(dst, output, Shape::Scalar)
+    }
+
+    fn execute_assign(
+        &self,
+        registers: &mut RegisterBank,
+        dst: RegisterRef,
+        input: RegisterRef,
+        fallback: &AssignmentFallback,
+        row_errors: &RowErrors,
+    ) -> Result<(), RuntimeError> {
+        let Some(failed) = row_errors.rows_failed_within(self.span) else {
+            return registers.copy(dst, input);
+        };
+        match fallback {
+            // The destination held no value before this assignment, so a failed row is null.
+            // Marking those rows null reuses the input's values instead of copying them into a
+            // new array.
+            AssignmentFallback::Uninitialized(_) => {
+                let failed = BooleanArray::new(failed, None);
+                let input = registers.read_array(input)?;
+                let output = nullif(input.as_array(), &failed)
+                    .map_err(|error| arrow_kernel_error("assignment fallback failed", error))?;
+                registers.set(dst, array_ref_to_typed_array(output)?, Shape::Column)
+            }
+            AssignmentFallback::Register(previous) => {
+                let success = BooleanArray::new(!&failed, None);
+                let input = registers.any_operand(input)?;
+                let previous = registers.any_operand(*previous)?;
+                let output = zip(&success, &input, &previous)
+                    .map_err(|error| arrow_kernel_error("assignment fallback failed", error))?;
+                registers.set(dst, array_ref_to_typed_array(output)?, Shape::Column)
             }
         }
     }
@@ -800,37 +987,39 @@ impl Instruction {
         match op {
             UnaryOp::Neg => match input.ty {
                 RegisterType::Int8 => Ok(TypedArray::Int8(execute_integer_negation(
-                    registers.int8(input)?,
+                    registers.column::<Int8Array>(input)?,
                     row_errors,
                     self.span,
                 ))),
                 RegisterType::Int16 => Ok(TypedArray::Int16(execute_integer_negation(
-                    registers.int16(input)?,
+                    registers.column::<Int16Array>(input)?,
                     row_errors,
                     self.span,
                 ))),
                 RegisterType::Int32 => Ok(TypedArray::Int32(execute_integer_negation(
-                    registers.int32(input)?,
+                    registers.column::<Int32Array>(input)?,
                     row_errors,
                     self.span,
                 ))),
                 RegisterType::Int64 => Ok(TypedArray::Int64(execute_integer_negation(
-                    registers.int64(input)?,
+                    registers.column::<Int64Array>(input)?,
                     row_errors,
                     self.span,
                 ))),
                 RegisterType::Float32 => Ok(TypedArray::Float32(numeric::float_negation(
-                    registers.float32(input)?,
+                    registers.column::<Float32Array>(input)?,
                 ))),
                 RegisterType::Float64 => Ok(TypedArray::Float64(numeric::float_negation(
-                    registers.float64(input)?,
+                    registers.column::<Float64Array>(input)?,
                 ))),
                 _ => Err(RuntimeError::InvalidRegisterType {
                     reg: input,
                     expected: "numeric array",
                 }),
             },
-            UnaryOp::Not => Ok(TypedArray::Boolean(execute_not(registers.boolean(input)?))),
+            UnaryOp::Not => Ok(TypedArray::Boolean(execute_not(
+                registers.column::<BooleanArray>(input)?,
+            ))),
         }
     }
 
@@ -845,71 +1034,71 @@ impl Instruction {
         let operator = NumericBinary::of(op);
         match (left.ty, operator) {
             (RegisterType::UInt8, Some(operator)) => Ok(execute_integer_binary(
-                registers.uint8(left)?,
-                registers.uint8(right)?,
+                registers.operand::<UInt8Array>(left)?,
+                registers.operand::<UInt8Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::Int8, Some(operator)) => Ok(execute_integer_binary(
-                registers.int8(left)?,
-                registers.int8(right)?,
+                registers.operand::<Int8Array>(left)?,
+                registers.operand::<Int8Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::UInt16, Some(operator)) => Ok(execute_integer_binary(
-                registers.uint16(left)?,
-                registers.uint16(right)?,
+                registers.operand::<UInt16Array>(left)?,
+                registers.operand::<UInt16Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::Int16, Some(operator)) => Ok(execute_integer_binary(
-                registers.int16(left)?,
-                registers.int16(right)?,
+                registers.operand::<Int16Array>(left)?,
+                registers.operand::<Int16Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::UInt32, Some(operator)) => Ok(execute_integer_binary(
-                registers.uint32(left)?,
-                registers.uint32(right)?,
+                registers.operand::<UInt32Array>(left)?,
+                registers.operand::<UInt32Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::Int32, Some(operator)) => Ok(execute_integer_binary(
-                registers.int32(left)?,
-                registers.int32(right)?,
+                registers.operand::<Int32Array>(left)?,
+                registers.operand::<Int32Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::UInt64, Some(operator)) => Ok(execute_integer_binary(
-                registers.uint64(left)?,
-                registers.uint64(right)?,
+                registers.operand::<UInt64Array>(left)?,
+                registers.operand::<UInt64Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::Int64, Some(operator)) => Ok(execute_integer_binary(
-                registers.int64(left)?,
-                registers.int64(right)?,
+                registers.operand::<Int64Array>(left)?,
+                registers.operand::<Int64Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::Float32, Some(operator)) => Ok(execute_float_binary(
-                registers.float32(left)?,
-                registers.float32(right)?,
+                registers.operand::<Float32Array>(left)?,
+                registers.operand::<Float32Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
             )),
             (RegisterType::Float64, Some(operator)) => Ok(execute_float_binary(
-                registers.float64(left)?,
-                registers.float64(right)?,
+                registers.operand::<Float64Array>(left)?,
+                registers.operand::<Float64Array>(right)?,
                 operator,
                 row_errors,
                 self.span,
@@ -930,15 +1119,19 @@ impl Instruction {
                 reg: left,
                 expected: "BooleanArray",
             }),
-            (RegisterType::Boolean, _) => {
-                execute_binary_bool(registers.boolean(left)?, registers.boolean(right)?, op)
-            }
-            (RegisterType::Utf8, _) => {
-                execute_compare_utf8(registers.utf8(left)?, registers.utf8(right)?, op)
-            }
-            (RegisterType::Datetime, _) => {
-                execute_compare_datetime(registers.datetime(left)?, registers.datetime(right)?, op)
-            }
+            (RegisterType::Boolean, _) => execute_binary_bool(registers, left, right, op),
+            (RegisterType::Utf8, _) => Ok(TypedArray::Boolean(compare_with_arrow_ord(
+                &registers.operand::<StringArray>(left)?,
+                &registers.operand::<StringArray>(right)?,
+                op,
+                "utf8 comparison",
+            )?)),
+            (RegisterType::Datetime, _) => Ok(TypedArray::Boolean(compare_with_arrow_ord(
+                &registers.operand::<TimestampNanosecondArray>(left)?,
+                &registers.operand::<TimestampNanosecondArray>(right)?,
+                op,
+                "datetime comparison",
+            )?)),
             (RegisterType::Generic, _) => Err(RuntimeError::InvalidRegisterType {
                 reg: left,
                 expected: "scalar array",
@@ -975,8 +1168,8 @@ impl NumericBinary {
 }
 
 fn execute_integer_binary<T>(
-    left: &PrimitiveArray<T>,
-    right: &PrimitiveArray<T>,
+    left: Operand<'_, PrimitiveArray<T>>,
+    right: Operand<'_, PrimitiveArray<T>>,
     operator: NumericBinary,
     row_errors: &mut RowErrors,
     span: Span,
@@ -990,7 +1183,7 @@ where
         NumericBinary::Arithmetic(arithmetic) => {
             let checked = arithmetic.evaluate_integers(left, right);
             row_errors.push_failures(checked.failed.lanes(), span, |row| {
-                arithmetic.integer_failure(right.value(row))
+                arithmetic.integer_failure(right.array().value(right.index(row)))
             });
             TypedArray::from(checked.column)
         }
@@ -1001,8 +1194,8 @@ where
 }
 
 fn execute_float_binary<T>(
-    left: &PrimitiveArray<T>,
-    right: &PrimitiveArray<T>,
+    left: Operand<'_, PrimitiveArray<T>>,
+    right: Operand<'_, PrimitiveArray<T>>,
     operator: NumericBinary,
     row_errors: &mut RowErrors,
     span: Span,
@@ -1084,80 +1277,80 @@ macro_rules! define_array_ref_to_typed_array {
 
 with_typed_registers!(define_array_ref_to_typed_array);
 
-fn execute_coalesce_arrow(inputs: &[TypedArray]) -> Result<TypedArray, RuntimeError> {
-    let mut result = inputs
+/// `coalesce` keeps the first non-null value of each row. The first argument is read as a column
+/// and each later one as an operand, so a literal fallback is zipped in as one scalar.
+fn execute_coalesce(
+    registers: &RegisterBank,
+    inputs: &[RegisterRef],
+) -> Result<TypedArray, RuntimeError> {
+    let first = inputs
         .first()
-        .verified("the compiler rejects a coalesce with fewer than one argument")
-        .clone()
-        .into_array_ref();
+        .verified("the compiler rejects a coalesce with fewer than one argument");
+    let mut result = registers.read_array(*first)?.into_array_ref();
     for input in &inputs[1..] {
         let mask = is_null(result.as_ref())
             .map_err(|error| arrow_kernel_error("coalesce is_null kernel failed", error))?;
-        let truthy = input.as_array();
-        let falsy = result.as_ref();
-        let truthy_datum: &dyn Datum = &truthy;
-        let falsy_datum: &dyn Datum = &falsy;
-        result = zip(&mask, truthy_datum, falsy_datum)
+        let fallback = registers.any_operand(*input)?;
+        result = zip(&mask, &fallback, &result)
             .map_err(|error| arrow_kernel_error("coalesce zip kernel failed", error))?;
     }
     array_ref_to_typed_array(result)
 }
 
+/// A conditional selects, for each row, the value of the first arm whose mask holds, and the
+/// `otherwise` value when none does. Masks are columns; values are operands, so a literal arm is
+/// zipped in as one scalar.
+fn execute_select(
+    registers: &RegisterBank,
+    arms: &[SelectArm],
+    otherwise: RegisterRef,
+) -> Result<TypedArray, RuntimeError> {
+    let mut selected: Option<ArrayRef> = None;
+    for arm in arms.iter().rev() {
+        let mask = registers.column::<BooleanArray>(arm.mask)?;
+        let value = registers.any_operand(arm.value)?;
+        let zipped = match &selected {
+            Some(fallback) => zip(mask, &value, fallback),
+            None => {
+                let fallback = registers.any_operand(otherwise)?;
+                zip(mask, &value, &fallback)
+            }
+        };
+        let output =
+            zipped.map_err(|error| arrow_kernel_error("conditional selection failed", error))?;
+        selected = Some(output);
+    }
+    match selected {
+        Some(output) => array_ref_to_typed_array(output),
+        None => registers.read_array(otherwise),
+    }
+}
+
+/// A literal is one value every row shares, so it is written as a scalar and never expanded into a
+/// column unless a kernel without a scalar form, or an output field, reads it.
 fn write_literal(
     registers: &mut RegisterBank,
     dst: RegisterRef,
     value: &ScalarValue,
-    len: usize,
 ) -> Result<(), RuntimeError> {
-    match value {
-        ScalarValue::Int64(value) if dst.ty != RegisterType::Int64 => {
-            Err(RuntimeError::InvalidRegisterType {
-                reg: dst,
-                expected: "Int64Array",
-            })
+    let scalar = match value {
+        ScalarValue::Int64(value) => TypedArray::Int64(Int64Array::from_value(*value, 1)),
+        ScalarValue::Float64(value) => TypedArray::Float64(Float64Array::from_value(*value, 1)),
+        ScalarValue::Boolean(value) => TypedArray::Boolean(BooleanArray::from(vec![*value])),
+        ScalarValue::Utf8(value) => {
+            TypedArray::Utf8(StringArray::from_iter_values([value.as_str()]))
         }
-        ScalarValue::Int64(value) => registers.set_int64(dst, Int64Array::from_value(*value, len)),
-        ScalarValue::Float64(value) if dst.ty != RegisterType::Float64 => {
-            Err(RuntimeError::InvalidRegisterType {
-                reg: dst,
-                expected: "Float64Array",
-            })
-        }
-        ScalarValue::Float64(value) => {
-            registers.set_float64(dst, Float64Array::from_value(*value, len))
-        }
-        ScalarValue::Boolean(value) if dst.ty != RegisterType::Boolean => {
-            Err(RuntimeError::InvalidRegisterType {
-                reg: dst,
-                expected: "BooleanArray",
-            })
-        }
-        ScalarValue::Boolean(value) => registers.set_boolean(
-            dst,
-            BooleanArray::from_iter(std::iter::repeat_n(Some(*value), len)),
-        ),
-        ScalarValue::Utf8(_) if dst.ty != RegisterType::Utf8 => {
-            Err(RuntimeError::InvalidRegisterType {
-                reg: dst,
-                expected: "StringArray",
-            })
-        }
-        ScalarValue::Utf8(value) => registers.set_utf8(
-            dst,
-            StringArray::from_iter_values(std::iter::repeat_n(value.as_str(), len)),
-        ),
-    }
+    };
+    registers.set(dst, scalar, Shape::Scalar)
 }
 
 fn write_null_literal(
     registers: &mut RegisterBank,
     dst: RegisterRef,
     data_type: &DataType,
-    len: usize,
 ) -> Result<(), RuntimeError> {
-    let array = new_null_array(data_type, len);
-    let typed = array_ref_to_typed_array(array)?;
-    registers.set_array(dst, typed)
+    let scalar = array_ref_to_typed_array(new_null_array(data_type, 1))?;
+    registers.set(dst, scalar, Shape::Scalar)
 }
 
 fn execute_not(input: &BooleanArray) -> BooleanArray {
@@ -1167,19 +1360,33 @@ fn execute_not(input: &BooleanArray) -> BooleanArray {
 }
 
 fn execute_binary_bool(
-    left: &BooleanArray,
-    right: &BooleanArray,
+    registers: &RegisterBank,
+    left: RegisterRef,
+    right: RegisterRef,
     op: BinaryOp,
 ) -> Result<TypedArray, RuntimeError> {
     let output = match op {
-        BinaryOp::And => and_kleene(left, right)
-            .map_err(|error| arrow_kernel_error("boolean and kernel failed", error))?,
-        BinaryOp::Or => or_kleene(left, right)
-            .map_err(|error| arrow_kernel_error("boolean or kernel failed", error))?,
-        BinaryOp::Eq => eq(left, right)
-            .map_err(|error| arrow_kernel_error("boolean eq kernel failed", error))?,
-        BinaryOp::NotEq => neq(left, right)
-            .map_err(|error| arrow_kernel_error("boolean neq kernel failed", error))?,
+        // The Kleene kernels take two columns, so a scalar operand is read as a column here.
+        BinaryOp::And => and_kleene(
+            registers.column::<BooleanArray>(left)?,
+            registers.column::<BooleanArray>(right)?,
+        )
+        .map_err(|error| arrow_kernel_error("boolean and kernel failed", error))?,
+        BinaryOp::Or => or_kleene(
+            registers.column::<BooleanArray>(left)?,
+            registers.column::<BooleanArray>(right)?,
+        )
+        .map_err(|error| arrow_kernel_error("boolean or kernel failed", error))?,
+        BinaryOp::Eq => eq(
+            &registers.operand::<BooleanArray>(left)?,
+            &registers.operand::<BooleanArray>(right)?,
+        )
+        .map_err(|error| arrow_kernel_error("boolean eq kernel failed", error))?,
+        BinaryOp::NotEq => neq(
+            &registers.operand::<BooleanArray>(left)?,
+            &registers.operand::<BooleanArray>(right)?,
+        )
+        .map_err(|error| arrow_kernel_error("boolean neq kernel failed", error))?,
         _ => {
             return Err(RuntimeError::InvalidRegisterType {
                 reg: RegisterRef::new(RegisterSpace::Temp, RegisterType::Boolean, 0),
@@ -1190,40 +1397,12 @@ fn execute_binary_bool(
     Ok(TypedArray::Boolean(output))
 }
 
-fn execute_compare_utf8(
-    left: &StringArray,
-    right: &StringArray,
-    op: BinaryOp,
-) -> Result<TypedArray, RuntimeError> {
-    Ok(TypedArray::Boolean(compare_with_arrow_ord(
-        left,
-        right,
-        op,
-        "utf8 comparison",
-    )?))
-}
-
-fn execute_compare_datetime(
-    left: &TimestampNanosecondArray,
-    right: &TimestampNanosecondArray,
-    op: BinaryOp,
-) -> Result<TypedArray, RuntimeError> {
-    Ok(TypedArray::Boolean(compare_with_arrow_ord(
-        left,
-        right,
-        op,
-        "datetime comparison",
-    )?))
-}
-
 fn compare_with_arrow_ord(
-    left: &dyn Array,
-    right: &dyn Array,
+    left: &dyn Datum,
+    right: &dyn Datum,
     op: BinaryOp,
     context: &str,
 ) -> Result<BooleanArray, RuntimeError> {
-    let left: &dyn Datum = &left;
-    let right: &dyn Datum = &right;
     match op {
         BinaryOp::Eq => eq(left, right)
             .map_err(|error| arrow_kernel_error(&format!("{context} eq kernel failed"), error)),
@@ -1250,38 +1429,32 @@ fn compare_with_arrow_ord(
 
 /// `nullif` returns null exactly where `=` holds, so it decides equality the way `=` does. Float
 /// operands use the IEEE 754 comparison `=` evaluates, and every other type uses the arrow equality
-/// kernel, which agrees with `=` for them.
-fn execute_nullif(left: &TypedArray, right: &TypedArray) -> Result<TypedArray, RuntimeError> {
-    let predicate = match (left, right) {
-        (TypedArray::Float32(left), TypedArray::Float32(right)) => {
-            Comparison::Eq.evaluate(left, right)
-        }
-        (TypedArray::Float64(left), TypedArray::Float64(right)) => {
-            Comparison::Eq.evaluate(left, right)
-        }
-        _ => {
+/// kernel, which agrees with `=` for them. The second argument is an operand, so a literal is
+/// compared as one scalar.
+fn execute_nullif(
+    left: &TypedArray,
+    right: Operand<'_, dyn Array>,
+) -> Result<TypedArray, RuntimeError> {
+    let float_predicate = match left {
+        TypedArray::Float32(values) => right
+            .downcast::<Float32Array>()
+            .map(|right| Comparison::Eq.evaluate(Operand::Column(values), right)),
+        TypedArray::Float64(values) => right
+            .downcast::<Float64Array>()
+            .map(|right| Comparison::Eq.evaluate(Operand::Column(values), right)),
+        _ => None,
+    };
+    let predicate = match float_predicate {
+        Some(predicate) => predicate,
+        None => {
             let left = left.as_array();
-            let right = right.as_array();
-            let left_datum: &dyn Datum = &left;
-            let right_datum: &dyn Datum = &right;
-            eq(left_datum, right_datum)
+            eq(&left, &right)
                 .map_err(|error| arrow_kernel_error("nullif eq kernel failed", error))?
         }
     };
     let output = nullif(left.as_array(), &predicate)
         .map_err(|error| arrow_kernel_error("nullif kernel failed", error))?;
     array_ref_to_typed_array(output)
-}
-
-fn execute_cast(
-    registers: &RegisterBank,
-    input: RegisterRef,
-    target: RegisterType,
-    row_errors: &mut RowErrors,
-    span: Span,
-) -> Result<TypedArray, RuntimeError> {
-    let input = registers.read_array(input)?;
-    cast_typed_array(input, target, row_errors, span)
 }
 
 fn execute_builtin(
@@ -1293,196 +1466,219 @@ fn execute_builtin(
     span: Span,
     context: &ExecutionContext,
 ) -> Result<TypedArray, RuntimeError> {
-    let values = inputs
-        .iter()
-        .map(|input| registers.read_array(*input))
-        .collect::<Result<Vec<_>, _>>()?;
+    // Each kernel reads its operands in the shape it can use. A kernel with a scalar form reads a
+    // text operand as it is, so a literal argument stays one value; a kernel that walks the batch
+    // reads a column, which expands a scalar once per batch.
+    let column = |index: usize| registers.read_array(inputs[index]);
+    let columns = || {
+        inputs
+            .iter()
+            .map(|input| registers.read_array(*input))
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let text = |index: usize| registers.operand::<StringArray>(inputs[index]);
 
     match lowering {
         BuiltinLowering::Now => Ok(TypedArray::Datetime(execute_now(row_count, context.now))),
         BuiltinLowering::UuidV4 => Ok(TypedArray::Utf8(execute_uuid_v4(row_count))),
         BuiltinLowering::UuidV7 => Ok(TypedArray::Utf8(execute_uuid_v7(row_count, context.now))),
         BuiltinLowering::Lower => Ok(TypedArray::Utf8(
-            CaseMapping::Lower.execute(as_utf8(&values[0])?),
+            CaseMapping::Lower.execute(as_utf8(&column(0)?)?),
         )),
         BuiltinLowering::Upper => Ok(TypedArray::Utf8(
-            CaseMapping::Upper.execute(as_utf8(&values[0])?),
+            CaseMapping::Upper.execute(as_utf8(&column(0)?)?),
         )),
         BuiltinLowering::Trim | BuiltinLowering::Btrim => {
-            Ok(TypedArray::Utf8(execute_trim(as_utf8(&values[0])?)))
+            Ok(TypedArray::Utf8(execute_trim(as_utf8(&column(0)?)?)))
         }
-        BuiltinLowering::Ltrim => Ok(TypedArray::Utf8(execute_ltrim(as_utf8(&values[0])?))),
-        BuiltinLowering::Rtrim => Ok(TypedArray::Utf8(execute_rtrim(as_utf8(&values[0])?))),
+        BuiltinLowering::Ltrim => Ok(TypedArray::Utf8(execute_ltrim(as_utf8(&column(0)?)?))),
+        BuiltinLowering::Rtrim => Ok(TypedArray::Utf8(execute_rtrim(as_utf8(&column(0)?)?))),
         BuiltinLowering::Length | BuiltinLowering::CharLength => {
-            Ok(TypedArray::Int64(execute_length(as_utf8(&values[0])?)))
+            Ok(TypedArray::Int64(execute_length(as_utf8(&column(0)?)?)))
         }
         BuiltinLowering::BitLength => {
-            Ok(TypedArray::Int64(execute_bit_length(as_utf8(&values[0])?)))
+            Ok(TypedArray::Int64(execute_bit_length(as_utf8(&column(0)?)?)))
         }
-        BuiltinLowering::Ascii => Ok(TypedArray::Int64(execute_ascii(as_utf8(&values[0])?))),
-        BuiltinLowering::Coalesce => execute_coalesce_arrow(&values),
-        BuiltinLowering::IsNull => Ok(TypedArray::Boolean(execute_is_null_typed(&values[0]))),
-        BuiltinLowering::NullIf => execute_nullif(&values[0], &values[1]),
-        BuiltinLowering::Abs => execute_abs_typed(&values[0], row_errors, span),
-        BuiltinLowering::Acos => execute_math(&values[0], MathFunction::Acos, row_errors, span),
-        BuiltinLowering::Asin => execute_math(&values[0], MathFunction::Asin, row_errors, span),
-        BuiltinLowering::Atan => execute_math(&values[0], MathFunction::Atan, row_errors, span),
-        BuiltinLowering::Ceil => execute_rounding(&values[0], Rounding::Ceil, row_errors, span),
-        BuiltinLowering::Concat => Ok(TypedArray::Utf8(execute_concat(&values)?)),
-        BuiltinLowering::Sum => execute_list_sum(&values[0], row_errors, span),
-        BuiltinLowering::First => execute_list_item(&values[0], ListItem::First, None),
-        BuiltinLowering::Last => execute_list_item(&values[0], ListItem::Last, None),
-        BuiltinLowering::Count => Ok(TypedArray::Int64(execute_list_count(&values[0])?)),
-        BuiltinLowering::Nth => execute_list_item(&values[0], ListItem::Nth, Some(&values[1])),
-        BuiltinLowering::Contains => Ok(TypedArray::Boolean(execute_contains(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-        ))),
-        BuiltinLowering::Cos => execute_math(&values[0], MathFunction::Cos, row_errors, span),
-        BuiltinLowering::StartsWith => Ok(TypedArray::Boolean(execute_starts_with(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-        ))),
-        BuiltinLowering::EndsWith => Ok(TypedArray::Boolean(execute_ends_with(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-        ))),
-        BuiltinLowering::Exp => execute_math(&values[0], MathFunction::Exp, row_errors, span),
-        BuiltinLowering::Floor => execute_rounding(&values[0], Rounding::Floor, row_errors, span),
-        BuiltinLowering::Initcap => Ok(TypedArray::Utf8(execute_initcap(as_utf8(&values[0])?))),
+        BuiltinLowering::Ascii => Ok(TypedArray::Int64(execute_ascii(as_utf8(&column(0)?)?))),
+        BuiltinLowering::Coalesce => execute_coalesce(registers, inputs),
+        BuiltinLowering::IsNull => Ok(TypedArray::Boolean(execute_is_null_typed(&column(0)?))),
+        BuiltinLowering::NullIf => execute_nullif(&column(0)?, registers.any_operand(inputs[1])?),
+        BuiltinLowering::Abs => execute_abs_typed(&column(0)?, row_errors, span),
+        BuiltinLowering::Acos => execute_math(&column(0)?, MathFunction::Acos, row_errors, span),
+        BuiltinLowering::Asin => execute_math(&column(0)?, MathFunction::Asin, row_errors, span),
+        BuiltinLowering::Atan => execute_math(&column(0)?, MathFunction::Atan, row_errors, span),
+        BuiltinLowering::Ceil => execute_rounding(&column(0)?, Rounding::Ceil, row_errors, span),
+        BuiltinLowering::Concat => {
+            let mut parts = Vec::with_capacity(inputs.len());
+            for index in 0..inputs.len() {
+                parts.push(text(index)?);
+            }
+            Ok(TypedArray::Utf8(execute_concat(row_count, &parts)))
+        }
+        BuiltinLowering::Sum => execute_list_sum(&column(0)?, row_errors, span),
+        BuiltinLowering::First => execute_list_item(&column(0)?, ListItem::First, None),
+        BuiltinLowering::Last => execute_list_item(&column(0)?, ListItem::Last, None),
+        BuiltinLowering::Count => Ok(TypedArray::Int64(execute_list_count(&column(0)?)?)),
+        BuiltinLowering::Nth => execute_list_item(&column(0)?, ListItem::Nth, Some(&column(1)?)),
+        BuiltinLowering::Contains => Ok(TypedArray::Boolean(execute_contains(text(0)?, text(1)?))),
+        BuiltinLowering::Cos => execute_math(&column(0)?, MathFunction::Cos, row_errors, span),
+        BuiltinLowering::StartsWith => {
+            Ok(TypedArray::Boolean(execute_starts_with(text(0)?, text(1)?)))
+        }
+        BuiltinLowering::EndsWith => Ok(TypedArray::Boolean(execute_ends_with(text(0)?, text(1)?))),
+        BuiltinLowering::Exp => execute_math(&column(0)?, MathFunction::Exp, row_errors, span),
+        BuiltinLowering::Floor => execute_rounding(&column(0)?, Rounding::Floor, row_errors, span),
+        BuiltinLowering::Initcap => Ok(TypedArray::Utf8(execute_initcap(as_utf8(&column(0)?)?))),
         BuiltinLowering::Left => Ok(TypedArray::Utf8(execute_left(
-            as_utf8(&values[0])?,
-            &values[1],
+            as_utf8(&column(0)?)?,
+            &column(1)?,
         )?)),
-        BuiltinLowering::Ln => execute_math(&values[0], MathFunction::Ln, row_errors, span),
-        BuiltinLowering::Log => execute_log(&values, row_errors, span),
-        BuiltinLowering::Lpad => Ok(TypedArray::Utf8(execute_lpad(
-            as_utf8(&values[0])?,
-            &values[1],
-            as_utf8(&values[2])?,
+        BuiltinLowering::Ln => execute_math(&column(0)?, MathFunction::Ln, row_errors, span),
+        BuiltinLowering::Log => execute_log(&columns()?, row_errors, span),
+        BuiltinLowering::Lpad => Ok(TypedArray::Utf8(execute_pad(
+            as_utf8(&column(0)?)?,
+            &column(1)?,
+            text(2)?,
+            PadSide::Left,
         )?)),
-        BuiltinLowering::Md5 => Ok(TypedArray::Utf8(execute_md5(as_utf8(&values[0])?))),
+        BuiltinLowering::Md5 => Ok(TypedArray::Utf8(execute_md5(as_utf8(&column(0)?)?))),
         BuiltinLowering::Pow => execute_binary_math(
-            &values[0],
-            &values[1],
+            &column(0)?,
+            &column(1)?,
             BinaryMathFunction::Pow,
             row_errors,
             span,
         ),
-        BuiltinLowering::RegexpLike => Ok(TypedArray::Boolean(execute_regexp_like(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-            row_errors,
-            span,
-        ))),
-        BuiltinLowering::RegexpReplace => Ok(TypedArray::Utf8(execute_regexp_replace(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-            as_utf8(&values[2])?,
-            row_errors,
-            span,
-        ))),
-        BuiltinLowering::RegexpSubstr => Ok(TypedArray::Utf8(execute_regexp_substr(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-            row_errors,
-            span,
-        ))),
+        BuiltinLowering::Regexp(call) => execute_regexp(call, registers, inputs, row_errors, span),
         BuiltinLowering::Repeat => Ok(TypedArray::Utf8(execute_repeat(
-            as_utf8(&values[0])?,
-            &values[1],
+            as_utf8(&column(0)?)?,
+            &column(1)?,
         )?)),
         BuiltinLowering::Replace => Ok(TypedArray::Utf8(execute_replace(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-            as_utf8(&values[2])?,
+            as_utf8(&column(0)?)?,
+            text(1)?,
+            text(2)?,
         ))),
-        BuiltinLowering::Reverse => Ok(TypedArray::Utf8(execute_reverse(as_utf8(&values[0])?))),
+        BuiltinLowering::Reverse => Ok(TypedArray::Utf8(execute_reverse(as_utf8(&column(0)?)?))),
         BuiltinLowering::Right => Ok(TypedArray::Utf8(execute_right(
-            as_utf8(&values[0])?,
-            &values[1],
+            as_utf8(&column(0)?)?,
+            &column(1)?,
         )?)),
-        BuiltinLowering::Round => match values.as_slice() {
-            [value, digits] => execute_round_to_digits(value, digits, row_errors, span)
-                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
-            _ => execute_rounding(&values[0], Rounding::Round, row_errors, span),
-        },
-        BuiltinLowering::Rpad => Ok(TypedArray::Utf8(execute_rpad(
-            as_utf8(&values[0])?,
-            &values[1],
-            as_utf8(&values[2])?,
+        BuiltinLowering::Round => {
+            let values = columns()?;
+            match values.as_slice() {
+                [value, digits] => execute_round_to_digits(value, digits, row_errors, span)
+                    .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+                _ => execute_rounding(&values[0], Rounding::Round, row_errors, span),
+            }
+        }
+        BuiltinLowering::Rpad => Ok(TypedArray::Utf8(execute_pad(
+            as_utf8(&column(0)?)?,
+            &column(1)?,
+            text(2)?,
+            PadSide::Right,
         )?)),
         BuiltinLowering::SplitPart => Ok(TypedArray::Utf8(execute_split_part(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-            &values[2],
+            as_utf8(&column(0)?)?,
+            text(1)?,
+            &column(2)?,
         )?)),
-        BuiltinLowering::Sqrt => execute_math(&values[0], MathFunction::Sqrt, row_errors, span),
+        BuiltinLowering::Sqrt => execute_math(&column(0)?, MathFunction::Sqrt, row_errors, span),
         BuiltinLowering::Strpos => Ok(TypedArray::Int64(execute_strpos(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
+            as_utf8(&column(0)?)?,
+            text(1)?,
         ))),
-        BuiltinLowering::Substr => Ok(TypedArray::Utf8(execute_substr(
-            as_utf8(&values[0])?,
-            &values[1],
-            values.get(2),
-        )?)),
-        BuiltinLowering::Tan => execute_math(&values[0], MathFunction::Tan, row_errors, span),
-        BuiltinLowering::ToHex => Ok(TypedArray::Utf8(execute_to_hex(&values[0])?)),
+        BuiltinLowering::Substr => {
+            let length = match inputs.get(2) {
+                Some(length) => Some(registers.read_array(*length)?),
+                None => None,
+            };
+            Ok(TypedArray::Utf8(execute_substr(
+                as_utf8(&column(0)?)?,
+                &column(1)?,
+                length.as_ref(),
+            )?))
+        }
+        BuiltinLowering::Tan => execute_math(&column(0)?, MathFunction::Tan, row_errors, span),
+        BuiltinLowering::ToHex => Ok(TypedArray::Utf8(execute_to_hex(&column(0)?)?)),
         BuiltinLowering::Translate => Ok(TypedArray::Utf8(execute_translate(
-            as_utf8(&values[0])?,
-            as_utf8(&values[1])?,
-            as_utf8(&values[2])?,
+            as_utf8(&column(0)?)?,
+            text(1)?,
+            text(2)?,
         ))),
-        BuiltinLowering::Sin => execute_math(&values[0], MathFunction::Sin, row_errors, span),
+        BuiltinLowering::Sin => execute_math(&column(0)?, MathFunction::Sin, row_errors, span),
         BuiltinLowering::Atan2 => execute_binary_math(
-            &values[0],
-            &values[1],
+            &column(0)?,
+            &column(1)?,
             BinaryMathFunction::Atan2,
             row_errors,
             span,
         ),
-        BuiltinLowering::Log2 => execute_math(&values[0], MathFunction::Log2, row_errors, span),
+        BuiltinLowering::Log2 => execute_math(&column(0)?, MathFunction::Log2, row_errors, span),
         BuiltinLowering::Radians => {
-            execute_math(&values[0], MathFunction::Radians, row_errors, span)
+            execute_math(&column(0)?, MathFunction::Radians, row_errors, span)
         }
         BuiltinLowering::Degrees => {
-            execute_math(&values[0], MathFunction::Degrees, row_errors, span)
+            execute_math(&column(0)?, MathFunction::Degrees, row_errors, span)
         }
-        BuiltinLowering::Sign => execute_sign(&values[0], row_errors, span)
-            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
-        BuiltinLowering::Trunc => execute_rounding(&values[0], Rounding::Trunc, row_errors, span),
-        BuiltinLowering::IsNan => execute_float_classification(&values[0], FloatClass::Nan)
-            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
-        BuiltinLowering::IsFinite => execute_float_classification(&values[0], FloatClass::Finite)
-            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::Sign => {
+            let values = columns()?;
+            execute_sign(&values[0], row_errors, span)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+        BuiltinLowering::Trunc => execute_rounding(&column(0)?, Rounding::Trunc, row_errors, span),
+        BuiltinLowering::IsNan => {
+            let values = columns()?;
+            execute_float_classification(&values[0], FloatClass::Nan)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+        BuiltinLowering::IsFinite => {
+            let values = columns()?;
+            execute_float_classification(&values[0], FloatClass::Finite)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
         BuiltinLowering::IsInfinite => {
+            let values = columns()?;
             execute_float_classification(&values[0], FloatClass::Infinite)
                 .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
         }
         BuiltinLowering::BitwiseAnd => {
+            let values = columns()?;
             execute_bitwise(&values[0], &values[1], BitwiseOperation::And)
                 .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
         }
-        BuiltinLowering::BitwiseOr => execute_bitwise(&values[0], &values[1], BitwiseOperation::Or)
-            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::BitwiseOr => {
+            let values = columns()?;
+            execute_bitwise(&values[0], &values[1], BitwiseOperation::Or)
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
         BuiltinLowering::BitwiseXor => {
+            let values = columns()?;
             execute_bitwise(&values[0], &values[1], BitwiseOperation::Xor)
                 .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
         }
-        BuiltinLowering::BitwiseNot => execute_bitwise_not(&values[0])
-            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
-        BuiltinLowering::BitCount => execute_bit_count(&values[0])
-            .ok_or_else(|| unsupported_builtin_inputs(lowering, &values)),
+        BuiltinLowering::BitwiseNot => {
+            let values = columns()?;
+            execute_bitwise_not(&values[0])
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+        BuiltinLowering::BitCount => {
+            let values = columns()?;
+            execute_bit_count(&values[0])
+                .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
         BuiltinLowering::ShiftLeft => {
+            let values = columns()?;
             execute_shift(&values[0], &values[1], Shift::Left, row_errors, span)
                 .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
         }
         BuiltinLowering::ShiftRight => {
+            let values = columns()?;
             execute_shift(&values[0], &values[1], Shift::Right, row_errors, span)
                 .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
         }
         BuiltinLowering::Datetime(function) => {
+            let values = columns()?;
             match execute_datetime(function, &values, row_errors, span) {
                 DatetimeExecution::Computed(output) => Ok(output),
                 DatetimeExecution::UnsupportedInputs => {
@@ -2081,18 +2277,27 @@ fn execute_length(input: &StringArray) -> Int64Array {
     Int64Array::new(lengths.into(), input.nulls().cloned())
 }
 
-fn execute_contains(string: &StringArray, substring: &StringArray) -> BooleanArray {
-    string_contains(string, substring)
+fn execute_contains(
+    string: Operand<'_, StringArray>,
+    substring: Operand<'_, StringArray>,
+) -> BooleanArray {
+    string_contains(&string, &substring)
         .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
-fn execute_starts_with(string: &StringArray, prefix: &StringArray) -> BooleanArray {
-    string_starts_with(string, prefix)
+fn execute_starts_with(
+    string: Operand<'_, StringArray>,
+    prefix: Operand<'_, StringArray>,
+) -> BooleanArray {
+    string_starts_with(&string, &prefix)
         .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
-fn execute_ends_with(string: &StringArray, suffix: &StringArray) -> BooleanArray {
-    string_ends_with(string, suffix)
+fn execute_ends_with(
+    string: Operand<'_, StringArray>,
+    suffix: Operand<'_, StringArray>,
+) -> BooleanArray {
+    string_ends_with(&string, &suffix)
         .assured("this kernel is defined for Utf8 arrays, and this signature accepts nothing else")
 }
 
@@ -2644,28 +2849,33 @@ where
     checked.column
 }
 
-fn execute_concat(values: &[TypedArray]) -> Result<StringArray, RuntimeError> {
-    let Some(first) = values.first() else {
-        return Ok(StringArray::from(Vec::<Option<String>>::new()));
-    };
-    let row_count = first.len();
-    let values = values.iter().map(as_utf8).collect::<Result<Vec<_>, _>>()?;
-    let value_capacity = values
-        .iter()
-        .map(|value| value.values().len())
-        .fold(0_usize, usize::saturating_add);
+fn execute_concat(row_count: usize, parts: &[Operand<'_, StringArray>]) -> StringArray {
+    // The reservation is only a hint: a part whose bytes cannot be counted in `usize` leaves the
+    // buffer to grow as rows are written.
+    let mut value_capacity = 0_usize;
+    for part in parts {
+        let part_bytes = match part {
+            Operand::Column(array) => Some(array.values().len()),
+            Operand::Scalar(array) => array.values().len().checked_mul(row_count),
+        };
+        if let Some(part_bytes) = part_bytes
+            && let Some(reserved) = value_capacity.checked_add(part_bytes)
+        {
+            value_capacity = reserved;
+        }
+    }
     let mut builder = StringBuilder::with_capacity(row_count, value_capacity);
     let mut result = String::new();
     for row in 0..row_count {
         result.clear();
-        for value in &values {
-            if !value.is_null(row) {
-                result.push_str(value.value(row));
+        for part in parts {
+            if !part.is_null(row) {
+                result.push_str(part.array().value(part.index(row)));
             }
         }
         builder.append_value(&result);
     }
-    Ok(builder.finish())
+    builder.finish()
 }
 
 fn execute_left(input: &StringArray, count: &TypedArray) -> Result<StringArray, RuntimeError> {
@@ -2709,27 +2919,18 @@ fn execute_repeat(input: &StringArray, count: &TypedArray) -> Result<StringArray
     Ok(builder.finish())
 }
 
-fn execute_lpad(
-    input: &StringArray,
-    length: &TypedArray,
-    fill: &StringArray,
-) -> Result<StringArray, RuntimeError> {
-    execute_pad(input, length, fill, true)
-}
-
-fn execute_rpad(
-    input: &StringArray,
-    length: &TypedArray,
-    fill: &StringArray,
-) -> Result<StringArray, RuntimeError> {
-    execute_pad(input, length, fill, false)
+/// The side of a value `lpad` and `rpad` extend.
+#[derive(Clone, Copy)]
+enum PadSide {
+    Left,
+    Right,
 }
 
 fn execute_pad(
     input: &StringArray,
     length: &TypedArray,
-    fill: &StringArray,
-    pad_left: bool,
+    fill: Operand<'_, StringArray>,
+    side: PadSide,
 ) -> Result<StringArray, RuntimeError> {
     let mut builder = string_builder_like(input);
     let mut result = String::new();
@@ -2741,7 +2942,7 @@ fn execute_pad(
         let target_len = usize::try_from(integral_value_at(length, row)?.unwrap_or(0).max(0))
             .assured("a non-negative i64 fits usize on every supported host architecture");
         let source = input.value(row);
-        let fill = fill.value(row);
+        let fill = fill.array().value(fill.index(row));
         let source_len = source.chars().count();
         if target_len == 0 {
             builder.append_value("");
@@ -2766,12 +2967,15 @@ fn execute_pad(
             reservation = reserved;
         }
         result.reserve(reservation);
-        if pad_left {
-            result.extend(fill.chars().cycle().take(missing));
-            result.push_str(source);
-        } else {
-            result.push_str(source);
-            result.extend(fill.chars().cycle().take(missing));
+        match side {
+            PadSide::Left => {
+                result.extend(fill.chars().cycle().take(missing));
+                result.push_str(source);
+            }
+            PadSide::Right => {
+                result.push_str(source);
+                result.extend(fill.chars().cycle().take(missing));
+            }
         }
         builder.append_value(&result);
     }
@@ -2819,58 +3023,109 @@ fn execute_log(
     }
 }
 
-/// Compiles regex patterns for a batch, reusing the previous compilation while the pattern
-/// text is unchanged. A pattern column is normally one broadcast literal, so this compiles
-/// once per batch instead of once per row.
-#[derive(Default)]
-struct RegexCache {
-    entry: Option<(String, Result<Regex, regex::Error>)>,
+/// Executes a regular-expression builtin over one batch.
+///
+/// A constant pattern was compiled with the program and is shared by every row. A pattern read
+/// from the pattern argument is resolved once per distinct text in the batch through the call's
+/// bounded cache. Each distinct pattern then borrows one search cache for the whole batch, so no
+/// row compiles a pattern or takes a lock. An invalid pattern reports its error on every row that
+/// evaluates it with a value.
+fn execute_regexp(
+    call: &RegexpCall,
+    registers: &RegisterBank,
+    inputs: &[RegisterRef],
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> Result<TypedArray, RuntimeError> {
+    let text = registers.column::<StringArray>(inputs[0])?;
+    let patterns = match &call.pattern {
+        PatternSource::Constant(constant) => {
+            BatchPatterns::shared(StdArc::clone(constant.outcome()))
+        }
+        PatternSource::Argument(cache) => {
+            let pattern = registers.operand::<StringArray>(inputs[1])?;
+            cache.resolve_rows((0..text.len()).map(|row| {
+                if pattern.is_null(row) {
+                    None
+                } else {
+                    Some(pattern.array().value(pattern.index(row)))
+                }
+            }))
+        }
+    };
+    let mut active = patterns
+        .outcomes()
+        .iter()
+        .map(|outcome| outcome.activate())
+        .collect::<Vec<_>>();
+    let output = match call.function {
+        RegexpFunction::Like => TypedArray::Boolean(execute_regexp_like(
+            text,
+            &patterns,
+            &mut active,
+            row_errors,
+            span,
+        )),
+        RegexpFunction::Substr => TypedArray::Utf8(execute_regexp_substr(
+            text,
+            &patterns,
+            &mut active,
+            row_errors,
+            span,
+        )),
+        RegexpFunction::Replace => {
+            // The replacement follows the text and, when the pattern is read from an argument,
+            // the pattern.
+            let replacement_input = match &call.pattern {
+                PatternSource::Constant(_) => 1,
+                PatternSource::Argument(_) => 2,
+            };
+            let replacement = registers.operand::<StringArray>(inputs[replacement_input])?;
+            TypedArray::Utf8(execute_regexp_replace(
+                text,
+                replacement,
+                &patterns,
+                &mut active,
+                row_errors,
+                span,
+            ))
+        }
+    };
+    Ok(output)
 }
 
-impl RegexCache {
-    fn compile(&mut self, pattern: &str) -> &Result<Regex, regex::Error> {
-        if self
-            .entry
-            .as_ref()
-            .is_none_or(|(cached, _)| cached != pattern)
-        {
-            self.entry = Some((pattern.to_string(), Regex::new(pattern)));
-        }
-        &self
-            .entry
-            .as_ref()
-            .verified(
-                "the branch above stores an entry whenever the cache does not already hold this \
-                 pattern",
-            )
-            .1
-    }
+fn invalid_pattern_error(row: usize, error: &regex::Error, row_errors: &mut RowErrors, span: Span) {
+    row_errors.push(
+        row,
+        SideError {
+            reason: SideErrorReason::InvalidRegularExpression(error.clone()),
+            span,
+        },
+    );
 }
 
 fn execute_regexp_like(
-    input: &StringArray,
-    pattern: &StringArray,
+    text: &StringArray,
+    patterns: &BatchPatterns,
+    active: &mut [ActivePattern<'_>],
     row_errors: &mut RowErrors,
     span: Span,
 ) -> BooleanArray {
-    let mut builder = BooleanBuilder::with_capacity(input.len());
-    let mut cache = RegexCache::default();
-    for row in 0..input.len() {
-        if input.is_null(row) || pattern.is_null(row) {
+    let mut builder = BooleanBuilder::with_capacity(text.len());
+    for row in 0..text.len() {
+        if text.is_null(row) {
             builder.append_null();
             continue;
         }
-        match cache.compile(pattern.value(row)) {
-            Ok(regex) => builder.append_value(regex.is_match(input.value(row))),
-            Err(error) => {
+        let Some(slot) = patterns.slot(row) else {
+            builder.append_null();
+            continue;
+        };
+        match &mut active[slot] {
+            ActivePattern::Regex(regex) => builder.append_value(regex.is_match(text.value(row))),
+            ActivePattern::Invalid(error) => {
                 builder.append_null();
-                row_errors.push(
-                    row,
-                    SideError {
-                        reason: SideErrorReason::InvalidRegularExpression(error.clone()),
-                        span,
-                    },
-                );
+                invalid_pattern_error(row, error, row_errors, span);
             }
         }
     }
@@ -2878,35 +3133,37 @@ fn execute_regexp_like(
 }
 
 fn execute_regexp_replace(
-    input: &StringArray,
-    pattern: &StringArray,
-    replacement: &StringArray,
+    text: &StringArray,
+    replacement: Operand<'_, StringArray>,
+    patterns: &BatchPatterns,
+    active: &mut [ActivePattern<'_>],
     row_errors: &mut RowErrors,
     span: Span,
 ) -> StringArray {
-    let mut builder = string_builder_like(input);
-    let mut cache = RegexCache::default();
-    for row in 0..input.len() {
-        if input.is_null(row) || pattern.is_null(row) || replacement.is_null(row) {
+    let mut builder = string_builder_like(text);
+    let mut replaced = String::new();
+    for row in 0..text.len() {
+        if text.is_null(row) || replacement.is_null(row) {
             builder.append_null();
             continue;
         }
-        match cache.compile(pattern.value(row)) {
-            Ok(regex) => {
-                let value = regex
-                    .replace_all(input.value(row), replacement.value(row))
-                    .into_owned();
-                builder.append_value(value);
-            }
-            Err(error) => {
-                builder.append_null();
-                row_errors.push(
-                    row,
-                    SideError {
-                        reason: SideErrorReason::InvalidRegularExpression(error.clone()),
-                        span,
-                    },
+        let Some(slot) = patterns.slot(row) else {
+            builder.append_null();
+            continue;
+        };
+        match &mut active[slot] {
+            ActivePattern::Regex(regex) => {
+                replaced.clear();
+                regex.replace_all_into(
+                    text.value(row),
+                    replacement.array().value(replacement.index(row)),
+                    &mut replaced,
                 );
+                builder.append_value(&replaced);
+            }
+            ActivePattern::Invalid(error) => {
+                builder.append_null();
+                invalid_pattern_error(row, error, row_errors, span);
             }
         }
     }
@@ -2914,45 +3171,50 @@ fn execute_regexp_replace(
 }
 
 fn execute_regexp_substr(
-    input: &StringArray,
-    pattern: &StringArray,
+    text: &StringArray,
+    patterns: &BatchPatterns,
+    active: &mut [ActivePattern<'_>],
     row_errors: &mut RowErrors,
     span: Span,
 ) -> StringArray {
-    let mut builder = string_builder_like(input);
-    let mut cache = RegexCache::default();
-    for row in 0..input.len() {
-        if input.is_null(row) || pattern.is_null(row) {
+    let mut builder = string_builder_like(text);
+    for row in 0..text.len() {
+        if text.is_null(row) {
             builder.append_null();
             continue;
         }
-        match cache.compile(pattern.value(row)) {
-            Ok(regex) => match regex.find(input.value(row)) {
-                Some(matched) => builder.append_value(matched.as_str()),
+        let Some(slot) = patterns.slot(row) else {
+            builder.append_null();
+            continue;
+        };
+        match &mut active[slot] {
+            ActivePattern::Regex(regex) => match regex.find(text.value(row)) {
+                Some(matched) => builder.append_value(matched),
                 None => builder.append_null(),
             },
-            Err(error) => {
+            ActivePattern::Invalid(error) => {
                 builder.append_null();
-                row_errors.push(
-                    row,
-                    SideError {
-                        reason: SideErrorReason::InvalidRegularExpression(error.clone()),
-                        span,
-                    },
-                );
+                invalid_pattern_error(row, error, row_errors, span);
             }
         }
     }
     builder.finish()
 }
 
-fn execute_replace(input: &StringArray, from: &StringArray, to: &StringArray) -> StringArray {
+fn execute_replace(
+    input: &StringArray,
+    from: Operand<'_, StringArray>,
+    to: Operand<'_, StringArray>,
+) -> StringArray {
     let mut builder = string_builder_like(input);
-    for ((value, from), to) in input.iter().zip(from.iter()).zip(to.iter()) {
-        let (Some(value), Some(from), Some(to)) = (value, from, to) else {
+    for row in 0..input.len() {
+        if input.is_null(row) || from.is_null(row) || to.is_null(row) {
             builder.append_null();
             continue;
-        };
+        }
+        let value = input.value(row);
+        let from = from.array().value(from.index(row));
+        let to = to.array().value(to.index(row));
 
         let mut copied_until = 0;
         for (start, matched) in value.match_indices(from) {
@@ -2989,7 +3251,7 @@ fn execute_reverse(input: &StringArray) -> StringArray {
 
 fn execute_split_part(
     input: &StringArray,
-    delimiter: &StringArray,
+    delimiter: Operand<'_, StringArray>,
     index: &TypedArray,
 ) -> Result<StringArray, RuntimeError> {
     let mut builder = string_builder_like(input);
@@ -3004,7 +3266,7 @@ fn execute_split_part(
             continue;
         }
         let string = input.value(row);
-        let delimiter = delimiter.value(row);
+        let delimiter = delimiter.array().value(delimiter.index(row));
         if delimiter.is_empty() {
             builder.append_value(if index == 1 { string } else { "" });
             continue;
@@ -3021,14 +3283,15 @@ fn execute_split_part(
     Ok(builder.finish())
 }
 
-fn execute_strpos(input: &StringArray, needle: &StringArray) -> Int64Array {
+fn execute_strpos(input: &StringArray, needle: Operand<'_, StringArray>) -> Int64Array {
     let mut builder = Int64Builder::with_capacity(input.len());
     for row in 0..input.len() {
         if input.is_null(row) || needle.is_null(row) {
             builder.append_null();
             continue;
         }
-        let value = if let Some(byte_idx) = input.value(row).find(needle.value(row)) {
+        let needle = needle.array().value(needle.index(row));
+        let value = if let Some(byte_idx) = input.value(row).find(needle) {
             i64::try_from(input.value(row)[..byte_idx].chars().count())
                 .assured("a string's character count cannot exceed its isize-bounded byte length")
                 + 1
@@ -3144,7 +3407,11 @@ fn execute_to_hex_values(
     builder.finish()
 }
 
-fn execute_translate(input: &StringArray, from: &StringArray, to: &StringArray) -> StringArray {
+fn execute_translate(
+    input: &StringArray,
+    from: Operand<'_, StringArray>,
+    to: Operand<'_, StringArray>,
+) -> StringArray {
     let mut builder = string_builder_like(input);
     let mut table = TranslateTable::default();
     let mut translated = String::new();
@@ -3154,7 +3421,10 @@ fn execute_translate(input: &StringArray, from: &StringArray, to: &StringArray) 
             continue;
         }
         let source = input.value(row);
-        let replacements = table.replacements(from.value(row), to.value(row));
+        let replacements = table.replacements(
+            from.array().value(from.index(row)),
+            to.array().value(to.index(row)),
+        );
         translated.clear();
         for ch in source.chars() {
             if let Some(replacement) = replacements.get(&ch) {
@@ -3910,10 +4180,12 @@ mod tests {
         assert_eq!(string_right(value, -1), "é🙂z");
         assert_eq!(string_substr(value, 1, Some(2)), "é🙂");
 
+        let from = StringArray::from(vec!["é🙂", "aab", "xy"]);
+        let to = StringArray::from(vec!["EO", "XYZ", "Q"]);
         let translated = execute_translate(
             &StringArray::from(vec!["aé🙂z", "aba", "xyz"]),
-            &StringArray::from(vec!["é🙂", "aab", "xy"]),
-            &StringArray::from(vec!["EO", "XYZ", "Q"]),
+            Operand::Column(&from),
+            Operand::Column(&to),
         );
         assert_eq!(translated.value(0), "aEOz");
         assert_eq!(translated.value(1), "XZX");
@@ -5280,7 +5552,7 @@ mod tests {
         ])
         .slice(1, 4);
         assert_eq!(
-            execute_replace(&replace_input, &from, &to),
+            execute_replace(&replace_input, Operand::Column(&from), Operand::Column(&to)),
             StringArray::from(vec![Some("X界X"), None, Some("ba__"), Some("-")])
         );
     }
@@ -6053,6 +6325,516 @@ mod tests {
                 assert_eq!(expected, "Int64Array");
             }
             other => panic!("expected invalid register type, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn literals_are_scalars_that_expand_only_when_read_as_a_column() {
+        let mut layouts = RegisterLayouts::default();
+        let literal = layouts.alloc(RegisterSpace::Temp, RegisterType::Utf8);
+        let copy = layouts.alloc(RegisterSpace::Temp, RegisterType::Utf8);
+        let mut registers = RegisterBank::new(&layouts, 4);
+
+        write_literal(
+            &mut registers,
+            literal,
+            &ScalarValue::Utf8("shared".to_string()),
+        )
+        .expect("literal must write");
+
+        assert!(registers.is_scalar(literal));
+        let operand = registers
+            .operand::<StringArray>(literal)
+            .expect("register must read");
+        assert!(matches!(operand, Operand::Scalar(array) if array.len() == 1));
+        let register = registers
+            .register::<StringArray>(literal)
+            .expect("register must read");
+        assert!(
+            matches!(register, Register::Scalar { column, .. } if column.get().is_none()),
+            "no column is built until one is read"
+        );
+
+        registers.copy(copy, literal).expect("copy must write");
+        assert!(registers.is_scalar(copy), "a copy keeps the scalar");
+
+        let column = registers
+            .column::<StringArray>(literal)
+            .expect("register must read");
+        assert_eq!(column.len(), 4);
+        assert!(column.iter().all(|value| value == Some("shared")));
+        let register = registers
+            .register::<StringArray>(literal)
+            .expect("register must read");
+        assert!(
+            matches!(register, Register::Scalar { column, .. } if column.get().is_some()),
+            "the column is kept once built"
+        );
+        let output = registers.output_array(copy).expect("output must read");
+        assert_eq!(output.len(), 4);
+    }
+
+    fn utc_instants(seconds: &[Option<i64>]) -> TimestampNanosecondArray {
+        TimestampNanosecondArray::from_iter(
+            seconds
+                .iter()
+                .map(|value| value.map(|seconds| seconds * 1_000_000_000)),
+        )
+        .with_timezone_utc()
+    }
+
+    /// The outputs the scalar-operand and column-operand programs below both write.
+    fn operand_agreement_outputs() -> Vec<Field> {
+        vec![
+            Field::new("i64_sum", DataType::Int64, true),
+            Field::new("i64_greater", DataType::Boolean, true),
+            Field::new("i32_sum", DataType::Int32, true),
+            Field::new("i32_less", DataType::Boolean, true),
+            Field::new("f64_product", DataType::Float64, true),
+            Field::new("f64_equal", DataType::Boolean, true),
+            Field::new("f32_sum", DataType::Float32, true),
+            Field::new("text_equal", DataType::Boolean, true),
+            Field::new("flag_equal", DataType::Boolean, true),
+            Field::new("at_later", DataType::Boolean, true),
+            Field::new("null_sum", DataType::Int64, true),
+            Field::new("padded", DataType::Utf8, true),
+            Field::new("tagged", DataType::Utf8, true),
+            Field::new("has_b", DataType::Boolean, true),
+            Field::new("fallback", DataType::Utf8, true),
+            Field::new("split", DataType::Utf8, true),
+            Field::new("replaced", DataType::Utf8, true),
+            Field::new("position", DataType::Int64, true),
+            Field::new("translated", DataType::Utf8, true),
+            Field::new("chosen", DataType::Utf8, true),
+            Field::new("nulled", DataType::Int64, true),
+        ]
+    }
+
+    #[test]
+    fn scalar_operands_agree_with_column_operands_across_types_and_nulls() {
+        // The literal program pairs every operand with a literal, a null constant, a cast
+        // literal or a constant call; the column program carries the same value in a column.
+        let literal_program = parse_program(
+            "SET i64_sum = input.i64 + 3, i64_greater = input.i64 > 3, i32_sum = input.i32 + (3 \
+             AS I32), i32_less = input.i32 < (3 AS I32), f64_product = input.f64 * 1.5, f64_equal \
+             = input.f64 = 1.5, f32_sum = input.f32 + (1.5 AS F32), text_equal = input.text = \
+             'b', flag_equal = input.flag = true, at_later = input.at > from_unix('second', 100), \
+             null_sum = input.i64 + nullif(3, 3), padded = lpad(input.text, 3, '*'), tagged = \
+             concat(input.text, '-', 'x'), has_b = contains(input.text, 'b'), fallback = \
+             coalesce(input.text, 'none'), split = split_part(input.text, 'b', 1), replaced = \
+             replace(input.text, 'b', 'c'), position = strpos(input.text, 'b'), translated = \
+             translate(input.text, 'ab', 'xy'), chosen = CASE WHEN input.flag THEN 'yes' ELSE \
+             'no' END, nulled = nullif(input.i64, 3)",
+        )
+        .expect("must parse");
+        let column_program = parse_program(
+            "SET i64_sum = input.i64 + input.three, i64_greater = input.i64 > input.three, \
+             i32_sum = input.i32 + input.three_i32, i32_less = input.i32 < input.three_i32, \
+             f64_product = input.f64 * input.one_and_half, f64_equal = input.f64 = \
+             input.one_and_half, f32_sum = input.f32 + input.one_and_half_f32, text_equal = \
+             input.text = input.b, flag_equal = input.flag = input.yes_flag, at_later = input.at \
+             > input.hundred_at, null_sum = input.i64 + input.null_i64, padded = lpad(input.text, \
+             input.three, input.star), tagged = concat(input.text, input.dash, input.x), has_b = \
+             contains(input.text, input.b), fallback = coalesce(input.text, input.none), split = \
+             split_part(input.text, input.b, input.one), replaced = replace(input.text, input.b, \
+             input.c), position = strpos(input.text, input.b), translated = translate(input.text, \
+             input.ab, input.xy), chosen = CASE WHEN input.flag THEN input.yes ELSE input.no END, \
+             nulled = nullif(input.i64, input.three)",
+        )
+        .expect("must parse");
+        let base_fields = vec![
+            Field::new("i64", DataType::Int64, true),
+            Field::new("i32", DataType::Int32, true),
+            Field::new("f64", DataType::Float64, true),
+            Field::new("f32", DataType::Float32, true),
+            Field::new("text", DataType::Utf8, true),
+            Field::new("flag", DataType::Boolean, true),
+            Field::new(
+                "at",
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                true,
+            ),
+        ];
+        let base_columns = vec![
+            TypedArray::Int64(Int64Array::from(vec![Some(1), None, Some(3)])),
+            TypedArray::Int32(Int32Array::from(vec![Some(1), None, Some(3)])),
+            TypedArray::Float64(Float64Array::from(vec![Some(2.0), None, Some(1.5)])),
+            TypedArray::Float32(Float32Array::from(vec![Some(2.0), None, Some(1.5)])),
+            TypedArray::Utf8(StringArray::from(vec![Some("abc"), None, Some("b")])),
+            TypedArray::Boolean(BooleanArray::from(vec![Some(true), None, Some(false)])),
+            TypedArray::Datetime(utc_instants(&[Some(50), None, Some(150)])),
+        ];
+        let literal_schema = schema(base_fields.clone());
+        let literal_compiled = compile_program_with_output_fields(
+            &literal_program,
+            literal_schema.clone(),
+            operand_agreement_outputs(),
+        );
+        let literal_batch =
+            TypedBatch::try_new(literal_schema, base_columns.clone()).expect("batch must build");
+
+        let mut column_fields = base_fields;
+        let mut column_columns = base_columns;
+        let constant_text = |value: &str| {
+            TypedArray::Utf8(StringArray::from(vec![
+                Some(value),
+                Some(value),
+                Some(value),
+            ]))
+        };
+        for (name, column) in [
+            ("three", TypedArray::Int64(Int64Array::from_value(3, 3))),
+            ("three_i32", TypedArray::Int32(Int32Array::from_value(3, 3))),
+            ("one", TypedArray::Int64(Int64Array::from_value(1, 3))),
+            (
+                "one_and_half",
+                TypedArray::Float64(Float64Array::from_value(1.5, 3)),
+            ),
+            (
+                "one_and_half_f32",
+                TypedArray::Float32(Float32Array::from_value(1.5, 3)),
+            ),
+            (
+                "yes_flag",
+                TypedArray::Boolean(BooleanArray::from(vec![true, true, true])),
+            ),
+            (
+                "hundred_at",
+                TypedArray::Datetime(utc_instants(&[Some(100), Some(100), Some(100)])),
+            ),
+            ("null_i64", TypedArray::Int64(Int64Array::new_null(3))),
+            ("b", constant_text("b")),
+            ("star", constant_text("*")),
+            ("dash", constant_text("-")),
+            ("x", constant_text("x")),
+            ("none", constant_text("none")),
+            ("c", constant_text("c")),
+            ("ab", constant_text("ab")),
+            ("xy", constant_text("xy")),
+            ("yes", constant_text("yes")),
+            ("no", constant_text("no")),
+        ] {
+            column_fields.push(Field::new(name, column.data_type(), true));
+            column_columns.push(column);
+        }
+        let column_schema = schema(column_fields);
+        let column_compiled = compile_program_with_output_fields(
+            &column_program,
+            column_schema.clone(),
+            operand_agreement_outputs(),
+        );
+        let column_batch =
+            TypedBatch::try_new(column_schema, column_columns).expect("batch must build");
+
+        let literal_output = execute_program_sync(&literal_compiled, &literal_batch)
+            .expect("literal program must execute");
+        let column_output = execute_program_sync(&column_compiled, &column_batch)
+            .expect("column program must execute");
+
+        assert!(literal_output.errors().is_error_free());
+        assert!(column_output.errors().is_error_free());
+        for field in operand_agreement_outputs() {
+            assert_eq!(
+                output_column(&literal_output, field.name()),
+                output_column(&column_output, field.name()),
+                "output '{}' must not depend on whether its operand is a literal",
+                field.name()
+            );
+        }
+        assert_eq!(
+            output_column(&literal_output, "i64_sum"),
+            &TypedArray::Int64(Int64Array::from(vec![Some(4), None, Some(6)]))
+        );
+        assert_eq!(
+            output_column(&literal_output, "null_sum"),
+            &TypedArray::Int64(Int64Array::new_null(3))
+        );
+        assert_eq!(
+            output_column(&literal_output, "at_later"),
+            &TypedArray::Boolean(BooleanArray::from(vec![Some(false), None, Some(true)]))
+        );
+        assert_eq!(
+            output_column(&literal_output, "tagged"),
+            &TypedArray::Utf8(StringArray::from(vec![
+                Some("abc-x"),
+                Some("-x"),
+                Some("b-x")
+            ]))
+        );
+        assert_eq!(
+            output_column(&literal_output, "fallback"),
+            &TypedArray::Utf8(StringArray::from(vec![
+                Some("abc"),
+                Some("none"),
+                Some("b")
+            ]))
+        );
+        assert_eq!(
+            output_column(&literal_output, "chosen"),
+            &TypedArray::Utf8(StringArray::from(vec![Some("yes"), Some("no"), Some("no")]))
+        );
+        assert_eq!(
+            output_column(&literal_output, "nulled"),
+            &TypedArray::Int64(Int64Array::from(vec![Some(1), None, None]))
+        );
+    }
+
+    #[test]
+    fn now_is_one_value_per_execution_and_uuids_are_one_per_row() {
+        let parsed =
+            parse_program("SET at = now(), id4 = uuid_v4(), id7 = uuid_v7()").expect("must parse");
+        let schema = schema(vec![Field::new("row", DataType::Int64, true)]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new(
+                    "at",
+                    DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
+                    true,
+                ),
+                Field::new("id4", DataType::Utf8, true),
+                Field::new("id7", DataType::Utf8, true),
+            ],
+        );
+        let rows = 6;
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![TypedArray::Int64(Int64Array::from_iter_values(0..rows))],
+        )
+        .expect("batch must build");
+        let instant = Timestamp::from_unix_nanos(1_700_000_000_000_000_000);
+        let context = ExecutionContext::new(instant);
+
+        let output = execute_program_in_context_sync(&compiled, &batch, &context)
+            .expect("execution must succeed")
+            .batch;
+
+        let TypedArray::Datetime(at) = output_column(&output, "at") else {
+            panic!("at must be Datetime");
+        };
+        assert_eq!(at.len(), 6);
+        assert!(
+            at.values()
+                .iter()
+                .all(|value| *value == instant.unix_nanos())
+        );
+        for (name, version) in [("id4", Version::Random), ("id7", Version::SortRand)] {
+            let TypedArray::Utf8(ids) = output_column(&output, name) else {
+                panic!("{name} must be Utf8");
+            };
+            let mut distinct = std::collections::BTreeSet::new();
+            for id in ids.iter() {
+                let id = id.expect("every row receives an identifier");
+                let parsed = Uuid::parse_str(id).expect("identifier must be a UUID");
+                assert_eq!(parsed.get_version(), Some(version));
+                distinct.insert(id.to_string());
+            }
+            assert_eq!(distinct.len(), 6, "{name} must differ on every row");
+        }
+    }
+
+    #[test]
+    fn a_shared_value_that_fails_reports_the_failure_on_every_row_its_arm_selects() {
+        let parsed =
+            parse_program("SET ratio = CASE WHEN input.flag THEN 1 / 0 ELSE 1 END, always = 1 / 0")
+                .expect("must parse");
+        let schema = schema(vec![Field::new("flag", DataType::Boolean, true)]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("ratio", DataType::Int64, true),
+                Field::new("always", DataType::Int64, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![TypedArray::Boolean(BooleanArray::from(vec![
+                Some(true),
+                Some(false),
+                Some(true),
+                None,
+            ]))],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+        assert_eq!(
+            output_column(&output, "ratio"),
+            &TypedArray::Int64(Int64Array::from(vec![None, Some(1), None, Some(1)]))
+        );
+        assert_eq!(
+            output_column(&output, "always"),
+            &TypedArray::Int64(Int64Array::new_null(4))
+        );
+        let error_counts = output
+            .errors()
+            .iter()
+            .map(<[SideError]>::len)
+            .collect::<Vec<_>>();
+        assert_eq!(error_counts, [2, 1, 2, 1]);
+        for error in output.errors().iter().flatten() {
+            assert_eq!(error.code(), ErrorCode::DivisionByZero);
+        }
+    }
+
+    fn dynamic_pattern_caches(compiled: &CompiledProgram) -> Vec<&crate::regexp::DynamicPatterns> {
+        let mut caches = Vec::new();
+        for instruction in &compiled.instructions {
+            if let InstructionKind::Builtin {
+                lowering:
+                    BuiltinLowering::Regexp(RegexpCall {
+                        pattern: PatternSource::Argument(cache),
+                        ..
+                    }),
+                ..
+            } = &instruction.kind
+            {
+                caches.push(cache);
+            }
+        }
+        caches
+    }
+
+    #[test]
+    fn constant_patterns_are_shared_across_batches_and_argument_patterns_are_cached() {
+        let parsed = parse_program(
+            "SET matched = regexp_like(input.text, 'a+'), piece = regexp_substr(input.text, \
+             input.pattern), rewritten = regexp_replace(input.text, input.pattern, '<$0>')",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("pattern", DataType::Utf8, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("matched", DataType::Boolean, true),
+                Field::new("piece", DataType::Utf8, true),
+                Field::new("rewritten", DataType::Utf8, true),
+            ],
+        );
+        let caches = dynamic_pattern_caches(&compiled);
+        assert_eq!(caches.len(), 2, "two calls read their pattern argument");
+
+        let first = TypedBatch::try_new(
+            schema.clone(),
+            vec![
+                TypedArray::Utf8(StringArray::from(vec![Some("aa"), Some("b"), None])),
+                TypedArray::Utf8(StringArray::from(vec![Some("a+"), Some("b"), Some("a+")])),
+            ],
+        )
+        .expect("batch must build");
+        let second = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec![Some("bb"), Some("a")])),
+                TypedArray::Utf8(StringArray::from(vec![Some("b"), Some("a+")])),
+            ],
+        )
+        .expect("batch must build");
+
+        let first_output = execute_program_sync(&compiled, &first).expect("execution must succeed");
+        let second_output =
+            execute_program_sync(&compiled, &second).expect("execution must succeed");
+
+        assert_eq!(
+            output_column(&first_output, "matched"),
+            &TypedArray::Boolean(BooleanArray::from(vec![Some(true), Some(false), None]))
+        );
+        assert_eq!(
+            output_column(&first_output, "piece"),
+            &TypedArray::Utf8(StringArray::from(vec![Some("aa"), Some("b"), None]))
+        );
+        assert_eq!(
+            output_column(&first_output, "rewritten"),
+            &TypedArray::Utf8(StringArray::from(vec![Some("<aa>"), Some("<b>"), None]))
+        );
+        assert_eq!(
+            output_column(&second_output, "matched"),
+            &TypedArray::Boolean(BooleanArray::from(vec![Some(false), Some(true)]))
+        );
+        assert_eq!(
+            output_column(&second_output, "piece"),
+            &TypedArray::Utf8(StringArray::from(vec![Some("b"), Some("a")]))
+        );
+        assert_eq!(
+            output_column(&second_output, "rewritten"),
+            &TypedArray::Utf8(StringArray::from(vec![Some("<b><b>"), Some("<a>")]))
+        );
+        for cache in caches {
+            let statistics = cache.statistics();
+            assert_eq!(
+                statistics.compiled, 2,
+                "each distinct pattern is compiled once for every batch that uses it"
+            );
+            assert_eq!(statistics.cached, 2);
+            assert_eq!(statistics.evicted, 0);
+        }
+    }
+
+    #[test]
+    fn invalid_constant_patterns_report_per_row_only_where_the_arm_is_selected() {
+        let parsed = parse_program(
+            "SET guarded = CASE WHEN input.flag THEN regexp_like(input.text, '(') ELSE false END, \
+             always = regexp_like(input.text, '(')",
+        )
+        .expect("must parse");
+        let schema = schema(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("flag", DataType::Boolean, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("guarded", DataType::Boolean, true),
+                Field::new("always", DataType::Boolean, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec![Some("a"), None, Some("b")])),
+                TypedArray::Boolean(BooleanArray::from(vec![
+                    Some(true),
+                    Some(false),
+                    Some(true),
+                ])),
+            ],
+        )
+        .expect("batch must build");
+
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+        assert_eq!(
+            output_column(&output, "guarded"),
+            &TypedArray::Boolean(BooleanArray::from(vec![None, Some(false), None]))
+        );
+        assert_eq!(
+            output_column(&output, "always"),
+            &TypedArray::Boolean(BooleanArray::new_null(3))
+        );
+        let error_counts = output
+            .errors()
+            .iter()
+            .map(<[SideError]>::len)
+            .collect::<Vec<_>>();
+        assert_eq!(error_counts, [2, 0, 2], "a null text reports nothing");
+        for error in output.errors().iter().flatten() {
+            assert_eq!(error.code(), ErrorCode::InvalidArgument);
+            assert!(
+                error
+                    .reason
+                    .to_string()
+                    .starts_with("invalid regular expression:"),
+                "{}",
+                error.reason
+            );
         }
     }
 }
