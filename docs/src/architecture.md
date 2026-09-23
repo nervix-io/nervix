@@ -77,8 +77,10 @@ sink. Sensitivity is unchanged by that projection: a mapped value still requires
 leave the domain. Each row sink then encodes from those columns at its own boundary — OTLP protobuf
 for OpenTelemetry in `crates/connectors/otel`, `JSONEachRow` lines for ClickHouse in
 `crates/connectors/clickhouse`, bound parameters for Postgres and MySQL in
-`crates/connectors/postgres` and `crates/connectors/mysql`, and BSON documents for MongoDB in
-`crates/connectors/mongodb`. No mapped row is ever materialized as a scalar between the two.
+`crates/connectors/postgres` and `crates/connectors/mysql`, BSON documents for MongoDB in
+`crates/connectors/mongodb`, and Arrow IPC staging files that one catalog commit turns into Parquet
+data files for Iceberg in `crates/connectors/iceberg`. No mapped row is ever materialized as a
+scalar between the two.
 
 A sink that stages what it accepts declares that it retains acknowledgements, and the runtime then
 hands it the acknowledgements of every row a write carries instead of resolving them as the write

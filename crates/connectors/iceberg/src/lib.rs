@@ -15,6 +15,9 @@
 //! the successful catalog commit, and an appended row is never idempotent, as
 //! [Emitters](docs/src/emitters.md) documents.
 
+#[cfg(feature = "shuttle")]
+extern crate shuttle_tokio as tokio;
+
 use std::{fs::File, path::PathBuf, sync::Arc as StdArc, time::Duration};
 
 use ::iceberg::{

@@ -14,6 +14,7 @@ use nervix_connector::{
     physical_time::{PhysicalDeadline, PhysicalDeadlineCapability, actual_utc_now},
 };
 use nervix_connector_clickhouse::{ClickHouseSink, ClickHouseSinkConfig};
+use nervix_connector_iceberg::{IcebergCommitPolicy, IcebergSink, IcebergSinkConfig};
 use nervix_connector_kafka::{KafkaSink, KafkaSinkConfig};
 use nervix_connector_mongodb::{MongoDbSink, MongoDbSinkConfig};
 use nervix_connector_mqtt::{MqttSink, MqttSinkConfig};
@@ -37,11 +38,9 @@ use thiserror::Error;
 
 use super::*;
 
-mod iceberg;
 mod mapped_values;
 mod pooled_clients;
 
-use iceberg::{IcebergCommitPolicy, IcebergSink, IcebergSinkConfig};
 use mapped_values::{MappedValuesProjection, MappedValuesProjectionInit};
 use pooled_clients::PooledSinkClient;
 
