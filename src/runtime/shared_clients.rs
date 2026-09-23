@@ -18,10 +18,10 @@ use nervix_connector::{ClientResourceMounts, ResolvedClientConfig, SinkStartErro
 use nervix_connector_mongodb::MongoDbClient;
 use nervix_connector_mysql::MySqlPool;
 use nervix_connector_postgres::PostgresPool;
+use nervix_connector_redis::{RedisClientError, RedisCommandPool, open_redis_command_pool};
 use url::Url;
 
 use super::*;
-use crate::runtime::emitters::{RedisClientError, RedisCommandPool};
 
 /// Why one client's connector instance could not be opened.
 ///
@@ -378,7 +378,7 @@ impl Runtime {
                     .map_err(started)?,
             ),
             PooledTransport::Redis => SharedClientInstance::Redis(
-                emitters::open_redis_command_pool(config, pool.bounds)
+                open_redis_command_pool(config, pool.bounds)
                     .await
                     .map_err(OpenClientError::from_redis)
                     .map_err(opened)?,

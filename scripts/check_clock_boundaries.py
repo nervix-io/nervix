@@ -123,8 +123,8 @@ def main() -> int:
         ROOT / "crates/connectors/prometheus/src/lib.rs",
         ROOT / "crates/connectors/sentry/src/lib.rs",
         runtime_root / "domain_clock.rs",
+        runtime_root / "emitter_task.rs",
         runtime_root / "endpoint.rs",
-        runtime_root / "emitters/mod.rs",
         runtime_root / "ingestors/kafka.rs",
         runtime_root / "ingestors/mqtt.rs",
         runtime_root / "ingestors/nats.rs",
@@ -140,7 +140,8 @@ def main() -> int:
     physical_capability_owners = {
         runtime_root / "branch_buffering.rs",
         runtime_root / "domain_clock.rs",
-        runtime_root / "emitters/mod.rs",
+        runtime_root / "emitter_publishing.rs",
+        runtime_root / "emitter_retry.rs",
         actual_utc_owner,
     }
     ownership_contract_sources = {

@@ -11,6 +11,9 @@
 use std::ops::Range;
 
 use async_trait::async_trait;
+use nervix_connector::{
+    MappedSinkRows, RowSink, SinkAcknowledgements, SinkLifecycle, SinkRecordPosition,
+};
 
 use super::*;
 
@@ -92,6 +95,178 @@ impl EmitterSink for MappedRowSink {
         }
         Ok(())
     }
+}
+
+pub(in crate::runtime) struct CompiledSqlValuesProgram {
+    program: Arc<VmCompiledProgram>,
+    label: &'static str,
+    error_sites: CompiledMessageErrorSites,
+}
+
+impl CompiledSqlValuesProgram {
+    fn structured_side_error(
+        &self,
+        execution_now: Timestamp,
+        reason: String,
+        span: VmSpan,
+    ) -> StructuredMessageError {
+        let site = self.error_sites.get(&span);
+        let operation = match site {
+            Some(site) => site.operation,
+            None => MessageErrorOperation::Values,
+        };
+        structured_message_error(
+            execution_now,
+            MessageErrorCode::Evaluation,
+            reason,
+            operation,
+            site.and_then(|site| site.operation_index),
+            site.map(|site| site.fields.iter().cloned())
+                .into_iter()
+                .flatten(),
+        )
+    }
+}
+
+fn compile_sql_values_program(
+    label: &'static str,
+    namespace: &'static str,
+    domain: &DomainName,
+    emitter: &EmitterName,
+    values: &[ClickHouseValueMapping],
+    input_schema: StdArc<arrow_schema::Schema>,
+    udfs: Option<&UdfExecutor>,
+) -> Result<CompiledSqlValuesProgram, RuntimeError> {
+    if values.is_empty() {
+        return Err(RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!(
+                "{label} emitter '{}' requires at least one VALUES mapping",
+                emitter.as_str()
+            ),
+        });
+    }
+    let mut assignments = Vec::with_capacity(values.len());
+    for (index, mapping) in values.iter().enumerate() {
+        let field = FieldName::parse(&format!("c{index}")).assured(
+            "a generated name containing c followed by decimal digits is a valid field name",
+        );
+        assignments.push(nervix_models::Assignment {
+            target: nervix_models::AssignmentTarget::bare(field),
+            value: mapping.expression.clone(),
+        });
+    }
+    let parsed = lower_route_construction(
+        &nervix_models::RouteConstruction {
+            assignments,
+            ..nervix_models::RouteConstruction::default()
+        },
+        nervix_vm::SemanticScopePolicy::read_write("input", namespace),
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "{label} VALUES for '{}' is invalid: {reason}",
+            emitter.as_str()
+        ),
+    })?;
+    let empty_sink_schema =
+        StdArc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
+    let infer_bindings = vec![
+        VmCompileBinding::writeonly(namespace, empty_sink_schema),
+        VmCompileBinding::readonly("input", input_schema.clone()),
+        VmCompileBinding::readonly("message", input_schema.clone()),
+    ];
+    let inferred_fields = infer_vm_set_expr_types_for_bindings_with_udfs(
+        &parsed,
+        infer_bindings,
+        runtime_udf_signatures(udfs),
+    )
+    .map_err(|error| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "{label} VALUES type inference failed for '{}': {}",
+            emitter.as_str(),
+            error.message
+        ),
+    })?;
+    let output_schema = StdArc::new(arrow_schema::Schema::new(
+        inferred_fields
+            .into_iter()
+            .map(|inferred| {
+                arrow_schema::Field::new(inferred.field, inferred.data_type, inferred.nullable)
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let compile_bindings = vec![
+        VmCompileBinding::writeonly(namespace, output_schema.clone()),
+        VmCompileBinding::readonly("input", input_schema.clone()),
+        VmCompileBinding::readonly("message", input_schema),
+    ];
+    let mut error_sites = compiled_message_error_sites(
+        &parsed,
+        &vec![MessageErrorOperation::Values; parsed.inner.set.len()],
+        None,
+    )
+    .map_err(|reason| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "{label} VALUES message-error metadata for '{}' is invalid: {reason}",
+            emitter.as_str()
+        ),
+    })?;
+    for site in error_sites.values_mut() {
+        if site.operation != MessageErrorOperation::Values {
+            continue;
+        }
+        let Some(index) = site.operation_index.map(|index| index.arch_into()) else {
+            continue;
+        };
+        let Some(mapping) = values.get(index) else {
+            continue;
+        };
+        let internal_target = format!("{namespace}.c{index}");
+        let external_target = format!("{namespace}.{}", mapping.column);
+        site.fields = SortedSet::from_unsorted(
+            site.fields
+                .iter()
+                .map(|field| {
+                    if field.as_str() == internal_target {
+                        FieldPath::new(external_target.clone())
+                    } else {
+                        field.clone()
+                    }
+                })
+                .collect(),
+        );
+    }
+    let compiled = compile_vm_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        output_schema.clone(),
+        VmSchemaSensitivity::default(),
+        compile_bindings,
+        runtime_udf_compile_options(
+            udfs,
+            VmCompileOptions {
+                output_mode: VmOutputMode::ExplicitOnly,
+                allow_sensitive_output: false,
+                ..VmCompileOptions::default()
+            },
+        ),
+    )
+    .map_err(|error| RuntimeError::BuildDomainExecution {
+        domain: domain.as_str().to_string(),
+        reason: format!(
+            "{label} VALUES compile failed for '{}': {}",
+            emitter.as_str(),
+            error.message
+        ),
+    })?;
+    Ok(CompiledSqlValuesProgram {
+        program: Arc::new(compiled),
+        label,
+        error_sites,
+    })
 }
 
 /// What one emitter's `VALUES` mapping is compiled from.
@@ -375,7 +550,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        runtime::test_fixtures::{expression, named, test_schema},
+        runtime::test_fixtures::{expression, input_schema, named, test_schema},
         runtime_schema::test_runtime_row,
     };
 
@@ -553,5 +728,37 @@ mod tests {
             (wide_allocations.alloc_calls, wide_allocations.realloc_calls),
             "projecting 64 times as many rows must cost the same allocations"
         );
+    }
+
+    #[test]
+    fn sql_value_compilers_reject_empty_mappings_before_compilation() {
+        let domain = DomainName::parse("emitter_tests").expect("valid domain");
+        let emitter = EmitterName::parse("output").expect("valid emitter name");
+        let schema = input_schema().arrow_schema();
+
+        let errors =
+            [("Iceberg", "iceberg"), ("ClickHouse", "clickhouse")].map(|(label, namespace)| {
+                MappedValuesProjection::compile(MappedValuesProjectionInit {
+                    label,
+                    namespace,
+                    domain: &domain,
+                    emitter: &emitter,
+                    values: &[],
+                    input_schema: schema.clone(),
+                    udfs: None,
+                    max_batch: None,
+                })
+                .err()
+            });
+        for result in errors {
+            let Some(error) = result else {
+                panic!("empty VALUES mappings must fail before compilation")
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("requires at least one VALUES mapping")
+            );
+        }
     }
 }

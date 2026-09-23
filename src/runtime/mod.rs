@@ -181,8 +181,14 @@ mod domain_clock;
 mod domain_execution;
 mod domain_rebuild;
 mod domain_wire_schemas;
+mod emitter_buffer;
+mod emitter_encoding;
+mod emitter_publishing;
+mod emitter_retry;
 mod emitter_start_plan;
 mod emitter_supervision;
+mod emitter_task;
+mod emitter_values;
 mod emitters;
 mod endpoint;
 mod entity_gate;
@@ -293,11 +299,31 @@ use domain_execution::{
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::branch_relays_from_branched_specs;
 use domain_wire_schemas::DomainWireSchemas;
+use emitter_buffer::{
+    DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublishBatch,
+    PublishReport,
+};
+use emitter_encoding::EncodedRecordSink;
+use emitter_publishing::{
+    EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterSink,
+    EmitterSinkState, RejectedEmitterRecord, await_emitter_confirmation,
+    emitter_unavailable_reason, finish_record_sink_publish, finish_rejected_records,
+};
+use emitter_retry::{
+    EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
+    emitter_retry_delay,
+};
 use emitter_start_plan::*;
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
     clear_emitter_stop_signal,
 };
+use emitter_task::{
+    EmitterRuntimeError, EmitterRuntimeResult, EmitterSinkContext, emitter_error_message,
+    emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
+};
+use emitter_values::{MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit};
+use emitters::EmitterSinkStarter;
 use endpoint::{
     EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint, RoutedEndpointsByDomain,
 };

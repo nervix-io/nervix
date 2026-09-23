@@ -7,7 +7,7 @@
   "data_plane_cluster_awaits": 0,
   "data_plane_lock_acquisitions": 169,
   "discarded_results": 0,
-  "files_over_3000_lines": 11,
+  "files_over_3000_lines": 10,
   "model_matches_in_data_plane": 79,
   "parser_imports_outside_edges": 0,
   "result_string_errors": 59,
