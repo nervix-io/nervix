@@ -102,6 +102,39 @@ Feature: Web console execution graph
     And no graph badge overlaps another graph item or badge
     And graph edge from "route_orders" to "high_value_orders" does not intersect graph edge from "route_orders" to "routine_orders"
 
+  Scenario: Execution graph draws a relay read both as input and as materialized state as two relations
+    Given a 1 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA reading_record (
+        sensor STRING,
+        value I64
+      );
+      CREATE RELAY readings
+        SCHEMA reading_record
+        UNBRANCHED
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY enriched_readings SCHEMA reading_record UNBRANCHED;
+      CREATE JUNCTION enrich_readings
+        FROM readings
+        UNBRANCHED
+        USING MATERIALIZED STATE readings REQUIRED SKIP
+        TO enriched_readings
+          INHERIT ALL
+          FLUSH EACH 250ms MAX BATCH SIZE 512kb
+          ON MESSAGE ERROR LOG;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".graph-hit-layer" contains "enrich_readings"
+    And graph action edge "data" from "readings" to "enrich_readings" is visible
+    And graph action edge "state link" from "readings" to "enrich_readings" is visible
+    And graph action edges "data" and "state link" from "readings" to "enrich_readings" are drawn apart
+    And no graph edge crosses any graph item
+    And the whole graph is visible in the graph viewport
+    And graph geometry does not change while snapshots arrive
+
   Scenario: Execution graph contains a branch group and names its branch and key fields
     Given a 1 node nervix cluster is started
     When these NSPL commands are executed on the leader node

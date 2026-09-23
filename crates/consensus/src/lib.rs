@@ -92,10 +92,10 @@ mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
     CommandExecutionChildResult, CommandExecutionDiagnostic, CommandExecutionEffect,
-    CommandExecutionReconciliation, CommandExecutionRequestConflict, CommandExecutionResult,
-    CommandExecutionResultKind, CommandExecutionState, CommandExecutionTransactionOperation,
-    CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
-    CommandExecutionTransactionTarget,
+    CommandExecutionPreviewStale, CommandExecutionReconciliation, CommandExecutionRequestConflict,
+    CommandExecutionResult, CommandExecutionResultKind, CommandExecutionState,
+    CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
+    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use retention::RaftRetentionPolicy;
@@ -6983,6 +6983,7 @@ mod tests {
             results: Vec::new(),
             transaction: None,
             transaction_admission: None,
+            preview_stale: None,
         };
         for terminal in [result.clone(), result.clone()] {
             let response = apply_consensus_command(
@@ -7230,6 +7231,7 @@ mod tests {
                     results: Vec::new(),
                     transaction: None,
                     transaction_admission: None,
+                    preview_stale: None,
                 }),
             },
         );

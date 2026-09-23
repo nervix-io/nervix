@@ -12,7 +12,7 @@ use imbl::OrdSet;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeIdentity, CommandExecutionReference, DomainName, DomainState, Statement, Timestamp,
-    TransactionOperationAdmission, TransactionPosition, UserName,
+    TransactionOperationAdmission, TransactionPosition, TransactionPreviewIdentity, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,18 @@ pub struct CommandExecutionResult {
     pub results: Vec<CommandExecutionChildResult>,
     pub transaction: Option<CommandExecutionTransactionStatus>,
     pub transaction_admission: Option<TransactionOperationAdmission>,
+    /// The two previews a refused commit reported, so a recovered outcome still says the
+    /// transaction moved rather than only that the commit failed.
+    pub preview_stale: Option<CommandExecutionPreviewStale>,
+}
+
+/// The preview a refused commit expected, beside the one that now describes the transaction.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct CommandExecutionPreviewStale {
+    pub expected: TransactionPreviewIdentity,
+    pub current: TransactionPreviewIdentity,
 }
 
 #[derive(
@@ -139,7 +151,12 @@ impl CommandExecutionTransactionTarget {
 )]
 pub enum CommandExecutionTransactionOperation {
     Queue(Box<TransactionStatementRequest>),
-    Commit,
+    Commit {
+        /// The whole-transaction preview the requesting client expected this commit to apply.
+        /// Absent when the request itself opened the transaction or appended to it, because
+        /// either moves the transaction past the preview the client was holding.
+        expected_preview: Option<TransactionPreviewIdentity>,
+    },
     Revert,
 }
 
@@ -916,6 +933,7 @@ mod tests {
             results: Vec::new(),
             transaction: None,
             transaction_admission: None,
+            preview_stale: None,
         })
     }
 

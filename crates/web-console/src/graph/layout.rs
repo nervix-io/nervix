@@ -1,17 +1,24 @@
-//! Geometry for the execution graph.
+//! Geometry for the console's graphs.
 //!
 //! The drawing is layered: items sit in columns ordered by how far records have travelled, and
 //! every edge crosses exactly one gutter at a time. Edges that span more than one gutter reserve
 //! a row of their own in each column they pass, which is what makes "an edge never crosses an
 //! item" a property of the arrangement rather than something a router has to rediscover.
+//!
+//! Items, edges and branch groups keep the identities their caller gives them. Two items of
+//! different kinds that share a name, or two relations between the same pair of items, therefore
+//! stay distinct all the way from the caller's graph to the geometry it gets back.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 
-/// Vertical clearance between two items in the same column. Wide enough for a branch-group
-/// header band and for two rate badges to sit above one another without touching.
+/// Vertical clearance between two items in the same column, wide enough for two rate badges to
+/// sit above one another without touching. Where a branch group's region begins or ends between
+/// the two items, the gap grows to hold the region's padding and header as well.
 const ROW_GAP: i32 = 36;
+/// Vertical clearance between a branch group's region and anything outside it in one column.
+const GROUP_CLEARANCE: i32 = 12;
 /// Smallest vertical distance between two ports on the same item.
 const PORT_PITCH: i32 = 20;
 /// Horizontal run every edge makes on leaving its source before it may turn.
@@ -31,30 +38,58 @@ const BAND_GAP: i32 = 72;
 const FEEDBACK_PITCH: i32 = 20;
 const ORDERING_SWEEPS: usize = 8;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum LayoutEdgeKind {
     /// Records travel along this edge.
     Flow,
     /// The target reads the source's materialized state.
     State,
+    /// The target's configuration requires the source. Nothing travels along it, so it places
+    /// only the items that no record or state edge places.
+    Dependency,
+}
+
+impl LayoutEdgeKind {
+    /// Whether this edge decides where the flow puts its endpoints.
+    const fn anchors(self) -> bool {
+        match self {
+            Self::Flow | Self::State => true,
+            Self::Dependency => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct LayoutItem {
-    pub id: String,
+pub struct LayoutItem<I, G> {
+    pub id: I,
     pub width: i32,
     pub height: i32,
     pub relay: bool,
     /// The branch group this item belongs to, if it runs per branch.
-    pub branch: Option<String>,
+    pub branch: Option<G>,
 }
 
 #[derive(Debug, Clone)]
-pub struct LayoutEdge {
-    pub source: String,
-    pub target: String,
+pub struct LayoutEdge<I, E> {
+    /// The edge's own identity, which tells apart two edges joining the same pair of items.
+    pub id: E,
+    pub source: I,
+    pub target: I,
     pub kind: LayoutEdgeKind,
     pub badge: bool,
+}
+
+/// How a routed edge travels between its endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeTravel {
+    /// Left to right through the gutters between its endpoints, the way records read.
+    Forward,
+    /// Right to left through the same gutters. Only a dependency between two items the flow has
+    /// already placed travels this way, and nothing moves along it.
+    Backward,
+    /// Through the corridor above the items, closing a cycle or joining two items that share a
+    /// column. It is drawn with direction markers so it is never mistaken for forward flow.
+    Return,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -87,24 +122,24 @@ impl Rect {
 }
 
 #[derive(Debug, Clone)]
-pub struct RoutedEdge {
-    pub source: String,
-    pub target: String,
+pub struct RoutedEdge<I> {
+    pub source: I,
+    pub target: I,
     pub kind: LayoutEdgeKind,
+    /// The turns the line makes, from where it leaves its source to where it enters its target.
     pub points: Vec<(i32, i32)>,
     pub badge: Option<Rect>,
-    /// A return path: it travels right to left and is drawn with direction markers.
-    pub feedback: bool,
+    pub travel: EdgeTravel,
 }
 
 #[derive(Debug, Clone)]
-pub struct GroupRegion {
-    pub branch: String,
+pub struct GroupRegion<G> {
+    pub branch: G,
     /// One band per column the group spans, left to right. Their union is the region.
     pub bands: Vec<Rect>,
 }
 
-impl GroupRegion {
+impl<G> GroupRegion<G> {
     /// The region outline as a closed rectilinear path: along the tops left to right, then back
     /// along the bottoms.
     pub fn outline(&self) -> String {
@@ -138,19 +173,45 @@ impl GroupRegion {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Layout {
-    pub items: BTreeMap<String, Rect>,
-    pub edges: Vec<RoutedEdge>,
-    pub groups: Vec<GroupRegion>,
+/// The geometry of one graph: where every item sits, how every edge is routed, and the region
+/// each branch group occupies.
+///
+/// `I` names items, `E` names edges and `G` names branch groups. Routes are keyed by edge
+/// identity rather than by their endpoints, so parallel relations between one pair of items each
+/// keep their own route.
+#[derive(Debug, Clone)]
+pub struct Layout<I, E, G> {
+    pub items: BTreeMap<I, Rect>,
+    pub edges: BTreeMap<E, RoutedEdge<I>>,
+    pub groups: Vec<GroupRegion<G>>,
     pub width: i32,
     pub height: i32,
 }
 
-impl Layout {
+impl<I, E, G> Default for Layout<I, E, G> {
+    fn default() -> Self {
+        Self {
+            items: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            groups: Vec::new(),
+            width: 0,
+            height: 0,
+        }
+    }
+}
+
+impl<I, E, G> Layout<I, E, G>
+where
+    I: Ord + Clone,
+    E: Ord + Clone,
+    G: Ord + Clone,
+{
     /// Arrange items and route edges. The result is a pure function of the input, so an
     /// unchanged topology always produces identical geometry.
-    pub fn build(items: &[LayoutItem], edges: &[LayoutEdge]) -> Self {
+    ///
+    /// Edge identities are unique within one graph. An edge whose endpoint is not one of the
+    /// items is not drawn.
+    pub fn build(items: &[LayoutItem<I, G>], edges: &[LayoutEdge<I, E>]) -> Self {
         Builder::new(items, edges).run()
     }
 }
@@ -158,22 +219,45 @@ impl Layout {
 /// A row in a column: either a real item or the reserved corridor an edge occupies while
 /// passing through.
 #[derive(Debug, Clone)]
-struct Slot {
+struct Slot<I, G> {
     item: Option<usize>,
     column: usize,
     width: i32,
     height: i32,
-    branch: Option<String>,
+    branch: Option<G>,
     /// Sort key that keeps ordering stable and reproducible across renders.
-    key: String,
+    key: SlotKey<I>,
     order: usize,
     y: i32,
     weight: i64,
 }
 
+/// What a row is, in an order that does not depend on how the graph was listed: an item by its
+/// identity, a corridor by the edge passing through it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SlotKey<I> {
+    /// The item itself, or the item a passing edge leaves.
+    anchor: I,
+    /// Present on a corridor: where the passing edge goes, and which edge it is.
+    corridor: Option<CorridorKey<I>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CorridorKey<I> {
+    target: I,
+    edge: usize,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Segment {
     edge: usize,
+    from: usize,
+    to: usize,
+}
+
+/// An edge's two items, as indices into the item list.
+#[derive(Debug, Clone, Copy)]
+struct EdgeEnds {
     from: usize,
     to: usize,
 }
@@ -188,76 +272,128 @@ struct LaneKey {
 /// Where a row sorts within its column. Branch members sort together on their group's median
 /// weight first, and the row key breaks ties so ordering is reproducible across renders.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct ColumnSortKey {
+struct ColumnSortKey<'a, I, G> {
     group_weight: i64,
-    group_name: String,
+    group: Option<&'a G>,
     weight: i64,
-    key: String,
+    key: &'a SlotKey<I>,
 }
 
 /// A comparable position for an edge's far endpoint, ordered by column, then by the row within
-/// that column, with the item id breaking ties.
+/// that column, with the item identity breaking ties.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct FarPosition {
+struct FarPosition<'a, I> {
     column: usize,
     order: usize,
-    id: String,
+    id: &'a I,
 }
 
-struct Builder<'a> {
-    items: &'a [LayoutItem],
-    edges: Vec<&'a LayoutEdge>,
-    index_by_id: BTreeMap<&'a str, usize>,
-    slots: Vec<Slot>,
+/// A row joined to another by one segment of an edge.
+#[derive(Debug, Clone, Copy)]
+struct Neighbour {
+    slot: usize,
+    edge: usize,
+}
+
+/// For every row, the rows that position it: those feeding it and those it feeds.
+struct Neighbours {
+    predecessors: Vec<Vec<Neighbour>>,
+    successors: Vec<Vec<Neighbour>>,
+}
+
+/// Which edges place items and which of those close a cycle.
+struct EdgePlan {
+    /// Edges that advance the flow, acyclic, so the items they join can be layered.
+    forward: Vec<usize>,
+    /// Edges that travel back against a cycle.
+    returns: BTreeSet<usize>,
+}
+
+struct Builder<'a, I, E, G> {
+    items: &'a [LayoutItem<I, G>],
+    edges: Vec<&'a LayoutEdge<I, E>>,
+    /// Each edge's source and target.
+    ends: Vec<EdgeEnds>,
+    /// Whether a record or state edge touches the item, which is what places it in the flow.
+    anchored: Vec<bool>,
+    /// Each edge's items in drawing order: the one it leaves on the left, then the one it enters
+    /// on the right. A backward edge is drawn from its target to its source.
+    drawn: Vec<EdgeEnds>,
+    travel: Vec<EdgeTravel>,
+    slots: Vec<Slot<I, G>>,
     columns: Vec<Vec<usize>>,
     segments: Vec<Segment>,
-    /// Edges that travel backwards, drawn as marked return paths.
-    feedback: Vec<usize>,
     item_slot: Vec<usize>,
+    /// The column each branch group starts in, which is where its region carries its header.
+    group_first_column: BTreeMap<G, usize>,
     column_x: Vec<i32>,
     column_width: Vec<i32>,
     gutter_x: Vec<i32>,
 }
 
-impl<'a> Builder<'a> {
-    fn new(items: &'a [LayoutItem], edges: &'a [LayoutEdge]) -> Self {
+impl<'a, I, E, G> Builder<'a, I, E, G>
+where
+    I: Ord + Clone,
+    E: Ord + Clone,
+    G: Ord + Clone,
+{
+    fn new(items: &'a [LayoutItem<I, G>], edges: &'a [LayoutEdge<I, E>]) -> Self {
         let index_by_id = items
             .iter()
             .enumerate()
-            .map(|(index, item)| (item.id.as_str(), index))
+            .map(|(index, item)| (&item.id, index))
             .collect::<BTreeMap<_, _>>();
-        let edges = edges
-            .iter()
-            .filter(|edge| {
-                index_by_id.contains_key(edge.source.as_str())
-                    && index_by_id.contains_key(edge.target.as_str())
-            })
-            .collect::<Vec<_>>();
+        let mut kept = Vec::with_capacity(edges.len());
+        let mut ends = Vec::with_capacity(edges.len());
+        for edge in edges {
+            let (Some(source), Some(target)) = (
+                index_by_id.get(&edge.source).copied(),
+                index_by_id.get(&edge.target).copied(),
+            ) else {
+                continue;
+            };
+            kept.push(edge);
+            ends.push(EdgeEnds {
+                from: source,
+                to: target,
+            });
+        }
+        let mut anchored = vec![false; items.len()];
+        for (edge, ends) in kept.iter().zip(&ends) {
+            if edge.kind.anchors() {
+                anchored[ends.from] = true;
+                anchored[ends.to] = true;
+            }
+        }
         Self {
             items,
-            edges,
-            index_by_id,
+            drawn: ends.clone(),
+            travel: vec![EdgeTravel::Forward; kept.len()],
+            edges: kept,
+            ends,
+            anchored,
             slots: Vec::new(),
             columns: Vec::new(),
             segments: Vec::new(),
-            feedback: Vec::new(),
-            item_slot: vec![usize::MAX; items.len()],
+            item_slot: Vec::new(),
+            group_first_column: BTreeMap::new(),
             column_x: Vec::new(),
             column_width: Vec::new(),
             gutter_x: Vec::new(),
         }
     }
 
-    fn run(mut self) -> Layout {
+    fn run(mut self) -> Layout<I, E, G> {
         if self.items.is_empty() {
             return Layout::default();
         }
-        let forward = self.forward_edges();
-        let depths = self.depths(&forward);
+        let plan = self.plan_edges();
+        let depths = self.depths(&plan.forward);
         self.build_columns(&depths);
-        self.build_segments(&forward);
+        self.orient_edges(&plan.returns);
+        self.build_segments();
         self.order_columns();
-        let ports = self.assign_ports(&forward);
+        let ports = self.assign_ports();
         self.assign_rows(&ports);
         self.assign_columns_x();
         let edges = self.route(&ports);
@@ -265,14 +401,23 @@ impl<'a> Builder<'a> {
         self.finish(edges, groups)
     }
 
-    /// Edge indices that advance the flow, with the back edges of a depth-first walk removed so
+    /// Whether an edge takes part in deciding columns. A dependency between two items the flow
+    /// already places only has to be drawn, so it cannot push the flow out of reading order.
+    fn places_columns(&self, edge: usize) -> bool {
+        let ends = self.ends[edge];
+        self.edges[edge].kind.anchors() || !self.anchored[ends.from] || !self.anchored[ends.to]
+    }
+
+    /// Edge indices that advance the flow, with the back edges of a depth-first walk set aside so
     /// that what remains is acyclic and can be layered.
-    fn forward_edges(&mut self) -> Vec<usize> {
+    fn plan_edges(&self) -> EdgePlan {
+        let placing = (0..self.edges.len())
+            .filter(|edge| self.places_columns(*edge))
+            .collect::<Vec<_>>();
         let mut adjacency = vec![Vec::new(); self.items.len()];
-        for (index, edge) in self.edges.iter().enumerate() {
-            let source = self.index_by_id[edge.source.as_str()];
-            let target = self.index_by_id[edge.target.as_str()];
-            adjacency[source].push((target, index));
+        for edge in &placing {
+            let ends = self.ends[*edge];
+            adjacency[ends.from].push((ends.to, *edge));
         }
         for list in &mut adjacency {
             list.sort_by(|left, right| {
@@ -329,38 +474,54 @@ impl<'a> Builder<'a> {
             }
         }
 
-        self.feedback = (0..self.edges.len())
-            .filter(|index| back.contains(index))
+        let forward = placing
+            .into_iter()
+            .filter(|edge| !back.contains(edge))
             .collect();
-        (0..self.edges.len())
-            .filter(|index| !back.contains(index))
-            .collect()
+        EdgePlan {
+            forward,
+            returns: back,
+        }
     }
 
     /// Longest-path depth over the acyclic remainder, so every item sits to the right of
-    /// everything that feeds it.
+    /// everything that feeds it. An item only a dependency places then moves as far right as the
+    /// items requiring it allow, so it stands beside them rather than at the start of the graph.
     fn depths(&self, forward: &[usize]) -> Vec<usize> {
-        let mut adjacency = vec![Vec::new(); self.items.len()];
+        let mut successors = vec![Vec::new(); self.items.len()];
         let mut indegree = vec![0_usize; self.items.len()];
         for index in forward {
-            let edge = self.edges[*index];
-            let source = self.index_by_id[edge.source.as_str()];
-            let target = self.index_by_id[edge.target.as_str()];
-            adjacency[source].push(target);
-            indegree[target] += 1;
+            let ends = self.ends[*index];
+            successors[ends.from].push(ends.to);
+            indegree[ends.to] += 1;
         }
         let mut depths = vec![0_usize; self.items.len()];
         let mut queue = (0..self.items.len())
             .filter(|index| indegree[*index] == 0)
             .collect::<VecDeque<_>>();
+        let mut topological = Vec::with_capacity(self.items.len());
         while let Some(node) = queue.pop_front() {
-            for target in adjacency[node].clone() {
+            topological.push(node);
+            for target in successors[node].clone() {
                 depths[target] = depths[target].max(depths[node] + 1);
                 indegree[target] -= 1;
                 if indegree[target] == 0 {
                     queue.push_back(target);
                 }
             }
+        }
+
+        for node in topological.into_iter().rev() {
+            if self.anchored[node] {
+                continue;
+            }
+            let Some(earliest) = successors[node].iter().map(|target| depths[*target]).min() else {
+                continue;
+            };
+            let latest = earliest
+                .checked_sub(1)
+                .verified("a successor sits at least one column right of the item feeding it");
+            depths[node] = depths[node].max(latest);
         }
         depths
     }
@@ -369,6 +530,7 @@ impl<'a> Builder<'a> {
     /// reads as the port between the nodes on either side of it.
     fn build_columns(&mut self, depths: &[usize]) {
         let max_depth = depths.iter().copied().max().unwrap_or(0);
+        let mut item_slot = vec![None; self.items.len()];
         let mut column = 0;
         for depth in 0..=max_depth {
             for relay in [false, true] {
@@ -388,27 +550,73 @@ impl<'a> Builder<'a> {
                         width: self.items[item].width,
                         height: self.items[item].height,
                         branch: self.items[item].branch.clone(),
-                        key: self.items[item].id.clone(),
+                        key: SlotKey {
+                            anchor: self.items[item].id.clone(),
+                            corridor: None,
+                        },
                         order: rows.len(),
                         y: 0,
                         weight: 0,
                     });
-                    self.item_slot[item] = slot;
+                    item_slot[item] = Some(slot);
                     rows.push(slot);
+                    if let Some(branch) = &self.items[item].branch {
+                        self.group_first_column
+                            .entry(branch.clone())
+                            .or_insert(column);
+                    }
                 }
                 self.columns.push(rows);
                 column += 1;
             }
         }
+        self.item_slot = item_slot
+            .into_iter()
+            .map(|slot| slot.assured("every item has a depth, so every item is given a row"))
+            .collect();
     }
 
-    /// Break every forward edge into adjacent-column segments, reserving a row in each column an
-    /// edge passes through so nothing else is placed in its way.
-    fn build_segments(&mut self, forward: &[usize]) {
-        for index in forward {
-            let edge = self.edges[*index];
-            let source = self.item_slot[self.index_by_id[edge.source.as_str()]];
-            let target = self.item_slot[self.index_by_id[edge.target.as_str()]];
+    fn column_of_item(&self, item: usize) -> usize {
+        self.slots[self.item_slot[item]].column
+    }
+
+    /// Decide how every edge travels now that columns are known. An edge the depth-first walk
+    /// set aside closes a cycle, and so does a dependency between two items in one column; the
+    /// rest cross the gutters between their columns, backwards when a dependency points against
+    /// the reading order.
+    fn orient_edges(&mut self, returns: &BTreeSet<usize>) {
+        for edge in 0..self.edges.len() {
+            let ends = self.ends[edge];
+            if returns.contains(&edge) {
+                self.travel[edge] = EdgeTravel::Return;
+                continue;
+            }
+            let from_column = self.column_of_item(ends.from);
+            let to_column = self.column_of_item(ends.to);
+            if from_column < to_column {
+                self.travel[edge] = EdgeTravel::Forward;
+            } else if to_column < from_column {
+                self.travel[edge] = EdgeTravel::Backward;
+                self.drawn[edge] = EdgeEnds {
+                    from: ends.to,
+                    to: ends.from,
+                };
+            } else {
+                self.travel[edge] = EdgeTravel::Return;
+            }
+        }
+    }
+
+    /// Break every edge that crosses gutters into adjacent-column segments, reserving a row in
+    /// each column an edge passes through so nothing else is placed in its way.
+    fn build_segments(&mut self) {
+        for index in 0..self.edges.len() {
+            if self.travel[index] == EdgeTravel::Return {
+                continue;
+            }
+            let drawn = self.drawn[index];
+            let source = self.item_slot[drawn.from];
+            let target = self.item_slot[drawn.to];
             let from_column = self.slots[source].column;
             let to_column = self.slots[target].column;
             let mut previous = source;
@@ -420,36 +628,73 @@ impl<'a> Builder<'a> {
                     width: 0,
                     height: 0,
                     branch: None,
-                    key: format!("{}\u{1}{}\u{1}{index}", edge.source, edge.target),
+                    key: SlotKey {
+                        anchor: self.items[drawn.from].id.clone(),
+                        corridor: Some(CorridorKey {
+                            target: self.items[drawn.to].id.clone(),
+                            edge: index,
+                        }),
+                    },
                     order: self.columns[column].len(),
                     y: 0,
                     weight: 0,
                 });
                 self.columns[column].push(slot);
                 self.segments.push(Segment {
-                    edge: *index,
+                    edge: index,
                     from: previous,
                     to: slot,
                 });
                 previous = slot;
             }
             self.segments.push(Segment {
-                edge: *index,
+                edge: index,
                 from: previous,
                 to: target,
             });
         }
     }
 
+    /// Whether a segment of `edge` may pull the row `slot` towards its other end. Items the flow
+    /// places answer only to record and state edges, so a dependency never bends the flow.
+    fn pulls(&self, slot: usize, edge: usize) -> bool {
+        let anchored = match self.slots[slot].item {
+            Some(item) => self.anchored[item],
+            None => false,
+        };
+        !anchored || self.edges[edge].kind.anchors()
+    }
+
+    /// The rows each row's position is derived from, before and after it.
+    fn neighbours(&self) -> Neighbours {
+        let mut neighbours = Neighbours {
+            predecessors: vec![Vec::new(); self.slots.len()],
+            successors: vec![Vec::new(); self.slots.len()],
+        };
+        for segment in &self.segments {
+            if self.pulls(segment.from, segment.edge) {
+                neighbours.successors[segment.from].push(Neighbour {
+                    slot: segment.to,
+                    edge: segment.edge,
+                });
+            }
+            if self.pulls(segment.to, segment.edge) {
+                neighbours.predecessors[segment.to].push(Neighbour {
+                    slot: segment.from,
+                    edge: segment.edge,
+                });
+            }
+        }
+        neighbours
+    }
+
     /// Order rows within each column to reduce crossings, keeping every branch group's members
     /// contiguous so a group's region can contain exactly its members.
     fn order_columns(&mut self) {
-        let mut predecessors = vec![Vec::new(); self.slots.len()];
-        let mut successors = vec![Vec::new(); self.slots.len()];
-        for segment in &self.segments {
-            successors[segment.from].push(segment.to);
-            predecessors[segment.to].push(segment.from);
-        }
+        let Neighbours {
+            predecessors,
+            successors,
+        } = self.neighbours();
 
         for column in &self.columns {
             for (position, slot) in column.iter().enumerate() {
@@ -478,7 +723,8 @@ impl<'a> Builder<'a> {
                             .iter()
                             .map(|neighbor| {
                                 i64::from(
-                                    i32::try_from(self.slots[*neighbor].order).unwrap_or(i32::MAX),
+                                    i32::try_from(self.slots[neighbor.slot].order)
+                                        .unwrap_or(i32::MAX),
                                 ) * 1000
                             })
                             .sum();
@@ -491,13 +737,15 @@ impl<'a> Builder<'a> {
     }
 
     fn sort_column(&mut self, column: usize) {
-        let medians = self.group_medians(column);
         let mut rows = self.columns[column].clone();
-        rows.sort_by(|left, right| {
-            let left_key = self.column_sort_key(*left, &medians);
-            let right_key = self.column_sort_key(*right, &medians);
-            left_key.cmp(&right_key)
-        });
+        {
+            let medians = self.group_medians(column);
+            rows.sort_by(|left, right| {
+                let left_key = self.column_sort_key(*left, &medians);
+                let right_key = self.column_sort_key(*right, &medians);
+                left_key.cmp(&right_key)
+            });
+        }
         for (position, slot) in rows.iter().enumerate() {
             self.slots[*slot].order = position;
         }
@@ -505,12 +753,12 @@ impl<'a> Builder<'a> {
     }
 
     /// Where each branch group sits in a column, so all of its members sort together.
-    fn group_medians(&self, column: usize) -> BTreeMap<String, i64> {
-        let mut weights: BTreeMap<String, Vec<i64>> = BTreeMap::new();
+    fn group_medians(&self, column: usize) -> BTreeMap<&G, i64> {
+        let mut weights: BTreeMap<&G, Vec<i64>> = BTreeMap::new();
         for slot in &self.columns[column] {
             if let Some(branch) = &self.slots[*slot].branch {
                 weights
-                    .entry(branch.clone())
+                    .entry(branch)
                     .or_default()
                     .push(self.slots[*slot].weight);
             }
@@ -524,43 +772,57 @@ impl<'a> Builder<'a> {
             .collect()
     }
 
-    fn column_sort_key(&self, slot: usize, medians: &BTreeMap<String, i64>) -> ColumnSortKey {
+    fn column_sort_key<'s>(
+        &'s self,
+        slot: usize,
+        medians: &BTreeMap<&G, i64>,
+    ) -> ColumnSortKey<'s, I, G> {
         let row = &self.slots[slot];
-        let (group_weight, group_name) = match &row.branch {
-            Some(branch) => (
-                medians.get(branch).copied().unwrap_or(row.weight),
-                branch.clone(),
-            ),
-            None => (row.weight, String::new()),
+        let group_weight = match &row.branch {
+            Some(branch) => medians.get(branch).copied().unwrap_or(row.weight),
+            None => row.weight,
         };
         ColumnSortKey {
             group_weight,
-            group_name,
+            group: row.branch.as_ref(),
             weight: row.weight,
-            key: row.key.clone(),
+            key: &row.key,
         }
     }
 
     /// Port offsets, measured from each item's vertical centre. The edge that continues a
     /// straight chain keeps the centre so the chain stays collinear.
-    fn assign_ports(&mut self, forward: &[usize]) -> Ports {
+    fn assign_ports(&mut self) -> Ports {
         let mut outgoing: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         let mut incoming: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-        for index in forward {
-            let edge = self.edges[*index];
-            let source = self.item_slot[self.index_by_id[edge.source.as_str()]];
-            let target = self.item_slot[self.index_by_id[edge.target.as_str()]];
-            outgoing.entry(source).or_default().push(*index);
-            incoming.entry(target).or_default().push(*index);
+        for index in 0..self.edges.len() {
+            if self.travel[index] == EdgeTravel::Return {
+                continue;
+            }
+            let drawn = self.drawn[index];
+            outgoing
+                .entry(self.item_slot[drawn.from])
+                .or_default()
+                .push(index);
+            incoming
+                .entry(self.item_slot[drawn.to])
+                .or_default()
+                .push(index);
         }
 
         let mut ports = Ports::default();
         for (slot, mut edges) in outgoing {
-            edges.sort_by_key(|index| self.far_position(*index, true));
+            edges.sort_by(|left, right| {
+                self.far_position(*left, true)
+                    .cmp(&self.far_position(*right, true))
+            });
             self.record_ports(&mut ports, slot, &edges, true);
         }
         for (slot, mut edges) in incoming {
-            edges.sort_by_key(|index| self.far_position(*index, false));
+            edges.sort_by(|left, right| {
+                self.far_position(*left, false)
+                    .cmp(&self.far_position(*right, false))
+            });
             self.record_ports(&mut ports, slot, &edges, false);
         }
         ports
@@ -609,32 +871,33 @@ impl<'a> Builder<'a> {
 
     /// A comparable position for an edge's far endpoint, used to order ports so edges leave and
     /// arrive without crossing each other at the item.
-    fn far_position(&self, edge: usize, outgoing: bool) -> FarPosition {
-        let edge = self.edges[edge];
-        let id = if outgoing { &edge.target } else { &edge.source };
-        let slot = self.item_slot[self.index_by_id[id.as_str()]];
+    fn far_position(&self, edge: usize, outgoing: bool) -> FarPosition<'_, I> {
+        let drawn = self.drawn[edge];
+        let item = if outgoing { drawn.to } else { drawn.from };
+        let slot = self.item_slot[item];
         FarPosition {
             column: self.slots[slot].column,
             order: self.slots[slot].order,
-            id: id.to_string(),
+            id: &self.items[item].id,
         }
     }
 
     /// Give every row a y, pulling each item towards the items it connects to so that a straight
     /// run of items lands on one horizontal axis.
     fn assign_rows(&mut self, ports: &Ports) {
-        let mut predecessors = vec![Vec::new(); self.slots.len()];
-        let mut successors = vec![Vec::new(); self.slots.len()];
-        for segment in &self.segments {
-            successors[segment.from].push((segment.to, segment.edge));
-            predecessors[segment.to].push((segment.from, segment.edge));
-        }
+        let Neighbours {
+            predecessors,
+            successors,
+        } = self.neighbours();
 
         for column in &self.columns.clone() {
-            let mut y = 0;
+            let mut previous = None::<usize>;
             for slot in column {
-                self.slots[*slot].y = y;
-                y += self.slots[*slot].height + ROW_GAP;
+                self.slots[*slot].y = match previous {
+                    Some(previous) => self.lowest_y_below(previous, *slot),
+                    None => 0,
+                };
+                previous = Some(*slot);
             }
         }
 
@@ -660,8 +923,8 @@ impl<'a> Builder<'a> {
                     }
                     let total: i32 = neighbors
                         .iter()
-                        .map(|(neighbor, edge)| {
-                            let anchor = self.port_y(*neighbor, *edge, downward, ports);
+                        .map(|neighbor| {
+                            let anchor = self.port_y(neighbor.slot, neighbor.edge, downward, ports);
                             anchor - self.slots[*slot].height / 2
                         })
                         .sum();
@@ -693,12 +956,47 @@ impl<'a> Builder<'a> {
     /// room between rows.
     fn place_column(&mut self, column: usize, desired: &[i32]) {
         let rows = self.columns[column].clone();
-        let mut y = i32::MIN;
+        let mut previous = None::<usize>;
         for (position, slot) in rows.iter().enumerate() {
             let wanted = desired[position];
-            let placed = if y == i32::MIN { wanted } else { wanted.max(y) };
+            let placed = match previous {
+                Some(previous) => wanted.max(self.lowest_y_below(previous, *slot)),
+                None => wanted,
+            };
             self.slots[*slot].y = placed;
-            y = placed + self.slots[*slot].height + ROW_GAP;
+            previous = Some(*slot);
+        }
+    }
+
+    /// The highest a row may sit directly below `upper` in the same column. Where a branch
+    /// group's region begins or ends between the two rows, the gap also holds the region's padding
+    /// and, in the group's first column, its header, so a region never reaches a row it does not
+    /// contain and two regions never meet.
+    fn lowest_y_below(&self, upper: usize, lower: usize) -> i32 {
+        let upper_row = &self.slots[upper];
+        let lower_row = &self.slots[lower];
+        let gap = if upper_row.branch == lower_row.branch {
+            ROW_GAP
+        } else {
+            let below_upper = match upper_row.branch {
+                Some(_) => GROUP_PADDING,
+                None => 0,
+            };
+            let above_lower = match &lower_row.branch {
+                Some(branch) => GROUP_PADDING + self.header_height(branch, lower_row.column),
+                None => 0,
+            };
+            ROW_GAP.max(below_upper + above_lower + GROUP_CLEARANCE)
+        };
+        upper_row.y + upper_row.height + gap
+    }
+
+    /// The header band a group's region carries in `column`: only its first column has one.
+    fn header_height(&self, branch: &G, column: usize) -> i32 {
+        if self.group_first_column.get(branch) == Some(&column) {
+            GROUP_HEADER_HEIGHT
+        } else {
+            0
         }
     }
 
@@ -716,12 +1014,18 @@ impl<'a> Builder<'a> {
                 .min()
                 .unwrap_or(0);
             let shift = offset - top;
-            let mut bottom = i32::MIN;
+            let mut bottom = None::<i32>;
             for slot in &component {
                 self.slots[*slot].y += shift;
-                bottom = bottom.max(self.slots[*slot].y + self.slots[*slot].height);
+                let slot_bottom = self.slots[*slot].y + self.slots[*slot].height;
+                bottom = Some(match bottom {
+                    Some(bottom) => bottom.max(slot_bottom),
+                    None => slot_bottom,
+                });
             }
-            offset = bottom + BAND_GAP;
+            if let Some(bottom) = bottom {
+                offset = bottom + BAND_GAP;
+            }
         }
     }
 
@@ -748,22 +1052,22 @@ impl<'a> Builder<'a> {
                 parent[left] = right;
             }
         }
-        for index in &self.feedback {
-            let edge = self.edges[*index];
-            let source = self.item_slot[self.index_by_id[edge.source.as_str()]];
-            let target = self.item_slot[self.index_by_id[edge.target.as_str()]];
-            let left = find(&mut parent, source);
-            let right = find(&mut parent, target);
+        for index in 0..self.edges.len() {
+            if self.travel[index] != EdgeTravel::Return {
+                continue;
+            }
+            let ends = self.ends[index];
+            let left = find(&mut parent, self.item_slot[ends.from]);
+            let right = find(&mut parent, self.item_slot[ends.to]);
             if left != right {
                 parent[left] = right;
             }
         }
 
-        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut groups: BTreeMap<&SlotKey<I>, Vec<usize>> = BTreeMap::new();
         for slot in 0..self.slots.len() {
             let root = find(&mut parent, slot);
-            let name = self.slots[root].key.clone();
-            groups.entry(name).or_default().push(slot);
+            groups.entry(&self.slots[root].key).or_default().push(slot);
         }
         groups.into_values().collect()
     }
@@ -819,14 +1123,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn route(&self, ports: &Ports) -> Vec<RoutedEdge> {
+    fn route(&self, ports: &Ports) -> BTreeMap<E, RoutedEdge<I>> {
         let lanes = self.assign_lanes(ports);
         let mut by_edge: BTreeMap<usize, Vec<Segment>> = BTreeMap::new();
         for segment in &self.segments {
             by_edge.entry(segment.edge).or_default().push(*segment);
         }
 
-        let mut routed = Vec::new();
+        let mut routed = BTreeMap::new();
         for (index, segments) in by_edge {
             let mut segments = segments;
             segments.sort_by_key(|segment| self.slots[segment.from].column);
@@ -850,28 +1154,36 @@ impl<'a> Builder<'a> {
                 }
                 points.push(end);
             }
+            let mut points = simplify(points);
+            // Points run from the edge's source to its target, so a backward edge is read off its
+            // drawn segments in reverse.
+            if self.travel[index] == EdgeTravel::Backward {
+                points.reverse();
+            }
             let edge = self.edges[index];
-            routed.push(RoutedEdge {
-                source: edge.source.clone(),
-                target: edge.target.clone(),
-                kind: edge.kind,
-                badge: edge
-                    .badge
-                    .then(|| self.badge_rect(segments.last().copied(), ports))
-                    .flatten(),
-                points: simplify(points),
-                feedback: false,
-            });
+            let badge = if edge.badge {
+                self.badge_rect(segments.last().copied(), ports)
+            } else {
+                None
+            };
+            routed.insert(
+                edge.id.clone(),
+                RoutedEdge {
+                    source: edge.source.clone(),
+                    target: edge.target.clone(),
+                    kind: edge.kind,
+                    points,
+                    badge,
+                    travel: self.travel[index],
+                },
+            );
         }
 
-        for index in &self.feedback {
-            routed.push(self.route_feedback(*index));
+        for index in 0..self.edges.len() {
+            if self.travel[index] == EdgeTravel::Return {
+                routed.insert(self.edges[index].id.clone(), self.route_return(index));
+            }
         }
-        routed.sort_by(|left, right| {
-            left.source
-                .cmp(&right.source)
-                .then_with(|| left.target.cmp(&right.target))
-        });
         routed
     }
 
@@ -1003,17 +1315,13 @@ impl<'a> Builder<'a> {
 
     /// Return paths run above the items they span and are marked so right-to-left travel is
     /// never mistaken for forward flow.
-    fn route_feedback(&self, index: usize) -> RoutedEdge {
+    fn route_return(&self, index: usize) -> RoutedEdge<I> {
         let edge = self.edges[index];
-        let source = self.item_slot[self.index_by_id[edge.source.as_str()]];
-        let target = self.item_slot[self.index_by_id[edge.target.as_str()]];
-        let source_rect = self.slot_rect(source);
-        let target_rect = self.slot_rect(target);
-        let top = self
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(slot, _)| self.slot_rect(slot).y)
+        let ends = self.ends[index];
+        let source_rect = self.slot_rect(self.item_slot[ends.from]);
+        let target_rect = self.slot_rect(self.item_slot[ends.to]);
+        let top = (0..self.slots.len())
+            .map(|slot| self.slot_rect(slot).y)
             .min()
             .unwrap_or(0);
         let feedback_lane = i32::try_from(index % 3).assured("a remainder below three fits i32");
@@ -1033,22 +1341,22 @@ impl<'a> Builder<'a> {
                 end,
             ],
             badge: None,
-            feedback: true,
+            travel: EdgeTravel::Return,
         }
     }
 
     /// A band per column a branch group spans. Members are contiguous within every column, so
     /// each band holds its members and nothing else.
-    fn group_regions(&self) -> Vec<GroupRegion> {
+    fn group_regions(&self) -> Vec<GroupRegion<G>> {
         /// The vertical extent one branch group covers in one column.
         struct BandExtent {
             top: i32,
             bottom: i32,
         }
 
-        let mut by_branch: BTreeMap<String, BTreeMap<usize, BandExtent>> = BTreeMap::new();
+        let mut by_branch: BTreeMap<&G, BTreeMap<usize, BandExtent>> = BTreeMap::new();
         for slot in 0..self.slots.len() {
-            let Some(branch) = self.slots[slot].branch.clone() else {
+            let Some(branch) = &self.slots[slot].branch else {
                 continue;
             };
             if self.slots[slot].item.is_none() {
@@ -1088,86 +1396,81 @@ impl<'a> Builder<'a> {
                         }
                     })
                     .collect();
-                GroupRegion { branch, bands }
+                GroupRegion {
+                    branch: branch.clone(),
+                    bands,
+                }
             })
             .collect()
     }
 
-    fn finish(self, edges: Vec<RoutedEdge>, groups: Vec<GroupRegion>) -> Layout {
+    fn finish(
+        self,
+        edges: BTreeMap<E, RoutedEdge<I>>,
+        groups: Vec<GroupRegion<G>>,
+    ) -> Layout<I, E, G> {
         let mut items = BTreeMap::new();
-        let mut min_x = i32::MAX;
-        let mut min_y = i32::MAX;
+        let mut min_x = None::<i32>;
+        let mut min_y = None::<i32>;
+        let mut include = |x: i32, y: i32| {
+            min_x = Some(match min_x {
+                Some(min) => min.min(x),
+                None => x,
+            });
+            min_y = Some(match min_y {
+                Some(min) => min.min(y),
+                None => y,
+            });
+        };
         for slot in 0..self.slots.len() {
             if let Some(item) = self.slots[slot].item {
                 let rect = self.slot_rect(slot);
-                min_x = min_x.min(rect.x);
-                min_y = min_y.min(rect.y);
+                include(rect.x, rect.y);
                 items.insert(self.items[item].id.clone(), rect);
             }
         }
         for group in &groups {
             for band in &group.bands {
-                min_x = min_x.min(band.x);
-                min_y = min_y.min(band.y);
+                include(band.x, band.y);
             }
         }
-        for edge in &edges {
+        for edge in edges.values() {
             for point in &edge.points {
-                min_x = min_x.min(point.0);
-                min_y = min_y.min(point.1);
+                include(point.0, point.1);
             }
         }
-        if min_x == i32::MAX {
-            min_x = 0;
-        }
-        if min_y == i32::MAX {
-            min_y = 0;
-        }
-        let shift_x = CANVAS_PADDING - min_x;
-        let shift_y = CANVAS_PADDING - min_y;
+        let shift_x = CANVAS_PADDING - min_x.unwrap_or(0);
+        let shift_y = CANVAS_PADDING - min_y.unwrap_or(0);
+        let shift = |rect: Rect| Rect {
+            x: rect.x + shift_x,
+            y: rect.y + shift_y,
+            ..rect
+        };
 
         let mut layout = Layout {
             items: items
                 .into_iter()
-                .map(|(id, rect)| {
-                    (
-                        id,
-                        Rect {
-                            x: rect.x + shift_x,
-                            y: rect.y + shift_y,
-                            ..rect
-                        },
-                    )
-                })
+                .map(|(id, rect)| (id, shift(rect)))
                 .collect(),
             edges: edges
                 .into_iter()
-                .map(|edge| RoutedEdge {
-                    points: edge
-                        .points
-                        .into_iter()
-                        .map(|(x, y)| (x + shift_x, y + shift_y))
-                        .collect(),
-                    badge: edge.badge.map(|badge| Rect {
-                        x: badge.x + shift_x,
-                        y: badge.y + shift_y,
-                        ..badge
-                    }),
-                    ..edge
+                .map(|(id, edge)| {
+                    let routed = RoutedEdge {
+                        points: edge
+                            .points
+                            .into_iter()
+                            .map(|(x, y)| (x + shift_x, y + shift_y))
+                            .collect(),
+                        badge: edge.badge.map(shift),
+                        ..edge
+                    };
+                    (id, routed)
                 })
                 .collect(),
             groups: groups
                 .into_iter()
                 .map(|group| GroupRegion {
-                    bands: group
-                        .bands
-                        .into_iter()
-                        .map(|band| Rect {
-                            x: band.x + shift_x,
-                            y: band.y + shift_y,
-                            ..band
-                        })
-                        .collect(),
+                    bands: group.bands.into_iter().map(shift).collect(),
                     ..group
                 })
                 .collect(),
@@ -1187,7 +1490,7 @@ impl<'a> Builder<'a> {
                 height = height.max(band.bottom());
             }
         }
-        for edge in &layout.edges {
+        for edge in layout.edges.values() {
             for point in &edge.points {
                 width = width.max(point.0);
                 height = height.max(point.1);
@@ -1240,331 +1543,4 @@ fn simplify(points: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn card(id: &str) -> LayoutItem {
-        LayoutItem {
-            id: id.to_string(),
-            width: 176,
-            height: 64,
-            relay: false,
-            branch: None,
-        }
-    }
-
-    fn pill(id: &str) -> LayoutItem {
-        LayoutItem {
-            id: id.to_string(),
-            width: 96,
-            height: 26,
-            relay: true,
-            branch: None,
-        }
-    }
-
-    fn flow(source: &str, target: &str) -> LayoutEdge {
-        LayoutEdge {
-            source: source.to_string(),
-            target: target.to_string(),
-            kind: LayoutEdgeKind::Flow,
-            badge: true,
-        }
-    }
-
-    fn quickstart() -> (Vec<LayoutItem>, Vec<LayoutEdge>) {
-        let items = vec![
-            card("client:kafka_local"),
-            card("ingestor:kafka_orders"),
-            pill("relay:orders"),
-            card("junction:route_orders"),
-            card("emitter:redis_orders"),
-            pill("relay:high_value_orders"),
-            pill("relay:routine_orders"),
-            card("emitter:redis_high_value"),
-            card("client_sink:redis_local"),
-        ];
-        let edges = vec![
-            flow("client:kafka_local", "ingestor:kafka_orders"),
-            flow("ingestor:kafka_orders", "relay:orders"),
-            flow("relay:orders", "junction:route_orders"),
-            flow("relay:orders", "emitter:redis_orders"),
-            flow("junction:route_orders", "relay:high_value_orders"),
-            flow("junction:route_orders", "relay:routine_orders"),
-            flow("relay:high_value_orders", "emitter:redis_high_value"),
-            flow("emitter:redis_high_value", "client_sink:redis_local"),
-            flow("emitter:redis_orders", "client_sink:redis_local"),
-        ];
-        (items, edges)
-    }
-
-    #[test]
-    fn every_item_sits_right_of_what_feeds_it() {
-        let (items, edges) = quickstart();
-        let layout = Layout::build(&items, &edges);
-        for edge in &edges {
-            let source = layout.items[&edge.source];
-            let target = layout.items[&edge.target];
-            assert!(
-                source.right() <= target.x,
-                "{} should sit left of {}",
-                edge.source,
-                edge.target
-            );
-        }
-    }
-
-    #[test]
-    fn relays_never_share_a_column_with_processing_nodes() {
-        let (items, edges) = quickstart();
-        let layout = Layout::build(&items, &edges);
-        for item in &items {
-            for other in &items {
-                if item.relay == other.relay {
-                    continue;
-                }
-                let left = layout.items[&item.id];
-                let right = layout.items[&other.id];
-                assert!(
-                    left.right() <= right.x || right.right() <= left.x,
-                    "{} and {} must not share a column",
-                    item.id,
-                    other.id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn no_edge_crosses_an_item() {
-        let (items, edges) = quickstart();
-        let layout = Layout::build(&items, &edges);
-        for edge in &layout.edges {
-            for window in edge.points.windows(2) {
-                let segment = segment_rect(window[0], window[1]);
-                for (id, rect) in &layout.items {
-                    if *id == edge.source || *id == edge.target {
-                        continue;
-                    }
-                    assert!(
-                        !segment.intersects(rect),
-                        "edge {} -> {} crosses {id}",
-                        edge.source,
-                        edge.target
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn no_badge_covers_an_item_or_another_badge() {
-        let (items, edges) = quickstart();
-        let layout = Layout::build(&items, &edges);
-        let badges = layout
-            .edges
-            .iter()
-            .filter_map(|edge| edge.badge)
-            .collect::<Vec<_>>();
-        for (index, badge) in badges.iter().enumerate() {
-            for rect in layout.items.values() {
-                assert!(!badge.intersects(rect), "badge {badge:?} covers an item");
-            }
-            for other in badges.iter().skip(index + 1) {
-                assert!(
-                    !badge.intersects(other),
-                    "badges {badge:?} and {other:?} overlap"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn a_straight_pipeline_is_drawn_as_one_line() {
-        let items = vec![
-            card("client:c"),
-            card("ingestor:i"),
-            pill("relay:r"),
-            card("emitter:e"),
-        ];
-        let edges = vec![
-            flow("client:c", "ingestor:i"),
-            flow("ingestor:i", "relay:r"),
-            flow("relay:r", "emitter:e"),
-        ];
-        let layout = Layout::build(&items, &edges);
-        let centres = items
-            .iter()
-            .map(|item| layout.items[&item.id].center_y())
-            .collect::<Vec<_>>();
-        assert!(
-            centres.windows(2).all(|pair| pair[0] == pair[1]),
-            "an unbranched pipeline must be collinear, got {centres:?}"
-        );
-        for edge in &layout.edges {
-            assert_eq!(
-                edge.points.len(),
-                2,
-                "chain edge {} -> {} should not bend",
-                edge.source,
-                edge.target
-            );
-        }
-    }
-
-    #[test]
-    fn fan_out_leaves_through_distinct_ports() {
-        let (items, edges) = quickstart();
-        let layout = Layout::build(&items, &edges);
-        let departures = layout
-            .edges
-            .iter()
-            .filter(|edge| edge.source == "relay:orders")
-            .map(|edge| edge.points[0].1)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(departures.len(), 2, "fan-out must not share one port");
-        let mut heights = departures.into_iter().collect::<Vec<_>>();
-        heights.sort_unstable();
-        assert!(heights[1] - heights[0] >= PORT_PITCH);
-    }
-
-    #[test]
-    fn a_state_dependency_does_not_push_the_record_flow_off_axis() {
-        let items = vec![
-            pill("relay:in"),
-            pill("relay:state"),
-            card("junction:enrich"),
-            pill("relay:out"),
-        ];
-        let edges = vec![
-            flow("relay:in", "junction:enrich"),
-            LayoutEdge {
-                source: "relay:state".to_string(),
-                target: "junction:enrich".to_string(),
-                kind: LayoutEdgeKind::State,
-                badge: false,
-            },
-            flow("junction:enrich", "relay:out"),
-        ];
-        let layout = Layout::build(&items, &edges);
-        let arrival = layout
-            .edges
-            .iter()
-            .find(|edge| edge.source == "relay:in")
-            .expect("the record edge must be routed");
-        let junction = layout.items["junction:enrich"];
-        assert_eq!(
-            arrival.points.last().expect("edge must arrive").1,
-            junction.center_y(),
-            "the record-carrying edge keeps the centre port"
-        );
-        assert_eq!(
-            layout.items["relay:in"].center_y(),
-            junction.center_y(),
-            "a state dependency must not bend the pipeline"
-        );
-    }
-
-    #[test]
-    fn identical_topology_produces_identical_geometry() {
-        let (items, edges) = quickstart();
-        let first = Layout::build(&items, &edges);
-        let second = Layout::build(&items, &edges);
-        assert_eq!(format!("{first:?}"), format!("{second:?}"));
-    }
-
-    #[test]
-    fn branch_group_bands_hold_members_and_nothing_else() {
-        let mut items = vec![
-            card("ingestor:source"),
-            card("emitter:sink"),
-            card("emitter:other"),
-        ];
-        let mut branched = pill("relay:branched");
-        branched.branch = Some("by_tenant".to_string());
-        let mut processor = card("junction:split");
-        processor.branch = Some("by_tenant".to_string());
-        items.push(branched);
-        items.push(processor);
-        let edges = vec![
-            flow("ingestor:source", "relay:branched"),
-            flow("relay:branched", "junction:split"),
-            flow("junction:split", "emitter:sink"),
-            flow("ingestor:source", "emitter:other"),
-        ];
-        let layout = Layout::build(&items, &edges);
-        let group = layout
-            .groups
-            .iter()
-            .find(|group| group.branch == "by_tenant")
-            .expect("branch group must be drawn");
-        for (id, rect) in &layout.items {
-            let member = id == "relay:branched" || id == "junction:split";
-            let inside = group.bands.iter().any(|band| band.intersects(rect));
-            assert_eq!(inside, member, "{id} containment must match membership");
-        }
-    }
-
-    #[test]
-    fn a_feedback_loop_is_drawn_as_a_marked_return_path() {
-        let items = vec![
-            card("ingestor:source"),
-            pill("relay:a"),
-            card("reingestor:loop"),
-        ];
-        let edges = vec![
-            flow("ingestor:source", "relay:a"),
-            flow("relay:a", "reingestor:loop"),
-            flow("reingestor:loop", "relay:a"),
-        ];
-        let layout = Layout::build(&items, &edges);
-        let returns = layout
-            .edges
-            .iter()
-            .filter(|edge| edge.feedback)
-            .collect::<Vec<_>>();
-        assert_eq!(returns.len(), 1, "exactly one edge should close the loop");
-        assert_eq!(returns[0].source, "reingestor:loop");
-        assert!(layout.items["relay:a"].x < layout.items["reingestor:loop"].x);
-    }
-
-    #[test]
-    fn disconnected_parts_are_stacked_without_overlapping() {
-        let items = vec![card("ingestor:a"), pill("relay:a"), pill("relay:lonely")];
-        let edges = vec![flow("ingestor:a", "relay:a")];
-        let layout = Layout::build(&items, &edges);
-        let lonely = layout.items["relay:lonely"];
-        for (id, rect) in &layout.items {
-            if id == "relay:lonely" {
-                continue;
-            }
-            assert!(!lonely.intersects(rect), "bands must not overlap {id}");
-        }
-    }
-
-    #[test]
-    fn an_isolated_item_still_lays_out() {
-        let items = vec![pill("relay:alone")];
-        let layout = Layout::build(&items, &[]);
-        assert_eq!(layout.items.len(), 1);
-        assert!(layout.width > 0 && layout.height > 0);
-    }
-
-    #[test]
-    fn an_empty_graph_has_no_geometry() {
-        let layout = Layout::build(&[], &[]);
-        assert!(layout.items.is_empty());
-        assert_eq!(layout.width, 0);
-    }
-
-    fn segment_rect(start: (i32, i32), end: (i32, i32)) -> Rect {
-        let x = start.0.min(end.0);
-        let y = start.1.min(end.1);
-        Rect {
-            x,
-            y,
-            width: (start.0 - end.0).abs().max(1),
-            height: (start.1 - end.1).abs().max(1),
-        }
-    }
-}
+mod tests;

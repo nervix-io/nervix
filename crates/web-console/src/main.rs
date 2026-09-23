@@ -23,8 +23,9 @@ use nervix_nspl::client_statement::{
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_web_console::graph::{
-    graph_layout_edge, graph_layout_item,
-    layout::{GroupRegion, Layout, Rect},
+    GraphEdgeId, GraphSearch, LiveGraphLayout, graph_layout_edge, graph_layout_item,
+    layout::{EdgeTravel, GroupRegion, Rect},
+    viewport::{Extent, GraphBounds, Viewport},
 };
 use prost::Message as ProstMessage;
 use url::Url;
@@ -264,15 +265,6 @@ const THEMES: [ThemeView; 4] = [
     },
 ];
 
-/// The zoom range the stage allows, shared by the buttons, the wheel and the fit control.
-const GRAPH_MIN_ZOOM: f64 = 0.25;
-const GRAPH_MAX_ZOOM: f64 = 3.0;
-/// One press of a zoom button.
-const GRAPH_ZOOM_STEP: f64 = 0.1;
-/// Fitting never enlarges: a small graph is shown at its natural size, centred.
-const GRAPH_FIT_MAX_ZOOM: f64 = 1.0;
-/// Clearance kept around the graph when framing it.
-const GRAPH_FIT_PADDING: f64 = 48.0;
 /// How long a snapshot stays fresh before the freshness pill reports a stall.
 const GRAPH_FRESHNESS_TIMEOUT: Duration = Duration::from_millis(2_500);
 /// How often the freshness pill re-evaluates the age of the last snapshot.
@@ -496,6 +488,7 @@ fn App() -> impl IntoView {
                         domain: request_domain,
                         execution_reference: command_execution_reference(),
                         expected_transaction_position,
+                        expected_preview: None,
                     },
                 )),
             };
@@ -573,6 +566,7 @@ fn App() -> impl IntoView {
                     domain,
                     execution_reference: command_execution_reference(),
                     expected_transaction_position: None,
+                    expected_preview: None,
                 },
             )),
         };
@@ -617,6 +611,7 @@ fn App() -> impl IntoView {
                     domain: tab.domain,
                     execution_reference: command_execution_reference(),
                     expected_transaction_position: None,
+                    expected_preview: None,
                 },
             )),
         };
@@ -2329,6 +2324,7 @@ fn request_resource_describe(
                 domain,
                 execution_reference: command_execution_reference(),
                 expected_transaction_position: None,
+                expected_preview: None,
             },
         )),
     };
@@ -2743,13 +2739,7 @@ fn SidebarIcon(kind: &'static str) -> impl IntoView {
 }
 
 /// The edge a click landed on, named the way the graph identifies it.
-struct GraphEdgeFocusRequest {
-    source: String,
-    target: String,
-    kind: DataflowEdgeKind,
-}
-
-fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<GraphEdgeFocusRequest> {
+fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<GraphEdgeId> {
     let pointer_hit = if let Some(window) = web_sys::window()
         && let Some(document) = window.document()
         && let Some(element) = document.element_from_point(
@@ -2772,7 +2762,7 @@ fn graph_edge_focus_request(event: &ev::MouseEvent) -> Option<GraphEdgeFocusRequ
     let source = hit.get_attribute("data-source")?;
     let target = hit.get_attribute("data-target")?;
     let kind = graph_edge_kind_from_label(hit.get_attribute("data-kind")?.as_str())?;
-    Some(GraphEdgeFocusRequest {
+    Some(GraphEdgeId {
         source,
         target,
         kind,
@@ -2821,7 +2811,7 @@ fn GraphPanel(
     let graph_hover = RwSignal::new(None::<GraphHover>);
     let fullscreen = RwSignal::new(false);
     let graph_search = RwSignal::new(String::new());
-    let graph_search_focus_key = RwSignal::new(None::<(GraphTopologyKey, String)>);
+    let graph_search_focus_key = RwSignal::new(None::<(GraphTopologyKey, GraphSearch)>);
     let graph_stage_ref = NodeRef::<leptos::html::Div>::new();
     let current_graph_state = RwSignal::new(None::<GraphView>);
     let topology_graph_state = RwSignal::new(None::<GraphView>);
@@ -2885,10 +2875,7 @@ fn GraphPanel(
             "the mounted graph branch retains its last topology until reactive unmount completes",
         )
     };
-    let active_graph_search = move || {
-        let query = graph_search.get().trim().to_ascii_lowercase();
-        (query.chars().count() >= 2).then_some(query)
-    };
+    let active_graph_search = move || GraphSearch::parse(&graph_search.get());
     let domain_lifecycle = move || {
         let selected_domain = active_domain.get().unwrap_or_default();
         let domain = domains
@@ -2915,40 +2902,33 @@ fn GraphPanel(
         let Some(stage) = graph_stage_ref.get() else {
             return false;
         };
-        let stage_width = f64::from(stage.client_width());
-        let stage_height = f64::from(stage.client_height());
-        if stage_width <= 1.0 || stage_height <= 1.0 {
+        let stage = Extent {
+            width: f64::from(stage.client_width()),
+            height: f64::from(stage.client_height()),
+        };
+        let canvas = Extent {
+            width: f64::from(graph.canvas_width()),
+            height: f64::from(graph.canvas_height()),
+        };
+        let Some(viewport) = Viewport::framing(stage, canvas, bounds, max_zoom) else {
             return false;
-        }
-        let available_width = (stage_width - GRAPH_FIT_PADDING * 2.0).max(stage_width * 0.4);
-        let available_height = (stage_height - GRAPH_FIT_PADDING * 2.0).max(stage_height * 0.4);
-        let zoom = (available_width / bounds.width())
-            .min(available_height / bounds.height())
-            .clamp(GRAPH_MIN_ZOOM, max_zoom);
-        let (center_x, center_y) = bounds.center();
-        let canvas_width = f64::from(graph.canvas_width());
-        let canvas_height = f64::from(graph.canvas_height());
-        let base_x = (stage_width - canvas_width) / 2.0;
-        let base_y = (stage_height - canvas_height) / 2.0;
-        let origin_x = canvas_width / 2.0;
-        let origin_y = canvas_height / 2.0;
-        graph_zoom.set(zoom);
-        graph_pan_x.set(stage_width / 2.0 - base_x - zoom * center_x - (1.0 - zoom) * origin_x);
-        graph_pan_y.set(stage_height / 2.0 - base_y - zoom * center_y - (1.0 - zoom) * origin_y);
+        };
+        graph_zoom.set(viewport.zoom);
+        graph_pan_x.set(viewport.pan_x);
+        graph_pan_y.set(viewport.pan_y);
         true
     };
     let fit_graph = move || {
         if let Some(graph) = visible_topology_graph() {
-            focus_graph_bounds(&graph, graph.canvas_bounds(), GRAPH_FIT_MAX_ZOOM);
+            focus_graph_bounds(&graph, graph.canvas_bounds(), Viewport::FIT_MAX_ZOOM);
         }
     };
-    let focus_graph_edge = move |request: GraphEdgeFocusRequest| {
+    let focus_graph_edge = move |request: GraphEdgeId| {
         let graph = current_topology_graph();
-        let Some(bounds) = graph.edge_focus_bounds(&request.source, &request.target, request.kind)
-        else {
+        let Some(bounds) = graph.edge_focus_bounds(&request) else {
             return;
         };
-        focus_graph_bounds(&graph, bounds, GRAPH_MAX_ZOOM);
+        focus_graph_bounds(&graph, bounds, Viewport::MAX_ZOOM);
     };
     // A newly loaded graph, and every switch to a different domain, opens framed rather than at
     // an arbitrary zoom and pan. The stage is read reactively, so a graph that arrives before the
@@ -2962,7 +2942,7 @@ fn GraphPanel(
         if fitted_topology_key.get_untracked().as_ref() == Some(&key) {
             return;
         }
-        if focus_graph_bounds(&graph, graph.canvas_bounds(), GRAPH_FIT_MAX_ZOOM) {
+        if focus_graph_bounds(&graph, graph.canvas_bounds(), Viewport::FIT_MAX_ZOOM) {
             fitted_topology_key.set(Some(key));
         }
     });
@@ -2983,7 +2963,7 @@ fn GraphPanel(
         if graph_search_focus_key.get_untracked().as_ref() == Some(&key) {
             return;
         }
-        if focus_graph_bounds(&graph, bounds, GRAPH_MAX_ZOOM) {
+        if focus_graph_bounds(&graph, bounds, Viewport::MAX_ZOOM) {
             graph_search_focus_key.set(Some(key));
         }
     });
@@ -3037,7 +3017,7 @@ fn GraphPanel(
                             type="button"
                             title="Zoom out"
                             on:click=move |_| graph_zoom.update(|zoom| {
-                                *zoom = (*zoom - GRAPH_ZOOM_STEP).max(GRAPH_MIN_ZOOM);
+                                *zoom = (*zoom - Viewport::ZOOM_STEP).max(Viewport::MIN_ZOOM);
                             })
                         >
                             <SidebarIcon kind="zoom-out" />
@@ -3063,7 +3043,7 @@ fn GraphPanel(
                             type="button"
                             title="Zoom in"
                             on:click=move |_| graph_zoom.update(|zoom| {
-                                *zoom = (*zoom + GRAPH_ZOOM_STEP).min(GRAPH_MAX_ZOOM);
+                                *zoom = (*zoom + Viewport::ZOOM_STEP).min(Viewport::MAX_ZOOM);
                             })
                         >
                             <SidebarIcon kind="zoom-in" />
@@ -3113,7 +3093,7 @@ fn GraphPanel(
                             event.prevent_default();
                             graph_zoom.update(|zoom| {
                                 *zoom = (*zoom - event.delta_y() * 0.001)
-                                    .clamp(GRAPH_MIN_ZOOM, GRAPH_MAX_ZOOM);
+                                    .clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM);
                             });
                         }
                     }
@@ -3236,37 +3216,23 @@ fn GraphPanel(
                                     <path d="M0.5,0.5 L4.2,2.5 L0.5,4.5 z" class="graph-arrow-head hollow"></path>
                                 </marker>
                             </defs>
-                            <For each={move || current_topology_graph().edges.clone()} key=move |edge| {
-                                (
-                                    edge.source.clone(),
-                                    edge.target.clone(),
-                                    edge.kind,
-                                    edge.path(),
-                                )
+                            <For each={move || current_topology_graph().drawn_edges()} key=move |edge| {
+                                (edge.id.clone(), edge.path())
                             } children={move |edge| {
                                 let path = edge.path();
-                                let source = edge.source.clone();
-                                let target = edge.target.clone();
-                                let kind = edge.kind;
+                                let id = edge.id.clone();
+                                let kind = id.kind;
                                 let kind_label = kind.as_ref().to_string();
                                 let class = format!("graph-edge {}", kind.css_class());
                                 let emphasis_edge = edge.clone();
-                                let hover_source = source.clone();
-                                let hover_target = target.clone();
-                                let messages_source = source.clone();
-                                let messages_target = target.clone();
-                                let bytes_source = source.clone();
-                                let bytes_target = target.clone();
-                                let batches_source = source.clone();
-                                let batches_target = target.clone();
-                                let messages_total_source = source.clone();
-                                let messages_total_target = target.clone();
-                                let bytes_total_source = source.clone();
-                                let bytes_total_target = target.clone();
-                                let batches_total_source = source.clone();
-                                let batches_total_target = target.clone();
-                                let flowing_source = source.clone();
-                                let flowing_target = target.clone();
+                                let hover_id = id.clone();
+                                let messages_id = id.clone();
+                                let bytes_id = id.clone();
+                                let batches_id = id.clone();
+                                let messages_total_id = id.clone();
+                                let bytes_total_id = id.clone();
+                                let batches_total_id = id.clone();
+                                let flowing_id = id.clone();
                                 let route_summary = edge.route_summary();
                                 view! {
                                     <g
@@ -3275,9 +3241,7 @@ fn GraphPanel(
                                         // records, so a stopped domain draws a still graph.
                                         class:flowing=move || {
                                             visible_graph().is_some_and(|graph| {
-                                                graph
-                                                    .edge_statistics(&flowing_source, &flowing_target, kind)
-                                                    .has_edge_activity()
+                                                graph.edge_statistics(&flowing_id).has_edge_activity()
                                             })
                                         }
                                         class:emphasis=move || {
@@ -3286,11 +3250,7 @@ fn GraphPanel(
                                                 .is_some_and(|hover| hover.emphasises_edge(&emphasis_edge))
                                         }
                                         on:mouseenter=move |_| {
-                                            graph_hover.set(Some(GraphHover::Edge {
-                                                source: hover_source.clone(),
-                                                target: hover_target.clone(),
-                                                kind,
-                                            }));
+                                            graph_hover.set(Some(GraphHover::Edge(hover_id.clone())));
                                         }
                                         on:mouseleave=move |_| graph_hover.set(None)
                                     >
@@ -3298,52 +3258,52 @@ fn GraphPanel(
                                         <path
                                             class="graph-edge-hit"
                                             data-kind=kind_label.clone()
-                                            data-source=source.clone()
-                                            data-target=target.clone()
+                                            data-source=id.source.clone()
+                                            data-target=id.target.clone()
                                             d=path.clone()
                                         />
                                         <path class=format!("graph-edge-shadow {}", kind.css_class()) d=path.clone() />
                                         <path
                                             class=class
                                             data-kind=kind_label
-                                            data-source=source
-                                            data-target=target
+                                            data-source=id.source.clone()
+                                            data-target=id.target.clone()
                                             data-feedback=edge.feedback_data()
                                             data-input-side=edge.input_side_data()
                                             data-routes=edge.routes.to_string()
                                             data-messages-per-second=move || {
                                                 current_graph()
-                                                    .edge_statistics(&messages_source, &messages_target, kind)
+                                                    .edge_statistics(&messages_id)
                                                     .messages_per_second
                                                     .to_string()
                                             }
                                             data-bytes-per-second=move || {
                                                 current_graph()
-                                                    .edge_statistics(&bytes_source, &bytes_target, kind)
+                                                    .edge_statistics(&bytes_id)
                                                     .bytes_per_second
                                                     .to_string()
                                             }
                                             data-batches-per-second=move || {
                                                 current_graph()
-                                                    .edge_statistics(&batches_source, &batches_target, kind)
+                                                    .edge_statistics(&batches_id)
                                                     .batches_per_second
                                                     .to_string()
                                             }
                                             data-messages-total=move || {
                                                 current_graph()
-                                                    .edge_statistics(&messages_total_source, &messages_total_target, kind)
+                                                    .edge_statistics(&messages_total_id)
                                                     .messages_total
                                                     .to_string()
                                             }
                                             data-bytes-total=move || {
                                                 current_graph()
-                                                    .edge_statistics(&bytes_total_source, &bytes_total_target, kind)
+                                                    .edge_statistics(&bytes_total_id)
                                                     .bytes_total
                                                     .to_string()
                                             }
                                             data-batches-total=move || {
                                                 current_graph()
-                                                    .edge_statistics(&batches_total_source, &batches_total_target, kind)
+                                                    .edge_statistics(&batches_total_id)
                                                     .batches_total
                                                     .to_string()
                                             }
@@ -3436,11 +3396,9 @@ fn GraphPanel(
                                 </button>
                             }
                             }} />
-                            <For each={move || current_graph().edges.clone()} key=move |edge| {
+                            <For each={move || current_graph().drawn_edges()} key=move |edge| {
                                 (
-                                    edge.source.clone(),
-                                    edge.target.clone(),
-                                    edge.kind,
+                                    edge.id.clone(),
                                     edge.statistics.messages_per_second.to_bits(),
                                     edge.statistics.bytes_per_second.to_bits(),
                                     edge.statistics.batches_per_second.to_bits(),
@@ -3450,9 +3408,9 @@ fn GraphPanel(
                                 )
                             } children={move |edge| {
                                 let title = edge.metric_summary();
-                                let source = edge.source.clone();
-                                let target = edge.target.clone();
-                                let kind_label = edge.kind.as_ref().to_string();
+                                let source = edge.id.source.clone();
+                                let target = edge.id.target.clone();
+                                let kind_label = edge.id.kind.as_ref().to_string();
                                 let style = edge.metric_style();
                                 let messages_rate = edge.statistics.messages_rate();
                                 let has_activity = edge.statistics.has_edge_activity() && style.is_some();
@@ -4236,7 +4194,8 @@ struct GraphView {
     statistics: GraphStatistics,
     nodes: Vec<GraphViewNode>,
     relays: Vec<GraphViewRelay>,
-    edges: Vec<GraphViewEdge>,
+    /// Every edge by its identity, so parallel edges between one pair of items stay apart.
+    edges: BTreeMap<GraphEdgeId, GraphViewEdge>,
     groups: Vec<GraphBranchGroup>,
     width: i32,
     height: i32,
@@ -4244,7 +4203,7 @@ struct GraphView {
 
 impl GraphView {
     fn from_dataflow_graph(graph: DataflowGraph) -> Self {
-        let layout = Layout::build(
+        let layout = LiveGraphLayout::build(
             &graph
                 .nodes
                 .iter()
@@ -4300,41 +4259,33 @@ impl GraphView {
             }
         }
 
-        let routes = layout
-            .edges
-            .iter()
-            .map(|edge| ((edge.source.as_str(), edge.target.as_str()), edge))
-            .collect::<BTreeMap<_, _>>();
-        let edges = graph
-            .edges
-            .into_iter()
-            .map(|edge| {
-                let route = routes.get(&(edge.source.as_str(), edge.target.as_str()));
-                let points = match route {
-                    Some(route) => route.points.clone(),
-                    None => Vec::new(),
-                };
-                GraphViewEdge {
-                    points,
-                    badge: route.and_then(|route| route.badge),
-                    feedback: route.is_some_and(|route| route.feedback),
-                    source: edge.source,
-                    target: edge.target,
-                    kind: edge.kind,
-                    input_side: edge.input_side,
-                    routes: edge.routes,
-                    statistics: GraphStatistics::from(edge.statistics),
-                    branches: edge
-                        .branches
-                        .into_iter()
-                        .map(|branch| GraphBranchStatistics {
-                            branch: branch.branch,
-                            statistics: GraphStatistics::from(branch.statistics),
-                        })
-                        .collect(),
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut edges = BTreeMap::new();
+        for edge in graph.edges {
+            let id = GraphEdgeId::from(&edge);
+            let route = layout.edges.get(&id);
+            let points = match route {
+                Some(route) => route.points.clone(),
+                None => Vec::new(),
+            };
+            let drawn = GraphViewEdge {
+                points,
+                badge: route.and_then(|route| route.badge),
+                feedback: route.is_some_and(|route| route.travel == EdgeTravel::Return),
+                id: id.clone(),
+                input_side: edge.input_side,
+                routes: edge.routes,
+                statistics: GraphStatistics::from(edge.statistics),
+                branches: edge
+                    .branches
+                    .into_iter()
+                    .map(|branch| GraphBranchStatistics {
+                        branch: branch.branch,
+                        statistics: GraphStatistics::from(branch.statistics),
+                    })
+                    .collect(),
+            };
+            edges.insert(id, drawn);
+        }
 
         let groups = layout
             .groups
@@ -4363,64 +4314,56 @@ impl GraphView {
                 .iter()
                 .map(GraphRelayTopologyKey::from)
                 .collect(),
-            edges: self.edges.iter().map(GraphEdgeTopologyKey::from).collect(),
+            edges: self
+                .edges
+                .values()
+                .map(GraphEdgeTopologyKey::from)
+                .collect(),
         }
     }
 
-    fn edge_statistics(
-        &self,
-        source: &str,
-        target: &str,
-        kind: DataflowEdgeKind,
-    ) -> GraphStatistics {
-        let edge = self
-            .edges
-            .iter()
-            .find(|edge| edge.source == source && edge.target == target && edge.kind == kind);
-        match edge {
+    /// The edges in the order they are drawn.
+    fn drawn_edges(&self) -> Vec<GraphViewEdge> {
+        self.edges.values().cloned().collect()
+    }
+
+    fn edge_statistics(&self, id: &GraphEdgeId) -> GraphStatistics {
+        match self.edges.get(id) {
             Some(edge) => edge.statistics,
             None => GraphStatistics::default(),
         }
     }
 
-    fn edge_focus_bounds(
-        &self,
-        source: &str,
-        target: &str,
-        kind: DataflowEdgeKind,
-    ) -> Option<GraphBounds> {
-        let edge = self
-            .edges
-            .iter()
-            .find(|edge| edge.source == source && edge.target == target && edge.kind == kind)?;
+    fn edge_focus_bounds(&self, id: &GraphEdgeId) -> Option<GraphBounds> {
+        let edge = self.edges.get(id)?;
         let mut bounds = None::<GraphBounds>;
-        for id in [edge.source.as_str(), edge.target.as_str()] {
-            if let Some(item) = self.item_bounds(id) {
-                include(&mut bounds, item);
+        for endpoint in [edge.id.source.as_str(), edge.id.target.as_str()] {
+            if let Some(item) = self.item_bounds(endpoint) {
+                GraphBounds::include(&mut bounds, item);
             }
         }
         for point in &edge.points {
-            include(&mut bounds, GraphBounds::from_point(point.0, point.1));
+            GraphBounds::include(&mut bounds, GraphBounds::from_point(point.0, point.1));
         }
         bounds
     }
 
-    fn search_result_bounds(&self, query: &str) -> Option<GraphBounds> {
+    fn search_result_bounds(&self, query: &GraphSearch) -> Option<GraphBounds> {
         let mut bounds = None::<GraphBounds>;
         for node in self.nodes.iter().filter(|node| node.matches_search(query)) {
-            include(&mut bounds, GraphBounds::from_rect(node.rect));
+            GraphBounds::include(&mut bounds, GraphBounds::from_rect(node.rect));
         }
         for relay in self
             .relays
             .iter()
             .filter(|relay| relay.matches_search(query))
         {
-            include(&mut bounds, GraphBounds::from_rect(relay.rect));
+            GraphBounds::include(&mut bounds, GraphBounds::from_rect(relay.rect));
         }
         bounds
     }
 
-    fn search_result_count(&self, query: &str) -> usize {
+    fn search_result_count(&self, query: &GraphSearch) -> usize {
         self.nodes
             .iter()
             .filter(|node| node.matches_search(query))
@@ -4434,12 +4377,7 @@ impl GraphView {
 
     /// The whole drawing, used to frame the graph on load and when the fit control is pressed.
     fn canvas_bounds(&self) -> GraphBounds {
-        GraphBounds::from_rect(Rect {
-            x: 0,
-            y: 0,
-            width: self.width,
-            height: self.height,
-        })
+        GraphBounds::canvas(self.width, self.height)
     }
 
     fn item_bounds(&self, id: &str) -> Option<GraphBounds> {
@@ -4474,13 +4412,6 @@ impl GraphView {
 
     const fn canvas_height(&self) -> i32 {
         self.height
-    }
-}
-
-fn include(bounds: &mut Option<GraphBounds>, next: GraphBounds) {
-    match bounds {
-        Some(bounds) => bounds.include_bounds(next),
-        None => *bounds = Some(next),
     }
 }
 
@@ -4576,9 +4507,7 @@ impl From<&GraphSchemaField> for GraphSchemaFieldTopologyKey {
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct GraphEdgeTopologyKey {
-    source: String,
-    target: String,
-    kind: DataflowEdgeKind,
+    id: GraphEdgeId,
     input_side: Option<DataflowInputSide>,
     routes: u32,
 }
@@ -4586,9 +4515,7 @@ struct GraphEdgeTopologyKey {
 impl From<&GraphViewEdge> for GraphEdgeTopologyKey {
     fn from(edge: &GraphViewEdge) -> Self {
         Self {
-            source: edge.source.clone(),
-            target: edge.target.clone(),
-            kind: edge.kind,
+            id: edge.id.clone(),
             input_side: edge.input_side,
             routes: edge.routes,
         }
@@ -4703,11 +4630,8 @@ impl GraphViewNode {
         graph_position_style(self.rect)
     }
 
-    fn matches_search(&self, query: &str) -> bool {
-        let query = query.trim().to_ascii_lowercase();
-        query.chars().count() >= 2
-            && (self.id.to_ascii_lowercase().contains(&query)
-                || self.label.to_ascii_lowercase().contains(&query))
+    fn matches_search(&self, search: &GraphSearch) -> bool {
+        search.matches(&self.id) || search.matches(&self.label)
     }
 
     const fn status_label(&self) -> &'static str {
@@ -4915,11 +4839,8 @@ impl GraphViewRelay {
         )
     }
 
-    fn matches_search(&self, query: &str) -> bool {
-        let query = query.trim().to_ascii_lowercase();
-        query.chars().count() >= 2
-            && (self.id.to_ascii_lowercase().contains(&query)
-                || self.label.to_ascii_lowercase().contains(&query))
+    fn matches_search(&self, search: &GraphSearch) -> bool {
+        search.matches(&self.id) || search.matches(&self.label)
     }
 
     fn group_branch(&self) -> Option<&str> {
@@ -4986,10 +4907,10 @@ struct GraphBranchGroup {
 
 impl GraphBranchGroup {
     fn new(
-        region: &GroupRegion,
+        region: &GroupRegion<String>,
         nodes: &[GraphViewNode],
         relays: &[GraphViewRelay],
-        edges: &[GraphViewEdge],
+        edges: &BTreeMap<GraphEdgeId, GraphViewEdge>,
     ) -> Self {
         let members = nodes
             .iter()
@@ -5023,8 +4944,8 @@ impl GraphBranchGroup {
         {
             active.extend(relay.branches.iter().map(|branch| branch.branch.as_str()));
         }
-        for edge in edges.iter().filter(|edge| {
-            members.contains(edge.source.as_str()) || members.contains(edge.target.as_str())
+        for edge in edges.values().filter(|edge| {
+            members.contains(edge.id.source.as_str()) || members.contains(edge.id.target.as_str())
         }) {
             active.extend(edge.branches.iter().map(|branch| branch.branch.as_str()));
         }
@@ -5074,68 +4995,10 @@ impl GraphBranchGroup {
     }
 }
 
-#[derive(Clone, Copy)]
-struct GraphBounds {
-    left: f64,
-    top: f64,
-    right: f64,
-    bottom: f64,
-}
-
-impl GraphBounds {
-    fn from_point(x: i32, y: i32) -> Self {
-        let x = f64::from(x);
-        let y = f64::from(y);
-        Self {
-            left: x,
-            top: y,
-            right: x,
-            bottom: y,
-        }
-    }
-
-    fn from_rect(rect: Rect) -> Self {
-        Self {
-            left: f64::from(rect.x),
-            top: f64::from(rect.y),
-            right: f64::from(rect.right()),
-            bottom: f64::from(rect.bottom()),
-        }
-    }
-
-    fn include_point(&mut self, x: f64, y: f64) {
-        self.left = self.left.min(x);
-        self.top = self.top.min(y);
-        self.right = self.right.max(x);
-        self.bottom = self.bottom.max(y);
-    }
-
-    fn include_bounds(&mut self, bounds: Self) {
-        self.include_point(bounds.left, bounds.top);
-        self.include_point(bounds.right, bounds.bottom);
-    }
-
-    fn width(self) -> f64 {
-        (self.right - self.left).max(1.0)
-    }
-
-    fn height(self) -> f64 {
-        (self.bottom - self.top).max(1.0)
-    }
-
-    fn center(self) -> (f64, f64) {
-        (
-            (self.left + self.right) / 2.0,
-            (self.top + self.bottom) / 2.0,
-        )
-    }
-}
-
 #[derive(Clone)]
 struct GraphViewEdge {
-    source: String,
-    target: String,
-    kind: DataflowEdgeKind,
+    /// The items this edge joins and what travels along it.
+    id: GraphEdgeId,
     input_side: Option<DataflowInputSide>,
     routes: u32,
     statistics: GraphStatistics,
@@ -5209,7 +5072,7 @@ impl GraphViewEdge {
 
     /// A state dependency is looked up rather than delivered, so it ends in a hollow head.
     const fn marker(&self) -> &'static str {
-        if self.kind.carries_records() {
+        if self.id.kind.carries_records() {
             "url(#graph-arrow)"
         } else {
             "url(#graph-arrow-hollow)"
@@ -5223,7 +5086,7 @@ impl GraphViewEdge {
             Some(DataflowInputSide::Right) => " into RIGHT",
             None => "",
         };
-        let subject = match self.kind {
+        let subject = match self.id.kind {
             DataflowEdgeKind::Data => "records",
             DataflowEdgeKind::CorrelationTimeout => "correlation timeouts",
             DataflowEdgeKind::MessageError => "message errors",
@@ -5237,7 +5100,7 @@ impl GraphViewEdge {
         let feedback = if self.feedback { " · return path" } else { "" };
         format!(
             "{} → {}{side}: {subject}{routes}{feedback}",
-            self.source, self.target
+            self.id.source, self.id.target
         )
     }
 
@@ -5472,29 +5335,21 @@ struct GraphDrag {
 #[derive(Clone, PartialEq, Eq)]
 enum GraphHover {
     Item(String),
-    Edge {
-        source: String,
-        target: String,
-        kind: DataflowEdgeKind,
-    },
+    Edge(GraphEdgeId),
 }
 
 impl GraphHover {
     fn emphasises_item(&self, id: &str) -> bool {
         match self {
             Self::Item(hovered) => hovered == id,
-            Self::Edge { source, target, .. } => source == id || target == id,
+            Self::Edge(edge) => edge.source == id || edge.target == id,
         }
     }
 
     fn emphasises_edge(&self, edge: &GraphViewEdge) -> bool {
         match self {
-            Self::Item(hovered) => *hovered == edge.source || *hovered == edge.target,
-            Self::Edge {
-                source,
-                target,
-                kind,
-            } => *source == edge.source && *target == edge.target && *kind == edge.kind,
+            Self::Item(hovered) => *hovered == edge.id.source || *hovered == edge.id.target,
+            Self::Edge(hovered) => *hovered == edge.id,
         }
     }
 }
@@ -5725,11 +5580,11 @@ mod tests {
             Some(site_branch()),
             &["site=ams-1"],
         )];
-        let edges = vec![view_edge(
+        let edges = edge_map([view_edge(
             "relay:telemetry_by_site",
             "junction:route_site",
             &["site=cdg-1"],
-        )];
+        )]);
 
         let group = GraphBranchGroup::new(&region, &nodes, &relays, &edges);
 
@@ -5758,7 +5613,7 @@ mod tests {
         };
         let relays = vec![view_relay("relay:tenants", Some(branch), &[])];
 
-        let group = GraphBranchGroup::new(&region, &[], &relays, &[]);
+        let group = GraphBranchGroup::new(&region, &[], &relays, &BTreeMap::new());
 
         assert_eq!(group.key_fields_data(), "");
         assert_eq!(group.subtitle(), "(singleton key) · 0 br");
@@ -5905,13 +5760,45 @@ mod tests {
             )],
         });
 
-        let link = &graph.edges[0];
+        let link = graph
+            .edges
+            .values()
+            .next()
+            .expect("the state link must be drawn");
         assert_eq!(link.metric_style(), None);
-        assert_eq!(link.kind.css_class(), "graph-edge--state-link");
+        assert_eq!(link.id.kind.css_class(), "graph-edge--state-link");
         assert_eq!(link.marker(), "url(#graph-arrow-hollow)");
         assert_eq!(
             link.route_summary(),
             "relay:reference → generator:ticks: materialized state"
+        );
+    }
+
+    #[test]
+    fn a_relay_read_as_input_and_as_state_draws_two_routes() {
+        let records = edge("relay:events", "junction:enrich");
+        let state = DataflowEdge::data(
+            "relay:events",
+            "junction:enrich",
+            DataflowEdgeKind::StateLink,
+        );
+        let graph = GraphView::from_dataflow_graph(DataflowGraph {
+            domain: "parallel_demo".to_string(),
+            statistics: DataflowStatistics::default(),
+            nodes: vec![
+                relay("relay:events", "events", None),
+                junction("junction:enrich", "enrich", None),
+            ],
+            edges: vec![records.clone(), state.clone()],
+        });
+
+        let records = &graph.edges[&GraphEdgeId::from(&records)];
+        let state = &graph.edges[&GraphEdgeId::from(&state)];
+        assert!(!records.points.is_empty() && !state.points.is_empty());
+        assert_ne!(
+            records.path(),
+            state.path(),
+            "the record input and the state read must not be drawn on one line"
         );
     }
 
@@ -5947,7 +5834,7 @@ mod tests {
             &region,
             &[],
             &[view_relay("relay:a", Some(site_branch()), &[])],
-            &[],
+            &BTreeMap::new(),
         );
         let busy = GraphBranchGroup::new(
             &region,
@@ -5957,7 +5844,7 @@ mod tests {
                 Some(site_branch()),
                 &["site=iad-1", "site=lhr-1", "site=sfo-1"],
             )],
-            &[],
+            &BTreeMap::new(),
         );
 
         assert!(
@@ -6160,13 +6047,13 @@ mod tests {
         });
         let first = graph
             .edges
-            .iter()
-            .find(|edge| edge.source == "ingestor:mqtt")
+            .values()
+            .find(|edge| edge.id.source == "ingestor:mqtt")
             .expect("the ingest edge must exist");
         let second = graph
             .edges
-            .iter()
-            .find(|edge| edge.target == "emitter:redis")
+            .values()
+            .find(|edge| edge.id.target == "emitter:redis")
             .expect("the emit edge must exist");
 
         let hover = GraphHover::Item("ingestor:mqtt".to_string());
@@ -6175,11 +6062,11 @@ mod tests {
         assert!(hover.emphasises_edge(first));
         assert!(!hover.emphasises_edge(second));
 
-        let hover = GraphHover::Edge {
+        let hover = GraphHover::Edge(GraphEdgeId {
             source: "relay:telemetry".to_string(),
             target: "emitter:redis".to_string(),
             kind: DataflowEdgeKind::Data,
-        };
+        });
         assert!(hover.emphasises_item("relay:telemetry"));
         assert!(hover.emphasises_item("emitter:redis"));
         assert!(!hover.emphasises_item("ingestor:mqtt"));
@@ -6203,10 +6090,11 @@ mod tests {
             ],
         });
 
-        assert_eq!(graph.search_result_count("telemetry"), 2);
-        assert_eq!(graph.search_result_count("t"), 0, "one letter is too broad");
-        assert!(graph.search_result_bounds("telemetry").is_some());
-        assert!(graph.search_result_bounds("nothing").is_none());
+        let search = |query: &str| GraphSearch::parse(query).expect("the query is long enough");
+        assert_eq!(graph.search_result_count(&search("telemetry")), 2);
+        assert_eq!(GraphSearch::parse("t"), None, "one letter is too broad");
+        assert!(graph.search_result_bounds(&search("telemetry")).is_some());
+        assert!(graph.search_result_bounds(&search("nothing")).is_none());
     }
 
     #[test]
@@ -6385,9 +6273,11 @@ mod tests {
 
     fn view_edge(source: &str, target: &str, branches: &[&str]) -> GraphViewEdge {
         GraphViewEdge {
-            source: source.to_string(),
-            target: target.to_string(),
-            kind: DataflowEdgeKind::Data,
+            id: GraphEdgeId {
+                source: source.to_string(),
+                target: target.to_string(),
+                kind: DataflowEdgeKind::Data,
+            },
             input_side: None,
             routes: 1,
             statistics: GraphStatistics::default(),
@@ -6403,6 +6293,15 @@ mod tests {
             points,
             ..view_edge(source, target, &[])
         }
+    }
+
+    fn edge_map(
+        edges: impl IntoIterator<Item = GraphViewEdge>,
+    ) -> BTreeMap<GraphEdgeId, GraphViewEdge> {
+        edges
+            .into_iter()
+            .map(|edge| (edge.id.clone(), edge))
+            .collect()
     }
 
     fn branch_statistics(branches: &[&str]) -> Vec<GraphBranchStatistics> {

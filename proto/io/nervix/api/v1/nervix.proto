@@ -14,6 +14,9 @@ message CommandRequest {
   string execution_reference = 3;
   // Required when this command appends to an already-open transaction.
   optional uint64 expected_transaction_position = 4;
+  // The whole-transaction preview a COMMIT expects to apply. A commit that carries one is
+  // refused before any effect applies when the transaction no longer matches it.
+  TransactionPreviewIdentity expected_preview = 5;
 }
 
 message Diagnostic {
@@ -30,6 +33,9 @@ enum CommandResultKind {
   // The session names a transaction this leader has no binding for. The client must attach the
   // transaction again before the command can run.
   COMMAND_RESULT_KIND_TRANSACTION_DETACHED = 4;
+  // The COMMIT expected a preview that no longer describes the transaction. Nothing applied and
+  // the transaction stays open.
+  COMMAND_RESULT_KIND_PREVIEW_STALE = 5;
 }
 
 message CommandResult {
@@ -45,6 +51,21 @@ message CommandResult {
   TransactionStatus transaction = 10;
   string execution_reference = 11;
   TransactionOperationAdmission transaction_admission = 12;
+  TransactionPreviewStale preview_stale = 13;
+  // Present when the command inspected a transaction, whatever format rendered its message. The
+  // inspected transaction may differ from `transaction`, which keeps describing the caller's own
+  // session binding.
+  TransactionInspection inspection = 14;
+}
+
+// A transaction's impact report, read without attaching or changing the transaction.
+message TransactionInspection {
+  // The inspected transaction, counting the operations its report numbers.
+  TransactionStatus transaction = 1;
+  // The inspected one-based operation. Absent when the whole transaction was inspected.
+  optional uint64 operation = 2;
+  // The whole impact report in its JSON representation. Selecting an operation never narrows it.
+  bytes report = 3;
 }
 
 message TransactionPreviewIdentity {
@@ -56,6 +77,13 @@ message TransactionPreviewIdentity {
 message TransactionOperationAdmission {
   uint64 operation = 1;
   TransactionPreviewIdentity preview = 2;
+}
+
+// The preview a refused COMMIT expected, beside the one that now describes the transaction. The
+// transaction stays open, so a client re-reads the current preview and commits against it.
+message TransactionPreviewStale {
+  TransactionPreviewIdentity expected = 1;
+  TransactionPreviewIdentity current = 2;
 }
 
 enum TransactionState {

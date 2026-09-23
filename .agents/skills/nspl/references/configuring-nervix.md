@@ -82,7 +82,9 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    queued prefix without applying its effect; a rejection can be corrected before commit. Queued
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
    maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, read-only statements,
-   subscriptions, uploads, and node administration remain outside the transaction.
+   subscriptions, uploads, and node administration remain outside the transaction. The exception
+   is `DESCRIBE TRANSACTION;`, sent on its own, which reads the open transaction's planned impact
+   before `COMMIT` without becoming content or shifting operation numbers.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
    paced `START` establishes one replicated clock generation that joining nodes install before
    execution. One committed authority revision identifies the producing node incarnation; owner
@@ -167,6 +169,10 @@ relay. Do not use them to scan across branches.
 - ClickHouse, Postgres, MySQL, and MongoDB emitter sinks declare a positive `WITH MAX BATCH`.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
+- Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
+  that range is rejected through `ON MESSAGE ERROR` instead of being written or used as an
+  `ON CONFLICT` target, so map such a column to `STRING` when the full unsigned range must reach
+  the collection.
 - Every optional `COLLECT FOR` policy follows the complete relay input list, has a positive
   duration, and is absent when immediate input execution is intended. Correlator sides are checked
   independently; ingestors never declare input collection. Treat the duration as domain-logical

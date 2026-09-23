@@ -30,9 +30,18 @@ shuttle = [
   "nervix-connector-clickhouse/shuttle",
   "nervix-connector-kafka/shuttle",
   "nervix-connector-mongodb/shuttle",
+  "nervix-connector-mqtt/shuttle",
   "nervix-connector-mysql/shuttle",
+  "nervix-connector-nats/shuttle",
   "nervix-connector-otel/shuttle",
   "nervix-connector-postgres/shuttle",
+  "nervix-connector-pulsar/shuttle",
+  "nervix-connector-rabbitmq/shuttle",
+  "nervix-connector-redis/shuttle",
+  "nervix-connector-sentry/shuttle",
+  "nervix-connector-sqs/shuttle",
+  "nervix-connector-syslog/shuttle",
+  "nervix-connector-zeromq/shuttle",
   "nervix-consensus/shuttle",
   "nervix-execution/shuttle",
   "nervix-interconnect/shuttle",
@@ -110,12 +119,20 @@ nervix-connector-clickhouse = { workspace = true }
 nervix-connector-http = { workspace = true }
 nervix-connector-kafka = { workspace = true }
 nervix-connector-mongodb = { workspace = true }
+nervix-connector-mqtt = { workspace = true }
 nervix-connector-mysql = { workspace = true }
+nervix-connector-nats = { workspace = true }
 nervix-connector-otel = { workspace = true }
 nervix-connector-postgres = { workspace = true }
 nervix-connector-prometheus = { workspace = true }
+nervix-connector-pulsar = { workspace = true }
+nervix-connector-rabbitmq = { workspace = true }
+nervix-connector-redis = { workspace = true }
+nervix-connector-sentry = { workspace = true }
+nervix-connector-sqs = { workspace = true }
 nervix-connector-syslog = { workspace = true }
 nervix-connector-websockets = { workspace = true }
+nervix-connector-zeromq = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
 nervix-execution = { workspace = true }
@@ -171,7 +188,6 @@ rkyv = { workspace = true }
 rumqttc = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
-sentry-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shuttle = { workspace = true, optional = true }
@@ -259,12 +275,20 @@ members = [
   "crates/connectors/http",
   "crates/connectors/kafka",
   "crates/connectors/mongodb",
+  "crates/connectors/mqtt",
   "crates/connectors/mysql",
+  "crates/connectors/nats",
   "crates/connectors/otel",
   "crates/connectors/postgres",
   "crates/connectors/prometheus",
+  "crates/connectors/pulsar",
+  "crates/connectors/rabbitmq",
+  "crates/connectors/redis",
+  "crates/connectors/sentry",
+  "crates/connectors/sqs",
   "crates/connectors/syslog",
   "crates/connectors/websockets",
+  "crates/connectors/zeromq",
   "crates/consensus",
   "crates/dataflow-graph",
   "crates/execution",
@@ -416,12 +440,20 @@ nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = 
 nervix-connector-http = { package = "nervix-connector-http", path = "crates/connectors/http" }
 nervix-connector-kafka = { package = "nervix-connector-kafka", path = "crates/connectors/kafka" }
 nervix-connector-mongodb = { package = "nervix-connector-mongodb", path = "crates/connectors/mongodb" }
+nervix-connector-mqtt = { package = "nervix-connector-mqtt", path = "crates/connectors/mqtt" }
 nervix-connector-mysql = { package = "nervix-connector-mysql", path = "crates/connectors/mysql" }
+nervix-connector-nats = { package = "nervix-connector-nats", path = "crates/connectors/nats" }
 nervix-connector-otel = { package = "nervix-connector-otel", path = "crates/connectors/otel" }
 nervix-connector-postgres = { package = "nervix-connector-postgres", path = "crates/connectors/postgres" }
 nervix-connector-prometheus = { package = "nervix-connector-prometheus", path = "crates/connectors/prometheus" }
+nervix-connector-pulsar = { package = "nervix-connector-pulsar", path = "crates/connectors/pulsar" }
+nervix-connector-rabbitmq = { package = "nervix-connector-rabbitmq", path = "crates/connectors/rabbitmq" }
+nervix-connector-redis = { package = "nervix-connector-redis", path = "crates/connectors/redis" }
+nervix-connector-sentry = { package = "nervix-connector-sentry", path = "crates/connectors/sentry" }
+nervix-connector-sqs = { package = "nervix-connector-sqs", path = "crates/connectors/sqs" }
 nervix-connector-syslog = { package = "nervix-connector-syslog", path = "crates/connectors/syslog" }
 nervix-connector-websockets = { package = "nervix-connector-websockets", path = "crates/connectors/websockets" }
+nervix-connector-zeromq = { package = "nervix-connector-zeromq", path = "crates/connectors/zeromq" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
 nervix-execution = { package = "nervix-execution", path = "crates/execution" }

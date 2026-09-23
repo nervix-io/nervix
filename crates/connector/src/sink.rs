@@ -55,6 +55,9 @@ pub struct SinkRecord {
     pub key: Option<String>,
     pub payload: Vec<u8>,
     pub headers: Vec<(String, String)>,
+    /// The group a service that delivers records in order per group writes this one under, as the
+    /// host evaluated it for this record. Absent where the emitter declares no group.
+    pub message_group: Option<String>,
     pub occurred_at: Timestamp,
 }
 
@@ -71,8 +74,15 @@ impl SinkRecord {
             key,
             payload,
             headers,
+            message_group: None,
             occurred_at,
         }
+    }
+
+    /// This record written under the ordering group the host evaluated for it.
+    pub fn with_message_group(mut self, message_group: String) -> Self {
+        self.message_group = Some(message_group);
+        self
     }
 
     pub fn rejected(&self, message: String) -> RejectedSinkRecord {
@@ -204,12 +214,20 @@ pub enum SinkDeadline {
 }
 
 /// Why a connector could not initialize its sink client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SinkStartError {
     #[error("invalid {sink} sink configuration")]
     InvalidConfiguration { sink: &'static str },
     #[error("failed to initialize {sink} sink")]
     Initialize { sink: &'static str },
+    /// Nervix creates nothing in an external system, so an entity a sink writes to has to exist
+    /// before it starts. A connector reports the entity it looked for rather than creating one.
+    #[error("{kind} '{name}' does not exist")]
+    MissingExternalEntity {
+        sink: &'static str,
+        kind: &'static str,
+        name: String,
+    },
 }
 
 pub type SinkStartResult<T> = Result<T, Report<SinkStartError>>;

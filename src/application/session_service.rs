@@ -58,7 +58,7 @@ use super::{
     service_tasks::ServiceTasks,
     subscription::{SessionCommandOperation, SessionSubscriptions, SubscriptionInterestKey},
     tls::HttpsListenerCertificates,
-    transaction::TransactionRecovery,
+    transaction::{TransactionRecovery, transaction_preview_identity},
 };
 use crate::{
     cluster, proto,
@@ -129,7 +129,7 @@ impl SessionEvents {
 /// one `Arc` over the server's state, so handing the service to a spawned task costs a single
 /// refcount rather than one per piece of state the server owns.
 #[derive(Clone)]
-pub(in crate::application) struct SessionServiceImpl {
+pub struct SessionServiceImpl {
     pub(in crate::application) inner: Arc<SessionServiceInner>,
 }
 
@@ -1271,16 +1271,24 @@ impl SessionServiceImpl {
             }
         };
 
-        let is_transaction_request = expected_transaction_position.is_some()
-            || subscriptions.transaction_active()
-            || client_statements.iter().any(|parsed| {
-                matches!(
-                    parsed.statement,
-                    ClientStatement::BeginTransaction
-                        | ClientStatement::CommitTransaction
-                        | ClientStatement::RevertTransaction
-                )
-            });
+        // A request that only inspects a transaction reads it rather than changing it, so it
+        // takes none of the durable admission, replay and queue-position fencing a transaction
+        // request needs, even while the session has one attached.
+        let inspects_transaction_only = matches!(
+            client_statements.as_slice(),
+            [parsed] if parsed.statement.inspects_transaction()
+        );
+        let is_transaction_request = !inspects_transaction_only
+            && (expected_transaction_position.is_some()
+                || subscriptions.transaction_active()
+                || client_statements.iter().any(|parsed| {
+                    matches!(
+                        parsed.statement,
+                        ClientStatement::BeginTransaction
+                            | ClientStatement::CommitTransaction
+                            | ClientStatement::RevertTransaction
+                    )
+                }));
         let mut execution_guard = None;
         if is_transaction_request {
             let leader = self.inner.consensus.current_leader().await;
@@ -1357,12 +1365,27 @@ impl SessionServiceImpl {
             }
         }
 
+        let expected_preview = match req.expected_preview.clone() {
+            Some(preview) => match transaction_preview_identity(preview) {
+                Ok(preview) => Some(preview),
+                Err(error) => {
+                    return self
+                        .command_with_transaction_status(
+                            command_error(error.current_context().to_string()),
+                            subscriptions,
+                        )
+                        .await;
+                }
+            },
+            None => None,
+        };
         let operations = match subscriptions.plan_commands(
             client_statements,
             &req.query,
             &req.domain,
             execution_reference,
             expected_transaction_position,
+            expected_preview,
         ) {
             Ok(operations) => operations,
             Err(error) => {
@@ -1621,6 +1644,7 @@ mod tests {
                     domain: "default".to_string(),
                     execution_reference: uuid::Uuid::now_v7().to_string(),
                     expected_transaction_position: None,
+                    expected_preview: None,
                 },
                 &tx,
                 &mut subscriptions,

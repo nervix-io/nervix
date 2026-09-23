@@ -428,8 +428,11 @@ schedule again, after a restart or a rebuild, publishes nothing new.
 A generation also belongs to the module binding it was published for. A model change that binds
 another resource, version, or module file, such as a `REBIND RESOURCE`, starts a new generation for
 every branch in the schedule publication that commits it, so the new module starts every branch
-without guest state. See
-[Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects).
+without guest state. Changing only the execution limits, the global error policy, or the
+rejected-state policy leaves the binding alone and keeps every branch in the generation it has. The
+node compiles the candidate module before the batch is published, so a module it cannot compile
+rejects the whole change while the previous binding and its saved state are still the current ones.
+See [Resource Versions And Bindings](./resource-versions.md#classification-and-state-effects).
 
 #### Coordinated reset
 

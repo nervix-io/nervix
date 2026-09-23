@@ -1192,15 +1192,18 @@ pub(super) async fn run_processor_branch_task(
     } = context;
     let mut force_flush = runtime_handle.force_flush_participant(&domain, quiesce_counters.clone());
     let mut quiesce_gauges = BranchQuiesceGauges::new(quiesce_counters.clone());
-    let ownership_entity =
-        DomainNodeRef::node_in(domain.clone(), branch.source_kind, processor.clone());
+    let ownership_freeze = OwnershipHandoffFreezeWatch::new(
+        &runtime_handle,
+        DomainNodeRef::node_in(domain.clone(), branch.source_kind, processor.clone()),
+    );
     let domain_clock = branch.domain_clock.clone();
     quiesce_gauges.observe(&branch, &processor);
     let stop_mode;
     let mut handoff_execution_snapshot = None;
     loop {
         tokio::task::consume_budget().await;
-        let ownership_frozen = runtime_handle.ownership_handoff_entity_is_frozen(&ownership_entity);
+        let freeze = ownership_freeze.observe();
+        let ownership_frozen = freeze.is_frozen();
         let execution_snapshot = match domain_clock.snapshot() {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -1377,7 +1380,7 @@ pub(super) async fn run_processor_branch_task(
                 quiesce_gauges.observe(&branch, &processor);
                 completion.complete();
             }
-            _ = runtime_handle.inner.ownership_handoff_freeze_changed.notified(), if ownership_frozen => {}
+            _ = freeze.changed(), if ownership_frozen => {}
             result = wait_for_branch_buffer_deadlines(&domain_clock, buffer_deadlines),
                 if has_buffer_deadlines =>
             {
@@ -2046,15 +2049,15 @@ mod tests {
         )
         .await;
 
-        assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 1);
+        assert_eq!(counters.admitted_work(), 1);
         let queued = input_rx
             .recv()
             .await
             .expect("processor input should remain in the branch mailbox");
         assert_eq!(queued.relay, input_relay);
-        assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 1);
+        assert_eq!(counters.admitted_work(), 1);
         drop(queued);
-        assert_eq!(counters.mailbox_and_in_flight.load(Ordering::Acquire), 0);
+        assert_eq!(counters.admitted_work(), 0);
 
         let entry = instances
             .remove(&None)

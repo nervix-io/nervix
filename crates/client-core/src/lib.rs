@@ -16,6 +16,7 @@ extern crate shuttle_tokio_stream as tokio_stream;
 
 use std::{
     collections::VecDeque,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     str::FromStr,
     time::Duration,
@@ -26,7 +27,12 @@ use async_tar::{Builder as AsyncTarBuilder, EntryType, Header, HeaderMode};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-pub use nervix_models::{ResourceUploadIdentity, SubscriptionDeliveryBehavior};
+use nervix_models::{DomainName, TransactionLifecycle};
+pub use nervix_models::{
+    ImpactPlanningBasis, ResourceUploadIdentity, SubscriptionDeliveryBehavior,
+    TransactionImpactReport, TransactionInspection, TransactionOperationAdmission,
+    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
+};
 use nervix_nspl::client_statement::ClientStatement;
 pub use nervix_proto as proto;
 use nervix_recovery::{Discarded as _, NoReceiver as _};
@@ -91,8 +97,36 @@ pub struct CommandOutcome {
     pub leader_grpc_uri: Option<String>,
     pub already_existed: bool,
     pub transaction: Option<TransactionStatus>,
+    /// The preview an accepted append made current, which a later COMMIT fences against.
+    pub transaction_admission: Option<TransactionOperationAdmission>,
+    /// Present when a COMMIT was refused because its expected preview no longer described the
+    /// transaction. Nothing applied and the transaction stays open.
+    pub preview_stale: Option<TransactionPreviewStale>,
+    /// The transaction a `DESCRIBE TRANSACTION` read, whichever format rendered its message. It
+    /// may name a transaction other than `transaction`, which stays this session's own binding.
+    pub inspection: Option<Box<TransactionInspection>>,
     pub resource_upload: Option<ResourceUploadOutcome>,
     pub results: Vec<CommandOutcome>,
+}
+
+/// What a command expects of the transaction it runs against.
+///
+/// A position fences an append to the queue it was written for; a preview fences a commit to the
+/// transaction the caller actually read. Both travel together because a command carries at most
+/// one of each and neither means anything without the attached transaction.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TransactionExpectation {
+    /// The accepted-operation position an append expects.
+    position: Option<u64>,
+    /// The whole-transaction preview a COMMIT expects to apply.
+    preview: Option<TransactionPreviewIdentity>,
+}
+
+/// The preview a refused COMMIT expected, beside the one that now describes the transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransactionPreviewStale {
+    pub expected: TransactionPreviewIdentity,
+    pub current: TransactionPreviewIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +142,8 @@ pub enum CommandOutcomeKind {
     Error,
     NotLeader,
     TransactionDetached,
+    /// The COMMIT expected a preview that no longer described the transaction.
+    PreviewStale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,6 +299,9 @@ struct ClientInner {
     pending: Arc<Mutex<VecDeque<PendingResponse>>>,
     command_lock: Mutex<()>,
     transaction: Mutex<Option<TransactionStatus>>,
+    /// The preview the attached transaction's last accepted append made current. A COMMIT sends
+    /// it so the server can refuse a transaction that moved since this session last read it.
+    commit_basis: Mutex<Option<TransactionPreviewIdentity>>,
     response_task: Mutex<Option<JoinHandle<()>>>,
     subscription_tx: mpsc::Sender<SubscriptionEvent>,
     subscription_rx: Mutex<mpsc::Receiver<SubscriptionEvent>>,
@@ -404,6 +443,7 @@ impl Client {
             pending,
             command_lock: Mutex::new(()),
             transaction: Mutex::new(None),
+            commit_basis: Mutex::new(None),
             response_task: Mutex::new(Some(session.response_task)),
             subscription_tx,
             subscription_rx: Mutex::new(subscription_rx),
@@ -435,6 +475,15 @@ impl Client {
         if !status.domain.is_empty() {
             self.set_domain(status.domain.clone()).await;
         }
+        // A cached basis names one transaction. Following the session to a different transaction
+        // leaves it describing something this session is no longer committing.
+        let mut basis = self.inner.commit_basis.lock().await;
+        if let Some(preview) = basis.as_ref()
+            && preview.transaction_id != status.id
+        {
+            *basis = None;
+        }
+        drop(basis);
         *self.inner.transaction.lock().await = Some(status);
     }
 
@@ -451,17 +500,46 @@ impl Client {
         let query = query.into();
         let _command_guard = self.inner.command_lock.lock().await;
         let execution_reference = uuid::Uuid::now_v7().to_string();
-        let expected_transaction_position = self
-            .active_transaction_status()
-            .await
-            .map(|status| status.pending_count);
+        let expectation = self.transaction_expectation().await;
         let outcome = self
-            .execute_with_redirects(&query, &execution_reference, expected_transaction_position)
+            .execute_with_redirects(&query, &execution_reference, &expectation)
             .await?;
+        self.record_commit_basis(&outcome).await;
         if let Some(transaction) = outcome.transaction.clone() {
             self.adopt_transaction_status(transaction).await;
         }
         Ok(outcome)
+    }
+
+    /// Updates the basis a later COMMIT fences against from what the server just reported.
+    ///
+    /// An accepted append makes its own preview current. A refused commit reports the preview
+    /// that now describes the transaction, so the caller can decide again against the transaction
+    /// as it actually is instead of staying fenced against a revision it already knows is gone.
+    async fn record_commit_basis(&self, outcome: &CommandOutcome) {
+        if let Some(admission) = &outcome.transaction_admission {
+            *self.inner.commit_basis.lock().await = Some(admission.preview.clone());
+            return;
+        }
+        if let Some(stale) = &outcome.preview_stale {
+            *self.inner.commit_basis.lock().await = Some(stale.current.clone());
+        }
+    }
+
+    /// What this session expects of the transaction the next command runs against.
+    ///
+    /// The cached basis fences a commit only while it still names the attached transaction, so a
+    /// basis obtained for a different transaction can never decide this one's commit.
+    async fn transaction_expectation(&self) -> TransactionExpectation {
+        let Some(status) = self.active_transaction_status().await else {
+            return TransactionExpectation::default();
+        };
+        let cached = self.inner.commit_basis.lock().await.clone();
+        let preview = cached.filter(|preview| preview.transaction_id == status.id);
+        TransactionExpectation {
+            position: Some(status.pending_count),
+            preview,
+        }
     }
 
     pub async fn attach_transaction(
@@ -502,12 +580,12 @@ impl Client {
         &self,
         query: &str,
         execution_reference: &str,
-        expected_transaction_position: Option<u64>,
+        expectation: &TransactionExpectation,
     ) -> Result<CommandOutcome, ClientError> {
         for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
             tokio::task::consume_budget().await;
             let outcome = match self
-                .execute_once(query, execution_reference, expected_transaction_position)
+                .execute_once(query, execution_reference, expectation)
                 .await
             {
                 Ok(outcome) => outcome,
@@ -542,7 +620,7 @@ impl Client {
                 },
             }
         }
-        self.execute_once(query, execution_reference, expected_transaction_position)
+        self.execute_once(query, execution_reference, expectation)
             .await
     }
 
@@ -631,7 +709,7 @@ impl Client {
         &self,
         query: &str,
         execution_reference: &str,
-        expected_transaction_position: Option<u64>,
+        expectation: &TransactionExpectation,
     ) -> Result<CommandOutcome, ClientError> {
         if let Ok(statements) = nervix_nspl::client_statement::parse_client_statement_sources(query)
             && statements
@@ -658,7 +736,7 @@ impl Client {
                 .execute_client_statement(parsed.statement, &source)
                 .await;
         }
-        self.execute_remote_once(query, execution_reference, expected_transaction_position)
+        self.execute_remote_once(query, execution_reference, expectation)
             .await
     }
 
@@ -694,8 +772,12 @@ impl Client {
             | ClientStatement::DeleteSubscription(_)
             | ClientStatement::Server(_) => {
                 let execution_reference = uuid::Uuid::now_v7().to_string();
-                self.execute_remote_once(source, &execution_reference, None)
-                    .await
+                self.execute_remote_once(
+                    source,
+                    &execution_reference,
+                    &TransactionExpectation::default(),
+                )
+                .await
             }
         }
     }
@@ -704,7 +786,7 @@ impl Client {
         &self,
         query: &str,
         execution_reference: &str,
-        expected_transaction_position: Option<u64>,
+        expectation: &TransactionExpectation,
     ) -> Result<CommandOutcome, ClientError> {
         let (tx, rx) = oneshot::channel();
         self.inner
@@ -717,7 +799,11 @@ impl Client {
                 query: query.to_string(),
                 domain: self.inner.domain.lock().await.clone(),
                 execution_reference: execution_reference.to_string(),
-                expected_transaction_position,
+                expected_transaction_position: expectation.position,
+                expected_preview: expectation
+                    .preview
+                    .as_ref()
+                    .map(api_transaction_preview_identity),
             })),
         };
         let request_tx = self.inner.request_tx.lock().await.clone();
@@ -944,6 +1030,9 @@ impl Client {
                     .then_some(response.leader_grpc_uri),
                 already_existed: false,
                 transaction: None,
+                transaction_admission: None,
+                preview_stale: None,
+                inspection: None,
                 resource_upload: Some(ResourceUploadOutcome {
                     identity: upload_identity.clone(),
                     version: response.version,
@@ -981,6 +1070,9 @@ impl Client {
             leader_grpc_uri: None,
             already_existed: false,
             transaction: None,
+            transaction_admission: None,
+            preview_stale: None,
+            inspection: None,
             resource_upload: Some(ResourceUploadOutcome {
                 identity: upload_identity,
                 version: 0,
@@ -1367,6 +1459,9 @@ fn command_ok_outcome(message: String) -> CommandOutcome {
         leader_grpc_uri: None,
         already_existed: false,
         transaction: None,
+        transaction_admission: None,
+        preview_stale: None,
+        inspection: None,
         resource_upload: None,
         results: Vec::new(),
     }
@@ -1383,6 +1478,9 @@ fn command_error_outcome(message: String) -> CommandOutcome {
         leader_grpc_uri: None,
         already_existed: false,
         transaction: None,
+        transaction_admission: None,
+        preview_stale: None,
+        inspection: None,
         resource_upload: None,
         results: Vec::new(),
     }
@@ -1453,9 +1551,107 @@ impl From<proto::CommandResult> for CommandOutcome {
             leader_grpc_uri: (!value.leader_grpc_uri.is_empty()).then_some(value.leader_grpc_uri),
             already_existed: value.already_existed,
             transaction: value.transaction.map(Into::into),
+            transaction_admission: value
+                .transaction_admission
+                .and_then(transaction_operation_admission),
+            preview_stale: value.preview_stale.and_then(transaction_preview_stale),
+            inspection: value.inspection.and_then(transaction_inspection),
             resource_upload: None,
             results: value.results.into_iter().map(Into::into).collect(),
         }
+    }
+}
+
+/// The transaction a command inspected, when the server sent a complete typed report.
+///
+/// A server always sends the inspected status and the report together. An envelope it could not
+/// have produced describes no read, so it is dropped rather than shown as a report the server never
+/// sent.
+fn transaction_inspection(
+    inspection: proto::TransactionInspection,
+) -> Option<Box<TransactionInspection>> {
+    let transaction = inspected_transaction_status(inspection.transaction?)?;
+    let operation = match inspection.operation {
+        Some(operation) => Some(transaction_operation_number(operation)?),
+        None => None,
+    };
+    let report = serde_json::from_slice::<TransactionImpactReport>(&inspection.report).ok()?;
+    Some(Box::new(TransactionInspection {
+        transaction,
+        operation,
+        report,
+    }))
+}
+
+/// The inspected transaction's status, as the report it arrived with counts its operations.
+fn inspected_transaction_status(
+    status: proto::TransactionStatus,
+) -> Option<nervix_models::TransactionStatus> {
+    let domain = DomainName::parse(&status.domain).ok()?;
+    let lifecycle = match proto::TransactionState::try_from(status.state).ok()? {
+        proto::TransactionState::Open => TransactionLifecycle::Open,
+        proto::TransactionState::Committing => TransactionLifecycle::Committing,
+        proto::TransactionState::Committed => TransactionLifecycle::Committed,
+        proto::TransactionState::Failed => TransactionLifecycle::Failed {
+            failing_operation: transaction_operation_number(status.failing_step?)?,
+            error: status.error,
+        },
+        proto::TransactionState::Reverted => TransactionLifecycle::Reverted,
+        proto::TransactionState::Expired => TransactionLifecycle::Expired,
+        proto::TransactionState::Unspecified => return None,
+    };
+    let accepted = TransactionPosition::new(usize::try_from(status.total_count).ok()?);
+    let applied = usize::try_from(status.completed_count).ok()?;
+    nervix_models::TransactionStatus::new(status.id, domain, lifecycle, accepted, applied).ok()
+}
+
+/// A one-based operation number as the server sends it. Zero numbers no operation.
+fn transaction_operation_number(number: u64) -> Option<TransactionOperationNumber> {
+    let number = NonZeroUsize::new(usize::try_from(number).ok()?)?;
+    Some(TransactionOperationNumber::new(number))
+}
+
+/// The admission a server reported, when it carries a complete preview identity.
+///
+/// A server always sends both halves together. A value missing either half names no revision, so
+/// it is dropped rather than turned into a preview the client could then fence a commit with.
+fn transaction_operation_admission(
+    admission: proto::TransactionOperationAdmission,
+) -> Option<TransactionOperationAdmission> {
+    let operation = usize::try_from(admission.operation).ok()?;
+    let operation = TransactionOperationNumber::from_index(operation.checked_sub(1)?).ok()?;
+    let preview = transaction_preview_identity(admission.preview?)?;
+    Some(TransactionOperationAdmission { operation, preview })
+}
+
+fn transaction_preview_stale(
+    stale: proto::TransactionPreviewStale,
+) -> Option<TransactionPreviewStale> {
+    let expected = transaction_preview_identity(stale.expected?)?;
+    let current = transaction_preview_identity(stale.current?)?;
+    Some(TransactionPreviewStale { expected, current })
+}
+
+fn transaction_preview_identity(
+    preview: proto::TransactionPreviewIdentity,
+) -> Option<TransactionPreviewIdentity> {
+    let position = usize::try_from(preview.position).ok()?;
+    let planning_basis = <[u8; 32]>::try_from(preview.planning_basis.as_ref()).ok()?;
+    Some(TransactionPreviewIdentity {
+        transaction_id: preview.transaction_id,
+        position: TransactionPosition::new(position),
+        planning_basis: ImpactPlanningBasis::new(planning_basis),
+    })
+}
+
+fn api_transaction_preview_identity(
+    preview: &TransactionPreviewIdentity,
+) -> proto::TransactionPreviewIdentity {
+    proto::TransactionPreviewIdentity {
+        transaction_id: preview.transaction_id.clone(),
+        position: u64::try_from(preview.position.accepted_operations())
+            .assured("supported targets have a pointer width no larger than u64"),
+        planning_basis: preview.planning_basis.fingerprint().to_vec().into(),
     }
 }
 
@@ -1529,6 +1725,7 @@ impl CommandOutcomeKind {
             Ok(proto::CommandResultKind::Error) => Self::Error,
             Ok(proto::CommandResultKind::NotLeader) => Self::NotLeader,
             Ok(proto::CommandResultKind::TransactionDetached) => Self::TransactionDetached,
+            Ok(proto::CommandResultKind::PreviewStale) => Self::PreviewStale,
             Ok(proto::CommandResultKind::Unspecified) | Err(_) => Self::Unspecified,
         }
     }
@@ -1542,15 +1739,18 @@ mod tests {
         time::Duration,
     };
 
-    use meticulous::ResultExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use nervix_models::ImpactReportCompleteness;
     use tokio::sync::{Mutex, mpsc, oneshot};
     use triomphe::Arc;
 
     use super::{
         Client, ClientError, ClientInner, CommandOutcome, CommandOutcomeKind, ConnectOptions,
-        Diagnostic, GrpcConnector, LeaderRouting, PendingResponse, ServerEvent, ServerEventLevel,
-        SessionResponseDispatch, SubscriptionEvent, SubscriptionRequest, TlsRequirement,
-        TransactionState, TransactionStatus, clear_pending_responses, expand_user_path, proto,
+        Diagnostic, DomainName, GrpcConnector, ImpactPlanningBasis, LeaderRouting, PendingResponse,
+        ServerEvent, ServerEventLevel, SessionResponseDispatch, SubscriptionEvent,
+        SubscriptionRequest, TlsRequirement, TransactionImpactReport, TransactionLifecycle,
+        TransactionPosition, TransactionPreviewIdentity, TransactionPreviewStale, TransactionState,
+        TransactionStatus, clear_pending_responses, command_error_outcome, expand_user_path, proto,
         reconnect_candidates, split_query_statements, upload_status_is_retryable,
     };
 
@@ -1582,6 +1782,7 @@ mod tests {
                 pending: Arc::new(Mutex::new(VecDeque::new())),
                 command_lock: Mutex::new(()),
                 transaction: Mutex::new(None),
+                commit_basis: Mutex::new(None),
                 response_task: Mutex::new(None),
                 subscription_tx,
                 subscription_rx: Mutex::new(subscription_rx),
@@ -1591,6 +1792,202 @@ mod tests {
                 domain_rx: Mutex::new(domain_rx),
             }),
         }
+    }
+
+    fn open_transaction(id: &str) -> TransactionStatus {
+        TransactionStatus {
+            id: id.to_string(),
+            domain: "tenant".to_string(),
+            state: TransactionState::Open,
+            pending_count: 1,
+            completed_count: 0,
+            total_count: 1,
+            error: None,
+            failing_step: None,
+        }
+    }
+
+    fn test_preview(transaction_id: &str, position: usize) -> TransactionPreviewIdentity {
+        TransactionPreviewIdentity {
+            transaction_id: transaction_id.to_string(),
+            position: TransactionPosition::new(position),
+            planning_basis: ImpactPlanningBasis::new([7; 32]),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_commit_fences_against_the_basis_its_own_transaction_reported() {
+        let client = test_client("tenant");
+        client
+            .adopt_transaction_status(open_transaction("tx-1"))
+            .await;
+        *client.inner.commit_basis.lock().await = Some(test_preview("tx-1", 1));
+
+        let expectation = client.transaction_expectation().await;
+
+        assert_eq!(expectation.position, Some(1));
+        assert_eq!(expectation.preview, Some(test_preview("tx-1", 1)));
+    }
+
+    #[tokio::test]
+    async fn a_basis_read_for_another_transaction_never_fences_this_one() {
+        let client = test_client("tenant");
+        client
+            .adopt_transaction_status(open_transaction("tx-2"))
+            .await;
+        *client.inner.commit_basis.lock().await = Some(test_preview("tx-1", 4));
+
+        let expectation = client.transaction_expectation().await;
+
+        assert_eq!(expectation.position, Some(1));
+        assert_eq!(
+            expectation.preview, None,
+            "a basis naming another transaction cannot decide this transaction's commit"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_commit_leaves_the_current_basis_for_the_next_attempt() {
+        let client = test_client("tenant");
+        client
+            .adopt_transaction_status(open_transaction("tx-1"))
+            .await;
+        let mut outcome = command_error_outcome("stale".to_string());
+        outcome.kind = CommandOutcomeKind::PreviewStale;
+        outcome.preview_stale = Some(TransactionPreviewStale {
+            expected: test_preview("tx-1", 1),
+            current: test_preview("tx-1", 2),
+        });
+
+        client.record_commit_basis(&outcome).await;
+
+        assert_eq!(
+            client.transaction_expectation().await.preview,
+            Some(test_preview("tx-1", 2))
+        );
+    }
+
+    fn empty_report() -> TransactionImpactReport {
+        TransactionImpactReport::new(
+            DomainName::parse("tenant").assured("the test domain is an accepted literal"),
+            TransactionPosition::new(0),
+            ImpactPlanningBasis::new([7; 32]),
+            ImpactReportCompleteness::Complete,
+            Vec::new(),
+            Vec::new(),
+        )
+        .assured("an empty report numbers no operation and so needs no execution step")
+    }
+
+    fn inspected_status(state: proto::TransactionState) -> proto::TransactionStatus {
+        proto::TransactionStatus {
+            id: "tx-inspected".to_string(),
+            state: i32::from(state),
+            domain: "tenant".to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn inspection_result(
+        status: proto::TransactionStatus,
+        report: &TransactionImpactReport,
+    ) -> proto::CommandResult {
+        let report =
+            serde_json::to_vec(report).assured("an impact report has a JSON representation");
+        proto::CommandResult {
+            success: true,
+            kind: i32::from(proto::CommandResultKind::Ok),
+            inspection: Some(proto::TransactionInspection {
+                transaction: Some(status),
+                operation: None,
+                report: report.into(),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn an_inspected_report_arrives_typed_beside_the_callers_own_binding() {
+        let report = empty_report();
+        let mut result =
+            inspection_result(inspected_status(proto::TransactionState::Open), &report);
+        result.transaction = Some(proto::TransactionStatus {
+            id: "tx-bound".to_string(),
+            ..inspected_status(proto::TransactionState::Open)
+        });
+
+        let outcome = CommandOutcome::from(result);
+
+        let inspection = outcome
+            .inspection
+            .as_ref()
+            .verified("the server sent a complete inspection envelope");
+        assert_eq!(inspection.transaction.transaction_id(), "tx-inspected");
+        assert_eq!(
+            inspection.transaction.lifecycle(),
+            &TransactionLifecycle::Open
+        );
+        assert_eq!(inspection.operation, None);
+        assert_eq!(inspection.report, report);
+        let binding = outcome
+            .transaction
+            .as_ref()
+            .verified("the result reports the session's own binding");
+        assert_eq!(
+            binding.id, "tx-bound",
+            "the inspected transaction does not replace the session's own binding"
+        );
+    }
+
+    #[test]
+    fn a_failed_inspected_transaction_names_its_failing_operation() {
+        let status = proto::TransactionStatus {
+            failing_step: Some(1),
+            error: "domain start refused".to_string(),
+            ..inspected_status(proto::TransactionState::Failed)
+        };
+        let outcome = CommandOutcome::from(inspection_result(status, &empty_report()));
+
+        let inspection = outcome
+            .inspection
+            .as_ref()
+            .verified("the server sent a complete inspection envelope");
+        let TransactionLifecycle::Failed {
+            failing_operation,
+            error,
+        } = inspection.transaction.lifecycle()
+        else {
+            panic!("a failed status must decode as a failure");
+        };
+        assert_eq!(failing_operation.get(), 1);
+        assert_eq!(error, "domain start refused");
+    }
+
+    #[test]
+    fn an_envelope_the_server_could_not_have_sent_is_dropped() {
+        let unspecified = inspection_result(
+            inspected_status(proto::TransactionState::Unspecified),
+            &empty_report(),
+        );
+        assert_eq!(CommandOutcome::from(unspecified).inspection, None);
+
+        let mut operation_zero = inspection_result(
+            inspected_status(proto::TransactionState::Open),
+            &empty_report(),
+        );
+        if let Some(inspection) = operation_zero.inspection.as_mut() {
+            inspection.operation = Some(0);
+        }
+        assert_eq!(CommandOutcome::from(operation_zero).inspection, None);
+
+        let mut unreadable_report = inspection_result(
+            inspected_status(proto::TransactionState::Open),
+            &empty_report(),
+        );
+        if let Some(inspection) = unreadable_report.inspection.as_mut() {
+            inspection.report = b"not a report".to_vec().into();
+        }
+        assert_eq!(CommandOutcome::from(unreadable_report).inspection, None);
     }
 
     #[tokio::test]
@@ -1818,6 +2215,8 @@ mod tests {
             }),
             execution_reference: "command-1".to_string(),
             transaction_admission: None,
+            preview_stale: None,
+            inspection: None,
         });
         assert!(!outcome.success);
         assert_eq!(outcome.kind, CommandOutcomeKind::NotLeader);
@@ -1905,6 +2304,9 @@ mod tests {
             leader_grpc_uri: None,
             already_existed: false,
             transaction: None,
+            transaction_admission: None,
+            preview_stale: None,
+            inspection: None,
             resource_upload: None,
             results: Vec::new(),
         };

@@ -792,6 +792,7 @@ fn upload_response_bytes(outcome: &CommandOutcome) -> Result<usize> {
         CommandOutcomeKind::Error => proto::CommandResultKind::Error,
         CommandOutcomeKind::NotLeader => proto::CommandResultKind::NotLeader,
         CommandOutcomeKind::TransactionDetached => proto::CommandResultKind::TransactionDetached,
+        CommandOutcomeKind::PreviewStale => proto::CommandResultKind::PreviewStale,
     };
     let response = proto::UploadResourceResponse {
         success: outcome.success,

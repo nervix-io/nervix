@@ -26,13 +26,7 @@ test: tests-deps
     # their modeled features separately.
     shuttle_packages=(
         nervix-client-core
-        nervix-connector
-        nervix-connector-clickhouse
-        nervix-connector-kafka
-        nervix-connector-mongodb
-        nervix-connector-mysql
-        nervix-connector-otel
-        nervix-connector-postgres
+        'nervix-connector*'
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -47,13 +41,7 @@ test: tests-deps
     cargo test --all-targets --features testing --package nervix-server
     cargo test --all-targets \
         --package nervix-client-core \
-        --package nervix-connector \
-        --package nervix-connector-clickhouse \
-        --package nervix-connector-kafka \
-        --package nervix-connector-mongodb \
-        --package nervix-connector-mysql \
-        --package nervix-connector-otel \
-        --package nervix-connector-postgres \
+        --package 'nervix-connector*' \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -262,13 +250,7 @@ test-coverage: tests-deps
     # without running modeled synchronization outside a Shuttle runner.
     shuttle_packages=(
         nervix-client-core
-        nervix-connector
-        nervix-connector-clickhouse
-        nervix-connector-kafka
-        nervix-connector-mongodb
-        nervix-connector-mysql
-        nervix-connector-otel
-        nervix-connector-postgres
+        'nervix-connector*'
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -285,13 +267,7 @@ test-coverage: tests-deps
     cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
-        --package nervix-connector \
-        --package nervix-connector-clickhouse \
-        --package nervix-connector-kafka \
-        --package nervix-connector-mongodb \
-        --package nervix-connector-mysql \
-        --package nervix-connector-otel \
-        --package nervix-connector-postgres \
+        --package 'nervix-connector*' \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \
@@ -463,13 +439,7 @@ cargo-clippy-all:
     # boundary separately. `test-shuttle` compiles and runs the modeled test targets.
     shuttle_packages=(
         nervix-client-core
-        nervix-connector
-        nervix-connector-clickhouse
-        nervix-connector-kafka
-        nervix-connector-mongodb
-        nervix-connector-mysql
-        nervix-connector-otel
-        nervix-connector-postgres
+        'nervix-connector*'
         nervix-consensus
         nervix-execution
         nervix-interconnect
@@ -483,14 +453,7 @@ cargo-clippy-all:
     cargo clippy --all-features --all-targets --workspace "${workspace_exclusions[@]}"
     cargo clippy --all-targets --features 'benchmarks testing' --package nervix-server
     cargo clippy --all-targets --features autocomplete --package nervix-client-core
-    cargo clippy --all-targets \
-        --package nervix-connector \
-        --package nervix-connector-clickhouse \
-        --package nervix-connector-kafka \
-        --package nervix-connector-mongodb \
-        --package nervix-connector-mysql \
-        --package nervix-connector-otel \
-        --package nervix-connector-postgres
+    cargo clippy --all-targets --package 'nervix-connector*'
     cargo clippy --all-targets --features testing --package nervix-consensus
     cargo clippy --all-targets \
         --package nervix-execution \
@@ -498,13 +461,7 @@ cargo-clippy-all:
         --package nervix-wasm
     cargo clippy --lib --features 'shuttle testing' \
         --package nervix-client-core \
-        --package nervix-connector \
-        --package nervix-connector-clickhouse \
-        --package nervix-connector-kafka \
-        --package nervix-connector-mongodb \
-        --package nervix-connector-mysql \
-        --package nervix-connector-otel \
-        --package nervix-connector-postgres \
+        --package 'nervix-connector*' \
         --package nervix-consensus \
         --package nervix-execution \
         --package nervix-interconnect \

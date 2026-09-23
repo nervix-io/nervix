@@ -34,6 +34,359 @@ Feature: NSPL transactions
       | 1            |
       | 3            |
 
+  @transaction_stale_preview
+  Scenario Outline: A commit fenced to a preview the transaction outgrew is refused and stays open
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    And client "contender" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA staged_event ( user_id U32 );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "contender" executes these NSPL commands
+      """
+      CREATE SCHEMA unrelated_event ( order_id U32 );
+      """
+    And client "owner" attempts to commit its transaction
+    Then client "owner" commit was refused because its expected preview is stale
+    And client "owner" transaction state is "OPEN"
+    And transaction "{{transaction_id}}" eventually has state "OPEN"
+    When client "contender" fails to execute these NSPL commands
+      """
+      SHOW CREATE SCHEMA staged_event;
+      """
+    Then the last command error contains
+      """
+      schema 'staged_event' does not exist in domain '{{domain}}'
+      """
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    Then client "owner" transaction state is "COMMITTED"
+    And transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA staged_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA staged_event (
+        user_id U32
+      );
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_inspection
+  Scenario Outline: DESCRIBE TRANSACTION reads the open transaction without becoming its content
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA inspected_event ( user_id U32 );
+      CREATE SCHEMA inspected_audit ( order_id U32 );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "owner" executes these NSPL commands
+      """
+      DESCRIBE TRANSACTION;
+      """
+    Then the last command output contains
+      """
+      transaction: {{transaction_id}}
+      domain: {{domain}}
+      state: OPEN
+      operations: 2 accepted, 0 applied, 2 pending
+      report: COMPLETE
+      """
+    And the last command output contains
+      """
+      quiesce level: DYNAMIC
+      pause: NO_PAUSE
+      operation 1: CREATE_CONFIGURATION kind=schema name=inspected_event
+        execution step: 1-2
+      """
+    And the last command output contains
+      """
+      operation 2: CREATE_CONFIGURATION kind=schema name=inspected_audit
+        execution step: 1-2
+      """
+    And the last command output contains
+      """
+      execution step 1-2: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED
+      """
+    And the last inspection reports
+      """
+      transaction: {{transaction_id}}
+      domain: {{domain}}
+      state: OPEN
+      accepted operations: 2
+      applied operations: 0
+      selected operation: none
+      report operations: 2
+      """
+    When client "owner" executes these NSPL commands
+      """
+      describe transaction operation 2;
+      """
+    Then the last command output contains
+      """
+      inspected operation: 2
+      operation 2: CREATE_CONFIGURATION kind=schema name=inspected_audit
+        execution step: 1-2
+        reason: CONFIGURATION kind=schema name=inspected_audit aspect=ENTITY_CREATED
+        contribution: configuration CREATED kind=schema name=inspected_audit operations=2
+      execution step 1-2: planned DYNAMIC, actual DYNAMIC, outcome UNATTEMPTED
+      """
+    And the last inspection reports
+      """
+      transaction: {{transaction_id}}
+      selected operation: 2
+      report operations: 2
+      """
+    And client "owner" transaction state is "OPEN"
+    When client "owner" executes these NSPL commands
+      """
+      CREATE SCHEMA inspected_trace ( trace_id U32 );
+      """
+    Then the last accepted operation is 3
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    Then client "owner" transaction state is "COMMITTED"
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA inspected_trace;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA inspected_trace (
+        trace_id U32
+      );
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_inspection
+  Scenario Outline: DESCRIBE TRANSACTION by identity reads another transaction without adopting it
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    And client "observer" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA observed_event ( user_id U32 );
+      CREATE SCHEMA observed_audit ( order_id U32 );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "observer" executes these NSPL commands
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}' OPERATION 1 FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /transaction/transaction_id = "{{transaction_id}}"
+      /transaction/domain = "{{domain}}"
+      /transaction/state = "OPEN"
+      /transaction/accepted_operations = 2
+      /transaction/applied_operations = 0
+      /operation = 1
+      /report/position = 2
+      /report/completeness/status = "COMPLETE"
+      /report/operations/0/number = 1
+      /report/operations/0/operation/kind = "CREATE_CONFIGURATION"
+      /report/operations/1/number = 2
+      /report/execution_steps/0/actual/outcome/status = "UNATTEMPTED"
+      """
+    And the last inspection reports
+      """
+      transaction: {{transaction_id}}
+      state: OPEN
+      selected operation: 1
+      report operations: 2
+      """
+    And client "observer" has no transaction
+    When client "owner" executes these NSPL commands
+      """
+      CREATE SCHEMA observed_trace ( trace_id U32 );
+      """
+    Then the last accepted operation is 3
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When client "observer" executes these NSPL commands
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}';
+      """
+    Then the last command output contains
+      """
+      transaction: {{transaction_id}}
+      domain: {{domain}}
+      state: COMMITTED
+      operations: 3 accepted, 3 applied, 0 pending
+      """
+    And the last command output contains
+      """
+      execution step 1-3: planned DYNAMIC, actual DYNAMIC, outcome APPLIED
+      """
+    And the last inspection reports
+      """
+      transaction: {{transaction_id}}
+      state: COMMITTED
+      accepted operations: 3
+      applied operations: 3
+      selected operation: none
+      """
+    And client "observer" has no transaction
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_inspection
+  Scenario Outline: DESCRIBE TRANSACTION names why it read nothing and changes nothing
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE USER inspection_intruder WITH PASSWORD 'intruder-password';
+      """
+    Given client "owner" is connected to the leader node
+    And client "observer" is connected to the leader node
+    And client "intruder" is connected to the leader node as user "inspection_intruder" with password "intruder-password"
+    When client "observer" fails to execute these NSPL commands
+      """
+      DESCRIBE TRANSACTION;
+      """
+    Then the last command error contains
+      """
+      no transaction is attached to this session
+      """
+    When client "observer" fails to execute these NSPL commands
+      """
+      DESCRIBE TRANSACTION 'reclaimed-transaction';
+      """
+    Then the last command error contains
+      """
+      transaction 'reclaimed-transaction' is unknown
+      """
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA refused_event ( user_id U32 );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "owner" fails to execute these NSPL commands
+      """
+      DESCRIBE TRANSACTION OPERATION 2;
+      """
+    Then the last command error contains
+      """
+      transaction '{{transaction_id}}' accepted 1 operation(s), so operation 2 does not exist
+      """
+    When client "intruder" fails to execute these NSPL commands
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}';
+      """
+    Then the last command error contains
+      """
+      transaction '{{transaction_id}}' belongs to another user
+      """
+    When client "owner" submits this NSPL command request
+      """
+      CREATE SCHEMA refused_audit ( order_id U32 );
+      DESCRIBE TRANSACTION;
+      """
+    Then the last command error contains
+      """
+      DESCRIBE TRANSACTION must be executed separately
+      """
+    When client "owner" fails to execute these NSPL commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then the last command error contains
+      """
+      DESCRIBE cannot be queued in a transaction
+      """
+    When client "owner" executes these NSPL commands
+      """
+      DESCRIBE TRANSACTION;
+      """
+    Then the last command output contains
+      """
+      state: OPEN
+      operations: 1 accepted, 0 applied, 1 pending
+      """
+    And client "owner" transaction state is "OPEN"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @transaction_inspection
+  Scenario: DESCRIBE TRANSACTION sent to a follower is answered by the leader
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    And a node other than placeholder "leader" is saved as placeholder "follower"
+    Given client "owner" is connected to the leader node
+    And client "observer" is connected to node "{{follower}}"
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA followed_event ( user_id U32 );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "observer" executes these NSPL commands
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}' FORMAT TEXT;
+      """
+    Then the last command output contains
+      """
+      transaction: {{transaction_id}}
+      domain: {{domain}}
+      state: OPEN
+      operations: 1 accepted, 0 applied, 1 pending
+      """
+    And client "observer" has no transaction
+    And client "owner" transaction state is "OPEN"
+
   @standalone_transaction_refresh
   Scenario: An ordinary command refreshes a frozen plan that loses its planning inputs
     Given a 1 node nervix cluster is started
@@ -85,14 +438,8 @@ Feature: NSPL transactions
     When the cluster is restarted
     Given client "resumed" is connected to the leader node
     When client "resumed" attaches to transaction "{{transaction_id}}"
-    And client "resumed" fails to execute these NSPL commands
-      """
-      COMMIT;
-      """
-    Then the last command error contains
-      """
-      transaction preview is stale
-      """
+    And client "resumed" attempts to commit its transaction
+    Then client "resumed" commit was refused because its expected preview is stale
     And transaction "{{transaction_id}}" eventually has state "OPEN"
     When client "resumed" executes these NSPL commands
       """

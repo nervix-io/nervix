@@ -10,8 +10,9 @@
 //! - **Owns.** The session schema, frame verification and ownership, the typed requests, replies,
 //!   transfers, events and rows the schema describes, the session limits, and how frames travel
 //!   over gRPC and WebSocket messages.
-//! - **Depends on.** `flatbuffers`, the vocabulary for names, timestamps, schema fields and the
-//!   transaction impact report, and tonic's codec traits for the gRPC transport.
+//! - **Depends on.** `flatbuffers`, the vocabulary for names, timestamps, schema fields, the
+//!   transaction impact report and the status, inspection envelope and preview identity a session
+//!   exchanges, and tonic's codec traits for the gRPC transport.
 //! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow, or any
 //!   client's dispatch, reconnection or subscription state.
 
@@ -61,10 +62,9 @@ pub use frame::{
 };
 pub use limits::{LimitsError, SessionLimitSettings, SessionLimits};
 pub use reply::{
-    CancelOutcome, CancelState, CancellationStage, InspectionOutcome, InspectionRejection,
-    RequestCancelled, RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome,
-    SubscriptionOpened, SuggestOutcome, Suggestion, SuggestionKind, TransactionInspection,
-    UnsubscribeDisposition, UnsubscribeOutcome,
+    CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
+    RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
+    SuggestOutcome, Suggestion, SuggestionKind, UnsubscribeDisposition, UnsubscribeOutcome,
 };
 pub use request::{
     AttachTransactionRequest, CancelRequest, ClientMessage, ClientRequest, CommandRequest,
@@ -81,7 +81,6 @@ pub use subscription::{
     SubscriptionHandle, SubscriptionRows, SubscriptionRowsEncoder, SubscriptionRowsSkipped,
     SubscriptionType,
 };
-pub use transaction::{TransactionState, TransactionStatus};
 pub use transfer::{TransferAssembly, TransferError, TransferPart, TransferParts};
 pub use upload::{
     UploadChunk, UploadDisposition, UploadFailure, UploadMessage, UploadReply, UploadStart,

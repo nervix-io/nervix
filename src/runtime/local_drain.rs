@@ -295,13 +295,10 @@ impl Runtime {
             }
             let counters = counters.value();
             LocalDomainDrainStatus::tally(&mut status.node_work_items, counters.admitted_work());
-            LocalDomainDrainStatus::tally(
-                &mut status.required_waits,
-                counters.pending_materialized.load(Ordering::Acquire),
-            );
+            LocalDomainDrainStatus::tally(&mut status.required_waits, counters.parked_work());
             LocalDomainDrainStatus::tally(
                 &mut status.force_flush_obligations,
-                counters.force_flushes.load(Ordering::Acquire),
+                counters.force_flush_obligations(),
             );
         }
         for buffered in self.inner.emitter_buffers.iter() {

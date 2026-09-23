@@ -17,7 +17,8 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionChildResult,
-    CommandExecutionDiagnostic, CommandExecutionEffect, CommandExecutionResult,
+    CommandExecutionDiagnostic, CommandExecutionEffect, CommandExecutionPreviewStale,
+    CommandExecutionResult,
     CommandExecutionResultKind, CommandExecutionState, CommandExecutionTransactionOperation,
     CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
     CommandExecutionTransactionTarget,
@@ -40,7 +41,7 @@ use super::{
     model_mutation::{command_error, is_persistent_statement, parse_request_domain},
     session_service::SessionServiceImpl,
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
-    transaction::is_queueable_transaction_statement,
+    transaction::{api_transaction_preview_identity, is_queueable_transaction_statement},
 };
 use crate::proto::{CommandResult, CommandResultKind, SessionResponse};
 
@@ -332,8 +333,10 @@ impl PersistentCommandRequest {
                         },
                     )));
                 }
-                SessionCommandOperation::Commit => {
-                    durable_operations.push(CommandExecutionTransactionOperation::Commit);
+                SessionCommandOperation::Commit { expected_preview } => {
+                    durable_operations.push(CommandExecutionTransactionOperation::Commit {
+                        expected_preview: expected_preview.clone(),
+                    });
                 }
                 SessionCommandOperation::Revert => {
                     durable_operations.push(CommandExecutionTransactionOperation::Revert);
@@ -952,6 +955,39 @@ fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
             .transaction_admission
             .as_ref()
             .map(durable_transaction_admission),
+        preview_stale: result.preview_stale.as_ref().map(durable_preview_stale),
+    }
+}
+
+/// The two previews a refused commit reported, as the execution ledger retains them.
+fn durable_preview_stale(
+    stale: &crate::proto::TransactionPreviewStale,
+) -> CommandExecutionPreviewStale {
+    CommandExecutionPreviewStale {
+        expected: durable_preview_identity(stale.expected.as_ref()),
+        current: durable_preview_identity(stale.current.as_ref()),
+    }
+}
+
+fn durable_preview_identity(
+    preview: Option<&crate::proto::TransactionPreviewIdentity>,
+) -> TransactionPreviewIdentity {
+    let preview = preview.assured("server-produced stale commits always carry both previews");
+    let position = usize::try_from(preview.position)
+        .assured("server-produced transaction positions fit the target pointer width");
+    let planning_basis = <[u8; 32]>::try_from(preview.planning_basis.as_ref())
+        .assured("server-produced transaction planning bases contain 32 bytes");
+    TransactionPreviewIdentity {
+        transaction_id: preview.transaction_id.clone(),
+        position: TransactionPosition::new(position),
+        planning_basis: ImpactPlanningBasis::new(planning_basis),
+    }
+}
+
+fn api_preview_stale(stale: CommandExecutionPreviewStale) -> crate::proto::TransactionPreviewStale {
+    crate::proto::TransactionPreviewStale {
+        expected: Some(api_transaction_preview_identity(&stale.expected)),
+        current: Some(api_transaction_preview_identity(&stale.current)),
     }
 }
 
@@ -968,9 +1004,13 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
                 span_end: diagnostic.span_end,
             })
             .collect(),
-        kind: match result.kind {
-            CommandExecutionResultKind::Ok => i32::from(CommandResultKind::Ok),
-            CommandExecutionResultKind::Error => i32::from(CommandResultKind::Error),
+        // A refused commit is recorded as an error carrying both previews. Restoring the typed
+        // disposition is what lets a recovered outcome tell a client to read the transaction
+        // again rather than only that its commit failed.
+        kind: match (&result.kind, &result.preview_stale) {
+            (_, Some(_)) => i32::from(CommandResultKind::PreviewStale),
+            (CommandExecutionResultKind::Ok, None) => i32::from(CommandResultKind::Ok),
+            (CommandExecutionResultKind::Error, None) => i32::from(CommandResultKind::Error),
         },
         already_existed: result.already_existed,
         results: result.results.into_iter().map(child_result).collect(),
@@ -987,6 +1027,7 @@ fn command_result(result: CommandExecutionResult) -> CommandResult {
                 failing_step: transaction.failing_step,
             }),
         transaction_admission: result.transaction_admission.map(api_transaction_admission),
+        preview_stale: result.preview_stale.map(api_preview_stale),
         ..Default::default()
     }
 }
@@ -1259,5 +1300,31 @@ mod tests {
         assert_eq!(durable.kind, CommandExecutionResultKind::Error);
         let restored = command_result(durable);
         assert_eq!(restored.kind, i32::from(CommandResultKind::Error));
+    }
+
+    #[test]
+    fn a_recovered_stale_commit_still_reports_both_previews() {
+        let preview = |position: u64, basis: u8| crate::proto::TransactionPreviewIdentity {
+            transaction_id: "transaction-1".to_string(),
+            position,
+            planning_basis: vec![basis; 32].into(),
+        };
+        let result = CommandResult {
+            success: false,
+            message: "transaction 'transaction-1' was planned from different inputs".to_string(),
+            kind: i32::from(CommandResultKind::PreviewStale),
+            preview_stale: Some(crate::proto::TransactionPreviewStale {
+                expected: Some(preview(1, 3)),
+                current: Some(preview(1, 9)),
+            }),
+            ..Default::default()
+        };
+
+        let durable = durable_command_result(&result);
+        assert_eq!(durable.kind, CommandExecutionResultKind::Error);
+        let restored = command_result(durable);
+
+        assert_eq!(restored, result);
+        assert_eq!(restored.kind, i32::from(CommandResultKind::PreviewStale));
     }
 }

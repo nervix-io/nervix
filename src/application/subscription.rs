@@ -25,7 +25,8 @@ use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscrip
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
     DomainName, FieldName, ModelKind, ParseAsType, RelayName, ScheduledModel, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName, UserName,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
+    TransactionPreviewIdentity, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
 use nervix_recovery::NoReceiver;
@@ -101,9 +102,15 @@ pub(in crate::application) struct PendingSessionCommand {
 
 #[derive(Debug)]
 pub(in crate::application) enum SessionCommandOperation {
-    Begin { domain: String },
+    Begin {
+        domain: String,
+    },
     Queue(PendingSessionCommand),
-    Commit,
+    Commit {
+        /// The whole-transaction preview this commit expects to apply, when the request fences
+        /// its commit against one.
+        expected_preview: Option<TransactionPreviewIdentity>,
+    },
     Revert,
     Execute(PendingSessionCommand),
 }
@@ -147,11 +154,16 @@ impl SessionSubscriptions {
         request_domain: &str,
         execution_reference: &CommandExecutionReference,
         expected_transaction_position: Option<usize>,
+        expected_preview: Option<TransactionPreviewIdentity>,
     ) -> Result<Vec<SessionCommandOperation>, String> {
         let mut transaction_active = self.transaction_active();
         let mut transaction_position = expected_transaction_position;
         let multi_statement = statements.len() > 1;
         let mut operations = Vec::with_capacity(statements.len());
+        // A preview describes the transaction as the client last saw it. It can fence a commit
+        // only while this request has not itself opened the transaction or appended to it,
+        // because either would move the transaction past the preview the client is holding.
+        let mut preview_describes_transaction = transaction_active;
 
         for (statement_index, parsed) in statements.into_iter().enumerate() {
             let span = parsed.span.clone();
@@ -162,6 +174,7 @@ impl SessionSubscriptions {
                     }
                     transaction_active = true;
                     transaction_position = Some(0);
+                    preview_describes_transaction = false;
                     operations.push(SessionCommandOperation::Begin {
                         domain: request_domain.to_string(),
                     });
@@ -171,7 +184,15 @@ impl SessionSubscriptions {
                         return Err("COMMIT requires an active transaction".to_string());
                     }
                     transaction_active = false;
-                    operations.push(SessionCommandOperation::Commit);
+                    let fenced_preview = if preview_describes_transaction {
+                        expected_preview.clone()
+                    } else {
+                        None
+                    };
+                    preview_describes_transaction = false;
+                    operations.push(SessionCommandOperation::Commit {
+                        expected_preview: fenced_preview,
+                    });
                 }
                 ClientStatement::RevertTransaction => {
                     if !transaction_active {
@@ -181,6 +202,7 @@ impl SessionSubscriptions {
                     operations.push(SessionCommandOperation::Revert);
                 }
                 statement => {
+                    let inspects_transaction = statement.inspects_transaction();
                     let request_reference = execution_reference.derive_step(statement_index);
                     let command = PendingSessionCommand {
                         request_reference,
@@ -189,7 +211,20 @@ impl SessionSubscriptions {
                         statement,
                         domain: request_domain.to_string(),
                     };
-                    if transaction_active {
+                    if inspects_transaction {
+                        // An inspection reads the transaction instead of joining it, so it is
+                        // dispatched before queueing: it never becomes transaction content and
+                        // never takes the queue position the next append expects. Sharing a
+                        // request with other statements would make it part of their durable
+                        // admission and replay, so it is always sent on its own.
+                        if multi_statement {
+                            return Err("DESCRIBE TRANSACTION must be executed separately; it \
+                                        reads a transaction and never joins a multi-statement \
+                                        request"
+                                .to_string());
+                        }
+                        operations.push(SessionCommandOperation::Execute(command));
+                    } else if transaction_active {
                         let Some(current_position) = transaction_position else {
                             return Err("transaction command is missing its expected queue \
                                         position"
@@ -199,6 +234,7 @@ impl SessionSubscriptions {
                         if transaction_position.is_none() {
                             return Err("transaction queue position overflowed".to_string());
                         }
+                        preview_describes_transaction = false;
                         operations.push(SessionCommandOperation::Queue(command));
                     } else if multi_statement {
                         return Err("multiple commands require BEGIN".to_string());
@@ -1400,11 +1436,12 @@ impl SessionServiceImpl {
                     )
                     .await
                 }
-                CommandExecutionTransactionOperation::Commit => {
+                CommandExecutionTransactionOperation::Commit { expected_preview } => {
                     self.commit_identified_transaction(
                         transaction_id.clone(),
                         owner.clone(),
                         activity,
+                        expected_preview,
                     )
                     .await
                 }
@@ -1499,8 +1536,9 @@ impl SessionServiceImpl {
                     self.queue_transaction_statement(command, subscriptions)
                         .await
                 }
-                SessionCommandOperation::Commit => {
-                    self.commit_bound_transaction(tx, subscriptions).await
+                SessionCommandOperation::Commit { expected_preview } => {
+                    self.commit_bound_transaction(tx, subscriptions, expected_preview)
+                        .await
                 }
                 SessionCommandOperation::Revert => {
                     self.revert_bound_transaction(subscriptions).await

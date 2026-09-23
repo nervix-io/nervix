@@ -311,6 +311,7 @@ impl StatusEndpoint {
                 domain: String::new(),
                 execution_reference: uuid::Uuid::now_v7().to_string(),
                 expected_transaction_position: None,
+                expected_preview: None,
             })),
         }
     }

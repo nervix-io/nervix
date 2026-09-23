@@ -65,6 +65,20 @@ use crate::{
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 
+/// A session command request for `query` in `domain`, with its own execution reference.
+///
+/// Tests that append to a transaction or fence a commit set the expectation fields themselves;
+/// every other test runs a command that expects nothing of a transaction.
+pub(in crate::application) fn test_command_request(query: &str, domain: &str) -> CommandRequest {
+    CommandRequest {
+        query: query.to_string(),
+        domain: domain.to_string(),
+        execution_reference: uuid::Uuid::now_v7().to_string(),
+        expected_transaction_position: None,
+        expected_preview: None,
+    }
+}
+
 pub(in crate::application) struct TestTlsFiles {
     _directory: tempfile::TempDir,
     pub(in crate::application) ca: PathBuf,
@@ -590,6 +604,7 @@ pub(in crate::application) async fn queue_in_transaction(
                         }),
                     None => None,
                 },
+                expected_preview: None,
             },
             tx,
             subscriptions,

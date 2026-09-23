@@ -136,15 +136,27 @@ applying one model change:
 | `USE <domain>` | switch the session's active domain |
 | `LIST DOMAINS` | list domains with pace and status |
 | `BEGIN` / `COMMIT` / `REVERT` | open, apply, or discard a replicated transaction on the leader |
+| `DESCRIBE TRANSACTION ['<id>'] [OPERATION <n>] [FORMAT TEXT \| JSON]` | read the attached transaction, or one named by id, without changing it |
 | `UPLOAD RESOURCE <name> VERSION '<dir>'` | stream a local directory as a new version of that resource in the active domain |
 | `CREATE SUBSCRIPTION` / `DELETE SUBSCRIPTION` | start and stop a read-only relay subscription |
 
 `USE`, `LIST DOMAINS`, and `UPLOAD RESOURCE` must be submitted on their own, and never inside a
 transaction. Read-only statements, subscriptions, `CREATE DOMAIN`, `CREATE USER`, and node
-administration are also rejected while queueing transaction content. `BEGIN` requires an existing
-active domain and binds the transaction to it; attaching a transaction switches the active domain
-to the transaction's domain. An upload targets the active domain, renders live progress, and
-finishes after every current live node incarnation has verified and installed the assigned version:
+administration are also rejected while queueing transaction content. `DESCRIBE TRANSACTION` is the
+exception: while a transaction is open it reads that transaction's impact report without queueing
+anything or consuming an operation number, so the next queued statement keeps the number it would
+have had. It must be submitted on its own. With an id it reads another transaction of the same user
+and leaves the prompt, the active domain, and the attached transaction as they were:
+
+```bash
+nervix-cli --domain production --command \
+  "DESCRIBE TRANSACTION '01a0ca64-7062-7302-ac1e-43138ccc2067' OPERATION 2 FORMAT JSON;"
+```
+
+`BEGIN` requires an existing active domain and binds the transaction to it; attaching a transaction
+switches the active domain to the transaction's domain. An upload targets the active domain,
+renders live progress, and finishes after every current live node incarnation has verified and
+installed the assigned version:
 
 ```text
 upload resource 'order_model' finished: 4.2 MiB sent

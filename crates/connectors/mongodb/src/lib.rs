@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The node's shared MongoDB client and its TLS and pool options, the database its
-//!   configuration names, the BSON document each mapped row becomes, the upsert model of a
-//!   conflict action, and write-error classification.
+//!   configuration names, the BSON document each mapped row becomes, the mapped values it has no
+//!   BSON representation for, the upsert model of a conflict action, and write-error
+//!   classification.
 //! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
 //!   and the `mongodb` driver.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -39,7 +40,7 @@ use nervix_connector::{
     SinkPublishError, SinkPublishResult, SinkRecordPosition, SinkStartError, SinkStartResult,
     optional_client_config_value,
 };
-use nervix_models::{ClientConfigEntry, ClientPoolBounds, CollectionName, Timestamp};
+use nervix_models::{ClientConfigEntry, ClientPoolBounds, CollectionName, FieldPath, Timestamp};
 use tracing::trace;
 
 const MONGODB: &str = "mongodb";
@@ -416,10 +417,27 @@ impl RowSink for MongoDbSink {
                 );
                 return outcome;
             };
-            let documents = chunk_rows
-                .iter()
-                .map(|row| columns.document(*row))
-                .collect::<Vec<_>>();
+            let mut documents = Vec::with_capacity(chunk_rows.len());
+            let mut encoded_rows = Vec::with_capacity(chunk_rows.len());
+            for row in chunk_rows {
+                let position = SinkRecordPosition {
+                    batch_index: rows.batch_index,
+                    row_index: *row,
+                };
+                match columns.document(*row) {
+                    Ok(document) => {
+                        documents.push(document);
+                        encoded_rows.push(*row);
+                    }
+                    Err(unencodable) => {
+                        outcome.reject(unencodable.rejected(position, rows.occurred_at));
+                    }
+                }
+            }
+            // A chunk whose every row was rejected leaves no document for this write to carry.
+            if documents.is_empty() {
+                continue;
+            }
             match &self.conflict_action {
                 MongoDbConflictAction::None => {
                     match mongodb_collection
@@ -428,7 +446,7 @@ impl RowSink for MongoDbSink {
                         .await
                     {
                         Ok(_) => {
-                            for row in chunk_rows {
+                            for row in &encoded_rows {
                                 outcome.deliver(SinkRecordPosition {
                                     batch_index: rows.batch_index,
                                     row_index: *row,
@@ -438,7 +456,7 @@ impl RowSink for MongoDbSink {
                         Err(error) => {
                             Self::apply_insert_many_error(
                                 rows.batch_index,
-                                chunk_rows,
+                                &encoded_rows,
                                 rows.occurred_at,
                                 error,
                                 &mut outcome,
@@ -472,7 +490,7 @@ impl RowSink for MongoDbSink {
                         .await
                     {
                         Ok(_) => {
-                            for row in chunk_rows {
+                            for row in &encoded_rows {
                                 outcome.deliver(SinkRecordPosition {
                                     batch_index: rows.batch_index,
                                     row_index: *row,
@@ -482,7 +500,7 @@ impl RowSink for MongoDbSink {
                         Err(error) => {
                             Self::apply_bulk_write_error(
                                 rows.batch_index,
-                                chunk_rows,
+                                &encoded_rows,
                                 rows.occurred_at,
                                 error,
                                 &mut outcome,
@@ -504,12 +522,38 @@ impl RowSink for MongoDbSink {
     }
 }
 
-/// A mapped column this sink cannot encode, named with the exact type it carries.
+/// A mapped value this sink has no BSON representation for, named with the field that carries it.
 #[derive(Debug, thiserror::Error)]
-#[error("MongoDB VALUES field '{field}' has unsupported exact type {data_type}")]
-struct UnsupportedMappedColumn {
-    field: String,
-    data_type: arrow_schema::DataType,
+enum UnencodableMappedValue {
+    #[error("MongoDB VALUES field '{field}' has unsupported exact type {data_type}")]
+    UnsupportedColumn {
+        field: String,
+        data_type: arrow_schema::DataType,
+    },
+    #[error(
+        "MongoDB VALUES field '{field}' holds an unsigned integer above the BSON signed 64-bit \
+         range"
+    )]
+    UnsignedIntegerRange { field: String },
+}
+
+impl UnencodableMappedValue {
+    /// The rejection the host delivers for the row this value came from.
+    ///
+    /// The rejection names the field and what MongoDB has no representation for, never the value
+    /// itself, so a rejected payload reaches neither an error route nor a log. It is definitive,
+    /// so the record follows `ON MESSAGE ERROR` instead of entering the host's retry loop.
+    fn rejected(&self, position: SinkRecordPosition, occurred_at: Timestamp) -> RejectedSinkRecord {
+        let field = match self {
+            Self::UnsupportedColumn { field, .. } | Self::UnsignedIntegerRange { field } => field,
+        };
+        RejectedSinkRecord::invalid(
+            position,
+            occurred_at,
+            self.to_string(),
+            [FieldPath::new(format!("{MONGODB}.{field}"))],
+        )
+    }
 }
 
 /// The mapped columns of one batch, downcast once so every document reads from the column that
@@ -528,13 +572,15 @@ impl<'a> MappedBsonColumns<'a> {
     fn new(
         batch: &'a RecordBatch,
         target_columns: &[String],
-    ) -> Result<Self, UnsupportedMappedColumn> {
+    ) -> Result<Self, UnencodableMappedValue> {
         let mut fields = Vec::with_capacity(target_columns.len());
         for (index, column) in target_columns.iter().enumerate() {
             let array = batch.column(index);
-            let values = MappedBsonColumn::new(array).ok_or_else(|| UnsupportedMappedColumn {
-                field: column.clone(),
-                data_type: array.data_type().clone(),
+            let values = MappedBsonColumn::new(array).ok_or_else(|| {
+                UnencodableMappedValue::UnsupportedColumn {
+                    field: column.clone(),
+                    data_type: array.data_type().clone(),
+                }
             })?;
             fields.push(MappedBsonField {
                 name: column.clone(),
@@ -545,12 +591,16 @@ impl<'a> MappedBsonColumns<'a> {
     }
 
     /// One document, read field by field at the row the host selected.
-    fn document(&self, row: usize) -> Document {
+    ///
+    /// A field this row holds no BSON value for rejects the whole document, so a record is never
+    /// written carrying a value it does not have.
+    fn document(&self, row: usize) -> Result<Document, UnencodableMappedValue> {
         let mut document = Document::new();
         for field in &self.fields {
-            document.insert(field.name.clone(), field.values.value(row));
+            let value = field.values.value(row, &field.name)?;
+            document.insert(field.name.clone(), value);
         }
-        document
+        Ok(document)
     }
 }
 
@@ -627,13 +677,15 @@ impl<'a> MappedBsonColumn<'a> {
 
     /// The BSON value one row carries, read from the column that holds it.
     ///
-    /// Every integer width writes as a 64-bit integer, and an unsigned value past that range has
-    /// no BSON integer, so it writes as null rather than as a number it is not.
-    fn value(&self, row: usize) -> Bson {
+    /// Every integer width writes as a 64-bit integer, and an unsigned value above that range has
+    /// no BSON integer at all, so its row is rejected rather than written as a value it is not.
+    /// The field names the mapped column this value belongs to, including for a list element,
+    /// whose failure belongs to the list its row carries.
+    fn value(&self, row: usize, field: &str) -> Result<Bson, UnencodableMappedValue> {
         if self.is_null(row) {
-            return Bson::Null;
+            return Ok(Bson::Null);
         }
-        match self {
+        let value = match self {
             Self::Bool(values) => Bson::Boolean(values.value(row)),
             Self::U8(values) => Bson::Int64(i64::from(values.value(row))),
             Self::I8(values) => Bson::Int64(i64::from(values.value(row))),
@@ -641,10 +693,14 @@ impl<'a> MappedBsonColumn<'a> {
             Self::I16(values) => Bson::Int64(i64::from(values.value(row))),
             Self::U32(values) => Bson::Int64(i64::from(values.value(row))),
             Self::I32(values) => Bson::Int64(i64::from(values.value(row))),
-            Self::U64(values) => match i64::try_from(values.value(row)) {
-                Ok(value) => Bson::Int64(value),
-                Err(_) => Bson::Null,
-            },
+            Self::U64(values) => {
+                let Ok(value) = i64::try_from(values.value(row)) else {
+                    return Err(UnencodableMappedValue::UnsignedIntegerRange {
+                        field: field.to_owned(),
+                    });
+                };
+                Bson::Int64(value)
+            }
             Self::I64(values) => Bson::Int64(values.value(row)),
             Self::F32(values) => Bson::Double(f64::from(values.value(row))),
             Self::F64(values) => Bson::Double(values.value(row)),
@@ -669,11 +725,12 @@ impl<'a> MappedBsonColumn<'a> {
                     "Arrow list offsets increase, so a row ends no earlier than it starts",
                 ));
                 for element in start..end {
-                    items.push(elements.value(element));
+                    items.push(elements.value(element, field)?);
                 }
                 Bson::Array(items)
             }
-        }
+        };
+        Ok(value)
     }
 
     fn is_null(&self, row: usize) -> bool {
@@ -700,7 +757,9 @@ impl<'a> MappedBsonColumn<'a> {
 mod tests {
     use std::sync::Arc as StdArc;
 
+    use arrow_array::types::UInt64Type;
     use arrow_schema::{DataType, Field, Schema, TimeUnit};
+    use nervix_models::{MessageErrorCode, MessageErrorOperation};
 
     use super::*;
 
@@ -782,7 +841,7 @@ mod tests {
         let columns = MappedBsonColumns::new(&batch, &names).expect("columns should be mapped");
 
         assert_eq!(
-            columns.document(0),
+            columns.document(0).expect("the first row should encode"),
             doc! {
                 "id": 7_i64,
                 "score": 1.5_f64,
@@ -791,7 +850,7 @@ mod tests {
             }
         );
         assert_eq!(
-            columns.document(1),
+            columns.document(1).expect("the second row should encode"),
             doc! {
                 "id": Bson::Null,
                 "score": 2.0_f64,
@@ -799,5 +858,121 @@ mod tests {
                 "at": Bson::Null,
             }
         );
+    }
+
+    #[test]
+    fn rejects_only_the_row_whose_unsigned_value_has_no_bson_integer() {
+        let schema = StdArc::new(Schema::new(vec![
+            Field::new("count", DataType::UInt64, true),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                StdArc::new(UInt64Array::from(vec![
+                    Some(u64::try_from(i64::MAX).expect("the signed maximum is unsigned")),
+                    Some(u64::MAX),
+                    None,
+                ])),
+                StdArc::new(StringArray::from(vec![
+                    Some("representable"),
+                    Some("out-of-range"),
+                    Some("genuine-null"),
+                ])),
+            ],
+        )
+        .expect("the mapped batch should build");
+        let names = ["count".to_string(), "name".to_string()];
+
+        let columns = MappedBsonColumns::new(&batch, &names).expect("columns should be mapped");
+
+        assert_eq!(
+            columns
+                .document(0)
+                .expect("the signed maximum should encode"),
+            doc! { "count": i64::MAX, "name": "representable" }
+        );
+        let rejected = columns
+            .document(1)
+            .expect_err("an unsigned value above the signed range has no BSON integer");
+        assert!(matches!(
+            rejected,
+            UnencodableMappedValue::UnsignedIntegerRange { ref field } if field == "count"
+        ));
+        assert_eq!(
+            columns.document(2).expect("a genuine null should encode"),
+            doc! { "count": Bson::Null, "name": "genuine-null" }
+        );
+    }
+
+    #[test]
+    fn reports_a_rejected_value_without_the_value_it_refused() {
+        let rejected = UnencodableMappedValue::UnsignedIntegerRange {
+            field: "mongodb_user_id".to_string(),
+        };
+
+        let record = rejected.rejected(
+            SinkRecordPosition {
+                batch_index: 2,
+                row_index: 5,
+            },
+            Timestamp::from_unix_nanos(11),
+        );
+
+        assert_eq!(
+            record.position,
+            SinkRecordPosition {
+                batch_index: 2,
+                row_index: 5,
+            }
+        );
+        assert_eq!(record.error.code, MessageErrorCode::Validation);
+        assert_eq!(record.error.operation, MessageErrorOperation::Values);
+        assert_eq!(
+            record
+                .error
+                .fields
+                .iter()
+                .map(FieldPath::as_str)
+                .collect::<Vec<_>>(),
+            ["mongodb.mongodb_user_id"]
+        );
+        assert_eq!(
+            record.error.message,
+            "MongoDB VALUES field 'mongodb_user_id' holds an unsigned integer above the BSON \
+             signed 64-bit range"
+        );
+    }
+
+    #[test]
+    fn rejects_the_row_whose_nested_unsigned_element_has_no_bson_integer() {
+        let counts = ListArray::from_iter_primitive::<UInt64Type, _, _>(vec![
+            Some(vec![Some(1_u64), Some(2_u64)]),
+            Some(vec![Some(3_u64), Some(u64::MAX)]),
+        ]);
+        let schema = StdArc::new(Schema::new(vec![Field::new(
+            "counts",
+            counts.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![StdArc::new(counts)])
+            .expect("the mapped batch should build");
+        let names = ["counts".to_string()];
+
+        let columns = MappedBsonColumns::new(&batch, &names).expect("columns should be mapped");
+
+        assert_eq!(
+            columns
+                .document(0)
+                .expect("a list of representable elements should encode"),
+            doc! { "counts": [1_i64, 2_i64] }
+        );
+        let rejected = columns
+            .document(1)
+            .expect_err("a list element above the signed range has no BSON integer");
+        assert!(matches!(
+            rejected,
+            UnencodableMappedValue::UnsignedIntegerRange { ref field } if field == "counts"
+        ));
     }
 }

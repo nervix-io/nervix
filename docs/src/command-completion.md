@@ -138,8 +138,15 @@ the retained admitted result and preview without touching the transaction.
 
 `COMMIT` first computes a side-effect-free complete preview from replicated content and a new
 coherent snapshot. Its admission validates the identified basis and atomically freezes the report,
-ordered plan, and captured inputs before changing the transaction to `COMMITTING`. A stale basis
-leaves it `OPEN` and returns a typed refresh result. Consecutive model mutations are one frozen step;
+ordered plan, and captured inputs before changing the transaction to `COMMITTING`. A commit may name
+the identity it expects to apply, which a client obtains from an accepted append or from inspecting
+the transaction. A stale basis leaves the transaction `OPEN` and returns a typed refusal naming both
+the expected and the current identity, so the caller can decide again against the transaction as it
+is. That refusal is part of the recorded outcome, so recovering the same request by its reference
+still names both identities rather than only reporting that the commit failed. Reading a transaction through inspection is itself side-effect-free: it changes no binding,
+domain, activity time, or queue position. `DESCRIBE TRANSACTION` is such a read, so it records no
+execution: repeating the request under the same reference reads the transaction again rather than
+returning a retained result, and it completes as soon as the report is read. Consecutive model mutations are one frozen step;
 lifecycle, domain, and resource statements each end a model run and form their own step. Durable
 effect progress changes the retained step from unattempted to applying, while completed application
 records applied or failed separately. A step whose authoritative write is committed remains applying
