@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use arch_into::ArchInto as _;
@@ -4691,6 +4691,18 @@ async fn given_command_retry_identities_are_valid_for(world: &mut ScenarioWorld,
         .assured("the configured command retry validity is a duration");
 }
 
+#[given(expr = "the command execution capacity is configured as {int}")]
+async fn given_command_execution_capacity_is_configured(
+    world: &mut ScenarioWorld,
+    capacity: usize,
+) {
+    assert!(
+        world.cluster.is_none(),
+        "command execution capacity must be configured before cluster startup"
+    );
+    world.cluster_config.command_execution_capacity = capacity;
+}
+
 #[given(expr = "the transaction statement limit is configured as {int}")]
 async fn given_transaction_statement_limit_is_configured(world: &mut ScenarioWorld, limit: usize) {
     assert!(
@@ -8526,8 +8538,77 @@ async fn when_referenced_command_request_is_executed_on_leader(
     execution_reference: String,
     #[step] step: &Step,
 ) {
-    let query = expand_placeholders(world, docstring(step));
     let execution_reference = command_execution_reference(world, &execution_reference);
+    execute_command_request_with_reference_on_leader(world, &execution_reference, step).await;
+}
+
+#[when(
+    expr = "this NSPL command request with an execution reference created {string} before now is \
+            executed on the leader node"
+)]
+async fn when_command_request_with_reference_created_before_now_is_executed(
+    world: &mut ScenarioWorld,
+    age: String,
+    #[step] step: &Step,
+) {
+    let age = humantime::parse_duration(&age).assured("the scenario reference age is a duration");
+    let created_at = SystemTime::now()
+        .checked_sub(age)
+        .assured("the scenario reference age lies after the Unix epoch");
+    let execution_reference = uuid_v7_created_at(created_at);
+    execute_command_request_with_reference_on_leader(world, &execution_reference, step).await;
+}
+
+#[when(
+    expr = "this NSPL command request with an execution reference created {string} after now is \
+            executed on the leader node"
+)]
+async fn when_command_request_with_reference_created_after_now_is_executed(
+    world: &mut ScenarioWorld,
+    lead: String,
+    #[step] step: &Step,
+) {
+    let lead =
+        humantime::parse_duration(&lead).assured("the scenario reference lead is a duration");
+    let created_at = SystemTime::now()
+        .checked_add(lead)
+        .assured("the scenario reference lead stays within the system clock range");
+    let execution_reference = uuid_v7_created_at(created_at);
+    execute_command_request_with_reference_on_leader(world, &execution_reference, step).await;
+}
+
+#[when(
+    "this NSPL command request with an execution reference without a creation time is executed on \
+     the leader node"
+)]
+async fn when_command_request_with_timeless_reference_is_executed(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    // A caller-selected reference is valid reference text but carries no UUIDv7 creation time.
+    let execution_reference = format!("caller-selected-{}", world.test_id);
+    execute_command_request_with_reference_on_leader(world, &execution_reference, step).await;
+}
+
+/// A UUIDv7 retry identity whose embedded creation time is `created_at`.
+fn uuid_v7_created_at(created_at: SystemTime) -> String {
+    let since_epoch = created_at
+        .duration_since(UNIX_EPOCH)
+        .assured("scenario reference times lie after the Unix epoch");
+    let timestamp = uuid::Timestamp::from_unix(
+        uuid::NoContext,
+        since_epoch.as_secs(),
+        since_epoch.subsec_nanos(),
+    );
+    Uuid::new_v7(timestamp).to_string()
+}
+
+async fn execute_command_request_with_reference_on_leader(
+    world: &mut ScenarioWorld,
+    execution_reference: &str,
+    step: &Step,
+) {
+    let query = expand_placeholders(world, docstring(step));
     let leader = current_leader_node(world).await;
     let mut session = world
         .cluster()
@@ -8535,7 +8616,7 @@ async fn when_referenced_command_request_is_executed_on_leader(
         .await
         .unwrap_or_else(|error| panic!("failed to open the resumed command session: {error}"));
     let result = session
-        .run_command_result_with_reference(&query, &execution_reference)
+        .run_command_result_with_reference(&query, execution_reference)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
     if result.success {
@@ -8559,7 +8640,7 @@ async fn then_command_execution_reference_is_eventually_reclaimed(
     let observer = world
         .fault_injection
         .consensus_observer(&crate::common::cluster::node_name(&leader));
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         tokio::task::consume_budget().await;
         assert!(

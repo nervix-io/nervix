@@ -53,8 +53,8 @@ pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
 use nervix_server::{
     FaultInjection, SchedulerMode,
     application::{
-        Application, InternalTransportMode, ShutdownCoordinator,
-        command_execution::CommandExecutionPolicy, init_tracing_to_file,
+        Application, CommandExecutionPolicy, InternalTransportMode, ShutdownCoordinator,
+        init_tracing_to_file,
     },
     memory_pressure::MemoryPressureConfig,
     runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},

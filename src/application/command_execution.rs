@@ -18,10 +18,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
     CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionChildResult,
     CommandExecutionDiagnostic, CommandExecutionEffect, CommandExecutionPreviewStale,
-    CommandExecutionResult,
-    CommandExecutionResultKind, CommandExecutionState, CommandExecutionTransactionOperation,
-    CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
-    CommandExecutionTransactionTarget,
+    CommandExecutionResult, CommandExecutionResultKind, CommandExecutionState,
+    CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
+    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget,
 };
 use nervix_execution::sync::DashMap;
 use nervix_models::{
@@ -77,7 +76,10 @@ impl CommandExecutionPolicy {
         self.retry_validity
     }
 
-    fn admission_at(self, now: Timestamp) -> CommandExecutionAdmissionPolicy {
+    pub(in crate::application) fn admission_at(
+        self,
+        now: Timestamp,
+    ) -> CommandExecutionAdmissionPolicy {
         CommandExecutionAdmissionPolicy::at(now, self.retry_validity, self.capacity)
     }
 }
@@ -91,9 +93,11 @@ impl Default for CommandExecutionPolicy {
     }
 }
 
-#[derive(Clone)]
+/// The leader-local owner of each durable execution reference.
+///
+/// An entry lives exactly as long as a request holds or waits for its owner, so a finished
+/// reference leaves no lock behind while a late waiter still joins the owner it found.
 pub(in crate::application) struct CommandExecutionOwners {
-    policy: CommandExecutionPolicy,
     inner: StdArc<CommandExecutionOwnersInner>,
 }
 
@@ -121,38 +125,14 @@ impl Drop for CommandExecutionLock {
 impl Default for CommandExecutionOwners {
     fn default() -> Self {
         Self {
-            policy: CommandExecutionPolicy::default(),
             inner: StdArc::new(CommandExecutionOwnersInner {
                 locks: DashMap::with_hasher(RandomState::new()),
             }),
         }
-    }
-}
-
-impl From<CommandExecutionPolicy> for CommandExecutionOwners {
-    fn from(policy: CommandExecutionPolicy) -> Self {
-        Self::new(policy)
     }
 }
 
 impl CommandExecutionOwners {
-    pub(in crate::application) fn new(policy: CommandExecutionPolicy) -> Self {
-        Self {
-            policy,
-            inner: StdArc::new(CommandExecutionOwnersInner {
-                locks: DashMap::with_hasher(RandomState::new()),
-            }),
-        }
-    }
-
-    pub(in crate::application) fn retry_validity(&self) -> Duration {
-        self.policy.retry_validity()
-    }
-
-    fn admission_at(&self, now: Timestamp) -> CommandExecutionAdmissionPolicy {
-        self.policy.admission_at(now)
-    }
-
     pub(in crate::application) async fn lock(
         &self,
         reference: CommandExecutionReference,
@@ -160,8 +140,8 @@ impl CommandExecutionOwners {
         let lock = self.lock_for(&reference);
         let guard = lock.mutex.clone().lock_owned().await;
         CommandExecutionOwnerGuard {
+            _guard: guard,
             _lock: lock,
-            guard: Some(guard),
         }
     }
 
@@ -172,8 +152,8 @@ impl CommandExecutionOwners {
         let lock = self.lock_for(&reference);
         let guard = lock.mutex.clone().try_lock_owned().ok()?;
         Some(CommandExecutionOwnerGuard {
+            _guard: guard,
             _lock: lock,
-            guard: Some(guard),
         })
     }
 
@@ -197,15 +177,11 @@ impl CommandExecutionOwners {
     }
 }
 
+/// Fields drop in declaration order, so the owner is released before this guard stops keeping
+/// the reference's entry alive.
 pub(in crate::application) struct CommandExecutionOwnerGuard {
+    _guard: OwnedMutexGuard<()>,
     _lock: StdArc<CommandExecutionLock>,
-    guard: Option<OwnedMutexGuard<()>>,
-}
-
-impl Drop for CommandExecutionOwnerGuard {
-    fn drop(&mut self) {
-        drop(self.guard.take());
-    }
 }
 
 pub(in crate::application) struct PersistentCommandRequest {
@@ -474,7 +450,7 @@ impl SessionServiceImpl {
                 .reclaim_command_executions(finished_before, retry_fence)
                 .await
         {
-            warn!(error = %error, "failed to expire retained command results");
+            warn!(error = %error, "failed to reclaim retained command execution history");
         }
     }
 
@@ -606,7 +582,10 @@ impl SessionServiceImpl {
             }
         };
         let admitted_at = current_timestamp();
-        let policy = self.inner.command_executions.admission_at(admitted_at);
+        let policy = self
+            .inner
+            .command_execution_policy
+            .admission_at(admitted_at);
         let execution = CommandExecution::applying_at_position(
             reference,
             owner,
@@ -1174,8 +1153,8 @@ mod tests {
             .await
             .assured("the command execution lock waiter does not panic");
         let second = CommandExecutionOwnerGuard {
+            _guard: guard,
             _lock: lock,
-            guard: Some(guard),
         };
         drop(late_lock);
         assert_eq!(owners.len(), 1);

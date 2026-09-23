@@ -2788,7 +2788,7 @@ impl SessionServiceImpl {
         let finished_before =
             subtract_timestamp_duration(now, self.inner.transaction_tombstone_retention);
         let command_retry_fence =
-            subtract_timestamp_duration(now, self.inner.command_executions.retry_validity());
+            subtract_timestamp_duration(now, self.inner.command_execution_policy.retry_validity());
         self.reconcile_persistent_commands(command_retry_fence, command_retry_fence)
             .await;
         let transactions = self.inner.consensus.current_transactions().await;

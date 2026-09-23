@@ -45,7 +45,7 @@ use triomphe::Arc;
 
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
-    command_execution::{CommandExecutionOwners, PersistentCommandRequest},
+    command_execution::{CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest},
     completion::{ApplicationRevisionPhase, wait_for_application_revision},
     describe_output::placement_runtime_node_ref_suggestions,
     model_mutation::{RequestDomainError, command_error, parse_request_domain},
@@ -172,6 +172,8 @@ pub(in crate::application) struct SessionServiceInner {
     pub(in crate::application) transaction_max_source_bytes: u64,
     pub(in crate::application) transaction_max_open: usize,
     pub(in crate::application) transaction_bindings: DashMap<String, String, RandomState>,
+    /// Retry validity and history capacity every durable command admission applies.
+    pub(in crate::application) command_execution_policy: CommandExecutionPolicy,
     /// Requests with one durable execution reference join one application owner on this leader.
     pub(in crate::application) command_executions: CommandExecutionOwners,
     /// Calls adopting the same replicated transaction share one executor without serializing

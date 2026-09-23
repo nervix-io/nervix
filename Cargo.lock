@@ -7504,6 +7504,7 @@ dependencies = [
  "nervix-recovery",
  "prost 0.13.5",
  "url",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

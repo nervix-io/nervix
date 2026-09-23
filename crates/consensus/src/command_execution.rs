@@ -11,8 +11,9 @@ use error_stack::Report;
 use imbl::OrdSet;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
-    ClusterNodeIdentity, CommandExecutionReference, DomainName, DomainState, Statement, Timestamp,
-    TransactionOperationAdmission, TransactionPosition, TransactionPreviewIdentity, UserName,
+    ClusterNodeIdentity, CommandExecutionReference, CommandExecutionReferenceTimestampError,
+    DomainName, DomainState, Statement, Timestamp, TransactionOperationAdmission,
+    TransactionPosition, TransactionPreviewIdentity, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -574,22 +575,28 @@ impl CommandExecutionAdmissionPolicy {
         self.retry_fence
     }
 
+    /// Checks a new identity against the retry fence in force, which is the later of this
+    /// policy's fence and the durable one.
     fn validate_reference(
         &self,
         reference: &CommandExecutionReference,
-        durable_fence: Option<Timestamp>,
+        fence: Timestamp,
     ) -> error_stack::Result<Timestamp, CommandExecutionAdmissionError> {
         let issued_at = match reference.retry_issued_at() {
             Ok(issued_at) => issued_at,
-            Err(_) => {
-                return Err(Report::new(
-                    CommandExecutionAdmissionError::MissingTimestamp,
-                ));
+            Err(error) => {
+                let refusal = match error.current_context() {
+                    CommandExecutionReferenceTimestampError::NotUuidV7 => {
+                        CommandExecutionAdmissionError::MissingTimestamp
+                    }
+                    // A UUIDv7 creation time counts milliseconds after the Unix epoch, so one
+                    // beyond the representable range lies centuries ahead of any serving clock.
+                    CommandExecutionReferenceTimestampError::OutsideTimestampRange => {
+                        CommandExecutionAdmissionError::Future
+                    }
+                };
+                return Err(error.change_context(refusal));
             }
-        };
-        let fence = match durable_fence {
-            Some(durable) => durable.max(self.retry_fence),
-            None => self.retry_fence,
         };
         if issued_at <= fence {
             return Err(Report::new(CommandExecutionAdmissionError::Expired));
@@ -715,7 +722,8 @@ impl CommandExecutionRecords {
         reference: &CommandExecutionReference,
         policy: &CommandExecutionAdmissionPolicy,
     ) -> error_stack::Result<(), CommandExecutionAdmissionError> {
-        policy.validate_reference(reference, self.retry_fence)?;
+        let fence = self.effective_retry_fence(policy.retry_fence);
+        policy.validate_reference(reference, fence)?;
         let retained = u64::try_from(self.entries.len())
             .assured("supported targets have a pointer width no larger than u64");
         if retained >= policy.capacity {
@@ -731,10 +739,7 @@ impl CommandExecutionRecords {
         execution: CommandExecution,
         policy: &CommandExecutionAdmissionPolicy,
     ) {
-        self.retry_fence = Some(match self.retry_fence {
-            Some(current) => current.max(policy.retry_fence),
-            None => policy.retry_fence,
-        });
+        self.retry_fence = Some(self.effective_retry_fence(policy.retry_fence));
         self.applying.insert(execution.reference.clone());
         self.entries.insert(execution.reference.clone(), execution);
     }
@@ -751,11 +756,21 @@ impl CommandExecutionRecords {
         self.entries.insert(reference, execution);
     }
 
+    /// The fence a reclamation applies: the durable fence never moves back, so a leader whose clock
+    /// trails the one that advanced it still rejects every identity already reclaimed.
+    fn effective_retry_fence(&self, retry_fence: Timestamp) -> Timestamp {
+        match self.retry_fence {
+            Some(current) => current.max(retry_fence),
+            None => retry_fence,
+        }
+    }
+
     pub(crate) fn reconciliation(
         &self,
         finished_before: Timestamp,
         retry_fence: Timestamp,
     ) -> CommandExecutionReconciliation {
+        let retry_fence = self.effective_retry_fence(retry_fence);
         let finished_due = self
             .finished
             .iter()
@@ -773,10 +788,7 @@ impl CommandExecutionRecords {
     }
 
     pub(crate) fn reclaim(&mut self, finished_before: Timestamp, retry_fence: Timestamp) {
-        let retry_fence = match self.retry_fence {
-            Some(current) => current.max(retry_fence),
-            None => retry_fence,
-        };
+        let retry_fence = self.effective_retry_fence(retry_fence);
         self.retry_fence = Some(retry_fence);
 
         let expired = self
@@ -991,6 +1003,92 @@ mod tests {
         records.reclaim(finished_before, identity_fence);
         assert!(records.get(&finished_reference).is_none());
         assert!(records.get(&applying_reference).is_some());
+    }
+
+    /// A UUIDv7 retry identity whose embedded creation time is `unix_millis`.
+    fn reference_issued_at(unix_millis: u64) -> CommandExecutionReference {
+        let high = unix_millis >> 16;
+        let low = unix_millis & 0xffff;
+        CommandExecutionReference::parse(format!("{high:08x}-{low:04x}-7000-8000-000000000001"))
+            .assured("the formatted identity uses only execution-reference characters")
+    }
+
+    fn admission_error(
+        records: &CommandExecutionRecords,
+        reference: &CommandExecutionReference,
+        policy: &CommandExecutionAdmissionPolicy,
+    ) -> CommandExecutionAdmissionError {
+        let Err(error) = records.validate_admission(reference, policy) else {
+            panic!("the identity '{reference}' must be refused");
+        };
+        *error.current_context()
+    }
+
+    #[test]
+    fn admission_accepts_only_identities_created_inside_the_retry_window() {
+        // The policy is taken at 1_700_000_010 s with a 60 s retry validity, so its fence sits at
+        // 1_699_999_950 s and a creation time may lead it by at most five minutes.
+        let policy = policy(10);
+        let records = CommandExecutionRecords::default();
+
+        let current = reference_issued_at(1_700_000_005_000);
+        records
+            .validate_admission(&current, &policy)
+            .assured("an identity created five seconds ago is inside the retry window");
+        let skewed = reference_issued_at(1_700_000_250_000);
+        records
+            .validate_admission(&skewed, &policy)
+            .assured("a creation time four minutes ahead is inside the clock-skew allowance");
+
+        let at_fence = reference_issued_at(1_699_999_950_000);
+        assert_eq!(
+            admission_error(&records, &at_fence, &policy),
+            CommandExecutionAdmissionError::Expired
+        );
+        let stale = reference_issued_at(1_699_999_000_000);
+        assert_eq!(
+            admission_error(&records, &stale, &policy),
+            CommandExecutionAdmissionError::Expired
+        );
+        let future = reference_issued_at(1_700_000_311_000);
+        assert_eq!(
+            admission_error(&records, &future, &policy),
+            CommandExecutionAdmissionError::Future
+        );
+        let random = CommandExecutionReference::parse("0f0a4bd6-3f1e-4c8a-9d51-2f64a1b0c7de")
+            .assured("a random UUID uses only execution-reference characters");
+        assert_eq!(
+            admission_error(&records, &random, &policy),
+            CommandExecutionAdmissionError::MissingTimestamp
+        );
+    }
+
+    #[test]
+    fn a_trailing_leader_clock_cannot_readmit_a_reclaimed_identity() {
+        let mut records = CommandExecutionRecords::default();
+        let reclaimed = reference_issued_at(1_700_000_005_000);
+        records.reclaim(
+            Timestamp::from_unix_nanos(1_700_000_020_000_000_000),
+            Timestamp::from_unix_nanos(1_700_000_020_000_000_000),
+        );
+
+        // This leader's own fence is 1_699_999_950 s, well before the identity was created, but
+        // the durable fence already passed it.
+        let trailing = policy(10);
+        assert_eq!(
+            admission_error(&records, &reclaimed, &trailing),
+            CommandExecutionAdmissionError::Expired
+        );
+
+        records.reclaim(
+            Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
+            Timestamp::from_unix_nanos(1_700_000_010_000_000_000),
+        );
+        assert_eq!(
+            records.retry_fence(),
+            Some(Timestamp::from_unix_nanos(1_700_000_020_000_000_000)),
+            "a reclamation from a trailing clock must not move the durable fence back"
+        );
     }
 
     #[test]

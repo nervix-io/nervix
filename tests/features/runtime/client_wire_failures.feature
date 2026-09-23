@@ -264,6 +264,11 @@ Feature: Client wire failure regressions
       );
       """
     Then the last command request succeeded
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the only transaction id is saved as placeholder "command_transaction"
     And command execution reference "reclaimed-{{test_id}}" is eventually reclaimed
     When the cluster is restarted
     And this NSPL command request with execution reference "reclaimed-{{test_id}}" is executed on the leader node
@@ -285,6 +290,106 @@ Feature: Client wire failure regressions
       CREATE SCHEMA reclaimed_identity_record (
         value STRING
       );
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      DESCRIBE TRANSACTION '{{command_transaction}}';
+      """
+    Then the last command output contains
+      """
+      transaction: {{command_transaction}}
+      domain: {{domain}}
+      state: COMMITTED
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @client_wire_execution_history
+  Scenario Outline: A command identity outside its retry window starts no effect
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When this NSPL command request with an execution reference <reference> is executed on the leader node
+      """
+      CREATE SCHEMA refused_identity_record (
+        value STRING
+      );
+      """
+    Then the last command error contains
+      """
+      <refusal>
+      """
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA refused_identity_record;
+      """
+    Then the last command error contains
+      """
+      schema 'refused_identity_record' does not exist in domain '{{domain}}'
+      """
+
+    Examples:
+      | cluster_size | reference               | refusal                                            |
+      | 1            | created "1h" before now | has expired                                        |
+      | 1            | created "10m" after now | beyond the accepted client clock-skew boundary     |
+      | 1            | without a creation time | does not carry a UUID version 7 creation timestamp |
+      | 3            | created "1h" before now | has expired                                        |
+      | 3            | created "10m" after now | beyond the accepted client clock-skew boundary     |
+      | 3            | without a creation time | does not carry a UUID version 7 creation timestamp |
+
+  @client_wire_execution_history
+  Scenario Outline: A full command history refuses new identities and keeps every retained result
+    Given the command execution capacity is configured as 3
+    And a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When this NSPL command request with execution reference "first-retained-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA first_retained_record (
+        value STRING
+      );
+      """
+    Then the last command request succeeded
+    When this NSPL command request with execution reference "second-retained-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA second_retained_record (
+        value STRING
+      );
+      """
+    Then the last command request succeeded
+    When this NSPL command request with execution reference "refused-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA refused_capacity_record (
+        value STRING
+      );
+      """
+    Then the last command error contains
+      """
+      command execution capacity of 3 is full
+      """
+    When this NSPL command request with execution reference "first-retained-{{test_id}}" is executed on the leader node
+      """
+      CREATE SCHEMA first_retained_record (
+        value STRING
+      );
+      """
+    Then the last command request succeeded
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA refused_capacity_record;
+      """
+    Then the last command error contains
+      """
+      schema 'refused_capacity_record' does not exist in domain '{{domain}}'
       """
 
     Examples:
