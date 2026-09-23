@@ -555,19 +555,19 @@ fn initialize_scenario_identity(world: &mut ScenarioWorld) {
     world.test_id = format!("t{}", Uuid::now_v7().as_simple());
     world.zeromq_ingest_addr = format!(
         "tcp://127.0.0.1:{}",
-        crate::common::cluster::next_port().expect("failed to allocate ZeroMQ ingest port")
+        crate::common::port_pool::next_port().expect("failed to allocate ZeroMQ ingest port")
     );
     world.zeromq_emit_addr = format!(
         "tcp://127.0.0.1:{}",
-        crate::common::cluster::next_port().expect("failed to allocate ZeroMQ emit port")
+        crate::common::port_pool::next_port().expect("failed to allocate ZeroMQ emit port")
     );
     world.syslog_ingest_addr = format!(
         "127.0.0.1:{}",
-        crate::common::cluster::next_port().expect("failed to allocate Syslog ingest port")
+        crate::common::port_pool::next_port().expect("failed to allocate Syslog ingest port")
     );
     world.syslog_emit_addr = format!(
         "127.0.0.1:{}",
-        crate::common::cluster::next_port().expect("failed to allocate Syslog emit port")
+        crate::common::port_pool::next_port().expect("failed to allocate Syslog emit port")
     );
 }
 
@@ -15237,7 +15237,7 @@ async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, a
         tokio::task::consume_budget().await;
         let replacement = format!(
             "tcp://127.0.0.1:{}",
-            crate::common::cluster::next_port()
+            crate::common::port_pool::next_port()
                 .expect("failed to allocate replacement ZeroMQ emit port")
         );
         if let Ok(observer) = world.cluster().observe_zeromq(&replacement).await {

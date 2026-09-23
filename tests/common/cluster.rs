@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::OpenOptions,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
     str::FromStr,
     sync::{Arc as StdArc, LazyLock, OnceLock},
@@ -117,6 +117,7 @@ use super::{
         cluster_startup_budget,
     },
     phase_deadline::PhaseDeadline,
+    port_pool::{next_ports, release_test_ports},
     scenario_phase::ScenarioIdentity,
     status_request::{
         STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint,
@@ -184,19 +185,6 @@ const TEST_STATE_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) const TEST_AUTH_USERNAME: &str = "default";
 pub(crate) const TEST_AUTH_PASSWORD: &str = "nervix-test-password";
 static DEV_TLS_READY: OnceLock<io::Result<()>> = OnceLock::new();
-/// Every port any scenario in this process has claimed. Scenarios run concurrently in one test
-/// binary, and `next_ports` drops its probe listener as soon as it has read the port number, so the
-/// operating system does not stop a second scenario from binding the same port. This set is the
-/// only thing that does. Startup still retries on a fresh allocation, because the pool is shared
-/// with sibling worktrees running the same suite, and their binds are invisible here.
-///
-/// A port leaves the set only once nothing can still dial it. Returning one while a peer holds it
-/// in gossip lets an unrelated scenario's node answer that peer, and because every scenario names
-/// its nodes `node-1`, `node-2` and `node-3`, the certificate identity alone cannot distinguish
-/// those separate test clusters. Never releasing is not the alternative: seven ports per
-/// node across the suite exceeds the ephemeral range, so teardown has to give them back.
-static RESERVED_TEST_PORTS: LazyLock<Mutex<BTreeSet<u16>>> =
-    LazyLock::new(|| Mutex::new(BTreeSet::new()));
 static TEST_LOG_TRUNCATED: LazyLock<Mutex<bool>> = LazyLock::new(|| Mutex::new(false));
 
 #[derive(Debug)]
@@ -321,19 +309,6 @@ async fn wait_for_proxy_resume(
     Ok(())
 }
 
-pub(crate) fn next_port() -> io::Result<u16> {
-    let mut ports = next_ports(1)?;
-    Ok(ports.remove(0))
-}
-
-/// Returns ports a stopped fixture no longer binds to the reservation set every scenario shares.
-pub(crate) fn release_test_ports(ports: &[u16]) {
-    let mut reserved = RESERVED_TEST_PORTS.lock();
-    for port in ports {
-        reserved.remove(port);
-    }
-}
-
 pub(crate) fn test_basic_auth_token_for_password(password: &str) -> String {
     BASE64_STANDARD.encode(format!("{TEST_AUTH_USERNAME}:{password}"))
 }
@@ -362,23 +337,6 @@ fn truncate_test_log_once() -> io::Result<()> {
         *truncated = true;
     }
     Ok(())
-}
-
-fn next_ports(count: usize) -> io::Result<Vec<u16>> {
-    let mut listeners = Vec::with_capacity(count);
-    let mut ports = Vec::with_capacity(count);
-    while ports.len() < count {
-        let listener = TcpListener::bind((HOST, 0))?;
-        let port = listener.local_addr()?.port();
-        let mut reserved = RESERVED_TEST_PORTS.lock();
-        if !reserved.insert(port) {
-            continue;
-        }
-        drop(reserved);
-        ports.push(port);
-        listeners.push(listener);
-    }
-    Ok(ports)
 }
 
 fn parse_addr(input: &str) -> io::Result<std::net::SocketAddr> {
