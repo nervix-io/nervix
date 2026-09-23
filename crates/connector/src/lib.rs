@@ -54,9 +54,9 @@ pub use service_url::{ServiceUrl, ServiceUrlError};
 pub use sink::{
     AckConfirmation, BrokerPublishingMode, MappedSinkRows, PerRecordOutcome, PerRecordOutcomeParts,
     RecordSink, RejectedSinkRecord, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
-    SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost, SinkHostServices,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
-    SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkStartResult,
+    SinkCommitReport, SinkDeadline, SinkEventReporter, SinkGeneralErrorHandler, SinkHost,
+    SinkHostServices, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord,
+    SinkRecordPosition, SinkRetryDelay, SinkStagingDirectory, SinkStartError, SinkStartResult,
     SinkTransientErrorStatus,
 };
 pub use source::{

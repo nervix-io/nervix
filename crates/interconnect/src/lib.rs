@@ -474,7 +474,7 @@ pub struct DomainDrainStatusEnvelope {
 pub enum EmitterPublishingDrainStateEnvelope {
     AwaitingConfirmation,
     RetryingInfrastructure,
-    RetryingIcebergCommit,
+    RetryingCommit,
 }
 
 impl EmitterPublishingDrainStateEnvelope {

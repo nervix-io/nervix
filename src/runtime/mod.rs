@@ -131,7 +131,6 @@ use nervix_wasm::{
 };
 use ordered_float::OrderedFloat;
 use sorted_vec::SortedSet;
-use tempfile::TempDir;
 use thiserror::Error;
 use tokio::{
     io::AsyncBufReadExt,
