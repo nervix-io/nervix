@@ -9,9 +9,7 @@
 //! - **Must not know.** The NATS driver, subscription lifecycle, NSPL parsing, registry
 //!   validation, or placement computation.
 
-mod source;
-
-use source::{NatsSource, NatsSourcePlan};
+use nervix_connector_nats::{NatsSource, NatsSourcePlan};
 
 use super::{
     super::*,

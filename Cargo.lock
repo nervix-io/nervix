@@ -6756,6 +6756,7 @@ version = "0.1.0-dev"
 dependencies = [
  "async-nats",
  "async-trait",
+ "bytes",
  "error-stack",
  "futures-util",
  "humantime",
@@ -6763,6 +6764,7 @@ dependencies = [
  "nervix-connector",
  "nervix-models",
  "shuttle-tokio",
+ "thiserror 2.0.20",
  "tokio",
 ]
 
