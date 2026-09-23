@@ -196,6 +196,59 @@ pub enum InstructionKind {
     },
 }
 
+impl InstructionKind {
+    /// The registers this instruction reads, in operand order.
+    pub fn operands(&self) -> Vec<RegisterRef> {
+        match self {
+            Self::Move { input, .. } | Self::Unary { input, .. } | Self::Cast { input, .. } => {
+                vec![*input]
+            }
+            Self::Assign {
+                input, fallback, ..
+            } => {
+                let mut operands = vec![*input];
+                if let AssignmentFallback::Register(previous) = fallback {
+                    operands.push(*previous);
+                }
+                operands
+            }
+            Self::Literal { .. } | Self::NullLiteral { .. } | Self::Uninitialized { .. } => {
+                Vec::new()
+            }
+            Self::Binary { left, right, .. } => vec![*left, *right],
+            Self::Builtin { inputs, .. } | Self::Inject { inputs, .. } => inputs.clone(),
+            Self::Select {
+                arms, otherwise, ..
+            } => {
+                let mut operands = Vec::with_capacity(arms.len() * 2 + 1);
+                for arm in arms {
+                    operands.push(arm.mask);
+                    operands.push(arm.value);
+                }
+                operands.push(*otherwise);
+                operands
+            }
+        }
+    }
+
+    /// The register this instruction writes.
+    pub fn output(&self) -> RegisterRef {
+        match self {
+            Self::Move { dst, .. }
+            | Self::Assign { dst, .. }
+            | Self::Literal { dst, .. }
+            | Self::NullLiteral { dst, .. }
+            | Self::Uninitialized { dst, .. }
+            | Self::Unary { dst, .. }
+            | Self::Binary { dst, .. }
+            | Self::Cast { dst, .. }
+            | Self::Builtin { dst, .. }
+            | Self::Inject { dst, .. }
+            | Self::Select { dst, .. } => *dst,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Instruction {
     pub kind: InstructionKind,

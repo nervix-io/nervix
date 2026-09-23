@@ -153,7 +153,7 @@ const _: () = assert!(
 );
 
 /// The environment variable a run sets to give the suite a budget of its own.
-const SUITE_BUDGET_ENV: &str = "NERVIX_TEST_SUITE_BUDGET";
+pub(crate) const SUITE_BUDGET_ENV: &str = "NERVIX_TEST_SUITE_BUDGET";
 
 /// The budget one scenario run is given, so a run that must end sooner than the suite's own budget
 /// can say so without rebuilding the harness.

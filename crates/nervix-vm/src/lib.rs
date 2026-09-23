@@ -38,7 +38,9 @@ mod error;
 mod frontend;
 mod ir;
 mod numeric;
+mod operand;
 pub mod program;
+mod regexp;
 mod runtime;
 mod semantics;
 pub mod window;
@@ -75,6 +77,11 @@ pub use ir::{
     CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
     InvocationBinding, OutputBinding, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace,
     RegisterType, ScalarValue,
+};
+pub use regexp::{
+    COMPILED_PATTERN_SIZE_LIMIT, ConstantPattern, DYNAMIC_PATTERN_CACHE_CAPACITY,
+    DynamicPatternStatistics, DynamicPatterns, PatternSource, RegexpCall, RegexpFunction,
+    SEARCH_CACHE_CAPACITY,
 };
 pub use runtime::{
     ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,

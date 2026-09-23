@@ -2221,7 +2221,8 @@ impl EmitSink {
         }
     }
 
-    pub fn iceberg_catalog_client(&self) -> Option<&ClientName> {
+    /// The catalog client this sink commits through, for a sink that names one beside its own.
+    pub fn catalog_client(&self) -> Option<&ClientName> {
         if let Self::Iceberg {
             catalog: IcebergCatalog::Rest { client },
             ..

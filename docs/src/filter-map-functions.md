@@ -62,7 +62,7 @@ A pass over a value buffer is written so the compiler can turn it into the vecto
 the CPU a Nervix binary is built for. Builtins contain no hand-written SIMD code, and the vector
 instructions a node's CPU offers never change a builtin's result.
 
-The compiler applies two optimizations that preserve results in the same way:
+The compiler applies three optimizations that preserve results in the same way:
 
 - A deterministic call that cannot fail and whose arguments are all literals may be computed once
   instead of for every batch. It produces exactly the value that evaluating it for each message
@@ -70,6 +70,11 @@ The compiler applies two optimizations that preserve results in the same way:
 - Identical deterministic expressions that cannot fail may be computed once per batch and shared.
   Calls that return a new value for every message, such as `uuid_v4()`, and calls that can report
   a per-message error are evaluated at each occurrence, so each occurrence reports its own error.
+- A literal, and any expression whose arguments are all literals or `now()`, is carried through a
+  batch as one value rather than as a column of copies. A function reads it as one value where it
+  can and expands it to a column only where a message-by-message operation or an output field
+  needs one, so the result is the same either way. When such an expression fails, such as
+  `1 / 0`, every message that evaluates it reports the error.
 
 ## Function Properties
 
@@ -253,7 +258,16 @@ Matching is exact and case-sensitive.
 ## Regular Expressions
 
 Regular-expression functions take `STRING` arguments and use Rust regex syntax. A pattern that does
-not compile reports a per-message error.
+not compile reports a per-message `invalid_argument` error.
+
+A pattern written as a literal, or computed from literals alone, is compiled once when the node is
+activated and reused by every batch. It is still not a configuration error: a literal pattern that
+does not compile reports its per-message error only for the messages that evaluate it, so an
+invalid pattern in a conditional arm no message selects reports nothing. A pattern read from a
+field is compiled when a message first uses it and kept in a cache of the 64 most recently
+compiled patterns per call, which evicts the pattern compiled longest ago. A compiled pattern is
+limited to 10 MiB; a pattern that compiles past that limit reports a per-message error like any
+other invalid pattern.
 
 | Function | Returns | Notes |
 | --- | --- | --- |

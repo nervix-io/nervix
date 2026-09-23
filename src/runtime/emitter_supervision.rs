@@ -14,10 +14,12 @@ pub(super) enum EmitterReconfigureError {
     ResponseDropped,
 }
 
+/// What an emitter is retrying: the publish path itself, or the commit that publishes what its
+/// sink staged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EmitterRetryKind {
     Infrastructure,
-    IcebergCommit,
+    Commit,
 }
 
 #[derive(Debug, Clone)]
@@ -251,7 +253,7 @@ impl Runtime {
         );
     }
 
-    pub(in crate::runtime) fn record_iceberg_commit_failure_with_backoff(
+    pub(in crate::runtime) fn record_commit_failure_with_backoff(
         &self,
         domain: &DomainName,
         emitter: &EmitterName,
@@ -263,7 +265,7 @@ impl Runtime {
             emitter,
             error,
             backoff,
-            EmitterRetryKind::IcebergCommit,
+            EmitterRetryKind::Commit,
         );
     }
 
@@ -402,7 +404,7 @@ impl Runtime {
         let client = clients
             .get(emitter.sink.client())
             .map(|model| model.as_ref());
-        let catalog_client = match emitter.sink.iceberg_catalog_client() {
+        let catalog_client = match emitter.sink.catalog_client() {
             Some(catalog) => clients.get(catalog).map(|model| model.as_ref()),
             None => None,
         };

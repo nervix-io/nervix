@@ -608,6 +608,113 @@ fn compile_list() -> Arc<CompiledProgram> {
     .expect("benchmark program must compile")
 }
 
+/// The outputs of the literal-operand programs: each pairs a column with a constant operand.
+fn literal_operand_output_schema() -> StdArc<Schema> {
+    with_output_fields(
+        &string_schema(),
+        &[
+            ("total", DataType::Int64),
+            ("scaled", DataType::Int64),
+            ("large", DataType::Boolean),
+            ("has", DataType::Boolean),
+            ("starts", DataType::Boolean),
+            ("chosen", DataType::Utf8),
+            ("tagged", DataType::Utf8),
+            ("replaced", DataType::Utf8),
+        ],
+    )
+}
+
+/// Every operator and builtin below reads one constant operand: the arithmetic and comparison
+/// operators, the Arrow string predicates, `coalesce`, `concat` and `replace`. Their cost is what
+/// carrying a literal as one value, rather than as a column of copies, saves.
+fn compile_literal_operands() -> Arc<CompiledProgram> {
+    let program = parse_program(
+        "SET total = input.number + 7, scaled = input.number * 3, large = input.number > 4096, \
+         has = contains(input.text, 'prefix'), starts = starts_with(input.text, ' prefix'), \
+         chosen = coalesce(input.primary, 'none'), tagged = concat(input.text, '-', 'tag'), \
+         replaced = replace(input.text, '-', '_')",
+    )
+    .expect("literal operand benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        literal_operand_output_schema(),
+        [CompileBinding::writable("input", string_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("literal operand benchmark program must compile")
+}
+
+fn regex_output_schema() -> StdArc<Schema> {
+    with_output_fields(
+        &regex_schema(),
+        &[
+            ("matched", DataType::Boolean),
+            ("piece", DataType::Utf8),
+            ("rewritten", DataType::Utf8),
+        ],
+    )
+}
+
+fn regex_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("text", DataType::Utf8, true),
+        Field::new("pattern", DataType::Utf8, true),
+    ]))
+}
+
+/// Rows whose text carries a number and whose pattern column cycles through three patterns, so a
+/// per-row pattern changes on every row and the call's cache answers each of them.
+fn regex_batch(row_count: usize) -> TypedBatch {
+    const PATTERNS: [&str; 3] = ["prefix-[0-9]+", "[0-9]+-suffix", "(prefix)-([0-9]+)"];
+    let text =
+        StringArray::from_iter((0..row_count).map(|row| Some(format!(" prefix-{row}-suffix "))));
+    let pattern = StringArray::from_iter((0..row_count).map(|row| Some(PATTERNS[row % 3])));
+    TypedBatch::try_new(
+        regex_schema(),
+        vec![TypedArray::Utf8(text), TypedArray::Utf8(pattern)],
+    )
+    .expect("regex benchmark batch must build")
+}
+
+/// Every pattern is a literal, so each is compiled once with the program and every batch reuses
+/// it; the replacement expands capture groups.
+fn compile_regex_constant_patterns() -> Arc<CompiledProgram> {
+    let program = parse_program(
+        "SET matched = regexp_like(input.text, 'prefix-[0-9]+'), piece = \
+         regexp_substr(input.text, '[0-9]+'), rewritten = regexp_replace(input.text, \
+         '(prefix)-([0-9]+)', '$2:$1')",
+    )
+    .expect("constant pattern benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        regex_output_schema(),
+        [CompileBinding::writable("input", regex_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("constant pattern benchmark program must compile")
+}
+
+/// Every pattern is read from the batch, so each call resolves its rows through its bounded
+/// pattern cache.
+fn compile_regex_argument_patterns() -> Arc<CompiledProgram> {
+    let program = parse_program(
+        "SET matched = regexp_like(input.text, input.pattern), piece = regexp_substr(input.text, \
+         input.pattern), rewritten = regexp_replace(input.text, input.pattern, '$0')",
+    )
+    .expect("argument pattern benchmark program must parse");
+    compile_program_with_options_for_bindings(
+        &program,
+        regex_output_schema(),
+        [CompileBinding::writable("input", regex_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("argument pattern benchmark program must compile")
+}
+
 fn unoptimized_options() -> CompileOptions {
     CompileOptions {
         optimize_temp_registers: false,
@@ -1813,6 +1920,10 @@ fn execute_benches(c: &mut Criterion) {
     let string_batch = string_batch(8_192);
     let long_tail_compiled = compile_long_tail();
     let long_tail_batch = long_tail_batch(8_192);
+    let literal_operands_compiled = compile_literal_operands();
+    let regex_constant_compiled = compile_regex_constant_patterns();
+    let regex_argument_compiled = compile_regex_argument_patterns();
+    let regex_batch = regex_batch(8_192);
     let runtime = benchmark_runtime();
 
     let mut group = c.benchmark_group("execute_program");
@@ -1856,6 +1967,30 @@ fn execute_benches(c: &mut Criterion) {
             ))
         })
     });
+    group.bench_function("literal_operands_8192", |b| {
+        b.iter(|| {
+            runtime.block_on(execute_benchmark_program(
+                black_box(&literal_operands_compiled),
+                black_box(&string_batch),
+            ))
+        })
+    });
+    group.bench_function("regex_constant_patterns_8192", |b| {
+        b.iter(|| {
+            runtime.block_on(execute_benchmark_program(
+                black_box(&regex_constant_compiled),
+                black_box(&regex_batch),
+            ))
+        })
+    });
+    group.bench_function("regex_argument_patterns_8192", |b| {
+        b.iter(|| {
+            runtime.block_on(execute_benchmark_program(
+                black_box(&regex_argument_compiled),
+                black_box(&regex_batch),
+            ))
+        })
+    });
     group.finish();
 }
 
@@ -1881,6 +2016,9 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
     let window_aggregate_input_compiled = compile_window_aggregate_input();
     let correlate_where_compiled = compile_correlate_where();
     let correlate_output_compiled = compile_correlate_output();
+    let literal_operands_compiled = compile_literal_operands();
+    let regex_constant_compiled = compile_regex_constant_patterns();
+    let regex_argument_compiled = compile_regex_argument_patterns();
     let runtime = benchmark_runtime();
 
     let mut group = c.benchmark_group("execute_program_batch_size");
@@ -1948,6 +2086,40 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
                 ))
             })
         });
+        group.bench_with_input(BenchmarkId::new("literal_operands", rows), &rows, |b, _| {
+            b.iter(|| {
+                runtime.block_on(execute_benchmark_program(
+                    black_box(&literal_operands_compiled),
+                    black_box(&batch),
+                ))
+            })
+        });
+
+        let batch = regex_batch(rows);
+        group.bench_with_input(
+            BenchmarkId::new("regex_constant_patterns", rows),
+            &rows,
+            |b, _| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&regex_constant_compiled),
+                        black_box(&batch),
+                    ))
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("regex_argument_patterns", rows),
+            &rows,
+            |b, _| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&regex_argument_compiled),
+                        black_box(&batch),
+                    ))
+                })
+            },
+        );
 
         let batch = list_batch(rows);
         group.bench_with_input(BenchmarkId::new("list_builtins", rows), &rows, |b, _| {

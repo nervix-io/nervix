@@ -1407,7 +1407,7 @@ impl DomainState {
                     }
                     graph.add_edge(client, source, EdgeKind::RequiredBy);
 
-                    if let Some(catalog_client_name) = emitter.sink.iceberg_catalog_client() {
+                    if let Some(catalog_client_name) = emitter.sink.catalog_client() {
                         let catalog_client = expect_kind(
                             domain,
                             identifier,

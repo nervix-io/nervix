@@ -149,6 +149,116 @@ Feature: Expression function semantics
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: Regular expressions prepare constant patterns and read per-message patterns
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA note (
+        id STRING,
+        raw STRING,
+        pattern STRING
+      );
+      CREATE SCHEMA matched_note (
+        id STRING,
+        raw STRING,
+        pattern STRING,
+        literal_match BOOL,
+        folded_match BOOL,
+        message_match BOOL,
+        message_piece STRING OPTIONAL,
+        rewritten STRING,
+        guarded BOOL
+      );
+      CREATE SCHEMA note_error (
+        source_id STRING,
+        error_code STRING,
+        error_message STRING
+      );
+      CREATE WIRE JSON SCHEMA note_wire MODE STRICT (
+        id string,
+        raw string,
+        pattern string
+      );
+      CREATE CODEC note_codec
+        FROM WIRE JSON SCHEMA note_wire
+        TO SCHEMA note;
+      CREATE RELAY notes SCHEMA note UNBRANCHED;
+      CREATE RELAY matched_notes SCHEMA matched_note UNBRANCHED;
+      CREATE RELAY note_errors SCHEMA note_error UNBRANCHED;
+      CREATE VHOST edge regexp-patterns-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/notes' TYPE HTTP;
+      CREATE INGESTOR note_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING note_codec
+        TO notes
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION match_notes
+        FROM notes
+        UNBRANCHED
+        TO matched_notes
+          INHERIT ALL
+          SET literal_match = regexp_like(input.raw, 'h[a-z]+'),
+              folded_match = regexp_like(input.raw, lower('H[A-Z]+')),
+              message_match = regexp_like(input.raw, input.pattern),
+              message_piece = regexp_substr(input.raw, input.pattern),
+              rewritten = regexp_replace(input.raw, '([a-z])([a-z]*)', '${1}_$2'),
+              guarded = CASE
+                WHEN input.id = 'guarded' THEN regexp_like(input.raw, '(')
+                ELSE false
+              END
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO note_errors
+            SET source_id = input.id,
+                error_code = error.code,
+                error_message = error.message;
+      CREATE SUBSCRIPTION matched_notes_subscription TO matched_notes;
+      CREATE SUBSCRIPTION note_errors_subscription TO note_errors;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "regexp-patterns-{{test_id}}.example.com" path "/notes"
+      """
+      {"id":"hello","raw":"hello world","pattern":"h[a-z]+"}
+      """
+    And http payload is posted to node "node-1" with host "regexp-patterns-{{test_id}}.example.com" path "/notes"
+      """
+      {"id":"digits","raw":"a1b22","pattern":"[0-9]+"}
+      """
+    And http payload is posted to node "node-1" with host "regexp-patterns-{{test_id}}.example.com" path "/notes"
+      """
+      {"id":"again","raw":"hi there","pattern":"h[a-z]+"}
+      """
+    And http payload is posted to node "node-1" with host "regexp-patterns-{{test_id}}.example.com" path "/notes"
+      """
+      {"id":"guarded","raw":"hello","pattern":"h[a-z]+"}
+      """
+    And http payload is posted to node "node-1" with host "regexp-patterns-{{test_id}}.example.com" path "/notes"
+      """
+      {"id":"unclosed","raw":"hello","pattern":"("}
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "id":"hello" | "literal_match":true | "folded_match":true | "message_match":true | "message_piece":"hello" | "rewritten":"h_ello w_orld" | "guarded":false
+      "id":"digits" | "literal_match":false | "folded_match":false | "message_match":true | "message_piece":"1" | "rewritten":"a_1b_22" | "guarded":false
+      "id":"again" | "literal_match":true | "folded_match":true | "message_match":true | "message_piece":"hi" | "rewritten":"h_i t_here" | "guarded":false
+      "source_id":"guarded" | "error_code":"evaluation" | invalid regular expression | unclosed group
+      "source_id":"unclosed" | "error_code":"evaluation" | invalid regular expression | unclosed group
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: CASE ignores float function errors from unselected arms
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
