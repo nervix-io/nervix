@@ -69,6 +69,17 @@ Every record sink implements this contract in its own crate under `crates/connec
 Pulsar, RabbitMQ, NATS, MQTT, Redis, ZeroMQ, Syslog, SQS, and Sentry. Each crate owns its driver
 and the raw client configuration that driver reads, neither of which belongs to the server runtime.
 
+The source side has the same shape. A broker source implements the source contract in the crate
+its sink already occupies: Kafka, Pulsar, RabbitMQ, NATS, MQTT, Redis Pub/Sub, ZeroMQ, and SQS,
+beside the syslog listener and the WebSocket client source. A connector owns its transport: how it
+opens, subscribes, reads the next batch, suspends and resumes, and what acknowledging or rejecting
+a position means for its broker, together with its own header semantics. The runtime owns one
+instance loop for every broker source: it parses the declared delivery mode into the acknowledgement
+policy, opens each instance, decodes and dispatches what the connector reads, waits on the
+acknowledgement roots it attached, acknowledges or rejects positions through the connector, and
+paces retries, quiesce, readiness, and transient status. No connector redeclares which quiesce
+modes it honors; that stays with the source vocabulary the registry validates.
+
 A row sink writes values rather than encoded payloads, so the runtime evaluates its `VALUES`
 mapping itself. The mapping compiles once when the emitter starts and runs once per batch,
 producing one Arrow column per target column together with the rows that still have to be written;
