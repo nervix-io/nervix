@@ -1,29 +1,24 @@
-//! ZeroMQ ingestor execution.
+//! ZeroMQ source runtime composition.
 //!
 //! Layer: data plane.
-//! - **Owns.** ZeroMQ socket consumption and source-boundary timestamp observation.
-//! - **Depends on.** Typed ZeroMQ plans, socket clients and ingestor runtime admission.
-//! - **Must not know.** NSPL parsing, registry validation or placement computation.
+//!
+//! - **Owns.** Composing the ZeroMQ connector plan with host-owned intake, whose quiesce either
+//!   leaves the socket unread or buffers and drops what it keeps reading.
+//! - **Depends on.** The connector source contract, the ZeroMQ connector, and pre-resolved
+//!   runtime execution handles.
+//! - **Must not know.** The ZeroMQ driver, socket lifecycle, NSPL parsing, registry validation,
+//!   or placement computation.
 
-use error_stack::ResultExt as _;
-use nervix_connector::{
-    client_config_value, optional_client_config_value, physical_time::actual_utc_now,
+mod source;
+
+use source::{ZeroMqSource, ZeroMqSourcePlan};
+
+use super::{
+    super::*,
+    source::{BrokerSourceStart, DeclaredSourceAcknowledgement},
 };
-use zeromq::{PullSocket, Socket, SocketRecv};
-
-use super::super::*;
 
 pub(in crate::runtime) struct ZeroMqIngestor;
-
-#[derive(Debug, Error)]
-pub(in crate::runtime) enum ZeroMqIngestorError {
-    #[error("invalid ZeroMQ client configuration")]
-    ClientConfig,
-    #[error("failed to bind ZeroMQ client")]
-    Bind,
-    #[error("failed to connect ZeroMQ client")]
-    Connect,
-}
 
 impl ZeroMqIngestor {
     pub(in crate::runtime) async fn start(
@@ -33,337 +28,19 @@ impl ZeroMqIngestor {
         let ZeroMqIngestorStartPlan {
             ingestor,
             client,
-            mode: _,
+            mode,
         } = plan;
-        let domain = &ingestor.domain;
-        let key =
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if runtime.inner.ingestors.contains_key(&key) {
-            return Err(RuntimeError::IngestorAlreadyRunning {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-            });
-        }
-
-        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
-        let branched_runtime = runtime.start_branched_ingestor_runtime(
-            domain,
-            &ingestor.name,
-            dependencies.branched_templates,
-        );
-        let branched_senders = branched_runtime.senders.clone();
-        let output_routes = dependencies.output_routes;
-        let filter_where = dependencies.filter_where;
-        let codec = dependencies.codec;
-        let metrics = dependencies.metrics;
-        let quiesce = runtime
-            .ingestor_quiesce_control(domain, &ingestor.name)
-            .verified(
-                "the runtime registers quiesce control for an ingestor before it starts the task",
-            );
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        let task_runtime = runtime.clone();
-        let task_domain = domain.clone();
-        let task_ingestor = ingestor.name.clone();
-        let task_timestamp_source = ingestor.timestamp_source.clone();
-        let task_events = runtime.events().clone();
-        let task = tokio::spawn(async move {
-            let mut backoff = RuntimeReconnectBackoff::default();
-            let mut collector = IngestRouteCollector::new(
-                IngestMetadataKind::Headers,
-                INGEST_GROUP_MAX_ROWS,
-                metrics,
-            );
-            info!(
-                domain = task_domain.as_str(),
-                ingestor = task_ingestor.as_str(),
-                "started zeromq ingestor"
-            );
-
-            'outer: loop {
-                tokio::task::consume_budget().await;
-                if task_runtime
-                    .wait_if_ingestor_faulted(&task_domain, &task_ingestor, &mut shutdown_rx)
-                    .await
-                {
-                    break;
-                }
-                if task_runtime
-                    .inner
-                    .fault_injection
-                    .ingestor_is_failed(&task_ingestor)
-                {
-                    continue;
-                }
-                let mut socket = match Self::pull_socket_from_config(&client.config).await {
-                    Ok(socket) => socket,
-                    Err(error) => {
-                        task_runtime.record_ingestor_transient_error(
-                            &task_domain,
-                            &task_ingestor,
-                            format!("zeromq connect failed: {error}"),
-                        );
-                        warn!(
-                            domain = task_domain.as_str(),
-                            ingestor = task_ingestor.as_str(),
-                            error = %error,
-                            "failed to connect zeromq source"
-                        );
-                        if !backoff.wait(&mut shutdown_rx).await {
-                            break;
-                        }
-                        continue;
-                    }
-                };
-                task_runtime.clear_ingestor_transient_error(&task_domain, &task_ingestor);
-                backoff.reset();
-                loop {
-                    tokio::task::consume_budget().await;
-                    if let Some(payload) = quiesce.pop_buffered(0) {
-                        if let Err(error) = task_runtime
-                            .dispatch_raw_ingest_payload(RawIngestDispatch {
-                                domain: &task_domain,
-                                ingestor: &task_ingestor,
-                                timestamp_source: task_timestamp_source.as_ref(),
-                                output_routes: &output_routes,
-                                filter_where: filter_where.as_ref(),
-                                branched_senders: &branched_senders,
-                                codec: codec.clone(),
-                                payload: &payload,
-                                collector: &mut collector,
-                                flush: false,
-                            })
-                            .await
-                        {
-                            task_events.report_error(format!(
-                                "failed to dispatch buffered zeromq payload for ingestor '{}' in \
-                                 domain '{}': {}",
-                                task_ingestor.as_str(),
-                                task_domain.as_str(),
-                                error
-                            ));
-                        }
-                        continue;
-                    }
-                    if quiesce.should_suspend_intake() {
-                        if let Err(error) = task_runtime
-                            .flush_ingest_collector(
-                                &task_domain,
-                                &task_ingestor,
-                                &branched_senders,
-                                &mut collector,
-                            )
-                            .await
-                        {
-                            task_events.report_error(format!(
-                                "failed to flush accepted zeromq messages before quiescing \
-                                 ingestor '{}' in domain '{}': {}",
-                                task_ingestor.as_str(),
-                                task_domain.as_str(),
-                                error
-                            ));
-                        }
-                        tokio::select! {
-                            changed = shutdown_rx.changed() => {
-                                if changed.is_err() || *shutdown_rx.borrow() {
-                                    break 'outer;
-                                }
-                            }
-                            _ = quiesce.wait_until_not_suspended() => {}
-                        }
-                        continue;
-                    }
-                    let next_flush = collector.next_flush();
-                    let flush_at =
-                        next_flush.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
-                    tokio::select! {
-                        changed = shutdown_rx.changed() => {
-                            if changed.is_err() || *shutdown_rx.borrow() {
-                                task_runtime
-                                    .flush_ingest_collector(
-                                        &task_domain,
-                                        &task_ingestor,
-                                        &branched_senders,
-                                        &mut collector,
-                                    )
-                                    .await
-                                    .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
-                                break 'outer;
-                            }
-                        }
-                        _ = sleep_until(flush_at), if next_flush.is_some() => {
-                            if let Err(error) = task_runtime
-                                .flush_ingest_collector(
-                                    &task_domain,
-                                    &task_ingestor,
-                                    &branched_senders,
-                                    &mut collector,
-                                )
-                                .await
-                            {
-                                task_events.report_error(format!(
-                                    "failed to flush messages for ingestor '{}' in domain '{}': {}",
-                                    task_ingestor.as_str(),
-                                    task_domain.as_str(),
-                                    error
-                                ));
-                            }
-                        }
-                        frame = socket.recv() => {
-                            match frame {
-                                Ok(message) => {
-                                    let payload = message.into_vec();
-                                    let Some(payload) = payload.first() else {
-                                        continue;
-                                    };
-
-                                    trace!(
-                                        domain = task_domain.as_str(),
-                                        ingestor = task_ingestor.as_str(),
-                                        payload = String::from_utf8_lossy(payload).to_string(),
-                                        "received zeromq message"
-                                    );
-
-                                    let payload = BufferedIngestPayload::new(
-                                        payload,
-                                        BufferedIngestMetadata::without_headers(),
-                                        actual_utc_now(),
-                                    );
-                                    if let IngestorQuiesceIntake::Dispatch(payload) =
-                                        quiesce.intake(0, payload, false)
-                                    {
-                                        if let Err(error) = task_runtime
-                                            .dispatch_raw_ingest_payload(RawIngestDispatch {
-                                                domain: &task_domain,
-                                                ingestor: &task_ingestor,
-                                                timestamp_source: task_timestamp_source.as_ref(),
-                                                output_routes: &output_routes,
-                                                filter_where: filter_where.as_ref(),
-                                                branched_senders: &branched_senders,
-                                                codec: codec.clone(),
-                                                payload: &payload,
-                                                collector: &mut collector,
-                                                flush: false,
-                                            })
-                                            .await
-                                        {
-                                            task_events.report_error(format!(
-                                                "failed to dispatch message for ingestor '{}' in domain '{}': {}",
-                                                task_ingestor.as_str(),
-                                                task_domain.as_str(),
-                                                error
-                                            ));
-                                        }
-                                            if collector.len() >= INGEST_GROUP_MAX_ROWS
-                                                && let Err(error) = task_runtime
-                                                    .flush_ingest_collector(
-                                                        &task_domain,
-                                                        &task_ingestor,
-                                                        &branched_senders,
-                                                        &mut collector,
-                                                    )
-                                                    .await
-                                            {
-                                                task_events.report_error(
-                                                    format!(
-                                                        "failed to flush messages for ingestor '{}' in domain '{}': {}",
-                                                        task_ingestor.as_str(),
-                                                        task_domain.as_str(),
-                                                        error
-                                                    ),
-                                                );
-                                            }
-                                    }
-                                }
-                                Err(error) => {
-                                    task_runtime
-                                        .flush_ingest_collector(
-                                            &task_domain,
-                                            &task_ingestor,
-                                            &branched_senders,
-                                            &mut collector,
-                                        )
-                                        .await
-                                        .discarded(INGEST_FLUSH_FAILURES_ARE_HANDLED);
-                                    task_runtime.record_ingestor_transient_error(
-                                        &task_domain,
-                                        &task_ingestor,
-                                        format!("zeromq receive failed: {error}"),
-                                    );
-                                    task_events.report_error(format!(
-                                        "failed to receive zeromq message for ingestor '{}' in domain '{}': {}",
-                                        task_ingestor.as_str(),
-                                        task_domain.as_str(),
-                                        error
-                                    ));
-                                    warn!(
-                                        domain = task_domain.as_str(),
-                                        ingestor = task_ingestor.as_str(),
-                                        error = %error,
-                                        "failed to receive zeromq message"
-                                    );
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                if !backoff.wait(&mut shutdown_rx).await {
-                    break;
-                }
-            }
-
-            info!(
-                domain = task_domain.as_str(),
-                ingestor = task_ingestor.as_str(),
-                "stopped zeromq ingestor"
-            );
-        });
-
-        runtime.inner.ingestors.insert(
-            key,
-            IngestorRuntime::Background {
-                shutdown: shutdown_tx,
-                branched: branched_runtime.runtimes,
-                tasks: vec![task],
-            },
-        );
-
-        Ok(())
-    }
-
-    async fn pull_socket_from_config(
-        config: &[ClientConfigEntry],
-    ) -> Result<PullSocket, Report<ZeroMqIngestorError>> {
-        let addr = client_config_value(config, "addr", "ZeroMQ")
-            .change_context(ZeroMqIngestorError::ClientConfig)?;
-        let bind = optional_client_config_value(config, "bind")
-            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
-        let mut socket = PullSocket::new();
-        if bind {
-            socket.bind(&addr).await.map_err(|source| {
-                Report::new(ZeroMqIngestorError::Bind).attach_printable(source.to_string())
-            })?;
-        } else {
-            socket.connect(&addr).await.map_err(|source| {
-                Report::new(ZeroMqIngestorError::Connect).attach_printable(source.to_string())
-            })?;
-        }
-        Ok(socket)
-    }
-
-    #[cfg(test)]
-    pub(in crate::runtime) fn addr_from_config(
-        config: &[ClientConfigEntry],
-    ) -> nervix_connector::ClientConfigResult<String> {
-        client_config_value(config, "addr", "ZeroMQ")
-    }
-
-    #[cfg(test)]
-    pub(in crate::runtime) fn bind_from_config(config: &[ClientConfigEntry]) -> bool {
-        match optional_client_config_value(config, "bind") {
-            Some(value) => value.eq_ignore_ascii_case("true"),
-            None => false,
-        }
+        runtime
+            .start_broker_source::<ZeroMqSource>(BrokerSourceStart {
+                ingestor: &ingestor,
+                connector: ZeroMqSourcePlan::new(client.config),
+                instances: NonZeroU64::MIN,
+                acknowledgement: DeclaredSourceAcknowledgement::from(&mode),
+                buffered_intake: true,
+                flush_each_intake: false,
+                client_mounts: Vec::new(),
+                connector_label: "zeromq",
+            })
+            .await
     }
 }

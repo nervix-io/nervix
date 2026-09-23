@@ -130,7 +130,6 @@ def main() -> int:
         runtime_root / "ingestors/source.rs",
         runtime_root / "ingestors/syslog.rs",
         runtime_root / "ingestors/websockets.rs",
-        runtime_root / "ingestors/zeromq.rs",
     }
     physical_capability_owners = {
         runtime_root / "branch_buffering.rs",
