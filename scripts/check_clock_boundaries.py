@@ -126,7 +126,6 @@ def main() -> int:
         runtime_root / "emitters/mod.rs",
         runtime_root / "emitters/iceberg.rs",
         runtime_root / "ingestors/kafka.rs",
-        runtime_root / "ingestors/mqtt.rs",
         runtime_root / "ingestors/source.rs",
         runtime_root / "ingestors/syslog.rs",
         runtime_root / "ingestors/websockets.rs",
