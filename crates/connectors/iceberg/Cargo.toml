@@ -1,0 +1,50 @@
+[package]
+description = "The Iceberg sink connector for Nervix"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-connector-iceberg"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+shuttle = [
+  "dep:shuttle-tokio",
+  "nervix-connector/shuttle",
+  "shuttle-tokio/shuttle",
+]
+
+[dependencies]
+ahash = { workspace = true }
+arch-into = { workspace = true }
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
+async-trait = { workspace = true }
+error-stack = { workspace = true }
+fastrand = { workspace = true }
+iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true }
+iceberg-storage-opendal = { workspace = true }
+meticulous = { workspace = true }
+nervix-connector = { workspace = true }
+nervix-models = { workspace = true }
+parquet = { workspace = true }
+shuttle-tokio = { workspace = true, features = [
+  "fs",
+  "macros",
+  "rt",
+  "sync",
+  "time",
+], optional = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

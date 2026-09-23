@@ -202,8 +202,22 @@ pub struct MappedSinkRows<'a> {
     pub selected_rows: &'a [usize],
     /// Ranges into `selected_rows` that respect the emitter's declared maximum batch size.
     pub selected_row_chunks: &'a [Range<usize>],
-    /// When the host evaluated the mapping, which a rejected row is reported with.
+    /// When the host evaluated the mapping, which a rejected row is reported with and a sink whose
+    /// commit cadence is a domain duration measures that cadence from.
     pub occurred_at: Timestamp,
+    /// The acknowledgements of `selected_rows`, handed over to a sink that declares
+    /// [`SinkLifecycle::retains_acknowledgements`]. The host builds them for no other sink, so a
+    /// sink that acknowledges on the publish boundary receives none.
+    pub acknowledgements: Option<SinkAcknowledgements>,
+}
+
+/// What one commit published, for the host's output metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkCommitReport {
+    pub messages: u64,
+    pub bytes: u64,
+    /// The latest domain time among the rows this commit published.
+    pub domain_timestamp: Timestamp,
 }
 
 /// A sink-owned deadline the host includes in the task's next wake.
@@ -244,6 +258,8 @@ pub enum SinkPublishError {
     Publish { sink: &'static str },
     #[error("failed to finish {sink} sink")]
     Finish { sink: &'static str },
+    #[error("failed to commit {sink} sink")]
+    Commit { sink: &'static str },
     #[error("{sink} sink cannot accept this write as it is configured")]
     Misconfigured { sink: &'static str },
 }
@@ -269,12 +285,42 @@ pub trait SinkLifecycle: Send {
         false
     }
 
+    /// When what this sink staged has to be published.
+    ///
+    /// The host includes the deadline in the emitter task's next wake and asks for the commit once
+    /// the deadline is reached. A sink that has nothing staged declares none.
     fn commit_deadline(&self) -> Option<SinkDeadline> {
         None
     }
 
     fn pending_acks(&self) -> Option<SinkAcknowledgements> {
         None
+    }
+
+    /// Whether this sink takes the acknowledgements of the rows it accepts and resolves them
+    /// itself once its commit succeeds.
+    ///
+    /// The host merges a batch's acknowledgements only for a sink that answers `true`, so a sink
+    /// that acknowledges on the publish boundary never pays for a handover it would not read.
+    fn retains_acknowledgements(&self) -> bool {
+        false
+    }
+
+    /// How many messages this sink holds that the host's own buffer no longer counts.
+    ///
+    /// A drain reads this total together with the emitter buffer, so staged work keeps the node
+    /// busy until its commit publishes it.
+    fn staged_messages(&self) -> u64 {
+        0
+    }
+
+    /// Publishes everything this sink staged and resolves the acknowledgements it retained.
+    ///
+    /// The host calls this when [`SinkLifecycle::commit_deadline`] is reached and once more for a
+    /// drain, which commits whatever is staged without waiting for that deadline. A sink that
+    /// writes each batch as it arrives stages nothing and has nothing to commit.
+    async fn commit(&mut self) -> SinkPublishResult<Option<SinkCommitReport>> {
+        Ok(None)
     }
 }
 
