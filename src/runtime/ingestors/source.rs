@@ -1139,6 +1139,10 @@ pub(super) async fn run_source_instance_with_retry<C>(
                     retry_delay = retry_policy.backoff;
                     host.mark_ready();
                     host.clear_transient_error();
+                    // A quiesce released while the source was resuming was not waited on by
+                    // anything, so the iteration starts over and replays what it buffered
+                    // before the loop blocks on the next batch.
+                    continue;
                 }
                 Ok(SourceResume::Waiting { retry_after }) => {
                     ready = false;
@@ -1379,6 +1383,10 @@ mod tests {
 
     #[derive(Default)]
     struct SourceLoopObservations {
+        /// Every resume, replay and poll in the order the loop performed them.
+        sequence: Vec<&'static str>,
+        /// Replays the host still has to deliver, as a quiesce buffer would.
+        pending_replays: usize,
         requests: Vec<SourceBatchRequest>,
         intake: Vec<(SourceIntakeMode, usize)>,
         acknowledged: Vec<Vec<u64>>,
@@ -1429,6 +1437,8 @@ mod tests {
         messages: VecDeque<FakeMessage>,
         resume_required: bool,
         resume_results: VecDeque<SourceResult<SourceResume>>,
+        /// Replays each resume leaves pending, as a quiesce released during it would.
+        replays_pending_after_resume: usize,
         observations: Arc<Mutex<SourceLoopObservations>>,
     }
 
@@ -1441,7 +1451,14 @@ mod tests {
         }
 
         async fn resume(&mut self) -> SourceResult<SourceResume> {
-            self.observations.lock().resumes += 1;
+            let mut observations = self.observations.lock();
+            observations.resumes += 1;
+            observations.sequence.push("resume");
+            observations.pending_replays = observations
+                .pending_replays
+                .checked_add(self.replays_pending_after_resume)
+                .verified("the test leaves at most a few replays pending");
+            drop(observations);
             match self.resume_results.pop_front() {
                 Some(result) => result,
                 None => Ok(SourceResume::Ready),
@@ -1463,7 +1480,10 @@ mod tests {
             &mut self,
             request: SourceBatchRequest,
         ) -> SourceResult<SourceBatch<Self::Message>> {
-            self.observations.lock().requests.push(request);
+            let mut observations = self.observations.lock();
+            observations.requests.push(request);
+            observations.sequence.push("next_batch");
+            drop(observations);
             if self.resume_required {
                 self.resume_required = false;
                 return Ok(SourceBatch::ResumeRequired);
@@ -1556,7 +1576,13 @@ mod tests {
         }
 
         async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
-            Ok(false)
+            let mut observations = self.observations.lock();
+            let Some(remaining) = observations.pending_replays.checked_sub(1) else {
+                return Ok(false);
+            };
+            observations.pending_replays = remaining;
+            observations.sequence.push("replay");
+            Ok(true)
         }
 
         fn next_flush(&self) -> Option<Instant> {
@@ -1614,22 +1640,27 @@ mod tests {
         }
     }
 
+    fn three_messages() -> VecDeque<FakeMessage> {
+        (0..3)
+            .map(|position| FakeMessage {
+                position,
+                payload: vec![
+                    u8::try_from(position).verified("the test positions are all below 256"),
+                ],
+            })
+            .collect()
+    }
+
     async fn run_policy_with_refresh(
         policy: SourceAckPolicy,
         resume_required: bool,
     ) -> Arc<Mutex<SourceLoopObservations>> {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let source = FakeSource {
-            messages: (0..3)
-                .map(|position| FakeMessage {
-                    position,
-                    payload: vec![
-                        u8::try_from(position).verified("the test positions are all below 256"),
-                    ],
-                })
-                .collect(),
+            messages: three_messages(),
             resume_required,
             resume_results: VecDeque::new(),
+            replays_pending_after_resume: 0,
             observations: observations.clone(),
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
@@ -1655,8 +1686,40 @@ mod tests {
             messages: VecDeque::new(),
             resume_required: false,
             resume_results: VecDeque::new(),
+            replays_pending_after_resume: 0,
             observations,
         }
+    }
+
+    #[tokio::test]
+    async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let source = FakeSource {
+            messages: three_messages(),
+            resume_required: false,
+            resume_results: VecDeque::new(),
+            replays_pending_after_resume: 2,
+            observations: observations.clone(),
+        };
+        let host = SourceHost::new(FakeHost::running(observations.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        run_source_instance(source, host, SourceAckPolicy::None, shutdown_rx).await;
+        drop(shutdown_tx);
+
+        let observations = observations.lock();
+        assert_eq!(
+            observations.sequence,
+            vec![
+                "resume",
+                "replay",
+                "replay",
+                "next_batch",
+                "next_batch",
+                "next_batch",
+                "next_batch",
+            ]
+        );
+        assert_eq!(observations.pending_replays, 0);
     }
 
     #[tokio::test]
