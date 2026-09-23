@@ -438,10 +438,19 @@ stop deadline. Kafka implements that hook by flushing the producer's local queue
 deadline. Other sinks hold no such queue, so their default finish hook completes immediately and
 the publish itself is the completion point.
 
-Iceberg commits its staged data through its catalog, forced by the drain rather than waiting for the
-`COMMIT EACH` cadence. Staged rows live as local files that only a successful commit removes, so a
-forced ending leaves them behind: the rows are not in the table, and a later run does not reclaim
-or commit them. An attached source redelivers that work; a detached one loses it.
+A sink that stages what it accepts and publishes it later reaches its completion point at its
+commit instead. After the buffered batches are written into such a sink, the drain calls the sink
+contract's commit hook and forces it, so the commit runs whatever the sink's own commit deadline
+says. Until that commit succeeds the sink holds the acknowledgements of every row it staged, and
+the drain counts those rows as work the node still owes. A commit that fails is retried on the
+emitter's declared backoff, reported as the emitter's commit retry, and a shutdown that cuts the
+backoff short fails the drain.
+
+Iceberg is the sink that does this. It commits its staged data through its catalog, forced by the
+drain rather than waiting for the `COMMIT EACH` cadence. Staged rows live as local files that only
+a successful commit removes, so a forced ending leaves them behind: the rows are not in the table,
+and a later run does not reclaim or commit them. An attached source redelivers that work; a
+detached one loses it.
 
 ### Duplication
 

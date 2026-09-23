@@ -96,8 +96,8 @@ fn emitter_publishing_drain_status_envelope(
             crate::runtime::EmitterPublishingDrainState::RetryingInfrastructure => {
                 EmitterPublishingDrainStateEnvelope::RetryingInfrastructure
             }
-            crate::runtime::EmitterPublishingDrainState::RetryingIcebergCommit => {
-                EmitterPublishingDrainStateEnvelope::RetryingIcebergCommit
+            crate::runtime::EmitterPublishingDrainState::RetryingCommit => {
+                EmitterPublishingDrainStateEnvelope::RetryingCommit
             }
         },
         pending_messages: status.pending_messages.arch_into(),

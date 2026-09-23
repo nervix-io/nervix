@@ -28,6 +28,7 @@ shuttle = [
   "nervix-client-core/shuttle",
   "nervix-connector/shuttle",
   "nervix-connector-clickhouse/shuttle",
+  "nervix-connector-iceberg/shuttle",
   "nervix-connector-kafka/shuttle",
   "nervix-connector-mongodb/shuttle",
   "nervix-connector-mqtt/shuttle",
@@ -104,9 +105,6 @@ hyper-util = { workspace = true, features = [
   "tokio",
   "http1",
 ] }
-iceberg = { workspace = true }
-iceberg-catalog-rest = { workspace = true }
-iceberg-storage-opendal = { workspace = true }
 indexmap = { workspace = true }
 lapin = { workspace = true }
 meticulous = { workspace = true }
@@ -117,6 +115,7 @@ nervix-client-wire = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-connector-clickhouse = { workspace = true }
 nervix-connector-http = { workspace = true }
+nervix-connector-iceberg = { workspace = true }
 nervix-connector-kafka = { workspace = true }
 nervix-connector-mongodb = { workspace = true }
 nervix-connector-mqtt = { workspace = true }
@@ -147,7 +146,6 @@ nervix-roto = { workspace = true }
 nervix-vm = { workspace = true }
 nervix-wasm = { workspace = true }
 nonzero_ext = { workspace = true }
-opendal = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-otlp = { workspace = true, default-features = false, features = [
   "grpc-tonic",
@@ -166,7 +164,6 @@ ort = { workspace = true, features = [
   "webgpu",
 ] }
 parking_lot = { workspace = true }
-parquet = { workspace = true }
 petgraph = { workspace = true }
 prometheus = { workspace = true }
 prost = { workspace = true }
@@ -230,6 +227,9 @@ criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 h2 = { workspace = true }
 http = { workspace = true }
+iceberg = { workspace = true }
+iceberg-catalog-rest = { workspace = true }
+iceberg-storage-opendal = { workspace = true }
 mongodb = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
@@ -273,6 +273,7 @@ members = [
   "crates/connector",
   "crates/connectors/clickhouse",
   "crates/connectors/http",
+  "crates/connectors/iceberg",
   "crates/connectors/kafka",
   "crates/connectors/mongodb",
   "crates/connectors/mqtt",
@@ -438,6 +439,7 @@ nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wir
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
 nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = "crates/connectors/clickhouse" }
 nervix-connector-http = { package = "nervix-connector-http", path = "crates/connectors/http" }
+nervix-connector-iceberg = { package = "nervix-connector-iceberg", path = "crates/connectors/iceberg" }
 nervix-connector-kafka = { package = "nervix-connector-kafka", path = "crates/connectors/kafka" }
 nervix-connector-mongodb = { package = "nervix-connector-mongodb", path = "crates/connectors/mongodb" }
 nervix-connector-mqtt = { package = "nervix-connector-mqtt", path = "crates/connectors/mqtt" }
@@ -475,12 +477,6 @@ nix = "0.30"
 # Compile-time checked non-zero literals, so a constant that must not be zero is rejected by the
 # compiler rather than by a runtime guard.
 nonzero_ext = "0.3"
-# Match the pinned Iceberg revision to avoid duplicate, incompatible OpenDAL APIs.
-opendal = { version = "0.56.0", features = [
-  "services-s3",
-  "services-gcs",
-  "services-azdls",
-] }
 # OpenRaft prereleases change snapshot APIs without semver compatibility.
 openraft = { version = "=0.10.0-alpha.33", default-features = false, features = [
   "tokio-rt",
