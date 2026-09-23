@@ -253,14 +253,16 @@ impl Arithmetic {
         T: ArrowPrimitiveType,
         T::Native: CheckedInteger,
     {
-        let lane = match self {
-            Self::Add => T::Native::lane_sum,
-            Self::Sub => T::Native::lane_difference,
-            Self::Mul => T::Native::lane_product,
-            Self::Div => T::Native::lane_quotient,
-            Self::Rem => T::Native::lane_remainder,
-        };
-        evaluate_binary(left, right, lane)
+        // Each arm hands the loop its own lane function, so the lane call is inlined into a loop
+        // the compiler can vectorize. Selecting the function first would coerce the five
+        // functions into one function pointer and call it once per lane.
+        match self {
+            Self::Add => evaluate_binary(left, right, T::Native::lane_sum),
+            Self::Sub => evaluate_binary(left, right, T::Native::lane_difference),
+            Self::Mul => evaluate_binary(left, right, T::Native::lane_product),
+            Self::Div => evaluate_binary(left, right, T::Native::lane_quotient),
+            Self::Rem => evaluate_binary(left, right, T::Native::lane_remainder),
+        }
     }
 
     /// Applies this operator to two float operands of one batch at their own width. Every lane
@@ -712,7 +714,9 @@ impl Comparison {
                     return BooleanArray::new_null(column.len());
                 }
                 let value = scalar.value(0);
-                let results = self.collect(column.len(), |lane| (value, column.values()[lane]));
+                let lanes = column.len();
+                let column_values = &column.values()[..lanes];
+                let results = self.collect(lanes, |lane| (value, column_values[lane]));
                 BooleanArray::new(results, column.nulls().cloned())
             }
             (Operand::Column(column), Operand::Scalar(scalar)) => {
@@ -720,7 +724,9 @@ impl Comparison {
                     return BooleanArray::new_null(column.len());
                 }
                 let value = scalar.value(0);
-                let results = self.collect(column.len(), |lane| (column.values()[lane], value));
+                let lanes = column.len();
+                let column_values = &column.values()[..lanes];
+                let results = self.collect(lanes, |lane| (column_values[lane], value));
                 BooleanArray::new(results, column.nulls().cloned())
             }
             (Operand::Column(left), Operand::Column(right))
