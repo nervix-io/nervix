@@ -1440,96 +1440,130 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn three_stuck_nodes_spend_one_cleanup_budget_rather_than_three() {
-        let log = Arc::new(CleanupLog::default());
-        let mut nodes = stand_in_cluster(
-            &[
-                ("node-1", StandInEnding::NeverStops),
-                ("node-2", StandInEnding::NeverStops),
-                ("node-3", StandInEnding::NeverStops),
-            ],
-            &log,
-        );
+    async fn stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three() {
+        for node_count in [1_usize, 3] {
+            let log = Arc::new(CleanupLog::default());
+            let names = (1..=node_count)
+                .map(|index| format!("node-{index}"))
+                .collect::<Vec<_>>();
+            let stuck = names
+                .iter()
+                .map(|name| (name.as_str(), StandInEnding::NeverStops))
+                .collect::<Vec<_>>();
+            let mut nodes = stand_in_cluster(&stuck, &log);
 
-        let started = Instant::now();
-        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
-        let spent = started.elapsed();
+            let started = Instant::now();
+            let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+            let spent = started.elapsed();
 
-        assert!(spent >= TEST_TEARDOWN_BUDGET, "{teardown}");
-        assert!(
-            spent < TEST_SHARED_TEARDOWN_BOUND,
-            "three stuck nodes must share one cleanup budget, but cleanup took {spent:?}: \
-             {teardown}"
-        );
-        for node in &teardown.nodes {
-            assert!(log.stop_was_requested(&node.node));
-            let NodeTaskWaitOutcome::AbortedAtDeadline(outcome) = &node.stop else {
-                panic!("a node that never stops must be aborted at the deadline: {node}");
-            };
+            assert!(spent >= TEST_TEARDOWN_BUDGET, "{teardown}");
             assert!(
-                StandInEnding::NeverStops.ended_as(outcome.as_ref()),
-                "an aborted node task must be joined for its outcome: {outcome}"
+                spent < TEST_SHARED_TEARDOWN_BOUND,
+                "{node_count} stuck node(s) must share one cleanup budget, but cleanup took \
+                 {spent:?}: {teardown}"
+            );
+            for node in &teardown.nodes {
+                assert!(log.stop_was_requested(&node.node));
+                let NodeTaskWaitOutcome::AbortedAtDeadline(outcome) = &node.stop else {
+                    panic!("a node that never stops must be aborted at the deadline: {node}");
+                };
+                assert!(
+                    StandInEnding::NeverStops.ended_as(outcome.as_ref()),
+                    "an aborted node task must be joined for its outcome: {outcome}"
+                );
+            }
+            assert_eq!(teardown.forced().count(), node_count, "{teardown}");
+            assert_eq!(log.released().len(), node_count);
+            assert!(
+                log.released_only_after_every_task_ended(),
+                "harness state must be given back only once every task has ended: {:?}",
+                log.events()
             );
         }
-        assert_eq!(teardown.forced().count(), 3, "{teardown}");
-        assert_eq!(log.released().len(), 3);
-        assert!(
-            log.released_only_after_every_task_ended(),
-            "harness state must be given back only once every task has ended: {:?}",
-            log.events()
-        );
+    }
+
+    /// How a node of a diagnostics regression answers the status request its cleanup sends.
+    #[derive(Clone, Copy, Debug)]
+    enum StandInDiagnostic {
+        Answers,
+        Stalls,
     }
 
     #[tokio::test]
-    async fn a_stalled_diagnostic_still_reaches_every_node_stop() {
+    async fn a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three() {
         let stalled = StandInNode::serve(StandInBehavior::WithholdSession).await;
         let healthy = StandInNode::serve(StandInBehavior::Answer(command_result(
             CommandResultKind::Ok,
             HEALTHY_STATUS,
         )))
         .await;
-        let endpoints = BTreeMap::from([
-            ("node-1".to_string(), healthy.endpoint()),
-            ("node-2".to_string(), stalled.endpoint()),
-        ]);
-        let log = Arc::new(CleanupLog::default());
-        let mut nodes = stand_in_cluster(
+        let clusters: [&[(&str, StandInDiagnostic)]; 2] = [
+            &[("node-1", StandInDiagnostic::Stalls)],
             &[
-                ("node-1", StandInEnding::StopsWhenAsked),
-                ("node-2", StandInEnding::StopsWhenAsked),
+                ("node-1", StandInDiagnostic::Answers),
+                ("node-2", StandInDiagnostic::Stalls),
+                ("node-3", StandInDiagnostic::Answers),
             ],
-            &log,
-        );
+        ];
 
-        let started = Instant::now();
-        let snapshots = StatusEndpoint::cluster_statuses(
-            &endpoints,
-            PhaseDeadline::after(STALLED_REQUEST_BUDGET),
-        )
-        .await;
-        let diagnostics_ended = started.elapsed();
-        let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+        for cluster in clusters {
+            let mut endpoints = BTreeMap::new();
+            for (name, diagnostic) in cluster {
+                let endpoint = match diagnostic {
+                    StandInDiagnostic::Answers => healthy.endpoint(),
+                    StandInDiagnostic::Stalls => stalled.endpoint(),
+                };
+                endpoints.insert((*name).to_string(), endpoint);
+            }
+            let log = Arc::new(CleanupLog::default());
+            let endings = cluster
+                .iter()
+                .map(|(name, _)| (*name, StandInEnding::StopsWhenAsked))
+                .collect::<Vec<_>>();
+            let mut nodes = stand_in_cluster(&endings, &log);
 
-        assert!(
-            diagnostics_ended >= STALLED_REQUEST_BUDGET,
-            "the stalled diagnostic must run out its own budget before cleanup continues"
-        );
-        assert!(matches!(snapshots.get("node-1"), Some(Ok(status)) if status == HEALTHY_STATUS));
-        let Some(Err(stalled_error)) = snapshots.get("node-2") else {
-            panic!("the stalled node's snapshot must be its timeout: {snapshots:?}");
-        };
-        assert!(deadline_passed_during(
-            stalled_error,
-            StatusOperation::OpenSession
-        ));
-        for node in &teardown.nodes {
+            let started = Instant::now();
+            let snapshots = StatusEndpoint::cluster_statuses(
+                &endpoints,
+                PhaseDeadline::after(STALLED_REQUEST_BUDGET),
+            )
+            .await;
+            let diagnostics_ended = started.elapsed();
+            let teardown = ClusterTeardown::stop_all(nodes.iter_mut(), TEST_TEARDOWN_BUDGET).await;
+
             assert!(
-                log.stop_was_requested(&node.node),
-                "a stalled diagnostic must not keep a node from being asked to stop: {node}"
+                diagnostics_ended >= STALLED_REQUEST_BUDGET,
+                "the stalled diagnostic must run out its own budget before cleanup continues"
             );
+            for (name, diagnostic) in cluster {
+                match diagnostic {
+                    StandInDiagnostic::Answers => assert!(
+                        matches!(snapshots.get(*name), Some(Ok(status)) if status == HEALTHY_STATUS),
+                        "a healthy node's snapshot must be kept beside a stalled one: \
+                         {snapshots:?}"
+                    ),
+                    StandInDiagnostic::Stalls => {
+                        let Some(Err(stalled_error)) = snapshots.get(*name) else {
+                            panic!(
+                                "the stalled node's snapshot must be its timeout: {snapshots:?}"
+                            );
+                        };
+                        assert!(deadline_passed_during(
+                            stalled_error,
+                            StatusOperation::OpenSession
+                        ));
+                    }
+                }
+            }
+            for node in &teardown.nodes {
+                assert!(
+                    log.stop_was_requested(&node.node),
+                    "a stalled diagnostic must not keep a node from being asked to stop: {node}"
+                );
+            }
+            assert!(!teardown.was_forced(), "{teardown}");
+            assert_eq!(log.released().len(), cluster.len());
         }
-        assert!(!teardown.was_forced(), "{teardown}");
-        assert_eq!(log.released().len(), 2);
     }
 
     #[tokio::test(start_paused = true)]

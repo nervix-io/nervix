@@ -397,7 +397,10 @@ impl<'node> NodeStartup<'node> {
             }
 
             let failure = match self.attempt(target, attempt).await {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.report_ready(attempt);
+                    return Ok(());
+                }
                 Err(failure) => failure,
             };
             let retry = failure.retry();
@@ -433,6 +436,19 @@ impl<'node> NodeStartup<'node> {
             Ok(()) => Ok(()),
             Err(error) => Err(AttemptFailure::NotReady(error)),
         }
+    }
+
+    /// Reports the attempt that produced a ready node and what the whole startup cost by then, so a
+    /// run's startup times can be read from its output beside the attempts it spent.
+    fn report_ready(&self, attempt: u32) {
+        eprintln!(
+            "node '{}' startup: ready after {:?} on attempt {attempt}/{NODE_START_ATTEMPTS}; {:?} \
+             of its {:?} budget left",
+            self.node,
+            self.budget.elapsed(),
+            self.budget.remaining(),
+            self.budget.budget()
+        );
     }
 
     /// Retains a failed attempt and reports the transition, so a run that ends in exhaustion is
