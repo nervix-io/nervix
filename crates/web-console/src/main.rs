@@ -2334,12 +2334,10 @@ fn request_resource_describe(
     }
 }
 
+/// Durable command admission reads the creation time embedded in a UUIDv7 retry identity, so a
+/// persistent command sent from the console must carry one.
 fn command_execution_reference() -> String {
-    let window = web_sys::window().assured("the web console runs inside a browser window");
-    let crypto = window
-        .crypto()
-        .assured("supported web console browsers expose Web Crypto");
-    crypto.random_uuid()
+    uuid::Uuid::now_v7().to_string()
 }
 
 fn entity_describe_command(kind: &str, name: &str) -> Option<String> {

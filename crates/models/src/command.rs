@@ -10,6 +10,8 @@ use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+use crate::Timestamp;
+
 const MAX_COMMAND_EXECUTION_REFERENCE_BYTES: usize = 128;
 
 #[derive(
@@ -55,6 +57,41 @@ impl CommandExecutionReference {
         &self.0
     }
 
+    /// Returns the caller time embedded in a UUIDv7 retry identity.
+    ///
+    /// Durable command admission requires this timestamp so a replicated time fence can reject a
+    /// reclaimed identity without retaining every caller-selected reference forever. Internal
+    /// identities that do not enter that ledger may continue to use the broader reference syntax.
+    pub fn retry_issued_at(
+        &self,
+    ) -> Result<Timestamp, Report<CommandExecutionReferenceTimestampError>> {
+        let value = uuid::Uuid::parse_str(self.as_str())
+            .map_err(|_| Report::new(CommandExecutionReferenceTimestampError::NotUuidV7))?;
+        if value.get_version() != Some(uuid::Version::SortRand) {
+            return Err(Report::new(
+                CommandExecutionReferenceTimestampError::NotUuidV7,
+            ));
+        }
+        let timestamp = value
+            .get_timestamp()
+            .ok_or_else(|| Report::new(CommandExecutionReferenceTimestampError::NotUuidV7))?;
+        let (seconds, subsec_nanos) = timestamp.to_unix();
+        let unix_seconds = u128::from(seconds)
+            .checked_mul(1_000_000_000)
+            .ok_or_else(|| {
+                Report::new(CommandExecutionReferenceTimestampError::OutsideTimestampRange)
+            })?;
+        let unix_nanos = unix_seconds
+            .checked_add(u128::from(subsec_nanos))
+            .ok_or_else(|| {
+                Report::new(CommandExecutionReferenceTimestampError::OutsideTimestampRange)
+            })?;
+        let unix_nanos = i64::try_from(unix_nanos).map_err(|_| {
+            Report::new(CommandExecutionReferenceTimestampError::OutsideTimestampRange)
+        })?;
+        Ok(Timestamp::from_unix_nanos(unix_nanos))
+    }
+
     /// Derives the durable identity of one statement in this request.
     ///
     /// The derived reference has a fixed size, so every accepted request reference can identify
@@ -87,6 +124,14 @@ pub enum CommandExecutionReferenceError {
     InvalidCharacter,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CommandExecutionReferenceTimestampError {
+    #[error("command execution retry identity must be a UUID version 7 value")]
+    NotUuidV7,
+    #[error("command execution retry identity timestamp is outside the supported range")]
+    OutsideTimestampRange,
+}
+
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
@@ -105,5 +150,26 @@ mod tests {
         assert_ne!(first, second);
         assert!(first.as_str().len() <= MAX_COMMAND_EXECUTION_REFERENCE_BYTES);
         assert!(CommandExecutionReference::parse(first.to_string()).is_ok());
+    }
+
+    #[test]
+    fn uuid_v7_retry_identity_exposes_its_creation_time() {
+        let reference =
+            CommandExecutionReference::parse("018bcfe5-687b-7000-8000-000000000001".to_string())
+                .assured("UUIDv7 text uses only execution-reference characters");
+
+        assert_eq!(
+            reference
+                .retry_issued_at()
+                .assured("the fixture is a UUIDv7 reference")
+                .unix_nanos(),
+            1_700_000_000_123_000_000
+        );
+        assert!(
+            CommandExecutionReference::parse("caller-selected")
+                .assured("the literal uses accepted reference characters")
+                .retry_issued_at()
+                .is_err()
+        );
     }
 }

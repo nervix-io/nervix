@@ -159,6 +159,7 @@ mod wasm_state_recovery;
 mod wasm_state_reset;
 mod web_console;
 
+pub use command_execution::CommandExecutionPolicy;
 use service_tasks::ServiceTasks;
 use shutdown::BeforeDeadline;
 pub use shutdown::{
@@ -326,6 +327,8 @@ pub struct Args {
         value_parser = parse_human_duration
     )]
     pub transaction_tombstone_retention: Duration,
+    #[command(flatten)]
+    pub command_execution: CommandExecutionPolicy,
     #[arg(
         long,
         env = "NERVIX_TRANSACTION_MAX_STATEMENTS",
@@ -546,6 +549,8 @@ pub struct Application {
     pub transaction_idle_timeout: Duration,
     #[builder(default = DEFAULT_TRANSACTION_TOMBSTONE_RETENTION)]
     pub transaction_tombstone_retention: Duration,
+    #[builder(default)]
+    pub command_execution: CommandExecutionPolicy,
     #[builder(default = DEFAULT_TRANSACTION_MAX_STATEMENTS)]
     pub transaction_max_statements: usize,
     #[builder(default = DEFAULT_TRANSACTION_MAX_SOURCE_BYTES)]
@@ -1712,7 +1717,8 @@ impl Application {
                 transaction_max_source_bytes,
                 transaction_max_open,
                 transaction_bindings: DashMap::with_hasher(RandomState::new()),
-                command_executions: DashMap::with_hasher(RandomState::new()),
+                command_execution_policy: self.command_execution,
+                command_executions: Default::default(),
                 transaction_executions: DashMap::with_hasher(RandomState::new()),
                 transaction_recovery: Default::default(),
                 ownership_handoff_operations: tokio::sync::Mutex::new(()),
