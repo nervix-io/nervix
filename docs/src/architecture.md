@@ -94,6 +94,13 @@ The pooled sinks keep the same split. A crate owns its driver's pool and the con
 out, and the runtime owns the lease on the node's one instance of a named client, the wait a graph
 node reports while it holds no connection, and the bounds the client declared.
 
+The runtime names every sink crate in one place, its composition root. Each variant of an
+emitter's sink plan maps to that crate's constructor, and the connector it opens is paired with the
+input the runtime prepares for its contract: the emitter's codec for a record sink, the compiled
+`VALUES` projection for a row sink. The emitter task holds that pairing as one boxed connector, so
+its batching, retry, commit, and drain are written once for every sink, and no connector is ever
+called once per row.
+
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and
 fenced authority for a paced `START`. Each data-plane execution binds a capability for the exact

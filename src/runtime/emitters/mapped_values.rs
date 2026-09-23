@@ -2,15 +2,97 @@
 //!
 //! Layer: data plane.
 //! - **Owns.** Compiling one emitter's `VALUES` mapping once, evaluating it once per batch into an
-//!   Arrow batch of mapped columns, and the row selection and chunk ranges that batch is written
-//!   in.
+//!   Arrow batch of mapped columns, the row selection and chunk ranges that batch is written in,
+//!   and handing each projected batch to the row sink it is mapped for.
 //! - **Depends on.** The VM's compile and execute API, Arrow batches and the connector contract's
-//!   mapped-rows value type.
+//!   row sink and mapped-rows value type.
 //! - **Must not know.** Which external system consumes the mapped rows, or how it encodes them.
 
 use std::ops::Range;
 
+use async_trait::async_trait;
+
 use super::*;
+
+/// A row sink and the host projection whose mapped columns it writes.
+///
+/// The mapping is evaluated here, once per batch, so the sink receives Arrow columns and the rows
+/// it must write and never learns what produced them.
+pub(in crate::runtime) struct MappedRowSink {
+    sink: Box<dyn RowSink>,
+    projection: MappedValuesProjection,
+}
+
+impl MappedRowSink {
+    pub(in crate::runtime) fn new(
+        sink: Box<dyn RowSink>,
+        projection: MappedValuesProjection,
+    ) -> Self {
+        Self { sink, projection }
+    }
+}
+
+#[async_trait]
+impl EmitterSink for MappedRowSink {
+    fn lifecycle(&self) -> &dyn SinkLifecycle {
+        &*self.sink
+    }
+
+    fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle {
+        &mut *self.sink
+    }
+
+    /// Writes every buffered batch, one projection and one virtual call per batch.
+    async fn publish_batches(
+        &mut self,
+        context: &EmitterSinkContext,
+        batches: &mut [EmitterPublishBatch],
+    ) -> EmitterRuntimeResult<()> {
+        let acknowledgements = match self.sink.retains_acknowledgements() {
+            true => DeliveredAcknowledgements::Sink,
+            false => DeliveredAcknowledgements::Host,
+        };
+        for batch_index in 0..batches.len() {
+            tokio::task::consume_budget().await;
+            let mut projected = {
+                let batch = &batches[batch_index];
+                let pending_rows = batch.pending_record_rows();
+                // A batch whose rows a previous attempt already delivered has nothing left to map.
+                if pending_rows.is_empty() {
+                    continue;
+                }
+                self.projection
+                    .project(
+                        batch_index,
+                        &batch.batch,
+                        batch.execution_now,
+                        &pending_rows,
+                    )
+                    .await?
+            };
+            let rejected = projected.take_rejected();
+            finish_rejected_records(context, batches, rejected, MessageErrorOperation::Values)
+                .await?;
+            if projected.is_empty() {
+                continue;
+            }
+            // A sink that resolves acknowledgements on its own commit boundary takes the ones its
+            // write carries, so the host stops owning them the moment the write accepts the rows.
+            let retained = match acknowledgements {
+                DeliveredAcknowledgements::Sink => {
+                    let batch = &batches[batch_index];
+                    Some(SinkAcknowledgements::new(
+                        batch.acks_for_rows(projected.selected_rows()),
+                    ))
+                }
+                DeliveredAcknowledgements::Host => None,
+            };
+            let outcome = self.sink.publish(projected.rows(retained)).await;
+            finish_record_sink_publish(context, batches, outcome, acknowledgements).await?;
+        }
+        Ok(())
+    }
+}
 
 /// What one emitter's `VALUES` mapping is compiled from.
 pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
