@@ -6580,6 +6580,7 @@ dependencies = [
  "nervix-models",
  "nervix-nspl",
  "nervix-recovery",
+ "parking_lot",
  "rustls",
  "shuttle-tokio",
  "shuttle-tokio-stream",

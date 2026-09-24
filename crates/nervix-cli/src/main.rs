@@ -605,6 +605,7 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
         ca_certificate_pem,
         username: Some(args.username.clone()),
         password: Some(password),
+        ..ConnectOptions::default()
     })
 }
 

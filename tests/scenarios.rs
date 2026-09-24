@@ -8873,8 +8873,18 @@ async fn when_named_client_begins_resource_upload_in_the_background(
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .assured("the scenario identity is an identifier-shaped literal");
     world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let upload_domain = client
+            .domain()
+            .await
+            .assured("the upload client selected a domain");
         let outcome = client
-            .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+            .upload_resource_from_directory_with_identity(
+                &resource,
+                directory,
+                upload_domain,
+                identity,
+                |_| {},
+            )
             .await
             .map_err(|error| error.to_string())?;
         if outcome.succeeded() {
@@ -9458,8 +9468,18 @@ async fn when_named_client_uploads_resource_with_identity(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .expect("scenario upload identity must be valid");
+    let upload_domain = client
+        .domain()
+        .await
+        .assured("the upload client selected a domain");
     let outcome = client
-        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .upload_resource_from_directory_with_identity(
+            &resource,
+            directory,
+            upload_domain,
+            identity,
+            |_| {},
+        )
         .await
         .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
     assert!(
@@ -9572,8 +9592,18 @@ async fn when_named_client_resource_upload_fails_with(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .expect("scenario upload identity must be valid");
+    let upload_domain = client
+        .domain()
+        .await
+        .assured("the upload client selected a domain");
     let outcome = client
-        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .upload_resource_from_directory_with_identity(
+            &resource,
+            directory,
+            upload_domain,
+            identity,
+            |_| {},
+        )
         .await
         .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
     assert!(

@@ -591,6 +591,7 @@ pub(crate) fn client_connect_options(server: &str) -> io::Result<ConnectOptions>
             ca_certificate_pem: Some(dev_tls_ca_pem()?),
             username: Some(TEST_AUTH_USERNAME.to_string()),
             password: Some(TEST_AUTH_PASSWORD.to_string()),
+            ..ConnectOptions::default()
         })
     } else {
         Ok(ConnectOptions::default().with_basic_auth(TEST_AUTH_USERNAME, TEST_AUTH_PASSWORD))
