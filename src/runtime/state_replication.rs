@@ -1463,7 +1463,7 @@ impl Runtime {
                 );
                 if let Some(ingestor) = self.inner.ingestors.get(&key) {
                     ingestor
-                        .branch_runtimes()
+                        .branched
                         .iter()
                         .map(|entrypoint| entrypoint.branch_runtime.clone())
                         .collect::<Vec<_>>()

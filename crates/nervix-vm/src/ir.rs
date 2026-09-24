@@ -253,7 +253,16 @@ impl InstructionKind {
 pub struct Instruction {
     pub kind: InstructionKind,
     pub span: Span,
-    pub error_mask: Option<RegisterRef>,
+    /// The register holding the rows a conditional arm selects for this instruction, or `None`
+    /// when it computes every row of the batch.
+    ///
+    /// The runtime confines the instruction to the selected rows: an injected function and a
+    /// kernel whose cost per row dwarfs narrowing run over the selected rows only, a vectorized
+    /// kernel runs over the batch and keeps only the selected rows' errors, and an arm no row
+    /// selects skips the instruction altogether. Only an instruction that can report a per-row
+    /// error or calls out of the VM carries a selection; any other instruction's result on an
+    /// unselected row is never observed.
+    pub selection: Option<RegisterRef>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

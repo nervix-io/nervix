@@ -296,7 +296,11 @@ impl Runtime {
         for node in schedule.nodes.values() {
             match node.config.as_ref() {
                 Model::Ingestor(ingestor) => {
-                    if let Err(error) = Self::validate_ingestor_start_settings(domain, ingestor) {
+                    if let Err(error) = Self::parse_ingest_acknowledgement(
+                        domain,
+                        &ingestor.name,
+                        ingestor.source.acknowledgement(),
+                    ) {
                         self.record_ingestor_transient_error(
                             domain,
                             &ingestor.name,

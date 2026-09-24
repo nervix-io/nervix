@@ -181,7 +181,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   casts between wire, internal, branch, processor, lookup, state, and sink values.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
   result at one exact type; remember that omitted `CASE ELSE` yields a typed null and requires an
-  optional destination.
+  optional destination. An arm is evaluated only for the messages that select it, so a `CASE`
+  guard shields a conversion, pattern, or UDF from the messages it cannot handle.
 - Write `IN` sets as constants of the operand's exact type, casting literals for narrower types:
   `input.priority IN (1 AS I32, 2 AS I32)`. A set cannot hold `NULL` or read a field, and an empty
   set is false for every message. `IN`, `NOT IN`, and `BETWEEN` are null for a null operand, so use

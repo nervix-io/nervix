@@ -45,7 +45,7 @@ pub(super) enum EmitterTaskCommand {
     },
     Stop {
         deadline: Instant,
-        response: oneshot::Sender<emitters::EmitterRuntimeResult<()>>,
+        response: oneshot::Sender<emitter_task::EmitterRuntimeResult<()>>,
     },
 }
 
@@ -166,7 +166,7 @@ impl ScheduledEmitterTask {
         if let Err(error) = response {
             clear_emitter_stop_signal(&self.stop_signal, deadline);
             return Err(ScheduledEmitterStopError::recoverable(
-                emitters::emitter_error_message(&error),
+                emitter_task::emitter_error_message(&error),
                 self,
             ));
         }
@@ -430,7 +430,7 @@ impl Runtime {
                     ),
                 })
         })?;
-        emitters::EmitterTask::spawn(self, build, emitter, plan, inputs)
+        emitter_task::EmitterTask::spawn(self, build, emitter, plan, inputs)
     }
 }
 
@@ -461,8 +461,10 @@ mod tests {
             let observed = Instant::now();
             assert!(deadline > started);
             assert!(deadline <= observed + grace);
-            let _ = response.send(Err(Report::new(emitters::EmitterRuntimeError::FinalFlush)
-                .attach_printable("transport drain failed")));
+            let _ = response.send(Err(Report::new(
+                emitter_task::EmitterRuntimeError::FinalFlush,
+            )
+            .attach_printable("transport drain failed")));
 
             let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
                 panic!("expected the retried emitter stop command");
@@ -523,5 +525,130 @@ mod tests {
                 .is_none(),
             "a dropped response must not leave the retained emitter interrupted"
         );
+    }
+
+    #[tokio::test]
+    async fn scheduled_emitter_stop_returns_final_flush_failure_as_recoverable() {
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (stop_signal, _stop_rx) = watch::channel(None);
+        let finished = Arc::new(AtomicBool::new(false));
+        let task_finished = finished.clone();
+        let task = tokio::spawn(async move {
+            let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
+                panic!("scheduled emitter must receive its stop command")
+            };
+            let _ = response.send(Err(Report::new(EmitterRuntimeError::FinalFlush)
+                .attach_printable("emitter final flush failed: broker unavailable")));
+            task_finished.store(true, Ordering::Release);
+        });
+        let scheduled = ScheduledEmitterTask {
+            commands,
+            stop_signal,
+            task,
+        };
+
+        let error = scheduled
+            .stop(Duration::from_secs(1))
+            .await
+            .expect_err("final flush failure must reach the stopping caller");
+
+        assert_eq!(
+            error.reason(),
+            "emitter final flush failed: broker unavailable"
+        );
+        let mut retained = error
+            .into_task()
+            .expect("a failed drain must retain the scheduled task");
+        let _ = (&mut retained.task).await;
+        assert!(finished.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn scheduled_emitter_stop_retains_a_task_that_drops_its_response() {
+        struct Dropped(Arc<AtomicBool>);
+
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (stop_signal, _) = watch::channel(None);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = dropped.clone();
+        let task = tokio::spawn(async move {
+            let _dropped = Dropped(task_dropped);
+            let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
+                panic!("scheduled emitter must receive its stop command")
+            };
+            drop(response);
+            std::future::pending::<()>().await;
+        });
+        let scheduled = ScheduledEmitterTask {
+            commands,
+            stop_signal,
+            task,
+        };
+
+        let error = scheduled
+            .stop(Duration::from_secs(1))
+            .await
+            .expect_err("a dropped response must fail stopping");
+
+        assert_eq!(
+            error.reason(),
+            "scheduled emitter task dropped its stop response"
+        );
+        let mut retained = error
+            .into_task()
+            .expect("a dropped response must leave the task recoverable");
+        assert!(!dropped.load(Ordering::Acquire));
+        retained.task.abort();
+        let _ = (&mut retained.task).await;
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn scheduled_emitter_stop_timeout_retains_the_task() {
+        struct Dropped(Arc<AtomicBool>);
+
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let (commands, mut command_rx) = mpsc::channel(1);
+        let (stop_signal, _) = watch::channel(None);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = dropped.clone();
+        let task = tokio::spawn(async move {
+            let _dropped = Dropped(task_dropped);
+            let Some(EmitterTaskCommand::Stop { response, .. }) = command_rx.recv().await else {
+                panic!("scheduled emitter must receive its stop command")
+            };
+            let _response = response;
+            std::future::pending::<()>().await;
+        });
+        let scheduled = ScheduledEmitterTask {
+            commands,
+            stop_signal,
+            task,
+        };
+
+        let error = scheduled
+            .stop(Duration::from_millis(5))
+            .await
+            .expect_err("a missing stop response must time out");
+
+        assert_eq!(error.reason(), "scheduled emitter task timed out draining");
+        let mut retained = error
+            .into_task()
+            .expect("a timed-out drain must leave the task recoverable");
+        assert!(!dropped.load(Ordering::Acquire));
+        retained.task.abort();
+        let _ = (&mut retained.task).await;
+        assert!(dropped.load(Ordering::Acquire));
     }
 }

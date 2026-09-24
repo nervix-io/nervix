@@ -1,9 +1,11 @@
 //! Ingestor runtime materialization.
 //!
 //! Layer: data plane.
-//! - **Owns.** Starting concrete connector tasks from validated ingestor execution plans.
-//! - **Depends on.** Ingestor plans, installed domain capabilities and connector runtimes.
-//! - **Must not know.** NSPL parsing, registry validation or placement selection.
+//! - **Owns.** Choosing which scheduled ingestors this node starts, stopping a running ingestor,
+//!   and compiling the dependencies every ingestor start reads.
+//! - **Depends on.** Ingestor plans, installed domain capabilities and the source start path.
+//! - **Must not know.** NSPL parsing, registry validation, placement selection, or which connector
+//!   a source runs on.
 
 use std::borrow::Cow;
 
@@ -59,6 +61,13 @@ pub(super) enum ScheduledIngestorStart {
     Error(RuntimeError),
 }
 
+/// One running ingestor: the tasks its source runs in and the branch runtimes its routes feed.
+pub(super) struct IngestorRuntime {
+    pub(super) shutdown: watch::Sender<bool>,
+    pub(super) branched: Vec<Arc<IngestorRouteRuntime>>,
+    pub(super) tasks: Vec<JoinHandle<()>>,
+}
+
 impl Runtime {
     pub(in crate::runtime) fn syslog_ingestor_bind_addr(&self, configured: &str) -> String {
         let dispatcher = self.inner.remote_dispatcher.load();
@@ -70,13 +79,6 @@ impl Runtime {
         }
 
         configured.to_string()
-    }
-
-    pub(in crate::runtime) async fn start_ingestor(
-        &self,
-        plan: IngestorStartPlan,
-    ) -> Result<(), RuntimeError> {
-        ingestors::IngestorStarter::start(self, plan).await
     }
 
     pub(super) async fn start_missing_domain_ingestors(
@@ -192,14 +194,12 @@ impl Runtime {
         schedule: &DomainSchedule,
         ingestor: &CreateIngestor,
     ) -> Option<Model> {
-        let source_ref = ingestor.source.source_ref();
-        let source_kind = match &ingestor.source {
-            IngestSource::Endpoint { .. } => ModelKind::Endpoint,
-            _ => ModelKind::Client,
-        };
         schedule
             .nodes
-            .get(&NodeRef::new(source_kind, source_ref))
+            .get(&NodeRef::new(
+                ingestor.source.source_kind(),
+                ingestor.source.source_ref(),
+            ))
             .map(|node| (*node.config).clone())
     }
 
@@ -216,60 +216,25 @@ impl Runtime {
             });
         };
 
-        match runtime {
-            IngestorRuntime::Background {
-                shutdown,
-                branched,
-                tasks,
-            } => {
-                if shutdown.send(true).is_err() {
-                    warn!(
-                        domain = domain.as_str(),
-                        ingestor = ingestor.as_str(),
-                        "ingestor shutdown signal had no receiver"
-                    );
-                }
-                for task in tasks {
-                    Self::await_shutdown_task(task, domain, Some(ingestor), "ingestor").await;
-                }
-                for branched in branched {
-                    branched.shutdown().await;
-                }
-            }
-            IngestorRuntime::Endpoint {
-                route_keys,
-                branched,
-                shutdown,
-                tasks,
-            } => {
-                if shutdown.send(true).is_err() {
-                    warn!(
-                        domain = domain.as_str(),
-                        ingestor = ingestor.as_str(),
-                        "endpoint ingestor shutdown signal had no receiver"
-                    );
-                }
-                for task in tasks {
-                    Self::await_shutdown_task(task, domain, Some(ingestor), "endpoint ingestor")
-                        .await;
-                }
-                for route_key in route_keys {
-                    let remove_route = if let Some(mut bindings) =
-                        self.inner.endpoint_bindings.get_mut(&route_key)
-                    {
-                        bindings.retain(|binding| binding.runtime_key != key);
-                        bindings.is_empty()
-                    } else {
-                        false
-                    };
-                    if remove_route {
-                        self.inner.endpoint_bindings.remove(&route_key);
-                    }
-                }
-                for branched in branched {
-                    branched.shutdown().await;
-                }
-            }
+        let IngestorRuntime {
+            shutdown,
+            branched,
+            tasks,
+        } = runtime;
+        if shutdown.send(true).is_err() {
+            warn!(
+                domain = domain.as_str(),
+                ingestor = ingestor.as_str(),
+                "ingestor shutdown signal had no receiver"
+            );
+        }
+        // Every source's tasks end by closing it, so an endpoint source has unbound its routes by
+        // the time they have been awaited.
+        for task in tasks {
+            Self::await_shutdown_task(task, domain, Some(ingestor), "ingestor").await;
+        }
+        for branched in branched {
+            branched.shutdown().await;
         }
 
         self.clear_ingestor_readiness(domain, ingestor);

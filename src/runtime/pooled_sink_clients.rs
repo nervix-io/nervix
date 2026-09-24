@@ -13,6 +13,7 @@ use nervix_connector::{SinkPublishError, SinkPublishResult};
 use nervix_connector_mongodb::{MongoDbClient, MongoDbClientSource};
 use nervix_connector_mysql::{MySqlConnection, MySqlConnections};
 use nervix_connector_postgres::{PostgresConnection, PostgresConnections};
+use nervix_connector_redis::{RedisCommandPool, RedisPoolHandle, RedisPoolServices, RedisPoolWait};
 
 use super::*;
 use crate::runtime::shared_clients::PoolWaitGuard;
@@ -110,5 +111,62 @@ impl MongoDbClientSource for PooledSinkClient {
             .mongodb(&self.client)
             .cloned()
             .map_err(|error| error.change_context(Self::not_initialized("mongodb")))
+    }
+}
+
+impl EmitterSinkContext {
+    /// Leases this node's shared Redis command pool for `plan`'s client.
+    ///
+    /// The lease travels with the handle the sink holds, so the pool stays open for exactly as
+    /// long as the sink publishes through it.
+    pub(super) async fn lease_redis_pool(
+        &self,
+        plan: &RedisSinkPlan,
+    ) -> EmitterRuntimeResult<RedisPoolHandle> {
+        let lease = self
+            .runtime
+            .lease_shared_client(&self.domain, &plan.client, plan.pooled_client())
+            .await
+            .map_err(|error| emitter_init_error(error.to_string()))?;
+        let pool = lease
+            .client()
+            .redis(&plan.client.name)
+            .map_err(|error| emitter_init_error(error.to_string()))?
+            .clone();
+        Ok(RedisPoolHandle::new(LeasedRedisPool {
+            _lease: lease,
+            pool,
+            runtime: self.runtime.clone(),
+            client: plan.client.name.clone(),
+            waiter: DomainNodeRef::node_in(
+                self.domain.clone(),
+                ModelKind::Emitter,
+                self.emitter.clone(),
+            ),
+        }))
+    }
+}
+
+/// One emitter's interest in this node's shared Redis pool, and the wait it records while that
+/// pool hands a connection over.
+struct LeasedRedisPool {
+    /// Held for as long as the sink publishes: releasing it gives back this emitter's interest in
+    /// the shared client, which closes the pool once its last local user leaves.
+    _lease: SharedClientLease,
+    pool: RedisCommandPool,
+    runtime: Runtime,
+    /// The client borrowed from, named in this emitter's pool wait.
+    client: ClientName,
+    /// This emitter, as the key its pool wait is recorded under for `DESCRIBE` to read.
+    waiter: DomainNodeRef,
+}
+
+impl RedisPoolServices for LeasedRedisPool {
+    fn pool(&self) -> RedisCommandPool {
+        self.pool.clone()
+    }
+
+    fn begin_pool_wait(&self) -> RedisPoolWait {
+        RedisPoolWait::new(self.runtime.pool_wait_guard(&self.waiter, &self.client))
     }
 }

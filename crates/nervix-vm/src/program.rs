@@ -209,6 +209,66 @@ impl PartialEq for CaseArm {
 impl Eq for CaseArm {}
 
 impl Expr {
+    /// Whether evaluating this expression calls a function answered outside the VM.
+    pub(crate) fn calls_out_of_the_vm(&self) -> bool {
+        match self {
+            Self::Literal(_) | Self::FieldRef(_) | Self::InternalFieldRef(_) => false,
+            Self::Unary { expr, .. } | Self::Cast { expr, .. } => expr.inner.calls_out_of_the_vm(),
+            Self::Binary { left, right, .. } => {
+                left.inner.calls_out_of_the_vm() || right.inner.calls_out_of_the_vm()
+            }
+            Self::Call { function, args } => {
+                if function.is_injected() {
+                    return true;
+                }
+                for argument in args {
+                    if argument.inner.calls_out_of_the_vm() {
+                        return true;
+                    }
+                }
+                false
+            }
+            Self::Case {
+                operand,
+                branches,
+                else_result,
+            } => {
+                if let Some(operand) = operand
+                    && operand.inner.calls_out_of_the_vm()
+                {
+                    return true;
+                }
+                for branch in branches {
+                    if branch.when.inner.calls_out_of_the_vm()
+                        || branch.result.inner.calls_out_of_the_vm()
+                    {
+                        return true;
+                    }
+                }
+                if let Some(else_result) = else_result {
+                    return else_result.inner.calls_out_of_the_vm();
+                }
+                false
+            }
+            Self::Membership { operand, set } => {
+                if operand.inner.calls_out_of_the_vm() {
+                    return true;
+                }
+                for element in set {
+                    if element.inner.calls_out_of_the_vm() {
+                        return true;
+                    }
+                }
+                false
+            }
+            Self::Between { operand, low, high } => {
+                operand.inner.calls_out_of_the_vm()
+                    || low.inner.calls_out_of_the_vm()
+                    || high.inner.calls_out_of_the_vm()
+            }
+        }
+    }
+
     const fn discriminant(&self) -> u8 {
         match self {
             Self::Literal(_) => 0,
@@ -825,6 +885,15 @@ impl WindowAggregateFunction {
 }
 
 impl FunctionName {
+    /// Whether a call to this function is answered by an injected function outside the VM rather
+    /// than by a builtin kernel: a header read, a window aggregate or a UDF.
+    pub const fn is_injected(&self) -> bool {
+        matches!(
+            self,
+            Self::ReadHeader | Self::ReadHeaders | Self::WindowAggregate(_) | Self::Udf(_)
+        )
+    }
+
     pub fn parse(name: &str) -> Self {
         match name.to_ascii_lowercase().as_str() {
             "now" => Self::Now,

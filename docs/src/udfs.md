@@ -3,8 +3,9 @@
 NSPL user-defined functions (UDFs) are domain-owned functions written in
 [Roto](roto-language-reference.md) and invoked anywhere
 an ordinary expression function can be used. They execute in process over Arrow columns: one UDF
-invocation receives a complete batch, and column methods perform vectorized work without
-serializing rows.
+invocation receives every message of a batch that reaches it, or, inside a conditional arm, only
+the messages that select that arm, and column methods perform vectorized work without serializing
+rows.
 
 UDF creation is trusted-code administration, like uploading a WASM resource. Roto code is native
 JIT-compiled code, not a sandbox for third-party programs.

@@ -2125,7 +2125,7 @@ impl Runtime {
                     ingestor: ingestor.name.as_str().to_string(),
                     reason: error.to_string(),
                 })?;
-            ingestors::IngestorStarter::start(self, plan).await?;
+            self.start_ingestor(plan).await?;
         }
 
         Ok(())
