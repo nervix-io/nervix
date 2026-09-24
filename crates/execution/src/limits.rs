@@ -6,8 +6,8 @@ use error_stack::Report;
 use thiserror::Error;
 use ubyte::ByteUnit;
 
-/// A bounded share of admission onto the blocking pool for CPU work, keeping it off the async
-/// workers.
+/// A bounded share of CPU admission onto the blocking pool in production, or onto the simulated
+/// scheduler in the Turmoil test build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CpuClass {
     /// Control-plane and consensus work. Its share of admission is its own, so saturated data or
@@ -53,33 +53,34 @@ impl MemoryClass {
     }
 }
 
-/// The name one worker pool reports itself under. Both execution kinds resolve to it so the pools
-/// share one implementation without sharing their admission.
+/// The class one worker pool admits. Its kind also selects the simulation execution strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WorkerClassName(&'static str);
+pub enum WorkerClassName {
+    Cpu(CpuClass),
+    Storage(StorageClass),
+}
 
 impl WorkerClassName {
     pub fn as_str(self) -> &'static str {
-        self.0
+        match self {
+            Self::Cpu(CpuClass::Control) => "control_cpu",
+            Self::Cpu(CpuClass::Data) => "data_cpu",
+            Self::Cpu(CpuClass::Bulk) => "bulk_cpu",
+            Self::Storage(StorageClass::Consensus) => "consensus_storage",
+            Self::Storage(StorageClass::Filesystem) => "filesystem_storage",
+        }
     }
 }
 
 impl From<CpuClass> for WorkerClassName {
     fn from(class: CpuClass) -> Self {
-        Self(match class {
-            CpuClass::Control => "control_cpu",
-            CpuClass::Data => "data_cpu",
-            CpuClass::Bulk => "bulk_cpu",
-        })
+        Self::Cpu(class)
     }
 }
 
 impl From<StorageClass> for WorkerClassName {
     fn from(class: StorageClass) -> Self {
-        Self(match class {
-            StorageClass::Consensus => "consensus_storage",
-            StorageClass::Filesystem => "filesystem_storage",
-        })
+        Self::Storage(class)
     }
 }
 
