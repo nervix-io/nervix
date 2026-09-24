@@ -214,7 +214,7 @@ pub(super) struct RelayConsumerFanout {
     pub(super) owner_buffer: ArcSwapOption<RelayOwnerBuffer>,
     pub(super) owner_capacity: AtomicUsize,
     pub(super) owner_pending_batches: Arc<AtomicUsize>,
-    pub(super) subscriptions: RelayBroadcast<RelayRecordBatch>,
+    pub(super) subscriptions: RelaySubscriptions,
     pub(super) attached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
     pub(super) detached_runtime_consumers: RelayBroadcast<RelayRecordBatch>,
 }
@@ -512,14 +512,15 @@ impl RelayConsumerFanout {
             owner_buffer: ArcSwapOption::empty(),
             owner_capacity: AtomicUsize::new(capacity.get()),
             owner_pending_batches: Arc::new(AtomicUsize::new(0)),
-            subscriptions: RelayBroadcast::with_capacity(dispatch_capacity),
+            subscriptions: RelaySubscriptions::new(),
             attached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
             detached_runtime_consumers: RelayBroadcast::with_capacity(dispatch_capacity),
         }
     }
 
+    #[cfg(test)]
     pub(super) fn subscription_receiver(&self) -> RelaySubscriptionReceiver<RelayRecordBatch> {
-        self.subscriptions.new_receiver()
+        self.subscriptions.receivers().new_receiver()
     }
 
     pub(super) fn set_capacity(&self, capacity: NonZeroUsize) {
@@ -683,10 +684,7 @@ impl RelayConsumerFanout {
         if self.subscriptions.receiver_count() == 0 {
             return;
         }
-        self.subscriptions
-            .broadcast(batch.detached())
-            .await
-            .means_peer_left("relay subscription");
+        self.subscriptions.broadcast(batch.detached()).await;
     }
 
     pub(super) async fn dispatch_runtime_consumers(
@@ -754,6 +752,7 @@ impl BranchCollapseNode {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn subscription_receiver(&self) -> RelaySubscriptionReceiver<RelayRecordBatch> {
         self.fanout.subscription_receiver()
     }
@@ -920,10 +919,19 @@ impl RelayBoundaryFanout {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn subscription_receiver(&self) -> RelaySubscriptionReceiver<RelayRecordBatch> {
         match self {
             Self::Direct(fanout) => fanout.subscription_receiver(),
             Self::BranchCollapse(branch_collapse) => branch_collapse.subscription_receiver(),
+        }
+    }
+
+    /// The session subscribers of this relay.
+    pub(super) fn subscriptions(&self) -> &RelaySubscriptions {
+        match self {
+            Self::Direct(fanout) => &fanout.subscriptions,
+            Self::BranchCollapse(branch_collapse) => &branch_collapse.fanout.subscriptions,
         }
     }
 
@@ -1140,6 +1148,7 @@ impl RelayBoundaryServices {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn subscription_receiver(&self) -> RelaySubscriptionReceiver<RelayRecordBatch> {
         self.fanout.subscription_receiver()
     }
@@ -1752,10 +1761,14 @@ impl Runtime {
         }
     }
 
+    /// Attaches a session subscriber to `relay`, provided this node executes the relay with the
+    /// definition the subscriber describes its rows by. The receiver ends as soon as the relay is
+    /// redefined or withdrawn, before any batch of another definition could reach it.
     pub(crate) async fn subscribe_stream(
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        expected: &RelaySubscriptionDefinition,
     ) -> Result<RelaySubscriptionReceiver<RelayRecordBatch>, RuntimeError> {
         let Some(routing) = self.domain_routing(domain) else {
             return Err(RuntimeError::RelayNotInstantiated {
@@ -1776,7 +1789,17 @@ impl Runtime {
                 relay: relay.as_str().to_string(),
             });
         };
-        Ok(services.subscription_receiver())
+        match services.fanout.subscriptions().attach(expected) {
+            Ok(receiver) => Ok(receiver),
+            Err(RelaySubscriptionRefusal::NotDeclared) => Err(RuntimeError::RelayNotInstantiated {
+                domain: domain.as_str().to_string(),
+                relay: relay.as_str().to_string(),
+            }),
+            Err(RelaySubscriptionRefusal::Redefined) => Err(RuntimeError::RelayRedefined {
+                domain: domain.clone(),
+                relay: relay.clone(),
+            }),
+        }
     }
 
     pub(in crate::runtime) fn spawn_relay_owner_task(

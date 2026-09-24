@@ -24,6 +24,14 @@ pub enum RuntimeError {
     CodecNotInstantiated { domain: String, codec: String },
     #[error("relay '{relay}' in domain '{domain}' is not instantiated")]
     RelayNotInstantiated { domain: String, relay: String },
+    #[error(
+        "relay '{relay}' in domain '{domain}' was redefined after its definition was read; read \
+         it again"
+    )]
+    RelayRedefined {
+        domain: DomainName,
+        relay: RelayName,
+    },
     #[error("failed to build domain execution for '{domain}': {reason}")]
     BuildDomainExecution { domain: String, reason: String },
     #[error(

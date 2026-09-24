@@ -238,6 +238,7 @@ mod relay_interaction;
 #[doc(hidden)]
 pub mod relay_interaction_benchmark;
 mod relay_processor_node;
+mod relay_subscription;
 mod remote_dispatch;
 mod reorderer;
 mod resources;
@@ -495,11 +496,12 @@ use test_fixtures::{
     publish_state_identity, quiesce_test_batch, row_value, scheduled_model, string_branch_key,
     test_branching, test_domain_clock, test_domain_clock_authority, test_ingestor_quiesce_control,
     test_named_branching, test_optional_schema, test_relay_boundary_services, test_schema,
-    u32_branch_key, unpaced_domain_state, validate_wasm_test_output_groups,
-    validate_wasm_test_outputs, vm_input_from_test_rows, wait_for_persisted_runtime_state_lsm,
-    wasm_generated_pool, wasm_guest_column, wasm_guest_stream, wasm_input_acks,
-    wasm_input_for_records, wasm_input_for_values, wasm_test_generated_output, wasm_test_output,
-    window_aggregate, window_outputs, window_plan, with_inherit_all,
+    u32_branch_key, unbranched_subscription_definition, unpaced_domain_state,
+    validate_wasm_test_output_groups, validate_wasm_test_outputs, vm_input_from_test_rows,
+    wait_for_persisted_runtime_state_lsm, wasm_generated_pool, wasm_guest_column,
+    wasm_guest_stream, wasm_input_acks, wasm_input_for_records, wasm_input_for_values,
+    wasm_test_generated_output, wasm_test_output, window_aggregate, window_outputs, window_plan,
+    with_inherit_all,
 };
 pub(in crate::runtime) use vm_compile::{
     CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
@@ -633,6 +635,8 @@ pub(crate) use ownership_handoff_error::{OwnershipHandoffError, OwnershipHandoff
 pub(crate) use relay_batch::{RelayMessage, RelayRecordBatch};
 pub(crate) use relay_boundary::scheduled_relay_owner_nodes;
 pub(crate) use relay_channel::{RelayBroadcast, RelayReceiver as RelaySubscriptionReceiver};
+pub(crate) use relay_subscription::RelaySubscriptionDefinition;
+use relay_subscription::{RelaySubscriptionRefusal, RelaySubscriptions};
 pub(crate) use state_replication::StateSyncAck;
 pub(crate) use state_snapshot_transfer::{DescribeStateSnapshot, FetchStateSnapshot};
 pub(crate) use state_store::{

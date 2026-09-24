@@ -28,7 +28,7 @@ not make that claim.
 | CW-F05 | `RELOCATE` plans from schedule S1, rereads S2 as its expected compare-and-swap value, and can publish the candidate derived from S1 over S2. | [05](https://app.clickup.com/t/86bc1ahn6) | `A relocation planned before a schedule revision cannot overwrite that revision` (`@client_wire_stale_relocation`) |
 | CW-F06 | Native client replies consume a FIFO waiter. Concurrent registration and send order can differ, so one response can complete another request. | [11](https://app.clickup.com/t/86bc1ahw3); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `nervix_client_core::tests::response_reordering_cannot_take_another_requests_waiter` |
 | CW-F07 | The native session response reader awaits bounded event queues inline. An unread subscription/server event can prevent an unrelated command reply from being routed. | [11](https://app.clickup.com/t/86bc1ahw3), with server lifecycle separation in [10](https://app.clickup.com/t/86bapbpt3) | `nervix_client_core::tests::saturated_event_consumer_cannot_block_a_command_reply` |
-| CW-F08 | Every same-relay subscription increments interest, but deletion unregisters only when the final local subscription disappears, leaving the count positive. | [10](https://app.clickup.com/t/86bapbpt3) | `application::subscription::tests::deleting_two_same_relay_subscriptions_clears_interest` |
+| CW-F08 | Every same-relay subscription increments interest, but deletion unregisters only when the final local subscription disappears, leaving the count positive. | [10](https://app.clickup.com/t/86bapbpt3) | `application::subscription::tests::deleting_two_same_relay_subscriptions_withdraws_the_interest_exactly`; `A node's interest in a relay follows every subscription of every session exactly` in `session_subscription_lifecycle.feature`, one and three nodes |
 | CW-F09 | The native client does not own acknowledged desired subscriptions as generation-fenced state, so reconnect/leader movement loses the subscription. | [12](https://app.clickup.com/t/86bc1ahwj) | `A reconnected native client restores acknowledged subscriptions` (`@client_wire_subscription_restore`, three nodes and concrete `acme`/`beta` branches) |
 | CW-F10 | The console dispatcher lets an unsolicited domain-list response take the first pending user request. | [13](https://app.clickup.com/t/86bc1ahym); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `tests::untracked_domain_push_cannot_discard_a_pending_websocket_request` in the `nervix-web-console` binary |
 
@@ -55,7 +55,7 @@ mutation ownership to [04](https://app.clickup.com/t/86bc1ahmy); retained reques
 | Full process crash/restart | Signal the actual child PID, assert termination by `SIGKILL`, restart the same executable with the same database, TLS identity, credentials and ports, then query through gRPC. | `A SIGKILL restart preserves a command admitted before the crash` in `client_wire_process_restart.feature` |
 | Full cluster restart | Stop and rebuild every node against its existing durable state. | Existing `Persisted rules are reapplied after a full cluster restart` matrix in `persistence.feature`, covering one node, three nodes, and a replicated three-node graph |
 | Undrained consumers | Fill the bounded event sender and hold its receiver while routing a command result under a short monotonic deadline. | CW-F07 |
-| Subscription create/delete/rebuild | Build two independently owned same-relay tasks, remove both in order, and inspect the owning interest index. The existing `rebuilt_relay_drops_subscription_with_clear_session_error` control rebuilds the relay under a live task. | CW-F08; CW-F09 adds public reconnect/restoration |
+| Subscription create/delete/rebuild | Announce two same-relay subscriptions, delete both in order, and read the node's lease count and `nervix_session_subscriptions`. `relay_rebuilds_end_subscribers_only_when_the_relay_rows_change` rebuilds a relay under a live subscriber with the same, a sensitive, and no definition. | CW-F08; CW-F09 adds public reconnect/restoration |
 
 Scenario teardown releases every armed command pause. Fault controls are compiled only with the
 `testing` feature and do not create a product protocol or compatibility surface.
@@ -84,16 +84,18 @@ just test-scenarios --input tests/features/runtime/client_wire_failures.feature 
 just test-scenarios --input tests/features/runtime/client_wire_failures.feature --tags @client_wire_subscription_restore --concurrency 1
 ```
 
-The ignored dispatch/accounting probes run independently:
+The ignored dispatch probe runs independently:
 
 ```console
 cargo test -p nervix-client-core --lib tests::saturated_event_consumer_cannot_block_a_command_reply -- --ignored --exact
-cargo test --features testing --lib application::subscription::tests::deleting_two_same_relay_subscriptions_clears_interest -- --ignored --exact
 ```
 
 The session transport cutover in [09](https://app.clickup.com/t/86bc1ahv3) correlates every reply
 with the request identity it names, on both transports, so the CW-F06 and CW-F10 probes pass and
-run with the ordinary suite.
+run with the ordinary suite. The subscription lifecycle in [10](https://app.clickup.com/t/86bapbpt3)
+gives every subscription one interest lease that it releases exactly once, so the CW-F08 probe
+passes and runs with the ordinary suite, beside the public lifecycle scenarios in
+`tests/features/runtime/session_subscription_lifecycle.feature`.
 
 ## Performance baseline
 

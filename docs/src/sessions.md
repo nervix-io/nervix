@@ -13,7 +13,8 @@ DESCRIBE RELAY notifications WHERE (tenant = 'acme');
 
 Current session behavior:
 
-- subscription creation validates that the referenced relay exists in the active runtime
+- subscription creation validates the statement against the relay as the cluster schedule declares
+  it, and attaches only while this node executes the relay with that declaration
 - subscription names are unique within one connected session and may refer to relays in different domains
 - `DELETE SUBSCRIPTION` resolves only the session-local subscription name, independent of the currently active domain
 - subscribing to a relay collects records from all active branch groups for that relay
@@ -30,7 +31,9 @@ Current session behavior:
 - each admitted subscription batch receives one snapshot from its relay's bound domain clock;
   every predicate expression and volatile UDF call for that batch sees the same instant
 - optional `BATCH SAMPLE RATE <rate>` samples arrivals after `WHERE` has been evaluated
-- `BLOCKING` delivery waits for the connected session transport queue, while `DROPPING` discards delivered events when that queue is full
+- `BLOCKING` delivery waits for room in the session's subscription queue, which holds back the
+  relay it reads, while `DROPPING` discards rows when that queue is full and reports how many it
+  discarded before its next rows
 - subscription events are delivered asynchronously to the connected client session
 - the relay owner is the sole subscription fan-out source, so each admitted batch is delivered at
   most once to a subscription even when producers and consumers run on several cluster nodes
@@ -40,6 +43,46 @@ Current session behavior:
 - cluster membership updates are also delivered asynchronously
 
 Sessions are runtime-facing protocol interactions, not part of the persisted namespace model.
+
+## Subscription Lifecycle
+
+A subscription is identified by its name together with the generation its session assigns when it
+opens it. Every frame about a subscription carries both, and a name reused after deletion opens a
+new generation, so a frame about an earlier generation is never taken for a later one. A
+subscription belongs to the session that created it and moves through one lifecycle:
+
+- **Creating.** The server validates the statement, makes the node's interest in the relay visible
+  to every live node, and attaches to the relay. A refusal at any step leaves nothing behind: no
+  interest, no attachment, and the name remains free.
+- **Active.** The reply that opens the subscription carries the schema of its rows, and no row
+  precedes it. When that reply cannot be delivered, because the request was cancelled, the session
+  ended, or the reply did not fit the session limits, the subscription is abandoned before it
+  delivers anything.
+- **Ended by the server.** When its relay is redefined, so that a field, a type, nullability,
+  sensitivity, or the branching changes, the subscription receives `SubscriptionEnded` with reason
+  `RelayChanged`. When its relay or the relay's domain is removed, the reason is `RelayRemoved`.
+  Either is the last frame about that generation, and no row of a redefined relay reaches a
+  subscription announced under its earlier definition. Stopping and starting a domain, and
+  rebuilds that keep the relay's definition, keep its subscriptions delivering. An ended
+  subscription can still be deleted by name, and its name can be used again at once.
+- **Deleted.** `DELETE SUBSCRIPTION`, or the end of the session, stops the subscription at once
+  even while its client reads nothing, and discards the frames it still has queued. Nothing about
+  that generation follows the reply that deleted it.
+
+Replies and session events travel ahead of the subscription rows a session has queued, so rows
+waiting for a slow client never hold back a command reply or the reply to the unsubscribe that stops
+them. Frames already handed to the transport stay in order: a reply follows the rows the transport
+took before it. A node advertises
+interest in a relay while at least one of its subscriptions holds it; see
+[Cluster Interconnect](interconnect.md) and the `nervix_session_subscriptions` and
+`nervix_session_subscription_dropped_rows_total` series in
+[Metrics and Observability](metrics-and-observability.md).
+
+Subscriptions are live views. They do not replay rows, keep durable offsets, or deliver exactly
+once. A session is told of the rows it lost where the server knows of them: a `DROPPING`
+subscription reports the rows it discarded, and rows a filter could not evaluate or the encoder
+could not write are reported as skipped. Rows in transit can also be lost without a report while
+relay ownership moves between nodes or a node-to-node delivery fails.
 
 Typed Row subscription frames carry a `BYTES` field as raw octets in a `BytesCell`; clients read
 the value as borrowed bytes, including empty and non-UTF-8 sequences. JSON subscription views

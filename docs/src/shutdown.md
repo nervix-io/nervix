@@ -169,10 +169,13 @@ Stop admission closes the node's public surface. It stops accepting on the sessi
 observability, and console listeners and closes the client connections those listeners had accepted.
 
 Closing a connection cancels the requests it carries. A session first tells its client that the
-server is shutting down, then ends. Every request the session had not yet admitted is cancelled
-before admission and never begins an effect, so the client can send it again, with the same
-execution reference, to another node. A session stream or a resource upload waiting on its client
-ends at once, so no client can hold the drain or the process open. An authenticated upload held open
+server is shutting down, then ends. The ending follows the replies already queued for the client
+and is the last frame of the session, but the session does not wait for the client to read it:
+a session whose client reads nothing ends just as promptly, and its subscriptions stop and release
+the relays they held. Every request the session had not yet admitted is cancelled before admission
+and never begins an effect, so the client can send it again, with the same execution reference, to
+another node. A session stream or a resource upload waiting on its client ends at once, so no
+client can hold the drain or the process open. An authenticated upload held open
 at any point of its progress — before its first message, between chunks, or trickling chunks
 indefinitely — is cancelled this way and does not delay the exit.
 

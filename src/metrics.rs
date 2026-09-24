@@ -65,6 +65,8 @@ const INGESTOR_QUIESCE_BUFFERED_RECORDS: &str = "ingestor_quiesce_buffered_recor
 const INGESTOR_QUIESCE_BUFFERED_BYTES: &str = "ingestor_quiesce_buffered_bytes";
 const INGESTOR_QUIESCE_DROPPED_TOTAL: &str = "ingestor_quiesce_dropped_total";
 const INGESTOR_QUIESCE_REJECTED_TOTAL: &str = "ingestor_quiesce_rejected_total";
+const SESSION_SUBSCRIPTIONS: &str = "session_subscriptions";
+const SESSION_SUBSCRIPTION_DROPPED_ROWS_TOTAL: &str = "session_subscription_dropped_rows_total";
 const JEMALLOC_SUBSYSTEM: &str = "jemalloc";
 const DOMAIN_TARGET_KIND: &str = "DOMAIN";
 const DOMAIN_INPUT_OUTPUT_TARGET: &str = "input_output";
@@ -99,6 +101,7 @@ const BRANCH_PROMETHEUS_LABELS: &[&str] = &["domain", "branch", "physical_node_i
 const BRANCH_EVICTION_PROMETHEUS_LABELS: &[&str] =
     &["domain", "branch", "physical_node_id", "reason"];
 const INGESTOR_QUIESCE_PROMETHEUS_LABELS: &[&str] = &["domain", "ingestor", "physical_node_id"];
+const SESSION_SUBSCRIPTION_PROMETHEUS_LABELS: &[&str] = &["domain", "relay"];
 const NO_DOMAIN_TIMESTAMP: i64 = i64::MIN;
 const NO_HISTOGRAM_CAPACITY: u64 = u64::MAX;
 const NO_WALL_ELAPSED_NANOS: u64 = u64::MAX;
@@ -1348,6 +1351,8 @@ struct PrometheusMetrics {
     ingestor_quiesce_buffered_bytes: IntGaugeVec,
     ingestor_quiesce_dropped_total: IntCounterVec,
     ingestor_quiesce_rejected_total: IntCounterVec,
+    session_subscriptions: IntGaugeVec,
+    session_subscription_dropped_rows_total: IntCounterVec,
 }
 
 #[derive(Debug, Clone)]
@@ -1613,6 +1618,44 @@ impl PrometheusMetrics {
                 "this registry is built here and each metric is registered once under a distinct \
                  name",
             );
+        let session_subscriptions = IntGaugeVec::new(
+            Opts::new(
+                SESSION_SUBSCRIPTIONS,
+                "Open session subscriptions this node delivers from the relay. The node \
+                 advertises interest in the relay to the cluster exactly while this is above zero.",
+            )
+            .namespace("nervix"),
+            SESSION_SUBSCRIPTION_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        registry
+            .register(Box::new(session_subscriptions.clone()))
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
+        let session_subscription_dropped_rows_total = IntCounterVec::new(
+            Opts::new(
+                SESSION_SUBSCRIPTION_DROPPED_ROWS_TOTAL,
+                "Rows dropping session subscriptions on this node discarded because their session \
+                 could not take them in time.",
+            )
+            .namespace("nervix"),
+            SESSION_SUBSCRIPTION_PROMETHEUS_LABELS,
+        )
+        .assured(
+            "the metric name, help text and label names are constants that satisfy Prometheus \
+             naming rules",
+        );
+        registry
+            .register(Box::new(session_subscription_dropped_rows_total.clone()))
+            .assured(
+                "this registry is built here and each metric is registered once under a distinct \
+                 name",
+            );
         registry
             .register(Box::new(JemallocMetricsCollector::new()))
             .assured(
@@ -1644,6 +1687,8 @@ impl PrometheusMetrics {
             ingestor_quiesce_buffered_bytes,
             ingestor_quiesce_dropped_total,
             ingestor_quiesce_rejected_total,
+            session_subscriptions,
+            session_subscription_dropped_rows_total,
         }
     }
 
@@ -2479,6 +2524,39 @@ impl RuntimeMetrics {
             .ingestor_quiesce_rejected_total
             .with_label_values(&values);
         labels
+    }
+
+    /// Records how many open session subscriptions this node delivers from `relay`. A relay the
+    /// node once delivered from keeps its series at zero after its last subscription closes, so
+    /// the withdrawal of the node's interest is itself observable.
+    pub(crate) fn set_session_subscriptions(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        subscriptions: usize,
+    ) {
+        self.series
+            .prometheus
+            .session_subscriptions
+            .with_label_values(&[domain.as_str(), relay.as_str()])
+            .set(
+                i64::try_from(subscriptions)
+                    .assured("every open subscription occupies memory, so the count fits in i64"),
+            );
+    }
+
+    /// Records rows a dropping session subscription to `relay` discarded.
+    pub(crate) fn increment_session_subscription_dropped_rows(
+        &self,
+        domain: &DomainName,
+        relay: &RelayName,
+        rows: u64,
+    ) {
+        self.series
+            .prometheus
+            .session_subscription_dropped_rows_total
+            .with_label_values(&[domain.as_str(), relay.as_str()])
+            .inc_by(rows);
     }
 
     pub(crate) fn set_ingestor_quiesce_buffered(

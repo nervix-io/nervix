@@ -3,16 +3,42 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** Subscription creation and deletion, the per-session subscription set and the
-//!   generation each subscription is opened with, cluster-wide subscription interest, and the
-//!   filtering, sampling and Row delivery each subscription asks for.
-//! - **Depends on.** The registry for schemas and schedules, the runtime for relay receivers, the
-//!   interconnect to make interest visible on every node, and the Row encoder that writes selected
-//!   Arrow rows into client frames.
+//!   generation each subscription is opened with, the lifecycle every subscription moves through,
+//!   and the filtering and sampling each subscription asks for.
+//! - **Depends on.** The schedule for the relay definition a subscription describes, the runtime
+//!   for relay receivers, the interconnect to make interest visible on every node, the Row encoder
+//!   that writes selected Arrow rows into client frames, and the session's subscription lane.
 //! - **Must not know.** Construction, inheritance, values or any other side effect a processor has.
+//!
+//! The session's ordered requests are the only owner of its subscriptions, and every subscription
+//! generation moves through one lifecycle:
+//!
+//! - **Creating.** A subscribe request validates the statement against the relay's scheduled
+//!   definition, takes this node's interest lease on the relay and waits until every live node
+//!   sees it, and attaches a receiver under that definition. A refusal at any step releases what
+//!   was taken, the request fails, and nothing of the generation remains.
+//! - **Active.** The generation joins its session once the reply that announces its schema is
+//!   queued, and only then do its rows flow. When that reply is not queued, because the request
+//!   was cancelled, the session ended or the reply could not be encoded, the generation is
+//!   abandoned unannounced, so a client never receives rows it cannot decode.
+//! - **Ended by the server.** When its relay is redefined or removed, the generation releases its
+//!   receiver and lease and sends a `SubscriptionEnded` naming why as its last frame. Its name
+//!   stays with the session until the client deletes it, reuses the name, or ends the session.
+//! - **Withdrawn by the client.** Deleting a generation, or ending its session, withdraws it: the
+//!   frames it still has queued are discarded, every wait it is in ends at once even while the
+//!   client reads nothing, and it releases its receiver and lease before the reply that deleted it
+//!   is queued.
+//!
+//! A name reused after deletion opens a new generation, so frames about an earlier generation can
+//! never be taken for a later one.
+
+mod delivery;
+mod interest;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use ahash::{HashMap, HashMapExt};
@@ -20,11 +46,7 @@ use blake3::Hasher;
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
-use nervix_client_wire::{
-    EncodedFrame, RowsSkippedCause, ServerFrame, SessionLimits, SubscriptionDeliveryLost,
-    SubscriptionEndReason, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
-    SubscriptionRowsSkipped,
-};
+use nervix_client_wire::{RowsSkippedCause, SessionLimits, SubscriptionHandle, SubscriptionOpened};
 use nervix_consensus::{
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionTarget, ReplicatedTransaction,
@@ -32,20 +54,18 @@ use nervix_consensus::{
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
-    DomainName, FieldName, ModelKind, ParseAsType, RelayName, ScheduledModel, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SubscriptionName,
-    TransactionPreviewIdentity, UserName,
+    DomainName, FieldName, ParseAsType, RelayName, ScheduledModel, SubscriptionBinding,
+    SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
+use nervix_recovery::Discarded as _;
 use nonzero_ext::nonzero;
 use sorted_vec::SortedSet;
-use tokio::{
-    sync::{mpsc, oneshot, watch},
-    task::JoinHandle,
-};
-use tracing::debug;
+use tokio::{sync::oneshot, task::JoinHandle};
 use triomphe::Arc;
 
+use self::delivery::SubscriptionDelivery;
+pub(in crate::application) use self::interest::SubscriptionInterests;
 #[cfg(test)]
 use super::authentication::DEFAULT_USER;
 use super::{
@@ -54,20 +74,18 @@ use super::{
         append_command_result, command_batch_result, command_error, command_ok,
         command_results_message,
     },
+    session::outbound::{SessionOutbound, SubscriptionWithdrawal},
     session_service::SessionServiceImpl,
     transaction::{InspectingSession, transaction_status},
 };
 use crate::{
     runtime::{
-        BranchKey, CompiledSubscriptionPredicate, RelayRecordBatch, RelaySubscriptionReceiver,
-        Runtime, SubscriptionPredicateCompileContext, compile_subscription_predicate,
+        BranchKey, CompiledSubscriptionPredicate, RelayRecordBatch, RelaySubscriptionDefinition,
+        Runtime, RuntimeError, SubscriptionPredicateCompileContext, compile_subscription_predicate,
         execute_subscription_predicate_on_record, scheduled_relay_owner_nodes,
     },
     runtime_schema,
-    subscription_row::{
-        SubscriptionBranchSchema, SubscriptionRowEncoder, SubscriptionRowFrame,
-        SubscriptionRowOpening, SubscriptionRowSelection, subscription_row_schema,
-    },
+    subscription_row::{SubscriptionBranchSchema, SubscriptionRowOpening, subscription_row_schema},
     task_shutdown::JoinShutdown,
 };
 
@@ -77,23 +95,43 @@ static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// limit, so this bounds the rows a client decodes per frame rather than the frame's size.
 const SUBSCRIPTION_ROWS_PER_FRAME: NonZeroUsize = nonzero!(256_usize);
 
-/// The frames a session sends its client, in the order they are queued.
-pub(in crate::application) type SessionOutbound = mpsc::Sender<EncodedFrame<ServerFrame>>;
-
-/// Where a session's subscriptions deliver their frames, and the limits those frames are held to.
+/// Where a session's subscriptions queue their frames, and the limits those frames are held to.
 #[derive(Clone)]
 pub(in crate::application) struct SessionDelivery {
     pub(in crate::application) outbound: SessionOutbound,
     pub(in crate::application) limits: SessionLimits,
 }
 
+/// One subscription generation its session announced, until it is withdrawn.
 struct SessionSubscription {
     handle: SubscriptionHandle,
     domain: DomainName,
-    relay: RelayName,
-    active: Arc<AtomicBool>,
-    stop_tx: watch::Sender<bool>,
-    task: JoinHandle<()>,
+    /// Discards the frames the generation still has queued and ends every wait of its delivery.
+    withdrawal: SubscriptionWithdrawal,
+    /// Finishes once delivery has stopped and released the relay receiver and the interest lease:
+    /// when the generation is withdrawn, or when the server ended it.
+    delivery: JoinHandle<()>,
+}
+
+impl SessionSubscription {
+    /// Whether the generation still delivers. One the server ended keeps its name until the
+    /// client deletes it, reuses the name, or ends the session.
+    fn is_delivering(&self) -> bool {
+        !self.delivery.is_finished()
+    }
+
+    /// Withdraws the generation and waits until its delivery has released everything it held.
+    /// Nothing the generation queued reaches the client afterwards.
+    async fn withdraw(self) -> RemovedSubscription {
+        self.withdrawal.withdraw();
+        self.delivery
+            .join_after_shutdown("session subscription")
+            .await;
+        RemovedSubscription {
+            handle: self.handle,
+            domain: self.domain,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -185,32 +223,37 @@ pub(in crate::application) enum SessionCommandOperation {
     Execute(PendingSessionCommand),
 }
 
-/// A subscription the session opened. Its rows wait for the reply that announces it.
+/// A subscription generation that is attached and holds its interest lease, and delivers nothing
+/// until the reply that announces it is queued.
+pub(in crate::application) struct PendingSubscription {
+    subscription: SessionSubscription,
+    announce: oneshot::Sender<()>,
+}
+
+impl PendingSubscription {
+    /// Abandons the generation unannounced. Its delivery stops at once and releases what it held.
+    pub(in crate::application) async fn abandon(self) {
+        let Self {
+            subscription,
+            announce,
+        } = self;
+        drop(announce);
+        subscription.withdraw().await;
+    }
+}
+
+/// A subscription the session opened, and the reply that announces it.
 pub(in crate::application) struct OpenedSubscription {
     pub(in crate::application) opened: SubscriptionOpened,
     pub(in crate::application) message: String,
-    /// Fired once the reply carrying `opened` is queued. The subscription's rows follow that
-    /// reply and never precede it; dropping this without firing ends the subscription unused.
-    pub(in crate::application) release: oneshot::Sender<()>,
+    /// Joins the session once the reply carrying `opened` is queued, and is abandoned otherwise.
+    pub(in crate::application) pending: PendingSubscription,
 }
 
 /// A subscription the session deleted.
 pub(in crate::application) struct DeletedSubscription {
     pub(in crate::application) handle: SubscriptionHandle,
     pub(in crate::application) message: String,
-}
-
-/// Everything the delivery task of one subscription needs.
-struct SessionSubscriptionTaskConfig {
-    handle: SubscriptionHandle,
-    predicate: Option<CompiledSubscriptionPredicate>,
-    delivery_behavior: SubscriptionDeliveryBehavior,
-    batch_sample_rate: Option<f64>,
-    runtime: Runtime,
-    receiver: RelaySubscriptionReceiver<RelayRecordBatch>,
-    encoder: SubscriptionRowEncoder,
-    delivery: SessionDelivery,
-    opened: oneshot::Receiver<()>,
 }
 
 impl SessionSubscriptions {
@@ -388,84 +431,60 @@ impl SessionSubscriptions {
         SubscriptionHandle { name, generation }
     }
 
-    fn insert(
-        &mut self,
-        domain: DomainName,
-        relay: RelayName,
-        config: SessionSubscriptionTaskConfig,
-    ) {
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let active = Arc::new(AtomicBool::new(true));
-        let task_active = active.clone();
-        let handle = config.handle.clone();
-        let task_domain = domain.clone();
-        let task_relay = relay.clone();
-        let task = tokio::spawn(async move {
-            run_subscription_delivery(config, task_domain, task_relay, stop_rx).await;
-            task_active.store(false, Ordering::Release);
-        });
-
-        self.subscriptions.insert(
-            handle.name.clone(),
-            SessionSubscription {
-                handle,
-                domain,
-                relay,
-                active,
-                stop_tx,
-                task,
-            },
-        );
-    }
-
-    fn contains_domain_stream(&self, domain: &DomainName, relay: &RelayName) -> bool {
-        self.subscriptions.values().any(|subscription| {
-            subscription.active.load(Ordering::Acquire)
-                && subscription.domain == *domain
-                && subscription.relay == *relay
-        })
-    }
-
+    /// Whether a subscription named `name` still delivers.
     fn contains_name(&self, name: &SubscriptionName) -> bool {
         self.subscriptions
             .get(name)
-            .is_some_and(|subscription| subscription.active.load(Ordering::Acquire))
+            .is_some_and(SessionSubscription::is_delivering)
     }
 
-    /// Stops and joins the subscription named `name`, returning what identified it.
+    /// Admits a generation whose announcing reply is queued, and releases its rows.
+    ///
+    /// A generation the server ended under the same name leaves the session here. It already
+    /// released everything it held, and the notice that ended it stays queued, so a client that
+    /// reuses a name still learns how the earlier generation ended.
+    pub(in crate::application) async fn activate(&mut self, pending: PendingSubscription) {
+        let PendingSubscription {
+            subscription,
+            announce,
+        } = pending;
+        if let Some(ended) = self.subscriptions.remove(&subscription.handle.name) {
+            ended
+                .delivery
+                .join_after_shutdown("ended session subscription")
+                .await;
+        }
+        announce
+            .send(())
+            .discarded("a delivery that already stopped has no rows to release");
+        self.subscriptions
+            .insert(subscription.handle.name.clone(), subscription);
+    }
+
+    /// Withdraws the subscription named `name`, returning what identified it.
     async fn remove(&mut self, name: &SubscriptionName) -> Option<RemovedSubscription> {
         let subscription = self.subscriptions.remove(name)?;
-        subscription.stop_tx.send_replace(true);
-        subscription
-            .task
-            .join_after_shutdown("session subscription")
-            .await;
-        Some(RemovedSubscription {
-            handle: subscription.handle,
-            domain: subscription.domain,
-            relay: subscription.relay,
-        })
+        Some(subscription.withdraw().await)
     }
 
-    pub(in crate::application) async fn stop_all(&mut self, service: &SessionServiceImpl) {
-        for (_, subscription) in self.subscriptions.drain() {
-            subscription.stop_tx.send_replace(true);
-            subscription
-                .task
-                .join_after_shutdown("session subscription")
-                .await;
-            service
-                .unregister_subscription_interest(&subscription.domain, &subscription.relay)
-                .await;
+    /// Withdraws every subscription of the session, and waits until each has released what it
+    /// held. All of them stop together rather than one after another.
+    pub(in crate::application) async fn stop_all(&mut self) {
+        let subscriptions = std::mem::take(&mut self.subscriptions);
+        for subscription in subscriptions.values() {
+            subscription.withdrawal.withdraw();
+        }
+        for (_, subscription) in subscriptions {
+            tokio::task::consume_budget().await;
+            subscription.withdraw().await;
         }
     }
 }
 
-/// A subscription taken out of its session, and the relay it read.
+/// A subscription taken out of its session.
 struct RemovedSubscription {
     handle: SubscriptionHandle,
     domain: DomainName,
-    relay: RelayName,
 }
 
 /// Rows of one relay batch a subscription passed over, and why.
@@ -479,223 +498,6 @@ struct SkippedRows {
 struct SubscriptionSelection {
     rows: Vec<usize>,
     skipped: Option<SkippedRows>,
-}
-
-/// Queues one subscription's frames on its session.
-struct SubscriptionSender {
-    handle: SubscriptionHandle,
-    delivery: SessionDelivery,
-    behavior: SubscriptionDeliveryBehavior,
-    /// Rows a dropping subscription discarded that its client has not been told about yet.
-    dropped_rows: u64,
-}
-
-impl SubscriptionSender {
-    /// Queues a notice about the subscription, waiting for room. `false` means the session is
-    /// gone.
-    async fn send_notice(
-        &self,
-        frame: Result<
-            EncodedFrame<ServerFrame>,
-            error_stack::Report<nervix_client_wire::WireEncodeError>,
-        >,
-    ) -> bool {
-        let frame = match frame {
-            Ok(frame) => frame,
-            Err(error) => {
-                debug!(
-                    subscription = %self.handle.name,
-                    error = %error,
-                    "a subscription notice does not fit a session frame"
-                );
-                return true;
-            }
-        };
-        self.delivery.outbound.send(frame).await.is_ok()
-    }
-
-    async fn report_skipped(&self, skipped: SkippedRows) -> bool {
-        let frame = SubscriptionRowsSkipped {
-            subscription: self.handle.clone(),
-            cause: skipped.cause,
-            skipped_rows: skipped.rows,
-            message: skipped.message,
-        }
-        .encode(&self.delivery.limits);
-        self.send_notice(frame).await
-    }
-
-    async fn report_end(&self, message: String) -> bool {
-        let frame = SubscriptionEnded {
-            subscription: self.handle.clone(),
-            reason: SubscriptionEndReason::RelayClosed,
-            message,
-        }
-        .encode(&self.delivery.limits);
-        self.send_notice(frame).await
-    }
-
-    /// Queues one frame of rows. A blocking subscription waits for room; a dropping one discards
-    /// the frame when the session is full and reports the loss before the next rows it delivers.
-    /// `false` means the session is gone.
-    async fn send_rows(&mut self, frame: SubscriptionRowFrame) -> bool {
-        let SubscriptionRowFrame { frame, rows } = frame;
-        let rows = u64::try_from(rows.get())
-            .assured("supported targets have a pointer width no larger than u64");
-        match self.behavior {
-            SubscriptionDeliveryBehavior::Blocking => {
-                self.delivery.outbound.send(frame).await.is_ok()
-            }
-            SubscriptionDeliveryBehavior::Dropping => {
-                if let Some(dropped_rows) = NonZeroU64::new(self.dropped_rows) {
-                    let lost = SubscriptionDeliveryLost {
-                        subscription: self.handle.clone(),
-                        dropped_rows,
-                    }
-                    .encode(&self.delivery.limits);
-                    match lost {
-                        Ok(lost) => match self.delivery.outbound.try_send(lost) {
-                            Ok(()) => self.dropped_rows = 0,
-                            // The loss is still unreported, so these rows cannot go ahead of it.
-                            Err(mpsc::error::TrySendError::Full(_)) => {
-                                self.count_dropped(rows);
-                                return true;
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => return false,
-                        },
-                        Err(error) => {
-                            debug!(
-                                subscription = %self.handle.name,
-                                error = %error,
-                                "a subscription loss report does not fit a session frame"
-                            );
-                            self.dropped_rows = 0;
-                        }
-                    }
-                }
-                match self.delivery.outbound.try_send(frame) {
-                    Ok(()) => true,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        self.count_dropped(rows);
-                        true
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => false,
-                }
-            }
-        }
-    }
-
-    fn count_dropped(&mut self, rows: u64) {
-        self.dropped_rows = self.dropped_rows.checked_add(rows).assured(
-            "the count restarts at every report, and no session drops 2^64 rows between two: at a \
-             billion rows a second that takes centuries",
-        );
-    }
-}
-
-/// Delivers one subscription's rows until it is stopped, its relay closes or its session goes
-/// away.
-async fn run_subscription_delivery(
-    config: SessionSubscriptionTaskConfig,
-    domain: DomainName,
-    relay: RelayName,
-    mut stop_rx: watch::Receiver<bool>,
-) {
-    let SessionSubscriptionTaskConfig {
-        handle,
-        predicate,
-        delivery_behavior,
-        batch_sample_rate,
-        runtime,
-        mut receiver,
-        encoder,
-        delivery,
-        opened,
-    } = config;
-    // Rows follow the reply that opened the subscription and never precede it. A session that
-    // never queued that reply never announced the subscription, so it delivers nothing.
-    if opened.await.is_err() {
-        return;
-    }
-    let mut sender = SubscriptionSender {
-        handle,
-        delivery,
-        behavior: delivery_behavior,
-        dropped_rows: 0,
-    };
-    loop {
-        tokio::task::consume_budget().await;
-        tokio::select! {
-            batch = receiver.recv() => {
-                let Some(batch) = batch else {
-                    let message = format!(
-                        "session subscription '{}' was dropped because relay '{}' in domain '{}' \
-                         was rebuilt after a schema or execution change; recreate the \
-                         subscription against the current schema",
-                        sender.handle.name, relay, domain,
-                    );
-                    sender.report_end(message).await;
-                    return;
-                };
-                let selection = select_subscription_rows(
-                    &batch,
-                    predicate.as_ref(),
-                    batch_sample_rate,
-                    &runtime,
-                    &domain,
-                )
-                .await;
-                if let Some(skipped) = selection.skipped
-                    && !sender.report_skipped(skipped).await
-                {
-                    return;
-                }
-                if selection.rows.is_empty() {
-                    continue;
-                }
-                let frames = encoder.encode(
-                    batch.record_batch(),
-                    batch.branch_keys(),
-                    SubscriptionRowSelection::Rows(&selection.rows),
-                );
-                let frames = match frames {
-                    Ok(frames) => frames,
-                    Err(error) => {
-                        let rows = NonZeroU64::new(
-                            u64::try_from(selection.rows.len()).assured(
-                                "supported targets have a pointer width no larger than u64",
-                            ),
-                        )
-                        .verified("the empty selection above already continued");
-                        let skipped = SkippedRows {
-                            cause: RowsSkippedCause::EncodingFailed,
-                            rows,
-                            message: format!(
-                                "session subscription '{}' could not encode rows of relay '{}': \
-                                 {error}",
-                                sender.handle.name, relay,
-                            ),
-                        };
-                        if !sender.report_skipped(skipped).await {
-                            return;
-                        }
-                        continue;
-                    }
-                };
-                for frame in frames {
-                    tokio::task::consume_budget().await;
-                    if !sender.send_rows(frame).await {
-                        return;
-                    }
-                }
-            }
-            changed = stop_rx.changed() => {
-                if changed.is_err() || *stop_rx.borrow() {
-                    return;
-                }
-            }
-        }
-    }
 }
 
 /// Which rows of one relay batch pass a subscription's filter and sampling.
@@ -1005,13 +807,6 @@ pub(in crate::application) fn parse_subscription_literal(
     }
 }
 
-/// One relay whose subscription interest this node advertises to the cluster.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(in crate::application) struct SubscriptionInterestKey {
-    domain: DomainName,
-    relay: RelayName,
-}
-
 /// The relay a subscription attaches to, as the cluster schedule describes it: the relay model,
 /// the schema its records carry, and the branch key fields a subscription may bind.
 pub(in crate::application) struct SubscriptionTarget {
@@ -1021,40 +816,6 @@ pub(in crate::application) struct SubscriptionTarget {
 }
 
 impl SessionServiceImpl {
-    async fn register_subscription_interest(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-    ) -> Result<(), String> {
-        let key = SubscriptionInterestKey {
-            domain: domain.clone(),
-            relay: relay.clone(),
-        };
-        let first_interest = {
-            let mut entry = self
-                .inner
-                .subscription_interest_counts
-                .entry(key)
-                .or_insert(0);
-            *entry += 1;
-            *entry == 1
-        };
-        if first_interest {
-            self.inner
-                .cluster
-                .set_local_subscription_interest(domain.as_str(), relay.as_str(), true)
-                .await;
-        }
-        if let Err(error) = self
-            .wait_for_subscription_interest_visibility(domain, relay)
-            .await
-        {
-            self.unregister_subscription_interest(domain, relay).await;
-            return Err(error);
-        }
-        Ok(())
-    }
-
     async fn wait_for_subscription_interest_visibility(
         &self,
         domain: &DomainName,
@@ -1132,28 +893,6 @@ impl SessionServiceImpl {
             .await
             .map_err(|error| error.to_string())?;
         response.result.map_err(|failure| failure.to_string())
-    }
-
-    async fn unregister_subscription_interest(&self, domain: &DomainName, relay: &RelayName) {
-        let key = SubscriptionInterestKey {
-            domain: domain.clone(),
-            relay: relay.clone(),
-        };
-        let mut should_clear = false;
-        if let Some(mut entry) = self.inner.subscription_interest_counts.get_mut(&key) {
-            if *entry <= 1 {
-                should_clear = true;
-            } else {
-                *entry -= 1;
-            }
-        }
-        if should_clear {
-            self.inner.subscription_interest_counts.remove(&key);
-            self.inner
-                .cluster
-                .set_local_subscription_interest(domain.as_str(), relay.as_str(), false)
-                .await;
-        }
     }
 
     pub(in crate::application) async fn scheduled_stream_owner_nodes(
@@ -1283,42 +1022,9 @@ impl SessionServiceImpl {
         }))
     }
 
-    async fn subscription_stream_schema(
-        &self,
-        domain: &DomainName,
-        relay: &RelayName,
-    ) -> Result<Option<nervix_models::CreateSchema>, String> {
-        match self.inner.registry.get::<CreateRelay>(domain, relay) {
-            Ok(Some(ack_model)) => {
-                match self
-                    .inner
-                    .registry
-                    .get::<CreateSchema>(domain, &ack_model.schema)
-                {
-                    Ok(Some(schema)) => Ok(Some(schema)),
-                    Ok(None) => Err(format!(
-                        "stream '{}' references missing schema '{}'",
-                        relay.as_str(),
-                        ack_model.schema.as_str()
-                    )),
-                    Err(err) => Err(format!(
-                        "failed to resolve schema '{}' for relay '{}': {err}",
-                        ack_model.schema.as_str(),
-                        relay.as_str()
-                    )),
-                }
-            }
-            Ok(None) => self
-                .subscription_target_from_schedule(domain, relay)
-                .await
-                .map(|resolved| resolved.map(|target| target.schema)),
-            Err(err) => Err(format!(
-                "failed to resolve relay '{}' for subscription: {err}",
-                relay.as_str()
-            )),
-        }
-    }
-
+    /// Creates a subscription generation for `subscription`, attached and holding its interest
+    /// lease but delivering nothing until the reply that announces it is queued. A refusal leaves
+    /// nothing behind.
     pub(in crate::application) async fn create_subscription(
         &self,
         domain: &DomainName,
@@ -1348,69 +1054,50 @@ impl SessionServiceImpl {
                 }
             };
 
-        let relay_missing = || {
-            let diagnostic = CommandDiagnostic::unlocated(format!(
-                "stream '{}' not found",
-                subscription.relay.as_str()
-            ));
-            let message = format!(
-                "stream '{}' does not exist in domain '{}'",
-                subscription.relay.as_str(),
-                domain.as_str()
-            );
-            CommandResult {
-                diagnostics: vec![diagnostic],
-                ..CommandResult::new(CommandDisposition::Failed, message)
-            }
-        };
-        match self
-            .inner
-            .registry
-            .contains(domain, ModelKind::Relay, &subscription.relay)
-        {
-            Ok(true) => {}
-            Ok(false) => match self
-                .subscription_target_from_schedule(domain, &subscription.relay)
-                .await
-            {
-                Ok(Some(_)) => {}
-                Ok(None) => return Err(Box::new(relay_missing())),
-                Err(err) => {
-                    return Err(Box::new(command_error(format!(
-                        "failed to resolve relay for subscription: {err}"
-                    ))));
-                }
-            },
-            Err(err) => {
-                return Err(Box::new(command_error(format!(
-                    "failed to resolve relay for subscription: {err}"
-                ))));
-            }
-        }
-
-        let payload_schema = match self
-            .subscription_stream_schema(domain, &subscription.relay)
+        // The subscription describes the relay as the schedule declares it, which is the
+        // definition the runtime executes it with and attaches it under.
+        let target = match self
+            .subscription_target_from_schedule(domain, &subscription.relay)
             .await
         {
-            Ok(Some(schema)) => schema,
-            Ok(None) => return Err(Box::new(relay_missing())),
+            Ok(Some(target)) => target,
+            Ok(None) => {
+                let diagnostic = CommandDiagnostic::unlocated(format!(
+                    "stream '{}' not found",
+                    subscription.relay.as_str()
+                ));
+                let message = format!(
+                    "stream '{}' does not exist in domain '{}'",
+                    subscription.relay.as_str(),
+                    domain.as_str()
+                );
+                return Err(Box::new(CommandResult {
+                    diagnostics: vec![diagnostic],
+                    ..CommandResult::new(CommandDisposition::Failed, message)
+                }));
+            }
             Err(err) => {
                 return Err(Box::new(command_error(format!(
                     "failed to resolve relay for subscription: {err}"
                 ))));
             }
         };
+        let SubscriptionTarget {
+            relay: _,
+            schema: payload_schema,
+            branching,
+        } = target;
+        let compiled_schema = Arc::new(runtime_schema::compile_schema(&payload_schema));
         let predicate = match subscription.where_clause.as_ref() {
             Some(expression) => {
                 let udfs = self.inner.runtime.udf_executor(domain);
-                let compiled = runtime_schema::compile_schema(&payload_schema);
                 let compiled_predicate = compile_subscription_predicate(
                     domain,
                     &subscription.name,
                     expression,
                     SubscriptionPredicateCompileContext::new(
-                        compiled.arrow_schema(),
-                        compiled.vm_sensitivity(),
+                        compiled_schema.arrow_schema(),
+                        compiled_schema.vm_sensitivity(),
                         udfs.as_ref(),
                     ),
                 );
@@ -1427,25 +1114,6 @@ impl SessionServiceImpl {
             None => None,
         };
 
-        let branching = match self
-            .subscription_target_from_schedule(domain, &subscription.relay)
-            .await
-        {
-            Ok(Some(target)) => target.branching,
-            Ok(None) => {
-                return Err(Box::new(command_error(format!(
-                    "stream '{}' has no scheduled branch declaration in domain '{}'",
-                    subscription.relay.as_str(),
-                    domain.as_str(),
-                ))));
-            }
-            Err(error) => {
-                return Err(Box::new(command_error(format!(
-                    "failed to resolve branch declaration for relay '{}': {error}",
-                    subscription.relay.as_str(),
-                ))));
-            }
-        };
         let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
         let branch = match &branching {
             nervix_models::ResolvedBranching::Unbranched => None,
@@ -1491,9 +1159,40 @@ impl SessionServiceImpl {
                 relay.as_str()
             ))));
         }
-        let receiver = match self.inner.runtime.subscribe_stream(domain, &relay).await {
+        let lease = self
+            .inner
+            .subscription_interests
+            .acquire(domain, &relay)
+            .await;
+        if let Err(error) = self
+            .wait_for_subscription_interest_visibility(domain, &relay)
+            .await
+        {
+            lease.release().await;
+            return Err(Box::new(command_error(format!(
+                "failed to register subscription interest for relay '{}' in domain '{}': {error}",
+                relay.as_str(),
+                domain.as_str(),
+            ))));
+        }
+        let definition = RelaySubscriptionDefinition::new(compiled_schema, branching);
+        let attached = self
+            .inner
+            .runtime
+            .subscribe_stream(domain, &relay, &definition)
+            .await;
+        let receiver = match attached {
             Ok(receiver) => receiver,
+            Err(RuntimeError::RelayRedefined { .. }) => {
+                lease.release().await;
+                return Err(Box::new(command_error(format!(
+                    "failed to subscribe to relay '{}': it was redefined while the subscription \
+                     was being created; subscribe again",
+                    relay.as_str()
+                ))));
+            }
             Err(err) => {
+                lease.release().await;
                 return Err(Box::new(command_error(format!(
                     "failed to subscribe to relay '{}': {err}",
                     relay.as_str()
@@ -1501,30 +1200,25 @@ impl SessionServiceImpl {
             }
         };
 
-        if let Err(error) = self.register_subscription_interest(domain, &relay).await {
-            return Err(Box::new(command_error(format!(
-                "failed to register subscription interest for relay '{}' in domain '{}': {error}",
-                relay.as_str(),
-                domain.as_str(),
-            ))));
-        }
         let (opened, encoder) = opening.open(domain.clone(), relay.clone());
-        let (release, released) = oneshot::channel();
-        subscriptions.insert(
-            domain.clone(),
-            relay,
-            SessionSubscriptionTaskConfig {
-                handle,
-                predicate,
-                delivery_behavior: subscription.delivery_behavior,
-                batch_sample_rate,
-                runtime: self.inner.runtime.clone(),
-                receiver,
-                encoder,
-                delivery: delivery.clone(),
-                opened: released,
-            },
-        );
+        let lane = delivery.outbound.subscription_lane();
+        let withdrawal = lane.withdrawal();
+        let (announce, announced) = oneshot::channel();
+        let generation = SubscriptionDelivery {
+            handle: handle.clone(),
+            domain: domain.clone(),
+            relay: relay.clone(),
+            predicate,
+            behavior: subscription.delivery_behavior,
+            batch_sample_rate,
+            receiver,
+            encoder,
+            lane,
+            limits: delivery.limits,
+            lease,
+            service: self.clone(),
+        };
+        let delivery_task = tokio::spawn(generation.run(announced));
 
         Ok(OpenedSubscription {
             opened,
@@ -1533,10 +1227,20 @@ impl SessionServiceImpl {
                 subscription.name,
                 domain.as_str()
             ),
-            release,
+            pending: PendingSubscription {
+                subscription: SessionSubscription {
+                    handle,
+                    domain: domain.clone(),
+                    withdrawal,
+                    delivery: delivery_task,
+                },
+                announce,
+            },
         })
     }
 
+    /// Withdraws the subscription the statement names. Its delivery has stopped and released the
+    /// relay receiver and the interest lease before this returns.
     pub(in crate::application) async fn delete_subscription(
         &self,
         subscription: nervix_models::DeleteSubscription,
@@ -1556,10 +1260,6 @@ impl SessionServiceImpl {
                 ..CommandResult::new(CommandDisposition::Failed, message)
             }));
         };
-        if !subscriptions.contains_domain_stream(&removed.domain, &removed.relay) {
-            self.unregister_subscription_interest(&removed.domain, &removed.relay)
-                .await;
-        }
         Ok(DeletedSubscription {
             message: format!(
                 "deleted subscription '{}' from domain '{}'",
@@ -1774,91 +1474,130 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
-    use arrow_array::{RecordBatch, UInt32Array};
-    use arrow_schema::{DataType, Field, Schema};
     use nervix_client_wire::{
         RowSchema, ServerEvent, ServerMessage, SubscriptionEndReason, VerifiedFrame,
     };
-    use nervix_models::{DomainName, SchemaField, SubscriptionDeliveryBehavior};
-    use nervix_recovery::Discarded as _;
-    use tokio::{sync::mpsc, time::Duration};
+    use nervix_models::{SchemaField, SubscriptionDeliveryBehavior};
+    use tokio::time::{Duration, timeout};
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        super::test_fixtures::{TestService, build_test_service, named, string_branch_key},
+        super::{
+            session::outbound::{self, SESSION_SUBSCRIPTION_CAPACITY, SessionFrames},
+            test_fixtures::{TestService, build_test_service, named, string_branch_key},
+        },
         *,
     };
-    use crate::runtime::Runtime;
+    use crate::{
+        runtime::{RelayBroadcast, RelaySubscriptionReceiver},
+        runtime_schema::{CompiledSchema, RuntimeValue, test_runtime_row},
+        subscription_row::SubscriptionRowOpening,
+    };
 
-    /// The delivery task configuration of a subscription whose rows hold one `user_id` field, with
-    /// its opening reply already queued.
-    fn task_config(
+    /// Generously longer than any step here takes, so only a hang reaches it.
+    const WAIT: Duration = Duration::from_secs(30);
+
+    fn default_domain() -> DomainName {
+        named("default")
+    }
+
+    fn user_id_fields() -> Vec<SchemaField> {
+        vec![SchemaField {
+            name: named("user_id"),
+            ty: ParseAsType::U32,
+            optional: false,
+            sensitive: false,
+        }]
+    }
+
+    fn user_id_schema() -> Arc<CompiledSchema> {
+        Arc::new(runtime_schema::compile_schema(&CreateSchema {
+            name: named("event"),
+            fields: user_id_fields(),
+        }))
+    }
+
+    fn user_id_batch(schema: &Arc<CompiledSchema>, user_id: u32) -> RelayRecordBatch {
+        RelayRecordBatch::unbranched_for_test(
+            schema.clone(),
+            test_runtime_row([("user_id".to_string(), RuntimeValue::U32(user_id))]),
+        )
+    }
+
+    /// Session lanes whose transport the test reads, or leaves unread to hold them full.
+    fn session_delivery() -> (SessionDelivery, SessionFrames) {
+        let (outbound, frames) = outbound::channel(CancellationToken::new());
+        let delivery = SessionDelivery {
+            outbound,
+            limits: SessionLimits::DEFAULT,
+        };
+        (delivery, frames)
+    }
+
+    /// A generation of `name` reading `relay` in the default domain as creation leaves it:
+    /// attached to `receiver`, holding its interest lease, and delivering nothing until announced.
+    async fn pending_subscription(
+        service: &SessionServiceImpl,
         subscriptions: &mut SessionSubscriptions,
+        delivery: &SessionDelivery,
         name: &str,
+        relay: &str,
         receiver: RelaySubscriptionReceiver<RelayRecordBatch>,
-        outbound: SessionOutbound,
-    ) -> SessionSubscriptionTaskConfig {
+    ) -> PendingSubscription {
+        let domain = default_domain();
+        let relay = named::<RelayName>(relay);
         let handle = subscriptions.next_handle(named(name));
         let schema = RowSchema {
-            fields: vec![SchemaField {
-                name: named("user_id"),
-                ty: ParseAsType::U32,
-                optional: false,
-                sensitive: false,
-            }],
+            fields: user_id_fields(),
             branch: None,
         };
         let (_, encoder) = SubscriptionRowOpening::new(
             handle.clone(),
             schema,
-            SessionLimits::DEFAULT,
+            delivery.limits,
             SUBSCRIPTION_ROWS_PER_FRAME,
         )
         .assured("the test row limit fits the default collection limit")
-        .open(named("default"), named("events"));
-        let (release, opened) = oneshot::channel();
-        release
-            .send(())
-            .discarded("the configuration keeps the receiver until its task starts");
-        SessionSubscriptionTaskConfig {
-            handle,
+        .open(domain.clone(), relay.clone());
+        let lease = service
+            .inner
+            .subscription_interests
+            .acquire(&domain, &relay)
+            .await;
+        let lane = delivery.outbound.subscription_lane();
+        let withdrawal = lane.withdrawal();
+        let (announce, announced) = oneshot::channel();
+        let generation = SubscriptionDelivery {
+            handle: handle.clone(),
+            domain: domain.clone(),
+            relay: relay.clone(),
             predicate: None,
-            delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
+            behavior: SubscriptionDeliveryBehavior::Blocking,
             batch_sample_rate: None,
-            runtime: Runtime::default(),
             receiver,
             encoder,
-            delivery: SessionDelivery {
-                outbound,
-                limits: SessionLimits::DEFAULT,
+            lane,
+            limits: delivery.limits,
+            lease,
+            service: service.clone(),
+        };
+        PendingSubscription {
+            subscription: SessionSubscription {
+                handle,
+                domain,
+                withdrawal,
+                delivery: tokio::spawn(generation.run(announced)),
             },
-            opened,
+            announce,
         }
     }
 
-    /// One frame holding a row for each of `user_ids`, as the subscription's encoder writes it.
-    fn row_frame(encoder: &SubscriptionRowEncoder, user_ids: &[u32]) -> SubscriptionRowFrame {
-        let schema = Schema::new(vec![Field::new("user_id", DataType::UInt32, false)]);
-        let column = UInt32Array::from(user_ids.to_vec());
-        let batch = RecordBatch::try_new(StdArc::new(schema), vec![StdArc::new(column)])
-            .assured("the column matches the one-field schema");
-        let unbranched = vec![None; user_ids.len()];
-        let frames = encoder
-            .encode(&batch, &unbranched, SubscriptionRowSelection::All)
-            .assured("the test rows match the subscription's row schema");
-        let Ok([frame]) = <[SubscriptionRowFrame; 1]>::try_from(frames) else {
-            panic!("a handful of rows fits one frame");
-        };
-        frame
-    }
-
-    /// The next frame the session would send, decoded.
-    async fn next_event(frames: &mut mpsc::Receiver<EncodedFrame<ServerFrame>>) -> ServerEvent {
-        let frame = tokio::time::timeout(Duration::from_secs(1), frames.recv())
+    /// The next frame the transport would write, decoded.
+    async fn next_event(frames: &mut SessionFrames) -> ServerEvent {
+        let frame = timeout(WAIT, frames.next())
             .await
-            .assured("the sender queues its frames before the test reads them")
-            .assured("the test holds the sender");
+            .assured("the session queues the frame within the deadline")
+            .assured("the test holds the session's producers");
         let frame = VerifiedFrame::verify(frame.into_bytes(), &SessionLimits::DEFAULT)
             .assured("the server encodes frames the session limits admit");
         let ServerMessage::Event(event) = ServerMessage::decode(&frame).assured("a frame decodes")
@@ -1868,114 +1607,8 @@ mod tests {
         event
     }
 
-    fn delivered_rows(event: ServerEvent) -> usize {
-        let ServerEvent::SubscriptionRows(rows) = event else {
-            panic!("expected subscription rows, found {event:?}");
-        };
-        rows.batch().len()
-    }
-
-    #[tokio::test]
-    async fn a_dropping_subscription_reports_what_it_dropped_before_its_next_rows() {
-        let mut subscriptions = SessionSubscriptions::new();
-        // Room for two frames, so the third is dropped until the session drains its queue.
-        let (outbound, mut frames) = mpsc::channel(2);
-        let events = crate::runtime::RelayBroadcast::with_capacity(
-            NonZeroUsize::new(4).assured("the test relay capacity is a nonzero literal"),
-        );
-        let SessionSubscriptionTaskConfig {
-            handle,
-            encoder,
-            delivery,
-            ..
-        } = task_config(
-            &mut subscriptions,
-            "sampled_events",
-            events.new_receiver(),
-            outbound,
-        );
-        let mut sender = SubscriptionSender {
-            handle: handle.clone(),
-            delivery,
-            behavior: SubscriptionDeliveryBehavior::Dropping,
-            dropped_rows: 0,
-        };
-
-        assert!(sender.send_rows(row_frame(&encoder, &[1])).await);
-        assert!(sender.send_rows(row_frame(&encoder, &[2, 3])).await);
-        assert!(sender.send_rows(row_frame(&encoder, &[4])).await);
-        assert_eq!(sender.dropped_rows, 1, "a full session drops the frame");
-        // The loss is still unreported and finds no room either, so these rows are dropped too.
-        assert!(sender.send_rows(row_frame(&encoder, &[5, 6])).await);
-        assert_eq!(sender.dropped_rows, 3);
-
-        assert_eq!(delivered_rows(next_event(&mut frames).await), 1);
-        assert_eq!(delivered_rows(next_event(&mut frames).await), 2);
-        assert!(sender.send_rows(row_frame(&encoder, &[7])).await);
-        let ServerEvent::SubscriptionDeliveryLost(lost) = next_event(&mut frames).await else {
-            panic!("the loss is reported before the rows that follow it");
-        };
-        assert_eq!(lost.subscription, handle);
-        assert_eq!(lost.dropped_rows.get(), 3);
-        assert_eq!(sender.dropped_rows, 0, "a reported loss starts a new count");
-        assert_eq!(delivered_rows(next_event(&mut frames).await), 1);
-
-        drop(frames);
-        assert!(
-            !sender.send_rows(row_frame(&encoder, &[8])).await,
-            "rows for a session that is gone end the delivery"
-        );
-    }
-
-    #[tokio::test]
-    async fn skipped_rows_are_reported_with_their_cause_and_count() {
-        let mut subscriptions = SessionSubscriptions::new();
-        let (outbound, mut frames) = mpsc::channel(2);
-        let events = crate::runtime::RelayBroadcast::with_capacity(
-            NonZeroUsize::new(4).assured("the test relay capacity is a nonzero literal"),
-        );
-        let SessionSubscriptionTaskConfig {
-            handle, delivery, ..
-        } = task_config(
-            &mut subscriptions,
-            "filtered_events",
-            events.new_receiver(),
-            outbound,
-        );
-        let sender = SubscriptionSender {
-            handle: handle.clone(),
-            delivery,
-            behavior: SubscriptionDeliveryBehavior::Blocking,
-            dropped_rows: 0,
-        };
-        let skipped = SkippedRows {
-            cause: RowsSkippedCause::FilterFailed,
-            rows: NonZeroU64::new(2).assured("two is non-zero"),
-            message: "session subscription predicate failed: division by zero".to_string(),
-        };
-
-        assert!(sender.report_skipped(skipped).await);
-
-        let ServerEvent::SubscriptionRowsSkipped(reported) = next_event(&mut frames).await else {
-            panic!("skipped rows are reported as such");
-        };
-        assert_eq!(reported.subscription, handle);
-        assert_eq!(reported.cause, RowsSkippedCause::FilterFailed);
-        assert_eq!(reported.skipped_rows.get(), 2);
-        assert_eq!(
-            reported.message,
-            "session subscription predicate failed: division by zero"
-        );
-        drop(frames);
-        let gone = SkippedRows {
-            cause: RowsSkippedCause::EncodingFailed,
-            rows: NonZeroU64::MIN,
-            message: "rows could not be encoded".to_string(),
-        };
-        assert!(
-            !sender.report_skipped(gone).await,
-            "a report for a session that is gone ends the delivery"
-        );
+    fn remove_test_directory(path: std::path::PathBuf) {
+        std::fs::remove_dir_all(path).discarded("the test directory is disposable");
     }
 
     #[test]
@@ -2026,24 +1659,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_subscriptions_track_names_generations_and_cleanup_tasks() {
+    async fn announced_subscriptions_track_names_generations_and_withdrawal() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let (delivery, _frames) = session_delivery();
         let mut subscriptions = SessionSubscriptions::new();
-        let (outbound, _frames) = mpsc::channel(4);
-        let events = crate::runtime::RelayBroadcast::with_capacity(
-            std::num::NonZeroUsize::new(4).expect("test relay capacity must be nonzero"),
-        );
-        let config = task_config(
+        let events = RelayBroadcast::with_capacity(NonZeroUsize::MIN);
+        let pending = pending_subscription(
+            &service,
             &mut subscriptions,
+            &delivery,
             "live_events",
+            "events",
             events.new_receiver(),
-            outbound.clone(),
+        )
+        .await;
+        let first_generation = pending.subscription.handle.generation;
+        assert!(
+            subscriptions.view().subscription_names.is_empty(),
+            "a generation joins its session only once it is announced"
         );
-        let first_generation = config.handle.generation;
-        subscriptions.insert(
-            DomainName::parse("default").expect("valid domain"),
-            named("events"),
-            config,
-        );
+
+        subscriptions.activate(pending).await;
         assert_eq!(
             subscriptions.view().matching_subscription_names("LIVE"),
             vec!["live_events".to_string()]
@@ -2058,10 +1694,14 @@ mod tests {
         let removed = subscriptions
             .remove(&named("live_events"))
             .await
-            .expect("subscription should be removed");
-        assert_eq!(removed.domain.as_str(), "default");
-        assert_eq!(removed.relay.as_str(), "events");
+            .assured("the announced subscription is in the session");
+        assert_eq!(removed.domain, default_domain());
         assert_eq!(removed.handle.generation, first_generation);
+        assert_eq!(
+            events.receiver_count(),
+            0,
+            "a withdrawn generation leaves its relay"
+        );
         assert!(
             subscriptions
                 .remove(&named("missing_events"))
@@ -2069,112 +1709,240 @@ mod tests {
                 .is_none()
         );
 
-        let reused = task_config(
-            &mut subscriptions,
-            "live_events",
-            events.new_receiver(),
-            outbound,
-        );
+        let reused = subscriptions.next_handle(named("live_events"));
         assert!(
-            reused.handle.generation > first_generation,
+            reused.generation > first_generation,
             "a reused name opens with a new generation"
         );
+        remove_test_directory(path);
     }
 
     #[tokio::test]
-    #[ignore = "CLIENT-WIRE-10 makes relay-interest accounting exact across every removal path"]
-    async fn deleting_two_same_relay_subscriptions_clears_interest() {
+    async fn deleting_two_same_relay_subscriptions_withdraws_the_interest_exactly() {
         let TestService { service, path, .. } = build_test_service(false).await;
-        let domain =
-            DomainName::parse("default").assured("the test domain is an identifier-shaped literal");
-        let relay: RelayName = named("events");
-        let key = SubscriptionInterestKey {
-            domain: domain.clone(),
-            relay: relay.clone(),
-        };
-        service
-            .inner
-            .subscription_interest_counts
-            .insert(key.clone(), 2);
-
+        let domain = default_domain();
+        let relay = named::<RelayName>("events");
+        let (delivery, _frames) = session_delivery();
         let mut subscriptions = SessionSubscriptions::new();
-        let events = crate::runtime::RelayBroadcast::with_capacity(
-            std::num::NonZeroUsize::new(4).assured("the test relay capacity is a nonzero literal"),
-        );
+        let events = RelayBroadcast::with_capacity(NonZeroUsize::MIN);
         for name in ["first", "second"] {
-            let (outbound, _frames) = mpsc::channel(4);
-            let config = task_config(&mut subscriptions, name, events.new_receiver(), outbound);
-            subscriptions.insert(domain.clone(), relay.clone(), config);
+            let pending = pending_subscription(
+                &service,
+                &mut subscriptions,
+                &delivery,
+                name,
+                "events",
+                events.new_receiver(),
+            )
+            .await;
+            subscriptions.activate(pending).await;
         }
+        let interests = &service.inner.subscription_interests;
+        assert_eq!(interests.leases(&domain, &relay), 2);
 
-        for name in ["first", "second"] {
-            let deleted = service
-                .delete_subscription(
-                    nervix_models::DeleteSubscription { name: named(name) },
-                    &mut subscriptions,
-                )
-                .await;
-            assert!(deleted.is_ok(), "subscription '{name}' deletion failed");
-        }
-        let leaked = service
-            .inner
-            .subscription_interest_counts
-            .contains_key(&key);
-        drop(service);
-        std::fs::remove_dir_all(path).discarded("the test directory is disposable");
-
-        assert!(
-            !leaked,
-            "deleting the final subscription left relay interest behind"
+        let deleted = service
+            .delete_subscription(
+                nervix_models::DeleteSubscription {
+                    name: named("first"),
+                },
+                &mut subscriptions,
+            )
+            .await;
+        assert!(deleted.is_ok(), "the first subscription is deleted");
+        assert_eq!(
+            interests.leases(&domain, &relay),
+            1,
+            "the other subscription of the relay keeps the node's interest"
         );
+
+        let deleted = service
+            .delete_subscription(
+                nervix_models::DeleteSubscription {
+                    name: named("second"),
+                },
+                &mut subscriptions,
+            )
+            .await;
+        assert!(deleted.is_ok(), "the second subscription is deleted");
+        assert_eq!(
+            interests.leases(&domain, &relay),
+            0,
+            "deleting the relay's last subscription withdraws the node's interest"
+        );
+        remove_test_directory(path);
     }
 
     #[tokio::test]
-    async fn rebuilt_relay_ends_the_subscription_with_a_typed_reason() {
+    async fn an_unannounced_subscription_releases_everything_and_sends_nothing() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let domain = default_domain();
+        let relay = named::<RelayName>("events");
+        let (delivery, mut frames) = session_delivery();
         let mut subscriptions = SessionSubscriptions::new();
-        let (outbound, mut frames) = mpsc::channel(4);
-        let events = crate::runtime::RelayBroadcast::with_capacity(
-            std::num::NonZeroUsize::new(4).expect("test relay capacity must be nonzero"),
-        );
-        let config = task_config(
+        let events = RelayBroadcast::with_capacity(NonZeroUsize::MIN);
+        let schema = user_id_schema();
+        let pending = pending_subscription(
+            &service,
             &mut subscriptions,
-            "live_events",
+            &delivery,
+            "never_announced",
+            "events",
             events.new_receiver(),
-            outbound,
+        )
+        .await;
+        assert!(
+            events.publish_for_test(user_id_batch(&schema, 1)).await,
+            "an unannounced generation takes the relay's batches rather than holding the relay"
         );
-        let handle = config.handle.clone();
-        subscriptions.insert(
-            DomainName::parse("default").expect("valid domain"),
-            named("events"),
-            config,
+        assert!(events.publish_for_test(user_id_batch(&schema, 2)).await);
+
+        timeout(WAIT, pending.abandon())
+            .await
+            .assured("abandoning a generation does not wait on its client");
+        assert_eq!(
+            service.inner.subscription_interests.leases(&domain, &relay),
+            0
         );
+        assert_eq!(events.receiver_count(), 0);
+        assert!(subscriptions.view().subscription_names.is_empty());
+
+        drop(delivery);
+        assert!(
+            timeout(WAIT, frames.next())
+                .await
+                .is_ok_and(|frame| frame.is_none()),
+            "a generation that was never announced sends nothing"
+        );
+        remove_test_directory(path);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_blocking_subscription_whose_client_reads_nothing_releases_its_relay() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let domain = default_domain();
+        let relay = named::<RelayName>("events");
+        let (delivery, mut frames) = session_delivery();
+        let mut subscriptions = SessionSubscriptions::new();
+        let events = Arc::new(RelayBroadcast::with_capacity(NonZeroUsize::MIN));
+        let schema = user_id_schema();
+        let pending = pending_subscription(
+            &service,
+            &mut subscriptions,
+            &delivery,
+            "blocked",
+            "events",
+            events.new_receiver(),
+        )
+        .await;
+        subscriptions.activate(pending).await;
+
+        // The lane takes one frame per batch until it is full, the delivery holds the next
+        // frame it cannot queue, and the relay receiver holds one more batch.
+        let absorbed = SESSION_SUBSCRIPTION_CAPACITY
+            .checked_add(2)
+            .assured("the lane capacity is a small constant");
+        for user_id in 0..absorbed {
+            let user_id = u32::try_from(user_id).assured("a few test rows fit in u32");
+            let published = timeout(
+                WAIT,
+                events.publish_for_test(user_id_batch(&schema, user_id)),
+            )
+            .await
+            .assured("the subscription has room for this batch");
+            assert!(published);
+        }
+        let held_schema = schema.clone();
+        let held = events.clone();
+        let held_publisher = tokio::spawn(async move {
+            held.publish_for_test(user_id_batch(&held_schema, 999))
+                .await
+        });
+        timeout(WAIT, async {
+            while events.waiting_publishers() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .assured("a blocking subscription whose client reads nothing holds its relay's publisher");
+
+        let removed = timeout(WAIT, subscriptions.remove(&named("blocked")))
+            .await
+            .assured("deleting a subscription does not wait on its client");
+        assert!(removed.is_some());
+        assert_eq!(
+            service.inner.subscription_interests.leases(&domain, &relay),
+            0
+        );
+        let delivered = timeout(WAIT, held_publisher)
+            .await
+            .assured("the withdrawn subscription releases its relay's publisher")
+            .assured("the publisher does not panic");
+        assert!(!delivered, "no subscriber was left to take the held batch");
+
+        drop(delivery);
+        assert!(
+            timeout(WAIT, frames.next())
+                .await
+                .is_ok_and(|frame| frame.is_none()),
+            "nothing a withdrawn generation queued reaches its client"
+        );
+        remove_test_directory(path);
+    }
+
+    #[tokio::test]
+    async fn a_closed_relay_ends_the_subscription_with_a_typed_reason_as_its_last_frame() {
+        let TestService { service, path, .. } = build_test_service(false).await;
+        let domain = default_domain();
+        let relay = named::<RelayName>("events");
+        let (delivery, mut frames) = session_delivery();
+        let mut subscriptions = SessionSubscriptions::new();
+        let events = RelayBroadcast::with_capacity(NonZeroUsize::MIN);
+        let schema = user_id_schema();
+        let pending = pending_subscription(
+            &service,
+            &mut subscriptions,
+            &delivery,
+            "live_events",
+            "events",
+            events.new_receiver(),
+        )
+        .await;
+        let handle = pending.subscription.handle.clone();
+        subscriptions.activate(pending).await;
+        assert!(events.publish_for_test(user_id_batch(&schema, 7)).await);
 
         drop(events);
-        let frame = tokio::time::timeout(Duration::from_secs(1), frames.recv())
-            .await
-            .expect("the subscription end should arrive")
-            .expect("the session channel should remain open");
-        let frame = VerifiedFrame::verify(frame.into_bytes(), &SessionLimits::DEFAULT)
-            .assured("the server encodes frames the session limits admit");
-        let ServerMessage::Event(ServerEvent::SubscriptionEnded(ended)) =
-            ServerMessage::decode(&frame).assured("a server frame decodes")
-        else {
-            panic!("the relay close ends the subscription");
+        let ServerEvent::SubscriptionRows(rows) = next_event(&mut frames).await else {
+            panic!("the batch published before the relay closed is delivered first");
+        };
+        assert_eq!(rows.subscription(), &handle);
+        let ServerEvent::SubscriptionEnded(ended) = next_event(&mut frames).await else {
+            panic!("the relay closing ends the subscription");
         };
         assert_eq!(ended.subscription, handle);
-        assert_eq!(ended.reason, SubscriptionEndReason::RelayClosed);
-        assert!(
-            ended
-                .message
-                .contains("subscription 'live_events' was dropped")
+        assert_eq!(
+            ended.reason,
+            SubscriptionEndReason::RelayRemoved,
+            "the schedule declares no such relay, so it was removed"
         );
-        assert!(ended.message.contains("recreate the subscription"));
-        tokio::task::yield_now().await;
-        assert!(!subscriptions.contains_name(&named("live_events")));
+        assert!(ended.message.contains("subscription 'live_events' ended"));
+        assert_eq!(
+            service.inner.subscription_interests.leases(&domain, &relay),
+            0
+        );
 
-        subscriptions
+        timeout(WAIT, async {
+            while subscriptions.contains_name(&named("live_events")) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .assured("an ended generation stops delivering");
+        let removed = subscriptions
             .remove(&named("live_events"))
             .await
-            .expect("closed subscription metadata should remain removable");
+            .assured("an ended generation stays deletable");
+        assert_eq!(removed.handle, handle);
+        remove_test_directory(path);
     }
 }

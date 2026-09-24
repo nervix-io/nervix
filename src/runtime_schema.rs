@@ -73,13 +73,13 @@ mod syslog;
 
 pub use jaq_unfold::UnfoldPosition;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompiledSchema {
     fields: Vec<CompiledSchemaField>,
     arrow_schema: StdArc<ArrowSchema>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CompiledSchemaField {
     name: String,
     ty: ParseAsType,
