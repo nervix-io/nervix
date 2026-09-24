@@ -1773,11 +1773,15 @@ fn execute_coalesce(
 }
 
 /// A conditional selects, for each row, the value of the first arm whose mask holds, and the
-/// `otherwise` value when none does. Masks are columns. Two literal arms are zipped as scalars,
-/// which Arrow answers in one pass over the mask; a literal arm beside a column is read as the
-/// column repeating it, built once per register, because Arrow copies a scalar row by row into
-/// every gap of the mask, and a mask that alternates has more gaps than the arm's kernel has
-/// rows.
+/// `otherwise` value when none does. The arms are applied last to first, so an earlier arm
+/// overrides a later one on the rows both hold.
+///
+/// Masks are columns. An arm whose mask holds on every row answers every row with its value, and
+/// an arm whose mask holds on no row changes nothing, so neither copies a row. Otherwise two
+/// literal arms are zipped as scalars, which Arrow answers in one pass over the mask, and a
+/// literal arm beside a column is read as the column repeating it, built once per register,
+/// because Arrow copies a scalar row by row into every gap of the mask, and a mask that selects
+/// few rows has more gaps than the arm's kernel has rows.
 fn execute_select(
     registers: &RegisterBank,
     arms: &[SelectArm],
@@ -1786,6 +1790,17 @@ fn execute_select(
     let mut selected: Option<ArrayRef> = None;
     for arm in arms.iter().rev() {
         let mask = registers.column::<BooleanArray>(arm.mask)?;
+        let matching = mask.true_count();
+        if matching == 0 {
+            // The rows keep what the later arms, or `otherwise`, chose for them.
+            continue;
+        }
+        if matching == mask.len() {
+            // Every row takes this arm until an earlier arm overrides it.
+            let value = registers.read_array(arm.value)?.into_array_ref();
+            selected = Some(value);
+            continue;
+        }
         let zipped = match &selected {
             Some(fallback) => {
                 let value = registers.read_array(arm.value)?.into_array_ref();

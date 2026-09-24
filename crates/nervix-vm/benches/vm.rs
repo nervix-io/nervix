@@ -2032,8 +2032,11 @@ fn compile_conditional(program: &ConditionalProgram) -> Arc<CompiledProgram> {
 /// Sweeps how many rows a conditional arm selects, for arms of different kernel cost. An arm
 /// narrowed to the rows it selects should cost in proportion to those rows, an arm no row selects
 /// should cost almost nothing, and an arm over a vectorized kernel should stay flat.
+///
+/// The batch is the largest the VM executes inline, so no hop to the blocking pool blurs what the
+/// arm itself costs; the batch-size sweep above covers the hop.
 fn conditional_arm_benches(c: &mut Criterion) {
-    const ROWS: usize = 8_192;
+    const ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
 
     let runtime = benchmark_runtime();
     let mut group = c.benchmark_group("conditional_arm");

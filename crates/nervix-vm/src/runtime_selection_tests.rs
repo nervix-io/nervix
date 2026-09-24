@@ -768,3 +768,64 @@ fn an_arm_scatters_list_results_and_yields_nulls_where_no_row_selects_it() {
         "the header read ran once, for the two selected rows of the first batch"
     );
 }
+
+#[test]
+fn arms_that_hold_on_every_row_or_on_none_keep_first_match_order() {
+    let input_schema = schema(vec![
+        Field::new("first", DataType::Boolean, true),
+        Field::new("second", DataType::Boolean, true),
+        Field::new("value", DataType::Int64, true),
+    ]);
+    let compiled = compile(
+        "SET chosen = CASE WHEN input.first THEN input.value WHEN input.second THEN 2 ELSE 3 END",
+        &input_schema,
+        vec![Field::new("chosen", DataType::Int64, true)],
+        CompileOptions::default(),
+    );
+    let run = |first: Vec<Option<bool>>, second: Vec<Option<bool>>| {
+        let batch = TypedBatch::try_new(
+            input_schema.clone(),
+            vec![
+                TypedArray::Boolean(BooleanArray::from(first)),
+                TypedArray::Boolean(BooleanArray::from(second)),
+                TypedArray::Int64(Int64Array::from(vec![Some(10), None, Some(30)])),
+            ],
+        )
+        .expect("the batch must build");
+        let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+        output_column(&output, "chosen").clone()
+    };
+
+    assert_eq!(
+        run(
+            vec![Some(true), Some(true), Some(true)],
+            vec![Some(true), Some(false), None]
+        ),
+        TypedArray::Int64(Int64Array::from(vec![Some(10), None, Some(30)])),
+        "a first arm that holds on every row answers every row, nulls included"
+    );
+    assert_eq!(
+        run(
+            vec![Some(true), Some(false), None],
+            vec![Some(true), Some(true), Some(true)]
+        ),
+        TypedArray::Int64(Int64Array::from(vec![Some(10), Some(2), Some(2)])),
+        "an earlier arm still overrides a later arm that holds on every row"
+    );
+    assert_eq!(
+        run(
+            vec![Some(false), None, Some(false)],
+            vec![Some(false), Some(true), None]
+        ),
+        TypedArray::Int64(Int64Array::from(vec![Some(3), Some(2), Some(3)])),
+        "an arm that holds on no row leaves the rows to the later arms"
+    );
+    assert_eq!(
+        run(
+            vec![Some(false), None, Some(false)],
+            vec![None, Some(false), Some(false)]
+        ),
+        TypedArray::Int64(Int64Array::from(vec![Some(3), Some(3), Some(3)])),
+        "when no arm holds on any row, every row takes ELSE"
+    );
+}
