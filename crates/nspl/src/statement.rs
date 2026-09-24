@@ -932,6 +932,7 @@ mod tests {
                         encode_using_codec: Some(g.name()),
                         sink: Box::new(sink),
                         publishing_mode,
+                        batch: None,
                         flush_policy: FlushPolicy::Each {
                             interval: "100ms".to_string(),
                             max_batch_size: "1MiB".to_string(),
@@ -996,6 +997,7 @@ mod tests {
                 encode_using_codec: Some(g.name()),
                 sink: Box::new(EmitSink::ZeroMq { client: g.name() }),
                 publishing_mode: emitter_publishing_mode(),
+                batch: None,
                 flush_policy: FlushPolicy::Each {
                     interval: "100ms".to_string(),
                     max_batch_size: "1MiB".to_string(),
@@ -1031,6 +1033,7 @@ mod tests {
                     subject: g.name(),
                 }),
                 publishing_mode: emitter_publishing_mode(),
+                batch: None,
                 flush_policy: FlushPolicy::Each {
                     interval: "100ms".to_string(),
                     max_batch_size: "1MiB".to_string(),

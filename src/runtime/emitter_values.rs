@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use nervix_connector::{
     MappedSinkRows, RowSink, SinkAcknowledgements, SinkLifecycle, SinkRecordPosition,
 };
+use nervix_models::BatchMessageLimit;
 
 use super::*;
 
@@ -280,9 +281,9 @@ pub(in crate::runtime) struct MappedValuesProjectionInit<'a> {
     pub(in crate::runtime) values: &'a [ClickHouseValueMapping],
     pub(in crate::runtime) input_schema: StdArc<arrow_schema::Schema>,
     pub(in crate::runtime) udfs: Option<&'a UdfExecutor>,
-    /// How many rows one write may carry, from the emitter's `MAX BATCH`. A sink that publishes a
-    /// whole batch in one request declares none.
-    pub(in crate::runtime) max_batch: Option<NonZeroU64>,
+    /// How many rows one write may carry, from the emitter's `BATCH MAX MESSAGES`. A sink that
+    /// publishes a whole batch in one request declares none.
+    pub(in crate::runtime) max_batch: Option<BatchMessageLimit>,
 }
 
 /// One emitter's `VALUES` mapping, compiled once at start and evaluated once per batch.
@@ -349,7 +350,7 @@ impl MappedValuesProjection {
             program,
             mapped_schema: StdArc::new(arrow_schema::Schema::new(fields)),
             target_columns,
-            max_rows: max_batch.map(addressable_count),
+            max_rows: max_batch.map(|limit| addressable_count(NonZeroU64::from(limit.get()))),
         })
     }
 
@@ -561,7 +562,7 @@ mod tests {
         }
     }
 
-    fn test_projection(max_batch: Option<NonZeroU64>) -> MappedValuesProjection {
+    fn test_projection(max_batch: Option<BatchMessageLimit>) -> MappedValuesProjection {
         let domain: DomainName = named("test_domain");
         let emitter: EmitterName = named("test_emitter");
         let schema = test_schema(&[("value", ParseAsType::I64), ("name", ParseAsType::String)]);
@@ -604,7 +605,7 @@ mod tests {
 
     #[tokio::test]
     async fn mapped_columns_carry_every_selected_row_under_its_target_name() {
-        let projection = test_projection(NonZeroU64::new(2));
+        let projection = test_projection(BatchMessageLimit::try_from(2u32).ok());
         let batch = test_batch(3);
 
         let projected = projection
@@ -674,7 +675,7 @@ mod tests {
     /// a property of the batch and not of the rows inside it.
     #[tokio::test]
     async fn projecting_allocates_per_batch_and_not_per_row() {
-        let projection = test_projection(NonZeroU64::new(4));
+        let projection = test_projection(BatchMessageLimit::try_from(4u32).ok());
         let narrow = test_batch(8);
         let wide = test_batch(512);
         let narrow_rows = (0..8).collect::<Vec<_>>();

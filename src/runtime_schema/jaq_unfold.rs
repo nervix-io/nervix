@@ -279,6 +279,7 @@ mod tests {
         let transformations = CodecJaqTransformations {
             on_ingestion: Some(program.to_string()),
             on_emitting: None,
+            on_emitting_batch: None,
         };
         compile_codec(
             &CreateCodec {

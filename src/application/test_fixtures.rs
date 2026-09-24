@@ -361,6 +361,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
             sink: Box::new(EmitSink::Syslog {
                 client: named("syslog_forwarder"),
             }),
+            batch: None,
             flush_policy: nervix_models::FlushPolicy::Immediate,
             error_policies: nervix_models::ErrorPolicies::handled_by_log(),
             publishing_mode: nervix_models::EmitterPublishingMode::NoAck {
