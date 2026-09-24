@@ -12,8 +12,8 @@ use imbl::OrdSet;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeIdentity, CommandExecutionReference, CommandExecutionReferenceTimestampError,
-    DomainName, DomainState, Statement, Timestamp, TransactionOperationAdmission,
-    TransactionPosition, TransactionPreviewIdentity, UserName,
+    DomainName, DomainState, Statement, Timestamp, TransactionLifecycle,
+    TransactionOperationAdmission, TransactionPosition, TransactionPreviewIdentity, UserName,
 };
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
@@ -28,29 +28,7 @@ use crate::{
 /// their embedded time, so this allowance cannot reopen a reclaimed identity.
 const COMMAND_EXECUTION_REFERENCE_FUTURE_SKEW: Duration = Duration::from_secs(5 * 60);
 
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct CommandExecutionDiagnostic {
-    pub message: String,
-    pub span_start: u32,
-    pub span_end: u32,
-}
-
-#[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
-)]
-pub struct CommandExecutionTransactionStatus {
-    pub id: String,
-    pub domain: String,
-    pub state: i32,
-    pub pending_count: u64,
-    pub completed_count: u64,
-    pub total_count: u64,
-    pub error: String,
-    pub failing_step: Option<u64>,
-}
-
+/// The byte range of a command's NSPL source a diagnostic points at. `start` is not after `end`.
 #[derive(
     Debug,
     Clone,
@@ -63,38 +41,87 @@ pub struct CommandExecutionTransactionStatus {
     RkyvSerialize,
     RkyvDeserialize,
 )]
-pub enum CommandExecutionResultKind {
-    Ok,
-    Error,
+pub struct DiagnosticSpan {
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
-pub struct CommandExecutionChildResult {
-    pub success: bool,
-    pub kind: CommandExecutionResultKind,
+pub struct CommandExecutionDiagnostic {
+    pub message: String,
+    /// Absent when the problem has no location in the command's source.
+    pub span: Option<DiagnosticSpan>,
+}
+
+/// The transaction a finished command was bound to, as the command reported it.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct CommandExecutionTransactionStatus {
+    pub transaction_id: String,
+    pub domain: DomainName,
+    pub lifecycle: TransactionLifecycle,
+    pub accepted_operations: TransactionPosition,
+    /// Never exceeds `accepted_operations`.
+    pub applied_operations: usize,
+}
+
+/// How a finished command ended.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum CommandExecutionDisposition {
+    Completed {
+        /// The statement found the entity it creates already present and changed nothing.
+        already_existed: bool,
+    },
+    Failed,
+    /// A COMMIT whose expected preview no longer described the transaction, so nothing applied.
+    /// Recording both previews lets a recovered outcome still say that the transaction moved,
+    /// rather than only that the commit failed.
+    PreviewStale(CommandExecutionPreviewStale),
+}
+
+/// How one statement of a finished multi-statement command ended.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum CommandExecutionStatementDisposition {
+    Completed { already_existed: bool },
+    Failed,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub struct CommandExecutionStatementResult {
+    pub disposition: CommandExecutionStatementDisposition,
     pub message: String,
     pub diagnostics: Vec<CommandExecutionDiagnostic>,
-    pub already_existed: bool,
-    pub transaction_admission: Option<TransactionOperationAdmission>,
 }
 
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub struct CommandExecutionResult {
-    pub success: bool,
-    pub kind: CommandExecutionResultKind,
+    pub disposition: CommandExecutionDisposition,
     pub message: String,
     pub diagnostics: Vec<CommandExecutionDiagnostic>,
-    pub already_existed: bool,
-    pub results: Vec<CommandExecutionChildResult>,
+    /// The outcome of each statement of a multi-statement command, in written order.
+    pub statements: Vec<CommandExecutionStatementResult>,
     pub transaction: Option<CommandExecutionTransactionStatus>,
     pub transaction_admission: Option<TransactionOperationAdmission>,
-    /// The two previews a refused commit reported, so a recovered outcome still says the
-    /// transaction moved rather than only that the commit failed.
-    pub preview_stale: Option<CommandExecutionPreviewStale>,
 }
 
 /// The preview a refused commit expected, beside the one that now describes the transaction.
@@ -937,15 +964,14 @@ mod tests {
 
     fn result() -> Box<CommandExecutionResult> {
         Box::new(CommandExecutionResult {
-            success: true,
-            kind: CommandExecutionResultKind::Ok,
+            disposition: CommandExecutionDisposition::Completed {
+                already_existed: false,
+            },
             message: "created".to_string(),
             diagnostics: Vec::new(),
-            already_existed: false,
-            results: Vec::new(),
+            statements: Vec::new(),
             transaction: None,
             transaction_admission: None,
-            preview_stale: None,
         })
     }
 

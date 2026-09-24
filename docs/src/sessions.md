@@ -21,6 +21,9 @@ Current session behavior:
   fields are masked using the same rules as sensitive relay fields
 - subscriptions are read-only views; only an optional `WHERE` predicate is supported, and a
   selected record is delivered without construction or transformation
+- the predicate is an ordinary `BOOL` expression, including membership, range, and null-safe
+  equality tests such as `input.status IN ('open', 'held')`; it selects a record only where it is
+  true, so a null predicate, such as `IN` over a null field, does not select it
 - bare fields, `message.<field>`, and `input.<field>` all read the subscribed relay record; the
   compiler rejects `output`, `branch`, and `relay_state` scopes when the subscription is created
 - subscription syntax does not accept `INHERIT`, `SET`, `VALUES`, `INVOKE`, or other side effects

@@ -7,15 +7,14 @@
 //! - **Must not know.** Connector implementations or runtime execution details.
 
 use meticulous::ResultExt as _;
+use nervix_client_wire::CommandRequest;
 use nervix_models::{DomainName, DomainSchedule, PlacementPolicy};
 use nervix_recovery::Discarded as _;
-use tokio::sync::mpsc;
 
 use super::super::{
     subscription::SessionSubscriptions,
-    test_fixtures::{TestService, build_test_service},
+    test_fixtures::{TestService, build_test_service, named, test_execution_reference},
 };
-use crate::proto::CommandRequest;
 
 #[tokio::test]
 async fn schedule_publication_keeps_the_basis_it_prepared() {
@@ -75,7 +74,6 @@ async fn drain_reports_when_its_captured_eligibility_has_no_replacement() {
         registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
 
     for command in [
@@ -83,20 +81,19 @@ async fn drain_reports_when_its_captured_eligibility_has_no_replacement() {
         "CREATE RELAY events SCHEMA event UNBRANCHED;",
     ] {
         let result = service
-            .process_command(
+            .test_command(
                 CommandRequest {
                     query: command.to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    domain: Some(named("default")),
+                    execution_reference: test_execution_reference(),
                     expected_transaction_position: None,
                     expected_preview: None,
                 },
-                &tx,
                 &mut subscriptions,
             )
             .await;
         assert!(
-            result.success,
+            result.succeeded(),
             "test graph command must succeed: {command}: {}",
             result.message
         );
@@ -104,7 +101,7 @@ async fn drain_reports_when_its_captured_eligibility_has_no_replacement() {
 
     let local_node = service.inner.consensus.local_node_id().clone();
     let result = service.drain_node(local_node, None).await;
-    assert!(!result.success);
+    assert!(!result.succeeded());
     assert!(
         result
             .message

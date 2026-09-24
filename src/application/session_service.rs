@@ -1,26 +1,28 @@
-//! The gRPC session every client statement arrives on.
+//! The command and completion pipeline every session request is served by, and the state one
+//! Nervix server serves it from.
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The session stream, the command and suggestion requests it carries, the resource
-//!   upload RPCs, and the events a session observes.
+//! - **Owns.** The server's shared state, the session event bus, the command pipeline from a
+//!   request's text to its typed result, and completion suggestions.
 //! - **Depends on.** The control-plane use cases it dispatches to, and the parser for the text a
 //!   client sends.
-//! - **Must not know.** How any use case reaches the rest of the cluster.
+//! - **Must not know.** How a transport frames, correlates or delivers what the pipeline returns.
 
 use std::sync::Arc as StdArc;
 
 use ahash::RandomState;
-use arch_into::ArchInto;
 use futures_util::future::BoxFuture;
-use nervix_consensus::{
-    Administrator, CommandExecutionTransactionTarget, ConsensusError, Observer, Proposer,
+use nervix_client_wire::{
+    CommandRequest, NoticeLevel, ServerNotice, SuggestOutcome, SuggestRequest, Suggestion,
+    SuggestionKind,
 };
+use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
 use nervix_execution::sync::DashMap;
 use nervix_interconnect::Transport;
 use nervix_models::{
     CommandExecutionReference, DomainName, ModelKind, ModelName, ResourceId, ResourceName,
-    ResourceUploadIdentity, ResourceUploadKey, TransactionPosition,
+    ResourceUploadKey, TransactionPosition,
 };
 use nervix_nspl::{
     Token, Word,
@@ -31,46 +33,46 @@ use nervix_nspl::{
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
-use nervix_recovery::{Discarded, NoReceiver};
+use nervix_recovery::Discarded;
 use sorted_vec::SortedSet;
 use tokio::{
-    sync::{Mutex as AsyncMutex, broadcast, mpsc},
+    sync::{Mutex as AsyncMutex, broadcast},
     time::Duration,
 };
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
-use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 use triomphe::Arc;
 
 use super::{
     authentication::{AuthRateLimiter, BasicAuthCredentials},
-    command_execution::{CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest},
+    command_execution::{
+        CommandAdmission, CommandExecutionOwners, CommandExecutionPolicy, PersistentCommandRequest,
+    },
+    command_result::{
+        CommandDiagnostic, CommandDisposition, CommandOrigin, CommandResponse, CommandResult,
+    },
     completion::{ApplicationRevisionPhase, wait_for_application_revision},
     describe_output::placement_runtime_node_ref_suggestions,
-    model_mutation::{RequestDomainError, command_error, parse_request_domain},
+    model_mutation::command_error,
     resource::{
-        ResourceUploadError, completed_resource_version_suggestions, resource_named_before_version,
+        completed_resource_version_suggestions, resource_named_before_version,
         resource_ref_suggestions, resource_version_suggestions,
     },
     runtime_admission::RuntimeAdmission,
     scheduling::RUNTIME_REVISION_READINESS_PROPAGATION_BOUND,
     service_tasks::ServiceTasks,
-    subscription::{SessionCommandOperation, SessionSubscriptions, SubscriptionInterestKey},
+    session::admission::{CancelledBeforeAdmission, RequestAdmission},
+    subscription::{
+        SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterestKey,
+    },
     tls::HttpsListenerCertificates,
-    transaction::{TransactionRecovery, transaction_preview_identity},
+    transaction::TransactionRecovery,
 };
 use crate::{
-    cluster, proto,
-    proto::{
-        CommandRequest, CommandResult, CommandResultKind, Diagnostic, ServerEvent,
-        ServerEventLevel, SessionRequest, SessionResponse, SuggestRequest, SuggestResponse,
-        Suggestion as ApiSuggestion, SuggestionKind, UploadResourceRequest, UploadResourceResponse,
-        session_service_server::SessionService,
-    },
+    cluster,
     registry::{Registry, RegistryError},
     resource::ResourceStore,
-    runtime::{Runtime, RuntimeEvent},
+    runtime::Runtime,
 };
 
 /// How many events a session can fall behind before the bus drops the oldest.
@@ -86,7 +88,7 @@ pub(in crate::application) const SESSION_EVENT_CAPACITY: usize = 256;
 /// follows only offers the same fact to whoever is.
 #[derive(Clone)]
 pub(in crate::application) struct SessionEvents {
-    sender: broadcast::Sender<ServerEvent>,
+    sender: broadcast::Sender<ServerNotice>,
 }
 
 impl SessionEvents {
@@ -100,7 +102,7 @@ impl SessionEvents {
     fn report_error(&self, message: impl Into<String>) {
         let message = message.into();
         warn!(error = %message, "server error reported to sessions");
-        self.publish(ServerEventLevel::Error, message);
+        self.publish(NoticeLevel::Error, message);
     }
 
     /// Offer a transition the cluster or consensus bus has already recorded.
@@ -108,26 +110,23 @@ impl SessionEvents {
     /// Those buses write their own `info` line before handing the text here, so this is a relay
     /// rather than a report and it logs nothing of its own.
     pub(in crate::application) fn relay_info(&self, message: String) {
-        self.publish(ServerEventLevel::Info, message);
+        self.publish(NoticeLevel::Info, message);
     }
 
-    fn publish(&self, level: ServerEventLevel, message: String) {
+    fn publish(&self, level: NoticeLevel, message: String) {
         self.sender
-            .send(ServerEvent {
-                level: i32::from(level),
-                message,
-            })
+            .send(ServerNotice { level, message })
             .discarded("the record this event carries is written before it is offered");
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<ServerEvent> {
+    pub(in crate::application) fn subscribe(&self) -> broadcast::Receiver<ServerNotice> {
         self.sender.subscribe()
     }
 }
 
-/// The handle every gRPC request, background reconciliation task, and HTTP server clones. It is
-/// one `Arc` over the server's state, so handing the service to a spawned task costs a single
-/// refcount rather than one per piece of state the server owns.
+/// The handle every session, background reconciliation task, and HTTP server clones. It is one
+/// `Arc` over the server's state, so handing the service to a spawned task costs a single refcount
+/// rather than one per piece of state the server owns.
 #[derive(Clone)]
 pub struct SessionServiceImpl {
     pub(in crate::application) inner: Arc<SessionServiceInner>,
@@ -193,409 +192,6 @@ pub(in crate::application) struct SessionServiceInner {
     /// Repeated observations of the same missing version join that one installation.
     pub(in crate::application) resource_replication_executions:
         DashMap<ResourceId, StdArc<AsyncMutex<()>>, RandomState>,
-}
-
-#[tonic::async_trait]
-impl SessionService for SessionServiceImpl {
-    type SessionStream = ReceiverStream<Result<SessionResponse, Status>>;
-
-    async fn session(
-        &self,
-        request: Request<tonic::Streaming<SessionRequest>>,
-    ) -> Result<Response<Self::SessionStream>, Status> {
-        let authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
-        let mut inbound = request.into_inner();
-        let service = self.clone();
-        let (tx, rx) = mpsc::channel(16);
-        let mut event_rx = self.inner.events.subscribe();
-        let mut runtime_event_rx = self.inner.runtime.subscribe_events();
-        let session_done = CancellationToken::new();
-
-        let event_service = service.clone();
-        let event_tx = tx.clone();
-        let event_session_done = session_done.clone();
-        let service_tasks = service.inner.service_tasks.clone();
-        service_tasks.spawn(async move {
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    _ = event_service.inner.admission_shutdown.cancelled() => break,
-                    _ = event_session_done.cancelled() => break,
-                    server_event = event_rx.recv() => {
-                        match server_event {
-                            Ok(event) => {
-                                let response = SessionResponse {
-                                    event: Some(proto::session_response::Event::Server(event)),
-                                };
-                                if event_tx.send(Ok(response)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            // The session stays open and resumes from the newest event. Saying how
-                            // many it skipped is what stops the gap from looking like quiet.
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                warn!(skipped, "session fell behind the server event bus");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                    runtime_event = runtime_event_rx.recv() => {
-                        match runtime_event {
-                            Ok(RuntimeEvent::Error(message)) => {
-                                let response = SessionResponse {
-                                    event: Some(proto::session_response::Event::Server(ServerEvent {
-                                        level: i32::from(ServerEventLevel::Error),
-                                        message,
-                                    })),
-                                };
-                                if event_tx.send(Ok(response)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            // As above: the runtime errors the session missed are gone, so the
-                            // count is the only record that they happened.
-                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                warn!(skipped, "session fell behind the runtime event bus");
-                            }
-                            Err(broadcast::error::RecvError::Closed) => break,
-                        }
-                    }
-                }
-            }
-        });
-
-        let session_done_guard = session_done.clone().drop_guard();
-        let service_tasks = service.inner.service_tasks.clone();
-        service_tasks.spawn(async move {
-            let _session_done_guard = session_done_guard;
-            let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
-            let mut clean_close = false;
-            let shutdown = service.inner.admission_shutdown.clone();
-            loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => {
-                        break;
-                    }
-                    inbound_request = tokio_stream::StreamExt::next(&mut inbound) => {
-                        let Some(request) = inbound_request else {
-                            clean_close = true;
-                            break;
-                        };
-                        let request = match request {
-                            Ok(request) => request,
-                            Err(status) => {
-                                tx.send(Err(status))
-                                    .await
-                                    .means_peer_left("session response stream");
-                                subscriptions.stop_all(&service).await;
-                                service.release_session_transaction_binding(&mut subscriptions);
-                                return;
-                            }
-                        };
-
-                        match request.request {
-                            Some(proto::session_request::Request::Command(command)) => {
-                                let result = service
-                                    .process_command(
-                                        command,
-                                        &tx,
-                                        &mut subscriptions,
-                                    )
-                                    .await;
-                                let event = SessionResponse {
-                                    event: Some(proto::session_response::Event::Result(Box::new(
-                                        result,
-                                    ))),
-                                };
-                                if tx.send(Ok(event)).await.is_err() {
-                                    subscriptions.stop_all(&service).await;
-                                    service.release_session_transaction_binding(&mut subscriptions);
-                                    return;
-                                }
-                            }
-                            Some(proto::session_request::Request::Suggest(suggest)) => {
-                                let response = service
-                                    .process_suggest(suggest, &subscriptions)
-                                    .await;
-                                let event = SessionResponse {
-                                    event: Some(proto::session_response::Event::Suggest(response)),
-                                };
-                                if tx.send(Ok(event)).await.is_err() {
-                                    subscriptions.stop_all(&service).await;
-                                    service.release_session_transaction_binding(&mut subscriptions);
-                                    return;
-                                }
-                            }
-                            Some(proto::session_request::Request::ListDomains(_)) => {
-                                let event = service.domain_list_response(true).await;
-                                if tx.send(Ok(event)).await.is_err() {
-                                    subscriptions.stop_all(&service).await;
-                                    service.release_session_transaction_binding(&mut subscriptions);
-                                    return;
-                                }
-                            }
-                            Some(proto::session_request::Request::SetActiveDomain(_)) => {
-                                tx.send(Err(Status::invalid_argument(
-                                    "active domain selection is only supported by the web console \
-                                     websocket",
-                                )))
-                                .await
-                                .means_peer_left("session response stream");
-                                subscriptions.stop_all(&service).await;
-                                service.release_session_transaction_binding(&mut subscriptions);
-                                return;
-                            }
-                            Some(proto::session_request::Request::AttachTransaction(request)) => {
-                                let result = service
-                                    .attach_transaction(request, &mut subscriptions)
-                                    .await;
-                                let event = SessionResponse {
-                                    event: Some(proto::session_response::Event::Result(Box::new(
-                                        result,
-                                    ))),
-                                };
-                                if tx.send(Ok(event)).await.is_err() {
-                                    subscriptions.stop_all(&service).await;
-                                    service.release_session_transaction_binding(&mut subscriptions);
-                                    return;
-                                }
-                            }
-                            None => {
-                                tx.send(Err(Status::invalid_argument(
-                                    "session request payload is missing",
-                                )))
-                                .await
-                                .means_peer_left("session response stream");
-                                subscriptions.stop_all(&service).await;
-                                service.release_session_transaction_binding(&mut subscriptions);
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
-
-            session_done.cancel();
-            subscriptions.stop_all(&service).await;
-            if clean_close {
-                service.clean_close_transaction(&mut subscriptions).await;
-            } else {
-                service.release_session_transaction_binding(&mut subscriptions);
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
-
-    async fn upload_resource(
-        &self,
-        request: Request<tonic::Streaming<UploadResourceRequest>>,
-    ) -> Result<Response<UploadResourceResponse>, Status> {
-        let authenticated_user = self.authenticate_grpc_metadata(request.metadata()).await?;
-        let leader = self.inner.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            let leader_node = match leader.as_ref() {
-                Some(leader_id) => self
-                    .inner
-                    .cluster
-                    .gossip_state()
-                    .await
-                    .live_nodes
-                    .into_iter()
-                    .find(|node| node.node_id == *leader_id),
-                None => None,
-            };
-            let mut leader_grpc_uri = String::new();
-            if let Some(node) = leader_node
-                && let Some(url) = node.client_url
-            {
-                leader_grpc_uri = url.to_string();
-            }
-            return Ok(Response::new(UploadResourceResponse {
-                success: false,
-                message: "resource uploads must be sent to the cluster leader".to_string(),
-                version: 0,
-                diagnostics: Vec::new(),
-                kind: i32::from(CommandResultKind::NotLeader),
-                leader: match leader {
-                    Some(leader) => leader.to_string(),
-                    None => String::new(),
-                },
-                leader_grpc_uri,
-                upload_identity: String::new(),
-            }));
-        }
-
-        let mut inbound = request.into_inner();
-        let Some(first) = inbound.message().await? else {
-            return Err(Status::invalid_argument(
-                "upload resource request relay is empty",
-            ));
-        };
-        let Some(proto::upload_resource_request::Event::Start(start)) = first.event else {
-            return Err(Status::invalid_argument(
-                "upload resource relay must start with metadata",
-            ));
-        };
-        let identifier = ModelName::parse(&start.name)
-            .map_err(|_| Status::invalid_argument("upload resource name is invalid"))?;
-        let upload_identity = ResourceUploadIdentity::parse(start.upload_identity)
-            .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        let domain = match parse_request_domain(&start.domain) {
-            Ok(domain) => domain,
-            Err(RequestDomainError::Missing) => {
-                return Err(Status::invalid_argument("no active domain selected"));
-            }
-            Err(RequestDomainError::Invalid) => {
-                return Err(Status::invalid_argument(
-                    "upload resource domain is invalid",
-                ));
-            }
-        };
-
-        let resources = self.inner.consensus.current_resources().await;
-        if !resources.is_declared(&domain, &ResourceName::from(&identifier)) {
-            return Ok(Response::new(UploadResourceResponse {
-                success: false,
-                message: format!("resource '{}' does not exist", identifier.as_str()),
-                version: 0,
-                diagnostics: Vec::new(),
-                kind: i32::from(CommandResultKind::Error),
-                leader: String::new(),
-                leader_grpc_uri: String::new(),
-                upload_identity: upload_identity.to_string(),
-            }));
-        }
-        if start.total_bytes == 0 {
-            return Err(Status::invalid_argument(
-                "upload resource must declare its archive size",
-            ));
-        }
-        self.inner
-            .resource_store
-            .validate_archive_bytes(start.total_bytes)
-            .map_err(|error| Status::resource_exhausted(error.to_string()))?;
-
-        let mut archive = self
-            .inner
-            .resource_store
-            .create_archive_stager()
-            .await
-            .map_err(|error| {
-                Status::internal(format!(
-                    "failed to create temporary upload archive: {error}"
-                ))
-            })?;
-        let mut total_received = 0u64;
-        while let Some(message) = inbound.message().await? {
-            tokio::task::consume_budget().await;
-            let Some(proto::upload_resource_request::Event::Chunk(chunk)) = message.event else {
-                return Err(Status::invalid_argument(
-                    "unexpected upload resource control event",
-                ));
-            };
-            let next_total = total_received
-                .checked_add(chunk.len().arch_into())
-                .ok_or_else(|| Status::invalid_argument("upload resource archive is too large"))?;
-            if next_total > start.total_bytes {
-                return Err(Status::invalid_argument(format!(
-                    "upload size exceeds declared size {}",
-                    start.total_bytes
-                )));
-            }
-            self.inner
-                .resource_store
-                .validate_archive_bytes(next_total)
-                .map_err(|error| Status::resource_exhausted(error.to_string()))?;
-            let chunk = self
-                .inner
-                .resource_store
-                .admit_staging_bytes(&chunk)
-                .await
-                .map_err(|error| Status::resource_exhausted(error.to_string()))?;
-            archive.write_chunk(chunk).await.map_err(|error| {
-                Status::internal(format!("failed to write upload resource chunk: {error}"))
-            })?;
-            total_received = next_total;
-        }
-        let archive = archive.finish().await.map_err(|error| {
-            Status::internal(format!("failed to flush upload resource archive: {error}"))
-        })?;
-
-        if start.total_bytes != total_received || archive.archive_bytes() != total_received {
-            return Ok(Response::new(UploadResourceResponse {
-                success: false,
-                message: format!(
-                    "upload size mismatch: expected {}, received {}",
-                    start.total_bytes, total_received
-                ),
-                version: 0,
-                diagnostics: Vec::new(),
-                kind: i32::from(CommandResultKind::Error),
-                leader: String::new(),
-                leader_grpc_uri: String::new(),
-                upload_identity: upload_identity.to_string(),
-            }));
-        }
-
-        let response_upload_identity = upload_identity.to_string();
-        let upload_key = ResourceUploadKey::new(
-            authenticated_user,
-            domain,
-            ResourceName::from(&identifier),
-            upload_identity,
-        );
-        let service = self.clone();
-        let root_checksum = archive.root_checksum().to_string();
-        let installation = self.inner.service_tasks.spawn(async move {
-            service
-                .install_uploaded_resource_archive(upload_key, archive.path(), root_checksum)
-                .await
-        });
-        let installation = installation
-            .await
-            .map_err(|error| Status::internal(format!("resource upload task failed: {error}")))?;
-        let Some(installation) = installation else {
-            return Err(Status::unavailable(
-                "the node shut down before the uploaded resource was installed",
-            ));
-        };
-        match installation {
-            Ok(installation) => Ok(Response::new(UploadResourceResponse {
-                success: true,
-                message: format!("uploaded resource version {}", installation.version),
-                version: installation.version,
-                diagnostics: Vec::new(),
-                kind: i32::from(CommandResultKind::Ok),
-                leader: String::new(),
-                leader_grpc_uri: String::new(),
-                upload_identity: response_upload_identity.clone(),
-            })),
-            Err(error) => {
-                let assigned_version = match error.downcast_ref::<ResourceUploadError>() {
-                    Some(error) => error.assigned_version().unwrap_or(0),
-                    None => 0,
-                };
-                let message = format!("{error:#}");
-                let result = match error.downcast_ref::<ConsensusError>() {
-                    Some(error) => self.consensus_error_response(error, message).await,
-                    None => command_error(message),
-                };
-                Ok(Response::new(UploadResourceResponse {
-                    success: false,
-                    message: result.message,
-                    version: assigned_version,
-                    diagnostics: result.diagnostics,
-                    kind: result.kind,
-                    leader: result.leader,
-                    leader_grpc_uri: result.leader_grpc_uri,
-                    upload_identity: response_upload_identity,
-                }))
-            }
-        }
-    }
 }
 
 /// The node-local handles that install the newest admitted runtime state.
@@ -825,13 +421,25 @@ pub(in crate::application) fn apply_current_cluster_runtime_state(
     })
 }
 
-fn error_response(kind: &str, diagnostics: &[ParseDiagnostic]) -> CommandResult {
+pub(in crate::application) fn error_response(
+    kind: &str,
+    diagnostics: &[ParseDiagnostic],
+) -> CommandResult {
     CommandResult {
-        success: false,
-        message: kind.to_string(),
         diagnostics: diagnostics.iter().map(map_diagnostic).collect(),
-        kind: i32::from(CommandResultKind::Error),
-        ..Default::default()
+        ..CommandResult::new(CommandDisposition::Failed, kind.to_string())
+    }
+}
+
+/// A failed result whose one diagnostic repeats its message at `span`.
+fn failed_at(message: String, span: Option<std::ops::Range<usize>>) -> CommandResult {
+    let diagnostic = CommandDiagnostic {
+        message: message.clone(),
+        span,
+    };
+    CommandResult {
+        diagnostics: vec![diagnostic],
+        ..CommandResult::new(CommandDisposition::Failed, message)
     }
 }
 
@@ -843,71 +451,37 @@ pub(in crate::application) fn create_registry_error_response(
 ) -> CommandResult {
     match err.current_context() {
         RegistryError::AlreadyExists { .. } => {
-            let span = find_identifier_span(query, model_id).unwrap_or(0..0);
+            let diagnostic = CommandDiagnostic {
+                message: format!("'{}' already exists", model_id.as_str()),
+                span: find_identifier_span(query, model_id),
+            };
+            let message = format!(
+                "{} '{}' already exists in domain '{}'",
+                infer_kind_from_error_target(err, model_id).unwrap_or("model"),
+                model_id.as_str(),
+                domain.as_str()
+            );
             CommandResult {
-                success: false,
-                message: format!(
-                    "{} '{}' already exists in domain '{}'",
-                    infer_kind_from_error_target(err, model_id).unwrap_or("model"),
-                    model_id.as_str(),
-                    domain.as_str()
-                ),
-                diagnostics: vec![Diagnostic {
-                    message: format!("'{}' already exists", model_id.as_str()),
-                    span_start: u32::try_from(span.start).unwrap_or(0),
-                    span_end: u32::try_from(span.end).unwrap_or(0),
-                }],
-                kind: i32::from(CommandResultKind::Error),
-                ..Default::default()
+                diagnostics: vec![diagnostic],
+                ..CommandResult::new(CommandDisposition::Failed, message)
             }
         }
         RegistryError::NotFound { .. }
         | RegistryError::StoredModelKindMismatch { .. }
         | RegistryError::DeleteInUse { .. }
         | RegistryError::InvalidModel { .. } => {
-            let span = find_identifier_span(query, model_id).unwrap_or(0..0);
-            CommandResult {
-                success: false,
-                message: format!("{err}"),
-                diagnostics: vec![Diagnostic {
-                    message: format!("{err}"),
-                    span_start: u32::try_from(span.start).unwrap_or(0),
-                    span_end: u32::try_from(span.end).unwrap_or(0),
-                }],
-                kind: i32::from(CommandResultKind::Error),
-                ..Default::default()
-            }
+            failed_at(format!("{err}"), find_identifier_span(query, model_id))
         }
         RegistryError::MissingReference { reference, .. } => {
             // A reference that is not a model name has nothing to underline in the query, and a
             // diagnostic without a span is still the diagnostic the operator needs.
             let span = match ModelName::try_from(reference.as_str()) {
-                Ok(id) => find_identifier_span(query, &id).unwrap_or(0..0),
-                Err(_) => 0..0,
+                Ok(id) => find_identifier_span(query, &id),
+                Err(_) => None,
             };
-            CommandResult {
-                success: false,
-                message: format!("{err}"),
-                diagnostics: vec![Diagnostic {
-                    message: format!("{err}"),
-                    span_start: u32::try_from(span.start).unwrap_or(0),
-                    span_end: u32::try_from(span.end).unwrap_or(0),
-                }],
-                kind: i32::from(CommandResultKind::Error),
-                ..Default::default()
-            }
+            failed_at(format!("{err}"), span)
         }
-        _ => CommandResult {
-            success: false,
-            message: format!("{err}"),
-            diagnostics: vec![Diagnostic {
-                message: format!("{err}"),
-                span_start: 0,
-                span_end: 0,
-            }],
-            kind: i32::from(CommandResultKind::Error),
-            ..Default::default()
-        },
+        _ => failed_at(format!("{err}"), None),
     }
 }
 
@@ -923,11 +497,10 @@ fn infer_kind_from_error_target(
     }
 }
 
-fn map_diagnostic(d: &ParseDiagnostic) -> Diagnostic {
-    Diagnostic {
+fn map_diagnostic(d: &ParseDiagnostic) -> CommandDiagnostic {
+    CommandDiagnostic {
         message: d.message.clone(),
-        span_start: u32::try_from(d.span.start).unwrap_or(u32::MAX),
-        span_end: u32::try_from(d.span.end).unwrap_or(u32::MAX),
+        span: Some(d.span.clone()),
     }
 }
 
@@ -1042,22 +615,25 @@ impl SessionServiceImpl {
         self.inner.events.report_error(message);
     }
 
+    /// The completions at the request's cursor, read against the session as `session` last left
+    /// it. The request's cursor is a byte offset on a character boundary of its input, which the
+    /// request type guarantees.
     pub(in crate::application) async fn process_suggest(
         &self,
         req: SuggestRequest,
-        subscriptions: &SessionSubscriptions,
-    ) -> SuggestResponse {
-        let cursor = req.cursor.arch_into();
-        let domain = parse_request_domain(&req.domain).ok();
+        session: &SessionView,
+    ) -> SuggestOutcome {
+        let cursor = req.cursor();
+        let domain = req.domain().cloned();
         let queued = self
-            .queued_configuration(subscriptions, domain.as_ref())
+            .queued_configuration(session.binding(), domain.as_ref())
             .await;
 
         let CompletionContext {
             grammar_input,
             grammar_cursor,
             prefix,
-        } = completion_context(&req.input, cursor);
+        } = completion_context(req.input(), cursor);
         let grammar = suggest_client_statement(&grammar_input, grammar_cursor);
 
         let mut suggestions = Vec::new();
@@ -1126,7 +702,7 @@ impl SessionServiceImpl {
         }
 
         if expects_session_subscription_ref {
-            suggestions.extend(subscriptions.matching_names(&prefix));
+            suggestions.extend(session.matching_subscription_names(&prefix));
         }
 
         if expects_runtime_node_ref
@@ -1181,95 +757,73 @@ impl SessionServiceImpl {
         let mut response_suggestions = SortedSet::from_unsorted(suggestions)
             .into_vec()
             .into_iter()
-            .map(|value| ApiSuggestion {
+            .map(|value| Suggestion {
                 value,
-                kind: i32::from(SuggestionKind::Text),
+                kind: SuggestionKind::Text,
             })
             .collect::<Vec<_>>();
 
-        if let Some(fragment) = upload_resource_path_fragment(&req.input, cursor) {
-            response_suggestions.push(ApiSuggestion {
+        if let Some(fragment) = upload_resource_path_fragment(req.input(), cursor) {
+            response_suggestions.push(Suggestion {
                 value: fragment.to_string(),
-                kind: i32::from(SuggestionKind::LocalDirectoryLookup),
+                kind: SuggestionKind::LocalDirectoryLookup,
             });
         }
 
-        SuggestResponse {
+        SuggestOutcome {
             suggestions: response_suggestions,
         }
     }
 
+    /// Serves one command request of a session, from its text to its typed result.
+    ///
+    /// `admission` is decided immediately before the command's first effect: a request cancelled
+    /// before that point returns [`CancelledBeforeAdmission`] having changed nothing.
     pub(in crate::application) async fn process_command(
         &self,
         req: CommandRequest,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
-    ) -> CommandResult {
-        let raw_reference = req.execution_reference.clone();
-        let execution_reference = match CommandExecutionReference::parse(raw_reference.clone()) {
-            Ok(reference) => reference,
-            Err(error) => {
-                let mut result = command_error(error.to_string());
-                result.execution_reference = raw_reference;
-                return result;
-            }
-        };
-        let expected_transaction_position = match req.expected_transaction_position {
-            Some(position) => match usize::try_from(position) {
-                Ok(position) => Some(position),
-                Err(_) => {
-                    let mut result = command_error(
-                        "expected transaction position exceeds this server's address space"
-                            .to_string(),
-                    );
-                    result.execution_reference = execution_reference.to_string();
-                    return result;
-                }
-            },
-            None => None,
-        };
-        let mut result = Box::pin(self.process_command_with_reference(
-            req,
-            tx,
-            subscriptions,
-            &execution_reference,
-            expected_transaction_position,
-        ))
-        .await;
-        result.execution_reference = execution_reference.to_string();
+        admission: &RequestAdmission,
+    ) -> Result<CommandResponse, CancelledBeforeAdmission> {
+        let response =
+            Box::pin(self.process_command_with_reference(req, subscriptions, admission)).await?;
         #[cfg(feature = "testing")]
         self.inner
             .runtime
             .pause_command_response_delivery_if_armed(self.inner.consensus.local_node_id())
             .await;
-        result
+        Ok(response)
     }
 
     async fn process_command_with_reference(
         &self,
         req: CommandRequest,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
-        execution_reference: &CommandExecutionReference,
-        expected_transaction_position: Option<usize>,
-    ) -> CommandResult {
+        admission: &RequestAdmission,
+    ) -> Result<CommandResponse, CancelledBeforeAdmission> {
+        let execution_reference = &req.execution_reference;
+        let expected_transaction_position = req
+            .expected_transaction_position
+            .map(TransactionPosition::accepted_operations);
         let client_statements = match parse_client_statement_sources(&req.query) {
             Ok(statements) => statements,
             Err(ParseFromSourceError::Lex { diagnostics, .. }) => {
-                return self
+                let result = self
                     .command_with_transaction_status(
                         error_response("lex error", &diagnostics),
                         subscriptions,
                     )
                     .await;
+                return Ok(CommandResponse::executed(result));
             }
             Err(ParseFromSourceError::Parse { diagnostics, .. }) => {
-                return self
+                let result = self
                     .command_with_transaction_status(
                         error_response("parse error", &diagnostics),
                         subscriptions,
                     )
                     .await;
+                return Ok(CommandResponse::executed(result));
             }
         };
 
@@ -1295,12 +849,11 @@ impl SessionServiceImpl {
         if is_transaction_request {
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                return self
-                    .command_with_transaction_status(
-                        self.not_leader_response(&req.query, leader).await,
-                        subscriptions,
-                    )
+                let result = self.not_leader_response(&req.query, leader).await;
+                let result = self
+                    .command_with_transaction_status(result, subscriptions)
                     .await;
+                return Ok(CommandResponse::executed(result));
             }
             execution_guard = Some(
                 self.inner
@@ -1315,42 +868,50 @@ impl SessionServiceImpl {
                 .await
             {
                 if execution.is_expired() {
-                    return command_error(format!(
-                        "command execution reference '{execution_reference}' has expired"
-                    ));
+                    return Ok(CommandResponse::executed(expired_reference(
+                        execution_reference,
+                    )));
                 }
                 let digest = match PersistentCommandRequest::transaction_digest(&req.query) {
                     Ok(digest) => digest,
-                    Err(error) => return command_error(error.to_string()),
+                    Err(error) => {
+                        return Ok(CommandResponse::executed(command_error(error.to_string())));
+                    }
                 };
-                let domain = parse_request_domain(&req.domain).ok();
                 let expected_position = expected_transaction_position.map(TransactionPosition::new);
                 if let Some(conflict) = execution.request_conflict(
                     &subscriptions.user,
-                    domain.as_ref(),
+                    req.domain.as_ref(),
                     expected_position,
                     digest,
                 ) {
-                    return command_error(format!(
-                        "command execution reference '{execution_reference}' conflicts by \
-                         {conflict}"
-                    ));
+                    return Ok(CommandResponse::executed(conflicting_reference(
+                        execution_reference,
+                        conflict,
+                    )));
                 }
                 let Some(target) = execution.transaction_target() else {
-                    return command_error(format!(
-                        "command execution reference '{execution_reference}' conflicts by position"
-                    ));
+                    return Ok(CommandResponse::executed(conflicting_reference(
+                        execution_reference,
+                        nervix_consensus::CommandExecutionRequestConflict::Position,
+                    )));
                 };
                 if let Some(bound) = subscriptions.transaction_id()
                     && bound != target.id()
                 {
-                    return command_error(format!(
-                        "command execution reference '{execution_reference}' conflicts by position"
-                    ));
+                    return Ok(CommandResponse::executed(conflicting_reference(
+                        execution_reference,
+                        nervix_consensus::CommandExecutionRequestConflict::Position,
+                    )));
                 }
-                return self
-                    .complete_persistent_command_request(execution, tx, subscriptions)
+                admission.admit()?;
+                let result = self
+                    .complete_persistent_command_request(execution, subscriptions)
                     .await;
+                return Ok(CommandResponse {
+                    result,
+                    origin: CommandOrigin::Recovered,
+                });
             }
             #[cfg(feature = "testing")]
             self.inner
@@ -1359,48 +920,37 @@ impl SessionServiceImpl {
                 .await;
             self.drop_transaction_bindings_if_armed();
             if subscriptions.transaction_active()
-                && let Err(error) = self.validate_session_transaction_binding(subscriptions)
+                && let Err(error) =
+                    self.validate_session_transaction_binding(subscriptions.binding())
             {
-                return self
+                let result = self
                     .command_with_transaction_status(error.into_command_result(), subscriptions)
                     .await;
+                return Ok(CommandResponse::executed(result));
             }
         }
 
-        let expected_preview = match req.expected_preview.clone() {
-            Some(preview) => match transaction_preview_identity(preview) {
-                Ok(preview) => Some(preview),
-                Err(error) => {
-                    return self
-                        .command_with_transaction_status(
-                            command_error(error.current_context().to_string()),
-                            subscriptions,
-                        )
-                        .await;
-                }
-            },
-            None => None,
-        };
         let operations = match subscriptions.plan_commands(
             client_statements,
             &req.query,
-            &req.domain,
+            req.domain.as_ref(),
             execution_reference,
             expected_transaction_position,
-            expected_preview,
+            req.expected_preview.clone(),
         ) {
             Ok(operations) => operations,
             Err(error) => {
-                return self
+                let result = self
                     .command_with_transaction_status(command_error(error), subscriptions)
                     .await;
+                return Ok(CommandResponse::executed(result));
             }
         };
 
         let persistent_request = if is_transaction_request {
-            let domain = match self.resolve_transaction_domain(&req.domain).await {
+            let domain = match self.resolve_transaction_domain(req.domain.as_ref()).await {
                 Ok(domain) => domain,
-                Err(error) => return command_error(error),
+                Err(error) => return Ok(CommandResponse::executed(command_error(error))),
             };
             let target = if matches!(
                 operations.first(),
@@ -1412,9 +962,9 @@ impl SessionServiceImpl {
                 }
             } else {
                 let Some(id) = subscriptions.transaction_id() else {
-                    return command_error(
+                    return Ok(CommandResponse::executed(command_error(
                         "transaction request has no durable transaction target".to_string(),
-                    );
+                    )));
                 };
                 CommandExecutionTransactionTarget::Existing {
                     id: id.to_string(),
@@ -1429,19 +979,24 @@ impl SessionServiceImpl {
                 target,
             ) {
                 Ok(request) => Some(request),
-                Err(error) => return command_error(error.to_string()),
+                Err(error) => {
+                    return Ok(CommandResponse::executed(command_error(error.to_string())));
+                }
             }
         } else {
-            match PersistentCommandRequest::from_operations(&operations, &req.domain) {
+            match PersistentCommandRequest::from_operations(&operations, req.domain.as_ref()) {
                 Ok(request) => request,
-                Err(error) => return command_error(error.to_string()),
+                Err(error) => {
+                    return Ok(CommandResponse::executed(command_error(error.to_string())));
+                }
             }
         };
         let mut persistent_execution = None;
         if let Some(request) = &persistent_request {
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                return self.not_leader_response(&req.query, leader).await;
+                let result = self.not_leader_response(&req.query, leader).await;
+                return Ok(CommandResponse::executed(result));
             }
             #[cfg(feature = "testing")]
             if !is_transaction_request {
@@ -1452,7 +1007,8 @@ impl SessionServiceImpl {
             }
             let leader = self.inner.consensus.current_leader().await;
             if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-                return self.not_leader_response(&req.query, leader).await;
+                let result = self.not_leader_response(&req.query, leader).await;
+                return Ok(CommandResponse::executed(result));
             }
             if execution_guard.is_none() {
                 execution_guard = Some(
@@ -1462,16 +1018,17 @@ impl SessionServiceImpl {
                         .await,
                 );
             }
-            let execution = match self
+            admission.admit()?;
+            let admitted = self
                 .admit_persistent_command(
                     execution_reference.clone(),
                     subscriptions.user.clone(),
                     request,
                 )
-                .await
-            {
-                Ok(execution) => execution,
-                Err(result) => return *result,
+                .await;
+            let admitted = match admitted {
+                Ok(admitted) => admitted,
+                Err(result) => return Ok(CommandResponse::executed(*result)),
             };
             #[cfg(feature = "testing")]
             self.inner
@@ -1480,47 +1037,74 @@ impl SessionServiceImpl {
                     self.inner.consensus.local_node_id(),
                 )
                 .await;
-            persistent_execution = Some(execution);
+            persistent_execution = Some(admitted);
         }
 
-        let result = match persistent_execution {
-            Some(execution) => {
-                self.complete_persistent_command_request(execution, tx, subscriptions)
-                    .await
-            }
+        let response = match persistent_execution {
+            Some(CommandAdmission::Admitted(execution)) => CommandResponse::executed(
+                self.complete_persistent_command_request(execution, subscriptions)
+                    .await,
+            ),
+            Some(CommandAdmission::Existing(execution)) => CommandResponse {
+                result: self
+                    .complete_persistent_command_request(execution, subscriptions)
+                    .await,
+                origin: CommandOrigin::Recovered,
+            },
             None => {
-                let result = Box::pin(self.process_session_command_operations(
-                    operations,
-                    tx,
-                    subscriptions,
-                ))
-                .await;
-                self.command_with_transaction_status(result, subscriptions)
-                    .await
+                admission.admit()?;
+                let result =
+                    Box::pin(self.process_session_command_operations(operations, subscriptions))
+                        .await;
+                CommandResponse::executed(
+                    self.command_with_transaction_status(result, subscriptions)
+                        .await,
+                )
             }
         };
         drop(execution_guard);
-        result
+        Ok(response)
+    }
+}
+
+/// The answer to a request whose execution reference aged out of execution history.
+fn expired_reference(reference: &CommandExecutionReference) -> CommandResult {
+    let message = format!("command execution reference '{reference}' has expired");
+    CommandResult {
+        diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+        ..CommandResult::new(CommandDisposition::ExecutionReferenceExpired, message)
+    }
+}
+
+/// The answer to a request whose execution reference already identifies a different command.
+pub(in crate::application) fn conflicting_reference(
+    reference: &CommandExecutionReference,
+    conflict: nervix_consensus::CommandExecutionRequestConflict,
+) -> CommandResult {
+    let message = format!("command execution reference '{reference}' conflicts by {conflict}");
+    CommandResult {
+        diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+        ..CommandResult::new(
+            CommandDisposition::ExecutionReferenceConflict(conflict),
+            message,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use meticulous::ResultExt as _;
-    use tokio::sync::mpsc;
 
     use super::{
         super::{
             subscription::SessionSubscriptions,
             test_fixtures::{
                 TestService, build_test_service, named, queue_in_transaction, suggestion_values,
+                test_execution_reference,
             },
+            transaction::TransactionAttachment,
         },
         *,
-    };
-    use crate::{
-        proto,
-        proto::{CommandRequest, SuggestRequest},
     };
 
     #[test]
@@ -1585,11 +1169,10 @@ mod tests {
         };
         let mapped = map_diagnostic(&parse_diagnostic);
         assert_eq!(mapped.message, "unexpected token");
-        assert_eq!(mapped.span_start, 3);
-        assert_eq!(mapped.span_end, 7);
+        assert_eq!(mapped.span, Some(3..7));
 
         let response = error_response("parse error", std::slice::from_ref(&parse_diagnostic));
-        assert!(!response.success);
+        assert!(!response.succeeded());
         assert_eq!(response.message, "parse error");
         assert_eq!(response.diagnostics, vec![mapped]);
 
@@ -1603,11 +1186,10 @@ mod tests {
             identifier: "orders".to_string(),
         });
         let registry_response = create_registry_error_response(query, &domain, &identifier, &err);
-        assert!(!registry_response.success);
+        assert!(!registry_response.succeeded());
         assert!(registry_response.message.contains("orders"));
         assert_eq!(registry_response.diagnostics.len(), 1);
-        assert_eq!(registry_response.diagnostics[0].span_start, 13);
-        assert_eq!(registry_response.diagnostics[0].span_end, 19);
+        assert_eq!(registry_response.diagnostics[0].span, Some(13..19));
         assert_eq!(
             infer_kind_from_error_target(&err, &identifier),
             Some("model")
@@ -1630,10 +1212,9 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let configured = service
-            .process_command(
+            .test_command(
                 CommandRequest {
                     query: "BEGIN; CREATE SCHEMA placement_event ( id I64 ); CREATE RELAY \
                             plain_input SCHEMA placement_event UNBRANCHED; CREATE RELAY \
@@ -1643,31 +1224,24 @@ mod tests {
                             plain_input UNBRANCHED TO plain_output INHERIT ALL FLUSH IMMEDIATE ON \
                             MESSAGE ERROR LOG; COMMIT;"
                         .to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    domain: Some(named("default")),
+                    execution_reference: test_execution_reference(),
                     expected_transaction_position: None,
                     expected_preview: None,
                 },
-                &tx,
                 &mut subscriptions,
             )
             .await;
         assert!(
-            configured.success,
+            configured.succeeded(),
             "placement completion fixture should configure: {configured:?}"
         );
 
         let input = "CREATE PLACEMENT policy FROM ";
+        let request = SuggestRequest::new(input.to_string(), input.len(), Some(named("default")))
+            .assured("the end of the input is a character boundary");
         let response = service
-            .process_suggest(
-                SuggestRequest {
-                    input: input.to_string(),
-                    cursor: u32::try_from(input.len())
-                        .assured("the test suggestion input is smaller than u32::MAX bytes"),
-                    domain: "default".to_string(),
-                },
-                &subscriptions,
-            )
+            .process_suggest(request, &subscriptions.view())
             .await;
         let values = response
             .suggestions
@@ -1698,14 +1272,12 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
-        queue_in_transaction(&service, &mut subscriptions, &tx, "BEGIN;").await;
+        queue_in_transaction(&service, &mut subscriptions, "BEGIN;").await;
         queue_in_transaction(
             &service,
             &mut subscriptions,
-            &tx,
             "CREATE SCHEMA queued_order ( order_id I64 );",
         )
         .await;
@@ -1725,13 +1297,11 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         queue_in_transaction(
             &service,
             &mut subscriptions,
-            &tx,
             "BEGIN; CREATE SCHEMA committed_order ( order_id I64 ); CREATE RELAY committed_orders \
              SCHEMA committed_order UNBRANCHED; COMMIT;",
         )
@@ -1743,14 +1313,8 @@ mod tests {
             "{committed:?}"
         );
 
-        queue_in_transaction(&service, &mut subscriptions, &tx, "BEGIN;").await;
-        queue_in_transaction(
-            &service,
-            &mut subscriptions,
-            &tx,
-            "DROP RELAY committed_orders;",
-        )
-        .await;
+        queue_in_transaction(&service, &mut subscriptions, "BEGIN;").await;
+        queue_in_transaction(&service, &mut subscriptions, "DROP RELAY committed_orders;").await;
 
         let dropped = suggestion_values(&service, &subscriptions, "DROP RELAY ").await;
         assert!(
@@ -1761,7 +1325,6 @@ mod tests {
         queue_in_transaction(
             &service,
             &mut subscriptions,
-            &tx,
             "CREATE RELAY committed_orders SCHEMA committed_order UNBRANCHED;",
         )
         .await;
@@ -1783,15 +1346,13 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut writer = SessionSubscriptions::new();
         let mut observer = SessionSubscriptions::new();
 
-        queue_in_transaction(&service, &mut writer, &tx, "BEGIN;").await;
+        queue_in_transaction(&service, &mut writer, "BEGIN;").await;
         queue_in_transaction(
             &service,
             &mut writer,
-            &tx,
             "CREATE SCHEMA isolated_order ( order_id I64 );",
         )
         .await;
@@ -1817,14 +1378,12 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
-        queue_in_transaction(&service, &mut subscriptions, &tx, "BEGIN;").await;
+        queue_in_transaction(&service, &mut subscriptions, "BEGIN;").await;
         queue_in_transaction(
             &service,
             &mut subscriptions,
-            &tx,
             "CREATE SCHEMA detached_order ( order_id I64 );",
         )
         .await;
@@ -1849,14 +1408,12 @@ mod tests {
         );
 
         let attached = service
-            .attach_transaction(
-                proto::AttachTransactionRequest {
-                    id: transaction_id.clone(),
-                },
-                &mut subscriptions,
-            )
+            .attach_transaction(transaction_id.clone(), &mut subscriptions)
             .await;
-        assert!(attached.success, "reattach must succeed: {attached:?}");
+        assert!(
+            matches!(attached, TransactionAttachment::Attached { .. }),
+            "reattach must succeed: {attached:?}"
+        );
 
         let reattached =
             suggestion_values(&service, &subscriptions, "CREATE RELAY orders SCHEMA ").await;
@@ -1876,15 +1433,13 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut first = SessionSubscriptions::new();
         let mut second = SessionSubscriptions::new();
 
-        queue_in_transaction(&service, &mut first, &tx, "BEGIN;").await;
+        queue_in_transaction(&service, &mut first, "BEGIN;").await;
         queue_in_transaction(
             &service,
             &mut first,
-            &tx,
             "CREATE SCHEMA takeover_order ( order_id I64 );",
         )
         .await;
@@ -1894,14 +1449,12 @@ mod tests {
             .to_string();
 
         let attached = service
-            .attach_transaction(
-                proto::AttachTransactionRequest {
-                    id: transaction_id.clone(),
-                },
-                &mut second,
-            )
+            .attach_transaction(transaction_id.clone(), &mut second)
             .await;
-        assert!(attached.success, "takeover must succeed: {attached:?}");
+        assert!(
+            matches!(attached, TransactionAttachment::Attached { .. }),
+            "takeover must succeed: {attached:?}"
+        );
 
         let displaced = suggestion_values(&service, &first, "CREATE RELAY orders SCHEMA ").await;
         assert!(
@@ -1924,21 +1477,18 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
-        queue_in_transaction(&service, &mut subscriptions, &tx, "BEGIN;").await;
+        queue_in_transaction(&service, &mut subscriptions, "BEGIN;").await;
         queue_in_transaction(
             &service,
             &mut subscriptions,
-            &tx,
             "CREATE SCHEMA queued_event ( id I64 );",
         )
         .await;
         queue_in_transaction(
             &service,
             &mut subscriptions,
-            &tx,
             "CREATE RELAY queued_state SCHEMA queued_event UNBRANCHED WITH MATERIALIZED STATE \
              LAST BY TIMESTAMP;",
         )
@@ -1946,7 +1496,6 @@ mod tests {
         queue_in_transaction(
             &service,
             &mut subscriptions,
-            &tx,
             "CREATE RELAY queued_plain SCHEMA queued_event UNBRANCHED;",
         )
         .await;

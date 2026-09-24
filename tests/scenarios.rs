@@ -4,10 +4,11 @@ extern crate shuttle_tokio as tokio;
 extern crate shuttle_tokio_util as tokio_util;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
     fs::{OpenOptions, create_dir_all},
     io::Write,
+    num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
@@ -60,10 +61,7 @@ use mysql_async::{
     prelude::Queryable as MySqlQueryable,
 };
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
-use nervix_client_core::{
-    Client, CommandOutcome as ClientCommandOutcome, CommandOutcomeKind as ClientCommandOutcomeKind,
-    TransactionState as ClientTransactionState,
-};
+use nervix_client_core::{Client, CommandOutcome as ClientCommandOutcome};
 use nervix_recovery::Discarded as _;
 use nervix_server::{
     FaultInjection, SchedulerMode, WasmStateResetRequestError, application::InternalTransportMode,
@@ -96,7 +94,7 @@ use crate::common::{
         BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        client_connect_options,
+        client_connect_options, client_domain,
     },
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
@@ -105,6 +103,7 @@ use crate::common::{
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
     phase_deadline::{BeforeDeadline, PhaseDeadline},
+    raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
     scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
@@ -118,6 +117,7 @@ use crate::common::{
 
 mod common;
 mod ingestion_time;
+mod session_protocol;
 
 const SCENARIOS_PATH: &str = "tests/features";
 const TEST_LOG_DIR: &str = "tests/logs";
@@ -237,6 +237,12 @@ struct ScenarioWorld {
     active_session_node: Option<String>,
     active_session_has_subscription: bool,
     transaction_clients: BTreeMap<String, Client>,
+    /// Rows a named client received and a step has not taken yet, as the client displays them.
+    client_subscription_rows: BTreeMap<String, VecDeque<String>>,
+    /// Requests the active session sent under names a scenario gave them.
+    session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// The reply to the last upload stream a scenario shaped itself.
+    last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
     /// When the message a delivery-delay assertion is about was published. Load moves this
     /// instant and the arrival together, which is what makes such an assertion hold on a
@@ -308,7 +314,7 @@ struct ScenarioWorld {
     dependencies: TestDependencies,
     background_nspl: Option<AbortOnDropHandle<Result<String, String>>>,
     background_command_result:
-        Option<AbortOnDropHandle<std::io::Result<nervix_proto::CommandResult>>>,
+        Option<AbortOnDropHandle<std::io::Result<nervix_client_wire::CommandOutcome>>>,
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
@@ -1537,7 +1543,7 @@ async fn when_open_transaction_is_held_on_server_process(
         .await
         .unwrap_or_else(|error| panic!("failed to open the retained transaction: {error}"));
     assert!(
-        result.success,
+        result.succeeded(),
         "the retained transaction must open: {}",
         result.message
     );
@@ -1546,7 +1552,7 @@ async fn when_open_transaction_is_held_on_server_process(
         .verified("a successful BEGIN returns its transaction identity");
     world
         .placeholders
-        .insert(placeholder, transaction.id.clone());
+        .insert(placeholder, transaction.transaction_id().to_string());
     world.last_command_output = Some(result.message);
     world.active_session = Some(session);
 }
@@ -1843,8 +1849,8 @@ async fn when_server_process_is_restarted_from_existing_database(world: &mut Sce
         .unwrap_or_else(|error| panic!("failed to restart nervix-server: {error}"));
 }
 
-#[when("the current protobuf client-wire baseline is captured")]
-async fn when_current_protobuf_client_wire_baseline_is_captured(world: &mut ScenarioWorld) {
+#[when("the current client-wire baseline is captured")]
+async fn when_current_client_wire_baseline_is_captured(world: &mut ScenarioWorld) {
     let domain = world.domain.clone();
     let test_id = world.test_id.clone();
     let process = world
@@ -3429,11 +3435,12 @@ async fn when_node_starts_durable_catch_up(
         .unwrap_or_else(|error| panic!("failed to resolve leader '{leader}': {error}"));
     let connect_options = client_connect_options(&leader_uri)
         .unwrap_or_else(|error| panic!("failed to configure the durable catch-up client: {error}"));
-    let client = Client::connect_with_options(&leader_uri, world.domain.clone(), connect_options)
-        .await
-        .unwrap_or_else(|error| {
-            panic!("failed to open the durable catch-up client session: {error}")
-        });
+    let client =
+        Client::connect_with_options(&leader_uri, client_domain(&world.domain), connect_options)
+            .await
+            .unwrap_or_else(|error| {
+                panic!("failed to open the durable catch-up client session: {error}")
+            });
     let started_at = Instant::now();
     let cancellation = CancellationToken::new();
     let writer_cancellation = cancellation.clone();
@@ -3453,10 +3460,10 @@ async fn when_node_starts_durable_catch_up(
                 outcome = request => outcome,
             };
             let outcome = outcome.map_err(|error| error.to_string())?;
-            if !outcome.success {
+            if !outcome.succeeded() {
                 return Err(format!(
                     "command failed with {:?}: {}; diagnostics: {:?}",
-                    outcome.kind, outcome.message, outcome.diagnostics
+                    outcome.disposition, outcome.message, outcome.diagnostics
                 ));
             }
             written = written
@@ -4466,7 +4473,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
         .expect("failed to resolve leader gRPC URI");
     let client = Client::connect_with_options(
         &grpc_uri,
-        world.domain.clone(),
+        client_domain(&world.domain),
         client_connect_options(&grpc_uri).expect("failed to build client TLS options"),
     )
     .await
@@ -4488,7 +4495,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
                 .await
                 .expect("WASM reset placement command must complete");
             assert!(
-                outcome.success,
+                outcome.succeeded(),
                 "WASM reset placement command must succeed: {command}: {}",
                 outcome.message
             );
@@ -4505,7 +4512,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
             .await
             .expect("WASM reset resource command must complete");
         assert!(
-            outcome.success,
+            outcome.succeeded(),
             "WASM reset resource command must succeed: {command}: {}",
             outcome.message
         );
@@ -4625,7 +4632,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
                 .await
                 .expect("WASM reset placement command must complete");
             assert!(
-                outcome.success,
+                outcome.succeeded(),
                 "WASM reset placement command must succeed: {command}: {}",
                 outcome.message
             );
@@ -4640,7 +4647,7 @@ async fn configure_wasm_state_reset_graph(world: &mut ScenarioWorld, graph: Wasm
                 .await
                 .expect("WASM reset placement status must complete");
             assert!(
-                outcome.success,
+                outcome.succeeded(),
                 "WASM reset placement status must succeed: {}",
                 outcome.message
             );
@@ -6853,7 +6860,16 @@ async fn then_command_admission_pause_is_reached(world: &mut ScenarioWorld, node
             }
             return;
         }
-        panic!("a background command request must be active");
+        // A request the active session sent under a name answers only when a later step reads
+        // it, so its pause is awaited on its own.
+        assert!(
+            !world.session_requests.is_empty(),
+            "a background command request or a named session request must be active"
+        );
+        let node_name = crate::common::cluster::node_name(&node_id);
+        fault_injection
+            .wait_for_command_admission_pause(&node_name)
+            .await;
     })
     .await
     .unwrap_or_else(|error| {
@@ -6885,11 +6901,20 @@ async fn then_command_durable_admission_pause_is_reached(
     let node_id = expand_placeholders(world, &node_id);
     let node_name = crate::common::cluster::node_name(&node_id);
     let fault_injection = world.fault_injection.clone();
-    let task = world
-        .background_command_result
-        .as_mut()
-        .verified("the preceding step started a background command request");
+    let task = world.background_command_result.as_mut();
+    assert!(
+        task.is_some() || !world.session_requests.is_empty(),
+        "a background command request or a named session request must be active"
+    );
     tokio::time::timeout(Duration::from_secs(30), async {
+        let Some(task) = task else {
+            // A request the active session sent under a name answers only when a later step
+            // reads it, so its pause is awaited on its own.
+            fault_injection
+                .wait_for_command_durable_admission_pause(&node_name)
+                .await;
+            return;
+        };
         tokio::select! {
             () = fault_injection.wait_for_command_durable_admission_pause(&node_name) => {},
             result = task => panic!(
@@ -7666,6 +7691,17 @@ async fn then_node_reports_that_its_last_shutdown_passed_its_deadline(
         failure.contains("did not finish before its shutdown deadline"),
         "node '{node_id}' stopped with an unrelated failure: {failure}"
     );
+}
+
+#[then(expr = "node {string} reports that its last shutdown finished before its deadline")]
+async fn then_node_reports_that_its_last_shutdown_finished_before_its_deadline(
+    world: &mut ScenarioWorld,
+    node_id: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    if let Some(failure) = world.cluster().node_run_failure(&node_id) {
+        panic!("node '{node_id}' did not finish its shutdown cleanly: {failure}");
+    }
 }
 
 #[then(expr = "the last authentication attempts take at least {string}")]
@@ -8460,7 +8496,7 @@ async fn when_exact_command_retry_begins_in_parallel(
             .run_command_result_with_reference(&query, &execution_reference)
             .await
             .map_err(|error| error.to_string())?;
-        if result.success {
+        if result.succeeded() {
             Ok(result.message)
         } else {
             Err(result.message)
@@ -8641,7 +8677,7 @@ async fn execute_command_request_with_reference_on_leader(
         .run_command_result_with_reference(&query, execution_reference)
         .await
         .unwrap_or_else(|error| panic!("resumed command request failed: {error}"));
-    if result.success {
+    if result.succeeded() {
         world.last_command_error = None;
         world.last_command_output = Some(result.message);
     } else {
@@ -8692,25 +8728,26 @@ async fn then_background_command_request_redirects(world: &mut ScenarioWorld, no
         .unwrap_or_else(|error| panic!("background command request did not finish: {error}"))
         .unwrap_or_else(|error| panic!("background command request task failed: {error}"))
         .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
-    assert!(
-        !result.success,
-        "leadership loss must reject the command: {result:?}"
-    );
+    let nervix_client_wire::CommandDisposition::NotLeader(redirect) = &result.disposition else {
+        panic!("leadership loss must produce a typed redirect: {result:?}");
+    };
+    let leader = redirect
+        .leader
+        .as_ref()
+        .unwrap_or_else(|| panic!("the redirect must name the current leader: {result:?}"));
     assert_eq!(
-        result.kind,
-        i32::from(nervix_proto::CommandResultKind::NotLeader),
-        "leadership loss must produce a typed redirect: {result:?}"
-    );
-    assert_eq!(
-        result.leader, node_id,
+        leader.node.as_str(),
+        node_id,
         "redirect must name the current leader"
     );
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node_id)
         .unwrap_or_else(|error| panic!("the redirect target must be a cluster node: {error}"));
+    let grpc_uri = url::Url::parse(&grpc_uri).expect("cluster gRPC URIs are URLs");
     assert_eq!(
-        result.leader_grpc_uri, grpc_uri,
+        leader.grpc_uri.as_ref(),
+        Some(&grpc_uri),
         "redirect must carry the leader endpoint"
     );
 }
@@ -8727,7 +8764,7 @@ async fn then_background_command_request_succeeds(world: &mut ScenarioWorld) {
         .assured("the background command request task is owned by this scenario")
         .unwrap_or_else(|error| panic!("background command request transport failed: {error}"));
     assert!(
-        result.success,
+        result.succeeded(),
         "background command request failed: {}",
         result.message
     );
@@ -8761,7 +8798,7 @@ async fn when_named_client_begins_executing_in_the_background(
                 .execute(command)
                 .await
                 .map_err(|error| error.to_string())?;
-            if !outcome.success {
+            if !outcome.succeeded() {
                 return Err(outcome.message);
             }
             last_output = outcome.message;
@@ -8801,7 +8838,7 @@ async fn when_named_client_begins_resource_upload_in_the_background(
             .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
             .await
             .map_err(|error| error.to_string())?;
-        if outcome.success {
+        if outcome.succeeded() {
             Ok(outcome.message)
         } else {
             Err(outcome.message)
@@ -9153,7 +9190,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_a_follower_
         .expect("failed to resolve follower gRPC URI");
     let client = Client::connect_with_options(
         &grpc_uri,
-        world.domain.clone(),
+        client_domain(&world.domain),
         client_connect_options(&grpc_uri).expect("failed to build client tls options"),
     )
     .await
@@ -9165,7 +9202,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_a_follower_
             .await
             .expect("client command should complete");
         assert!(
-            outcome.success,
+            outcome.succeeded(),
             "client command must succeed: {command}: {}",
             outcome.message
         );
@@ -9182,7 +9219,7 @@ async fn connect_named_client_to_node(world: &mut ScenarioWorld, name: String, n
         .expect("failed to resolve client node gRPC URI");
     let client = Client::connect_with_options(
         &grpc_uri,
-        world.domain.clone(),
+        client_domain(&world.domain),
         client_connect_options(&grpc_uri).expect("failed to build client tls options"),
     )
     .await
@@ -9231,7 +9268,7 @@ async fn given_named_client_is_connected_to_leader_as_user(
         client_connect_options(&grpc_uri).expect("failed to build client tls options");
     options.username = Some(expand_placeholders(world, &username));
     options.password = Some(expand_placeholders(world, &password));
-    let client = Client::connect_with_options(&grpc_uri, world.domain.clone(), options)
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
         .await
         .unwrap_or_else(|error| {
             panic!("failed to connect client '{name}' as '{username}': {error}")
@@ -9278,7 +9315,7 @@ async fn when_named_client_executes_commands(
             .await
             .unwrap_or_else(|error| panic!("client '{name}' command failed: {command}: {error}"));
         assert!(
-            outcome.success,
+            outcome.succeeded(),
             "client '{name}' command must succeed: {command}: {}",
             outcome.message
         );
@@ -9307,7 +9344,7 @@ async fn when_named_client_submits_command_request(
         .execute(request.clone())
         .await
         .unwrap_or_else(|error| panic!("client '{name}' request failed: {request}: {error}"));
-    if outcome.success {
+    if outcome.succeeded() {
         world.last_command_output = Some(outcome.message.clone());
     } else {
         world.last_command_error = Some(outcome.message.clone());
@@ -9333,7 +9370,7 @@ async fn when_named_client_fails_to_execute_commands(
     for command in nspl_statements(&commands) {
         tokio::task::consume_budget().await;
         match client.execute(command.clone()).await {
-            Ok(outcome) if outcome.success => {
+            Ok(outcome) if outcome.succeeded() => {
                 world.last_command_output = Some(outcome.message);
             }
             Ok(outcome) => {
@@ -9358,7 +9395,7 @@ async fn when_named_client_selects_domain(world: &mut ScenarioWorld, name: Strin
         .get(&name)
         .unwrap_or_else(|| panic!("client '{name}' must be connected"))
         .clone();
-    client.set_domain(domain).await;
+    client.set_domain(client_domain(&domain)).await;
 }
 
 #[when(expr = "client {string} uploads resource {string} from {string} with identity {string}")]
@@ -9387,11 +9424,48 @@ async fn when_named_client_uploads_resource_with_identity(
         .await
         .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
     assert!(
-        outcome.success,
+        outcome.succeeded(),
         "client '{name}' resource upload must succeed: {}",
         outcome.message
     );
-    world.last_command_output = Some(outcome.message);
+    world.last_command_output = Some(outcome.message.clone());
+    world.last_client_outcome = Some(outcome);
+}
+
+fn assert_last_client_upload(
+    world: &ScenarioWorld,
+    version: u64,
+    origin: nervix_client_core::OutcomeOrigin,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .expect("a client upload must have been made");
+    let upload = outcome
+        .resource_upload
+        .as_ref()
+        .unwrap_or_else(|| panic!("the last client outcome was not an upload: {outcome:?}"));
+    let installed = upload.version.map(std::num::NonZeroU64::get);
+    assert_eq!(
+        installed,
+        Some(version),
+        "unexpected upload version: {upload:?}"
+    );
+    assert_eq!(
+        upload.origin,
+        Some(origin),
+        "unexpected upload origin: {upload:?}"
+    );
+}
+
+#[then(expr = "the last client upload installed version {int}")]
+async fn then_last_client_upload_installed_version(world: &mut ScenarioWorld, version: u64) {
+    assert_last_client_upload(world, version, nervix_client_core::OutcomeOrigin::Executed);
+}
+
+#[then(expr = "the last client upload recovered version {int} from an earlier upload")]
+async fn then_last_client_upload_recovered_version(world: &mut ScenarioWorld, version: u64) {
+    assert_last_client_upload(world, version, nervix_client_core::OutcomeOrigin::Recovered);
 }
 
 #[when(
@@ -9406,13 +9480,31 @@ async fn when_incomplete_resource_upload_is_sent(
     let resource = expand_placeholders(world, &resource);
     let identity = expand_placeholders(world, &identity);
     let leader = current_leader_node(world).await;
+    // Declares two bytes and carries one, so the server must refuse it.
+    let upload = TestUpload {
+        domain: &world.domain,
+        resource: &resource,
+        identity: &identity,
+        parts: vec![
+            TestUploadPart::Start {
+                declared_bytes: NonZeroU64::new(2).assured("two is non-zero"),
+            },
+            TestUploadPart::Chunk(vec![0]),
+        ],
+    };
     let result = world
         .cluster()
-        .send_incomplete_resource_upload(&leader, &world.domain, &resource, &identity)
+        .send_shaped_resource_upload(&leader, upload)
         .await
         .unwrap_or_else(|error| panic!("incomplete upload request failed: {error}"));
-    assert!(!result.success, "incomplete upload unexpectedly succeeded");
-    assert_eq!(result.upload_identity, identity);
+    let nervix_client_wire::UploadDisposition::Failed {
+        upload_identity: Some(upload_identity),
+        ..
+    } = &result.disposition
+    else {
+        panic!("incomplete upload unexpectedly succeeded: {result:?}");
+    };
+    assert_eq!(upload_identity.as_str(), identity);
     world.last_command_error = Some(result.message.clone());
     world.last_command_output = Some(result.message);
 }
@@ -9445,7 +9537,10 @@ async fn when_named_client_resource_upload_fails_with(
         .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
         .await
         .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
-    assert!(!outcome.success, "resource upload unexpectedly succeeded");
+    assert!(
+        !outcome.succeeded(),
+        "resource upload unexpectedly succeeded"
+    );
     assert!(
         outcome.message.contains(&expected),
         "resource upload error did not contain '{expected}': {}",
@@ -9470,7 +9565,8 @@ async fn then_named_client_active_domain_is(
         .clone();
     let actual = client.domain().await;
     assert_eq!(
-        actual, expected,
+        actual,
+        client_domain(&expected),
         "client '{name}' active domain must be '{expected}'"
     );
 }
@@ -9491,7 +9587,9 @@ async fn then_named_client_transaction_id_is_saved(
         .transaction_status()
         .await
         .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
-    world.placeholders.insert(placeholder, status.id);
+    world
+        .placeholders
+        .insert(placeholder, status.transaction_id().to_string());
 }
 
 #[then(expr = "client {string} transaction state is {string} with failing step {int}")]
@@ -9512,8 +9610,15 @@ async fn then_named_client_transaction_failed_at_step(
         .transaction_status()
         .await
         .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
-    assert_eq!(client_transaction_state_name(status.state), expected_state);
-    assert_eq!(status.failing_step, Some(failing_step));
+    let nervix_client_core::TransactionLifecycle::Failed {
+        failing_operation, ..
+    } = status.lifecycle()
+    else {
+        panic!("client '{name}' transaction must have failed: {status:?}");
+    };
+    assert_eq!(status.lifecycle().as_ref(), expected_state);
+    let failing_step = usize::try_from(failing_step).expect("a step number fits in usize");
+    assert_eq!(failing_operation.get(), failing_step);
 }
 
 #[when(expr = "client {string} attempts to commit its transaction")]
@@ -9531,7 +9636,7 @@ async fn when_named_client_attempts_commit(world: &mut ScenarioWorld, name: Stri
         .execute("COMMIT;")
         .await
         .unwrap_or_else(|error| panic!("client '{name}' COMMIT did not reach the server: {error}"));
-    if outcome.success {
+    if outcome.succeeded() {
         world.last_command_output = Some(outcome.message.clone());
     } else {
         world.last_command_error = Some(outcome.message.clone());
@@ -9547,30 +9652,28 @@ async fn then_named_client_commit_refused_as_stale(world: &mut ScenarioWorld, na
         .as_ref()
         .unwrap_or_else(|| panic!("client '{name}' has not attempted a commit"));
     assert!(
-        !outcome.success,
+        !outcome.succeeded(),
         "client '{name}' commit must be refused: {}",
         outcome.message
     );
+    let nervix_client_core::CommandDisposition::PreviewStale { expected, current } =
+        &outcome.disposition
+    else {
+        panic!(
+            "client '{name}' commit must report a stale preview: {}",
+            outcome.message
+        );
+    };
     assert_eq!(
-        outcome.kind,
-        ClientCommandOutcomeKind::PreviewStale,
-        "client '{name}' commit must report a stale preview: {}",
-        outcome.message
-    );
-    let stale = outcome
-        .preview_stale
-        .as_ref()
-        .unwrap_or_else(|| panic!("client '{name}' stale commit must name both previews"));
-    assert_eq!(
-        stale.expected.transaction_id, stale.current.transaction_id,
+        expected.transaction_id, current.transaction_id,
         "a stale preview describes the same transaction the commit named"
     );
     assert_eq!(
-        stale.expected.position, stale.current.position,
+        expected.position, current.position,
         "nothing was appended, so only the planning basis moved"
     );
     assert_ne!(
-        stale.expected.planning_basis, stale.current.planning_basis,
+        expected.planning_basis, current.planning_basis,
         "a stale preview names a planning basis the transaction has outgrown"
     );
 }
@@ -9592,19 +9695,7 @@ async fn then_named_client_transaction_state_is(
         .transaction_status()
         .await
         .unwrap_or_else(|| panic!("client '{name}' does not have a transaction status"));
-    assert_eq!(client_transaction_state_name(status.state), expected_state);
-}
-
-fn client_transaction_state_name(state: ClientTransactionState) -> &'static str {
-    match state {
-        ClientTransactionState::Unspecified => "UNSPECIFIED",
-        ClientTransactionState::Open => "OPEN",
-        ClientTransactionState::Committing => "COMMITTING",
-        ClientTransactionState::Committed => "COMMITTED",
-        ClientTransactionState::Failed => "FAILED",
-        ClientTransactionState::Reverted => "REVERTED",
-        ClientTransactionState::Expired => "EXPIRED",
-    }
+    assert_eq!(status.lifecycle().as_ref(), expected_state);
 }
 
 #[then(expr = "client {string} has no transaction")]
@@ -9736,7 +9827,7 @@ async fn when_named_client_attaches_to_transaction(
             panic!("client '{name}' failed to attach transaction '{transaction_id}': {error}")
         });
     assert!(
-        outcome.success,
+        outcome.succeeded(),
         "client '{name}' must attach transaction '{transaction_id}': {}",
         outcome.message
     );
@@ -9761,14 +9852,14 @@ async fn when_named_client_fails_to_attach_to_transaction(
     match client.attach_transaction(transaction_id.clone()).await {
         Ok(outcome) => {
             assert!(
-                !outcome.success,
+                !outcome.succeeded(),
                 "client '{name}' unexpectedly attached transaction '{transaction_id}'"
             );
             world.last_command_output = Some(
                 outcome
-                    .results
+                    .statements
                     .iter()
-                    .map(|result| result.message.as_str())
+                    .map(|statement| statement.message.as_str())
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
@@ -9792,7 +9883,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_the_leader_
         .expect("failed to resolve leader gRPC URI");
     let client = Client::connect_with_options(
         &grpc_uri,
-        world.domain.clone(),
+        client_domain(&world.domain),
         client_connect_options(&grpc_uri).expect("failed to build client tls options"),
     )
     .await
@@ -9804,7 +9895,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_the_leader_
             .await
             .expect("client command should complete");
         assert!(
-            outcome.success,
+            outcome.succeeded(),
             "client command must succeed: {command}: {}",
             outcome.message
         );
@@ -9860,9 +9951,9 @@ async fn when_the_client_attempts_to_connect_to_the_leader_node_as_user_with_pas
             client_connect_options(&grpc_uri).expect("failed to build client tls options");
         options.username = Some(username.clone());
         options.password = Some(password.clone());
-        match Client::connect_with_options(&grpc_uri, world.domain.clone(), options).await {
+        match Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options).await {
             Ok(client) => match client.execute("SHOW CLUSTER STATUS;".to_string()).await {
-                Ok(outcome) if outcome.success => {
+                Ok(outcome) if outcome.succeeded() => {
                     panic!("auth attempt {attempt} unexpectedly succeeded");
                 }
                 Ok(outcome) => {
@@ -9902,9 +9993,9 @@ async fn connect_to_leader_with_credentials(
         client_connect_options(&grpc_uri).expect("failed to build client tls options");
     options.username = Some(username);
     options.password = Some(password);
-    match Client::connect_with_options(&grpc_uri, world.domain.clone(), options).await {
+    match Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options).await {
         Ok(client) => match client.execute("SHOW CLUSTER STATUS;".to_string()).await {
-            Ok(outcome) if outcome.success => {
+            Ok(outcome) if outcome.succeeded() => {
                 world.last_command_output = Some(outcome.message);
             }
             Ok(outcome) => {
@@ -9939,7 +10030,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
         .expect("failed to resolve node gRPC URI");
     let client = Client::connect_with_options(
         &grpc_uri,
-        world.domain.clone(),
+        client_domain(&world.domain),
         client_connect_options(&grpc_uri).expect("failed to build client tls options"),
     )
     .await
@@ -9951,7 +10042,7 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_node(
             .await
             .expect("client command should complete");
         assert!(
-            outcome.success,
+            outcome.succeeded(),
             "client command must succeed: {command}: {}",
             outcome.message
         );
@@ -9978,7 +10069,7 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
         .expect("failed to resolve node gRPC URI");
     let client = Client::connect_with_options(
         &grpc_uri,
-        world.domain.clone(),
+        client_domain(&world.domain),
         client_connect_options(&grpc_uri).expect("failed to build client tls options"),
     )
     .await
@@ -9990,7 +10081,7 @@ async fn when_these_nspl_commands_fail_through_the_client_on_node_with(
             .await
             .expect("client command should complete");
         assert!(
-            !outcome.success,
+            !outcome.succeeded(),
             "client command must fail: {command}: {}",
             outcome.message
         );
@@ -10109,10 +10200,12 @@ async fn when_new_session_attaches_and_executes_referenced_command(
         .await
         .unwrap_or_else(|error| panic!("failed to attach replay session: {error}"));
     assert!(
-        attached.success,
+        attached.succeeded(),
         "failed to attach replay session: {}",
         attached.message
     );
+    let expected_transaction_position = usize::try_from(expected_transaction_position)
+        .expect("a scenario transaction position fits in usize");
     let result = session
         .run_command_result_with_reference_at_position(
             &query,
@@ -10121,7 +10214,7 @@ async fn when_new_session_attaches_and_executes_referenced_command(
         )
         .await
         .unwrap_or_else(|error| panic!("replayed command request failed: {error}"));
-    if result.success {
+    if result.succeeded() {
         world.last_command_error = None;
         world.last_command_output = Some(result.message);
     } else {
@@ -17175,22 +17268,41 @@ async fn then_named_client_receives_subscription_payload(
         .get(&client_name)
         .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
         .clone();
-    let event = tokio::time::timeout(duration, client.next_subscription())
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "client '{client_name}' did not receive a subscription payload within {duration:?}"
-            )
-        })
-        .unwrap_or_else(|error| {
-            panic!("client '{client_name}' subscription stream closed: {error}")
-        });
+    let deadline = Instant::now() + duration;
+    let payload = loop {
+        tokio::task::consume_budget().await;
+        let pending = world
+            .client_subscription_rows
+            .entry(client_name.clone())
+            .or_default();
+        if let Some(payload) = pending.pop_front() {
+            break payload;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let event = tokio::time::timeout(remaining, client.next_subscription())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "client '{client_name}' did not receive a subscription payload within \
+                     {duration:?}"
+                )
+            })
+            .unwrap_or_else(|error| {
+                panic!("client '{client_name}' subscription stream closed: {error}")
+            });
+        let nervix_client_core::SubscriptionEvent::Rows(rows) = event else {
+            continue;
+        };
+        let lines = rows
+            .display_lines()
+            .unwrap_or_else(|error| panic!("client '{client_name}' rows do not render: {error}"));
+        pending.extend(lines);
+    };
     assert!(
-        payload_matches_expected(&event.payload, &expected),
-        "client '{client_name}' expected subscription payload {expected:?}, got {:?}",
-        event.payload
+        payload_matches_expected(&payload, &expected),
+        "client '{client_name}' expected subscription payload {expected:?}, got {payload:?}"
     );
-    world.last_subscription_payload = Some(event.payload);
+    world.last_subscription_payload = Some(payload);
 }
 
 #[then(expr = "node {string} eventually accepts websocket traffic for host {string} path {string}")]
@@ -18708,7 +18820,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error(
         .expect("failed while waiting for server error")
         .unwrap_or_else(|| panic!("timed out waiting for a server error within {:?}", duration));
     append_cucumber_log_line(&format!(
-        "observed runtime server error level={} message={}",
+        "observed runtime server error level={:?} message={}",
         event.level, event.message
     ));
     world.last_server_error = Some(event.message);
@@ -18746,7 +18858,7 @@ async fn then_within_duration_the_active_session_observes_a_server_error_contain
             );
         };
         append_cucumber_log_line(&format!(
-            "observed runtime server error level={} message={}",
+            "observed runtime server error level={:?} message={}",
             event.level, event.message
         ));
         if event.message.contains(&expected) {

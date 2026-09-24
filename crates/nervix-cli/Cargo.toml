@@ -24,3 +24,7 @@ rpassword = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 triomphe = { workspace = true }
+
+[dev-dependencies]
+meticulous = { workspace = true }
+url = { workspace = true }

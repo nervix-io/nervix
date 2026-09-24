@@ -6552,6 +6552,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "error-stack",
+ "meticulous",
  "nervix-client-core",
  "nervix-models",
  "nervix-nspl",
@@ -6561,24 +6562,25 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "triomphe",
+ "url",
 ]
 
 [[package]]
 name = "nervix-client-core"
 version = "0.1.0-dev"
 dependencies = [
+ "ahash",
  "arch-into",
  "async-tar",
  "base64 0.22.1",
  "error-stack",
+ "indexmap 2.14.2",
  "meticulous",
+ "nervix-client-wire",
  "nervix-models",
  "nervix-nspl",
- "nervix-proto",
  "nervix-recovery",
- "prost 0.13.5",
  "rustls",
- "serde_json",
  "shuttle-tokio",
  "shuttle-tokio-stream",
  "strum 0.26.3",
@@ -6596,6 +6598,7 @@ dependencies = [
 name = "nervix-client-wire"
 version = "0.1.0-dev"
 dependencies = [
+ "base64-simd",
  "bytes",
  "error-stack",
  "flatbuffers",
@@ -6603,6 +6606,7 @@ dependencies = [
  "futures-util",
  "meticulous",
  "nervix-models",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
@@ -7221,16 +7225,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nervix-proto"
-version = "0.1.0-dev"
-dependencies = [
- "meticulous",
- "prost 0.13.5",
- "tonic 0.13.1",
- "tonic-build",
-]
-
-[[package]]
 name = "nervix-recovery"
 version = "0.1.0-dev"
 dependencies = [
@@ -7354,7 +7348,6 @@ dependencies = [
  "nervix-jaq",
  "nervix-models",
  "nervix-nspl",
- "nervix-proto",
  "nervix-recovery",
  "nervix-roto",
  "nervix-test-environment",
@@ -7535,6 +7528,7 @@ name = "nervix-web-console"
 version = "0.1.0-dev"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "console_error_panic_hook",
  "futures-channel",
  "futures-util",
@@ -7543,12 +7537,11 @@ dependencies = [
  "leptos",
  "meticulous",
  "nervix-approx-into",
+ "nervix-client-wire",
  "nervix-dataflow-graph",
  "nervix-models",
  "nervix-nspl",
- "nervix-proto",
  "nervix-recovery",
- "prost 0.13.5",
  "url",
  "uuid",
  "wasm-bindgen",
@@ -12269,20 +12262,6 @@ dependencies = [
  "tower-service",
  "tracing",
  "webpki-roots 1.0.9",
-]
-
-[[package]]
-name = "tonic-build"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eac6f67be712d12f0b41328db3137e0d0757645d8904b4cb7d51cd9c2279e847"
-dependencies = [
- "prettyplease 0.2.37",
- "proc-macro2",
- "prost-build",
- "prost-types 0.13.5",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]

@@ -15,11 +15,13 @@ default = []
 grpc = ["dep:tonic"]
 
 [dependencies]
+base64-simd = { workspace = true }
 bytes = { workspace = true }
 error-stack = { workspace = true }
 flatbuffers = { workspace = true }
 meticulous = { workspace = true }
 nervix-models = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tonic = { workspace = true, optional = true }
 url = { workspace = true }

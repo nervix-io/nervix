@@ -82,6 +82,17 @@ pub(super) struct PendingLookupHashMapCall {
 pub(super) fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>) {
     match &expr.inner {
         Expr::Literal(_) | Expr::InternalFieldRef(_) => {}
+        Expr::Membership { operand, set } => {
+            collect_expr_field_refs(operand, refs);
+            for element in set {
+                collect_expr_field_refs(element, refs);
+            }
+        }
+        Expr::Between { operand, low, high } => {
+            collect_expr_field_refs(operand, refs);
+            collect_expr_field_refs(low, refs);
+            collect_expr_field_refs(high, refs);
+        }
         Expr::FieldRef(field_ref) => {
             refs.push((field_ref.relay.clone(), field_ref.field.clone()));
         }
@@ -157,6 +168,14 @@ pub(super) fn lookup_hash_map_literal_arg(
 pub(super) fn expr_contains_lookup_hash_map(expr: &SpannedExpr) -> bool {
     match &expr.inner {
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
+        Expr::Membership { operand, set } => {
+            expr_contains_lookup_hash_map(operand) || set.iter().any(expr_contains_lookup_hash_map)
+        }
+        Expr::Between { operand, low, high } => {
+            expr_contains_lookup_hash_map(operand)
+                || expr_contains_lookup_hash_map(low)
+                || expr_contains_lookup_hash_map(high)
+        }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expr_contains_lookup_hash_map(expr),
         Expr::Binary { left, right, .. } => {
             expr_contains_lookup_hash_map(left) || expr_contains_lookup_hash_map(right)
@@ -193,6 +212,42 @@ pub(super) fn rewrite_lookup_hash_map_expr(
 ) -> error_stack::Result<SpannedExpr, LookupHashMapError> {
     let rewritten = match &expr.inner {
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => expr.clone(),
+        Expr::Membership { operand, set } => nervix_vm::program::SpannedNode {
+            inner: Expr::Membership {
+                operand: Box::new(rewrite_lookup_hash_map_expr(
+                    operand,
+                    available_lookups,
+                    pending_calls,
+                )?),
+                set: set
+                    .iter()
+                    .map(|element| {
+                        rewrite_lookup_hash_map_expr(element, available_lookups, pending_calls)
+                    })
+                    .collect::<error_stack::Result<Vec<_>, LookupHashMapError>>()?,
+            },
+            span: expr.span,
+        },
+        Expr::Between { operand, low, high } => nervix_vm::program::SpannedNode {
+            inner: Expr::Between {
+                operand: Box::new(rewrite_lookup_hash_map_expr(
+                    operand,
+                    available_lookups,
+                    pending_calls,
+                )?),
+                low: Box::new(rewrite_lookup_hash_map_expr(
+                    low,
+                    available_lookups,
+                    pending_calls,
+                )?),
+                high: Box::new(rewrite_lookup_hash_map_expr(
+                    high,
+                    available_lookups,
+                    pending_calls,
+                )?),
+            },
+            span: expr.span,
+        },
         Expr::Unary { op, expr: inner } => nervix_vm::program::SpannedNode {
             inner: Expr::Unary {
                 op: *op,

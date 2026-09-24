@@ -11,6 +11,7 @@
 
 use std::{
     io::{self, Write},
+    ops::Range,
     path::{Path, PathBuf},
     sync::{
         Mutex as StdMutex,
@@ -19,15 +20,18 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
-use ariadne::{Color, Label, Report, ReportKind, Source};
+use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 use byte_unit::{Byte, UnitType};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use error_stack::Report as StackReport;
 use nervix_client_core::{
-    AutocompleteSuggestion, Client, ClientError as CoreClientError, CommandOutcomeKind,
-    ConnectOptions, Diagnostic, SubscriptionDeliveryBehavior, SubscriptionRequest,
-    SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionState,
+    AutocompleteSuggestion, Client, ClientError as CoreClientError, CommandDisposition,
+    CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic, DomainName,
+    LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition, StatementOutcome,
+    SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
+    SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
+    TransactionStatus,
 };
 use nervix_models::ClusterNodeName;
 use nervix_nspl::client_statement::{
@@ -60,7 +64,7 @@ struct Args {
     tls_ca_cert: Option<PathBuf>,
     /// Domain the session starts in
     #[arg(long, default_value = "default")]
-    domain: String,
+    domain: DomainName,
     /// Registry user to authenticate as
     #[arg(long, env = "NERVIX_USERNAME", default_value = "default")]
     username: String,
@@ -157,7 +161,7 @@ impl Completer for GrpcCompleter {
             Err(_) => String::new(),
         };
         let combined = format!("{}{}", prefix, &line[..pos.min(line.len())]);
-        let cursor = u32::try_from(combined.len()).unwrap_or(u32::MAX);
+        let cursor = combined.len();
         let client = self.client.clone();
         let runtime = self.runtime.clone();
 
@@ -241,37 +245,49 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         }
         Some(Command::RemoveNode { node_id }) => {
             let connect_options = connect_options_from_args(&args)?;
-            let client =
-                Client::connect_with_options(&args.server, args.domain.clone(), connect_options)
-                    .await
-                    .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            let client = Client::connect_with_options(
+                &args.server,
+                Some(args.domain.clone()),
+                connect_options,
+            )
+            .await
+            .map_err(|err| StackReport::new(ClientError::from(err)))?;
             execute_and_print(&client, format!("DROP NODE {node_id};")).await?;
             return Ok(());
         }
         Some(Command::CordonNode { node_id }) => {
             let connect_options = connect_options_from_args(&args)?;
-            let client =
-                Client::connect_with_options(&args.server, args.domain.clone(), connect_options)
-                    .await
-                    .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            let client = Client::connect_with_options(
+                &args.server,
+                Some(args.domain.clone()),
+                connect_options,
+            )
+            .await
+            .map_err(|err| StackReport::new(ClientError::from(err)))?;
             execute_and_print(&client, format!("CORDON NODE {node_id};")).await?;
             return Ok(());
         }
         Some(Command::UncordonNode { node_id }) => {
             let connect_options = connect_options_from_args(&args)?;
-            let client =
-                Client::connect_with_options(&args.server, args.domain.clone(), connect_options)
-                    .await
-                    .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            let client = Client::connect_with_options(
+                &args.server,
+                Some(args.domain.clone()),
+                connect_options,
+            )
+            .await
+            .map_err(|err| StackReport::new(ClientError::from(err)))?;
             execute_and_print(&client, format!("UNCORDON NODE {node_id};")).await?;
             return Ok(());
         }
         Some(Command::DrainNode { node_id }) => {
             let connect_options = connect_options_from_args(&args)?;
-            let client =
-                Client::connect_with_options(&args.server, args.domain.clone(), connect_options)
-                    .await
-                    .map_err(|err| StackReport::new(ClientError::from(err)))?;
+            let client = Client::connect_with_options(
+                &args.server,
+                Some(args.domain.clone()),
+                connect_options,
+            )
+            .await
+            .map_err(|err| StackReport::new(ClientError::from(err)))?;
             execute_and_print(&client, format!("DRAIN NODE {node_id};")).await?;
             return Ok(());
         }
@@ -279,9 +295,10 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     }
 
     let connect_options = connect_options_from_args(&args)?;
-    let client = Client::connect_with_options(&args.server, args.domain.clone(), connect_options)
-        .await
-        .map_err(|err| StackReport::new(ClientError::from(err)))?;
+    let client =
+        Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
+            .await
+            .map_err(|err| StackReport::new(ClientError::from(err)))?;
     let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
     spawn_event_collectors(client.clone(), event_sender);
 
@@ -304,12 +321,10 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     println!("[events] notifications are printed above the prompt");
 
     loop {
-        let active_domain = client.domain().await;
-        let prompt_domain = match client.transaction_status().await.map(|status| status.state) {
-            Some(TransactionState::Open) => format!("{active_domain} tx"),
-            Some(TransactionState::Committing) => format!("{active_domain} committing"),
-            _ => active_domain,
-        };
+        let prompt_domain = prompt_domain(
+            client.domain().await.as_ref(),
+            client.transaction_status().await.as_ref(),
+        );
         drain_event_queue(&mut event_receiver);
         let prompt = if buffer.is_empty() {
             DefaultPrompt::new(
@@ -503,7 +518,7 @@ fn strip_home_prefix(path: &Path) -> Option<PathBuf> {
 struct SubscribeModeOptions {
     server: String,
     connect_options: ConnectOptions,
-    domain: String,
+    domain: DomainName,
     name: String,
     relay: String,
     delivery_behavior: SubscriptionDeliveryBehavior,
@@ -512,10 +527,13 @@ struct SubscribeModeOptions {
 }
 
 async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackReport<ClientError>> {
-    let client =
-        Client::connect_with_options(&options.server, options.domain, options.connect_options)
-            .await
-            .map_err(|err| StackReport::new(ClientError::from(err)))?;
+    let client = Client::connect_with_options(
+        &options.server,
+        Some(options.domain),
+        options.connect_options,
+    )
+    .await
+    .map_err(|err| StackReport::new(ClientError::from(err)))?;
     spawn_event_loggers(client.clone());
     let request = subscribe_request(
         &options.name,
@@ -530,7 +548,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
         .subscribe(&request)
         .await
         .map_err(|err| StackReport::new(ClientError::from(err)))?;
-    if !result.success {
+    if !result.succeeded() {
         println!("error: {}", result.message);
         if result.diagnostics.is_empty() {
             println!("- no diagnostics provided");
@@ -604,47 +622,127 @@ async fn execute_and_print(client: &Client, query: String) -> Result<(), StackRe
         .execute(query)
         .await
         .map_err(|err| StackReport::new(ClientError::from(err)))?;
-    if !result.results.is_empty() {
-        for item in &result.results {
-            print_command_outcome(item, &query_source);
+    if !result.statements.is_empty() {
+        for statement in &result.statements {
+            print_outcome(&PrintedOutcome::of_statement(statement), &query_source);
         }
         return Ok(());
     }
-    print_command_outcome(&result, &query_source);
+    print_outcome(&PrintedOutcome::of_command(&result), &query_source);
 
     Ok(())
 }
 
-fn print_command_outcome(result: &nervix_client_core::CommandOutcome, query_source: &str) {
-    if result.success {
-        if !result.message.is_empty() {
-            emit_terminal_line(result.message.clone());
+/// One statement's outcome as the terminal prints it.
+struct PrintedOutcome<'a> {
+    disposition: CommandDisposition,
+    message: &'a str,
+    diagnostics: &'a [Diagnostic],
+    execution_reference: Option<&'a CommandExecutionReference>,
+}
+
+impl<'a> PrintedOutcome<'a> {
+    fn of_command(outcome: &'a CommandOutcome) -> Self {
+        Self {
+            disposition: outcome.disposition.clone(),
+            message: &outcome.message,
+            diagnostics: &outcome.diagnostics,
+            execution_reference: outcome.execution_reference.as_ref(),
         }
-    } else {
-        match result.kind {
-            CommandOutcomeKind::NotLeader => {
-                if let (Some(leader), Some(leader_grpc_uri)) =
-                    (result.leader.as_deref(), result.leader_grpc_uri.as_deref())
-                {
-                    emit_terminal_line(
-                        "topology: not-a-leader, retry on leader '{leader}' at {leader_grpc_uri}"
-                            .replace("{leader}", leader)
-                            .replace("{leader_grpc_uri}", leader_grpc_uri),
-                    );
-                } else if let Some(leader) = result.leader.as_deref() {
-                    emit_terminal_line(format!(
-                        "topology: not-a-leader, retry on leader '{leader}'"
-                    ));
-                } else {
-                    emit_terminal_line("topology: not-a-leader");
-                }
+    }
+
+    fn of_statement(outcome: &'a StatementOutcome) -> Self {
+        let disposition = match &outcome.disposition {
+            StatementDisposition::Completed { already_existed } => CommandDisposition::Completed {
+                already_existed: *already_existed,
+            },
+            StatementDisposition::Failed => CommandDisposition::Failed,
+            StatementDisposition::NotLeader(redirect) => {
+                CommandDisposition::NotLeader(redirect.clone())
             }
-            _ => emit_terminal_line(format!("error: {}", result.message)),
+        };
+        Self {
+            disposition,
+            message: &outcome.message,
+            diagnostics: &outcome.diagnostics,
+            execution_reference: None,
         }
-        if result.diagnostics.is_empty() {
-            emit_terminal_line("- no diagnostics provided");
-        } else {
-            print_diagnostics("remote", query_source, &result.diagnostics);
+    }
+
+    /// The lines printed for the outcome ahead of its diagnostics.
+    fn summary(&self) -> Vec<String> {
+        match &self.disposition {
+            CommandDisposition::Completed { .. } => {
+                if self.message.is_empty() {
+                    return Vec::new();
+                }
+                vec![self.message.to_string()]
+            }
+            CommandDisposition::NotLeader(redirect) => vec![not_leader_line(redirect)],
+            CommandDisposition::OutcomeUnknown(_) => {
+                let mut lines = Vec::with_capacity(2);
+                if !self.message.is_empty() {
+                    lines.push(self.message.to_string());
+                }
+                let hint = match self.execution_reference {
+                    Some(reference) => format!(
+                        "outcome: not known yet; the command was admitted, and retrying the same \
+                         request (execution reference {reference}) recovers it"
+                    ),
+                    None => "outcome: not known yet; the command was admitted, and retrying the \
+                             same request recovers it"
+                        .to_string(),
+                };
+                lines.push(hint);
+                lines
+            }
+            CommandDisposition::Failed
+            | CommandDisposition::TransactionDetached { .. }
+            | CommandDisposition::TransactionTakenOver { .. }
+            | CommandDisposition::ExecutionReferenceConflict(_)
+            | CommandDisposition::ExecutionReferenceExpired
+            | CommandDisposition::PreviewStale { .. } => vec![format!("error: {}", self.message)],
+        }
+    }
+}
+
+/// The topology line of a statement the serving node could not run because it is not the leader.
+fn not_leader_line(redirect: &LeaderRedirect) -> String {
+    let Some(leader) = &redirect.leader else {
+        return "topology: not-a-leader".to_string();
+    };
+    match &leader.grpc_uri {
+        Some(uri) => format!(
+            "topology: not-a-leader, retry on leader '{}' at {uri}",
+            leader.node
+        ),
+        None => format!("topology: not-a-leader, retry on leader '{}'", leader.node),
+    }
+}
+
+fn print_outcome(outcome: &PrintedOutcome<'_>, query_source: &str) {
+    for line in outcome.summary() {
+        emit_terminal_line(line);
+    }
+    match outcome.disposition {
+        CommandDisposition::Completed { .. } => {}
+        CommandDisposition::OutcomeUnknown(_) => {
+            if !outcome.diagnostics.is_empty() {
+                print_diagnostics("remote", query_source, outcome.diagnostics);
+            }
+        }
+        CommandDisposition::Failed
+        | CommandDisposition::NotLeader(_)
+        | CommandDisposition::TransactionDetached { .. }
+        | CommandDisposition::TransactionTakenOver { .. }
+        | CommandDisposition::ExecutionReferenceConflict(_)
+        | CommandDisposition::ExecutionReferenceExpired
+        | CommandDisposition::PreviewStale { .. } => {
+            if outcome.diagnostics.is_empty() {
+                emit_terminal_line("- no diagnostics provided");
+            } else {
+                print_diagnostics("remote", query_source, outcome.diagnostics);
+            }
         }
     }
 }
@@ -697,7 +795,7 @@ async fn execute_upload_and_print(
     let total_uploaded = uploaded.load(Ordering::Relaxed);
     clear_progress_line();
     let result = outcome.map_err(|err| StackReport::new(ClientError::from(err)))?;
-    if result.success {
+    if result.succeeded() {
         emit_terminal_line(format!(
             "upload resource '{}' finished: {} sent, installed on every live node",
             identifier,
@@ -755,12 +853,11 @@ fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::UnboundedSe
     tokio::spawn(async move {
         while let Ok(event) = subscription_client.next_subscription().await {
             tokio::task::consume_budget().await;
-            subscription_sender
-                .send(format!(
-                    "[events] subscription [{}] from [{}]: {}",
-                    event.subscription, event.relay, event.payload
-                ))
-                .means_shutdown("terminal event printer");
+            for line in format_subscription_event(&event) {
+                subscription_sender
+                    .send(line)
+                    .means_shutdown("terminal event printer");
+            }
         }
     });
 
@@ -779,10 +876,9 @@ fn spawn_event_loggers(client: Client) {
     tokio::spawn(async move {
         while let Ok(event) = subscription_client.next_subscription().await {
             tokio::task::consume_budget().await;
-            println!(
-                "[events] subscription [{}] from [{}]: {}",
-                event.subscription, event.relay, event.payload
-            );
+            for line in format_subscription_event(&event) {
+                println!("{line}");
+            }
         }
     });
 
@@ -800,13 +896,78 @@ fn drain_event_queue(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>
     }
 }
 
-fn format_server_event(event: &nervix_client_core::ServerEvent) -> String {
+/// The terminal lines of one subscription event: one line per row of a batch, or one notice.
+fn format_subscription_event(event: &SubscriptionEvent) -> Vec<String> {
+    let subscription = &event.subscription().name;
+    match event {
+        SubscriptionEvent::Rows(rows) => {
+            let prefix = format!(
+                "[events] subscription [{subscription}] from [{}]",
+                rows.relay
+            );
+            match rows.display_lines() {
+                Ok(lines) => lines
+                    .into_iter()
+                    .map(|line| format!("{prefix}: {line}"))
+                    .collect(),
+                Err(error) => vec![format!(
+                    "{prefix}: rows do not match the subscription schema: {}",
+                    error.current_context()
+                )],
+            }
+        }
+        SubscriptionEvent::DeliveryLost(lost) => vec![format!(
+            "[events] subscription [{subscription}] notice: {} rows were dropped because the \
+             session could not take them in time",
+            lost.dropped_rows
+        )],
+        SubscriptionEvent::RowsSkipped(skipped) => vec![format!(
+            "[events] subscription [{subscription}] notice: {} rows were skipped ({:?}): {}",
+            skipped.skipped_rows, skipped.cause, skipped.message
+        )],
+        SubscriptionEvent::Ended(ended) => vec![format!(
+            "[events] subscription [{subscription}] notice: the subscription ended: {}",
+            ended.message
+        )],
+    }
+}
+
+fn format_server_event(event: &ServerEvent) -> String {
     let label = if event.message.starts_with("raft transition:") {
         "topology"
     } else {
         "server"
     };
-    format!("[events] {} {}: {}", label, event.level, event.message)
+    format!(
+        "[events] {} {}: {}",
+        label,
+        notice_level_label(event.level),
+        event.message
+    )
+}
+
+/// The label a server notice's level prints with.
+fn notice_level_label(level: NoticeLevel) -> &'static str {
+    match level {
+        NoticeLevel::Info => "INFO",
+        NoticeLevel::Warning => "WARN",
+        NoticeLevel::Error => "ERROR",
+    }
+}
+
+/// The prompt's domain segment: the session's domain, and the state of its transaction while one
+/// is active.
+fn prompt_domain(domain: Option<&DomainName>, transaction: Option<&TransactionStatus>) -> String {
+    let domain = match domain {
+        Some(domain) => domain.to_string(),
+        None => "no domain".to_string(),
+    };
+    let lifecycle = transaction.map(TransactionStatus::lifecycle);
+    match lifecycle {
+        Some(TransactionLifecycle::Open) => format!("{domain} tx"),
+        Some(TransactionLifecycle::Committing) => format!("{domain} committing"),
+        _ => domain,
+    }
 }
 
 fn subscribe_request(
@@ -835,23 +996,26 @@ fn subscribe_request(
 }
 
 fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) {
+    let config = Config::default().with_index_type(IndexType::Byte);
     for diagnostic in diagnostics {
-        let start = diagnostic.span_start.arch_into();
-        let mut end = diagnostic.span_end.arch_into();
-        if end < start {
-            end = start;
-        }
-        let end = end.min(source.len());
-        let start = start.min(end);
-
-        let report = Report::build(ReportKind::Error, (source_id, start..end))
-            .with_message("server parse error")
-            .with_label(
-                Label::new((source_id, start..end))
-                    .with_message(diagnostic.message.clone())
-                    .with_color(Color::Red),
-            )
-            .finish();
+        let report = match diagnostic_range(source, diagnostic.span) {
+            Some(range) => Report::build(ReportKind::Error, (source_id, range.clone()))
+                .with_config(config)
+                .with_message("server parse error")
+                .with_label(
+                    Label::new((source_id, range))
+                        .with_message(diagnostic.message.clone())
+                        .with_color(Color::Red),
+                )
+                .finish(),
+            // A diagnostic without a location in this source renders without an underline. A
+            // report without a label prints no source section, so its message carries the
+            // diagnostic.
+            None => Report::build(ReportKind::Error, (source_id, 0..0))
+                .with_config(config)
+                .with_message(format!("server parse error: {}", diagnostic.message))
+                .finish(),
+        };
 
         if let Err(err) = report.eprint((source_id, Source::from(source))) {
             eprintln!("failed to render diagnostic: {err}");
@@ -859,9 +1023,23 @@ fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) 
     }
 }
 
+/// The byte range of `source` a diagnostic underlines: its span, when the span lies within the
+/// source and both of its ends fall on character boundaries.
+fn diagnostic_range(source: &str, span: Option<SourceSpan>) -> Option<Range<usize>> {
+    let span = span?;
+    let start: usize = span.start().arch_into();
+    let end: usize = span.end().arch_into();
+    // A span never ends before it starts, and an offset past the end of the source is never a
+    // character boundary, so the two checks keep the whole range inside the source.
+    if !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    Some(start..end)
+}
+
 #[cfg(test)]
 mod tests {
-    use nervix_client_core::{ServerEvent, ServerEventLevel};
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
 
@@ -871,7 +1049,7 @@ mod tests {
         assert_eq!(args.server, "http://127.0.0.1:47391");
         assert_eq!(args.tls, CliTlsRequirement::Preferred);
         assert_eq!(args.tls_ca_cert, None);
-        assert_eq!(args.domain, "default");
+        assert_eq!(args.domain.as_str(), "default");
         assert_eq!(args.command, None);
         assert!(args.subcommand.is_none());
     }
@@ -894,7 +1072,7 @@ mod tests {
         assert_eq!(args.server, "http://localhost:9999");
         assert_eq!(args.tls, CliTlsRequirement::Required);
         assert_eq!(args.tls_ca_cert, Some(PathBuf::from("/tmp/ca.pem")));
-        assert_eq!(args.domain, "tenant_a");
+        assert_eq!(args.domain.as_str(), "tenant_a");
         assert_eq!(args.command.as_deref(), Some("SHOW CLUSTER STATUS;"));
     }
 
@@ -1232,7 +1410,7 @@ mod tests {
     #[test]
     fn raft_transition_server_events_are_labeled_as_topology() {
         let rendered = format_server_event(&ServerEvent {
-            level: ServerEventLevel::Info,
+            level: NoticeLevel::Info,
             message: "raft transition: state=Leader leader=node-1 term=2".to_string(),
         });
         assert_eq!(
@@ -1244,9 +1422,316 @@ mod tests {
     #[test]
     fn non_raft_server_events_keep_server_label() {
         let rendered = format_server_event(&ServerEvent {
-            level: ServerEventLevel::Warn,
+            level: NoticeLevel::Warning,
             message: "runtime warning".to_string(),
         });
         assert_eq!(rendered, "[events] server WARN: runtime warning");
+    }
+
+    #[test]
+    fn server_error_notices_print_with_the_error_label() {
+        let rendered = format_server_event(&ServerEvent {
+            level: NoticeLevel::Error,
+            message: "relay 'orders' failed".to_string(),
+        });
+        assert_eq!(rendered, "[events] server ERROR: relay 'orders' failed");
+    }
+
+    fn span(start: u32, end: u32) -> Option<SourceSpan> {
+        Some(SourceSpan::new(start, end).assured("the test span starts before it ends"))
+    }
+
+    #[test]
+    fn diagnostic_ranges_stay_within_the_source_on_character_boundaries() {
+        // `é` occupies bytes 7 and 8 of the ten-byte source.
+        let source = "CREATE é;";
+        assert_eq!(diagnostic_range(source, span(0, 6)), Some(0..6));
+        assert_eq!(diagnostic_range(source, span(7, 9)), Some(7..9));
+        assert_eq!(diagnostic_range(source, span(10, 10)), Some(10..10));
+        assert_eq!(
+            diagnostic_range(source, span(8, 9)),
+            None,
+            "a span that starts inside a character underlines nothing"
+        );
+        assert_eq!(
+            diagnostic_range(source, span(7, 8)),
+            None,
+            "a span that ends inside a character underlines nothing"
+        );
+        assert_eq!(
+            diagnostic_range(source, span(0, 11)),
+            None,
+            "a span past the end of the source underlines nothing"
+        );
+        assert_eq!(diagnostic_range(source, None), None);
+    }
+
+    #[test]
+    fn rendering_a_diagnostic_never_panics_whatever_its_span() {
+        let diagnostics = [
+            None,
+            span(8, 9),
+            span(0, 11),
+            span(u32::MAX, u32::MAX),
+            span(0, 10),
+        ]
+        .map(|span| Diagnostic {
+            message: "unexpected token".to_string(),
+            span,
+        });
+        print_diagnostics("remote", "CREATE é;", &diagnostics);
+        print_diagnostics("remote", "", &diagnostics);
+    }
+
+    fn leader(grpc_uri: Option<&str>) -> LeaderRedirect {
+        LeaderRedirect {
+            leader: Some(nervix_client_core::LeaderEndpoints {
+                node: ClusterNodeName::parse("node-2").assured("a valid node name"),
+                grpc_uri: grpc_uri
+                    .map(|uri| url::Url::parse(uri).assured("the test URI is a valid URL")),
+                web_console_uri: None,
+            }),
+        }
+    }
+
+    fn summary(
+        disposition: CommandDisposition,
+        message: &str,
+        execution_reference: Option<&CommandExecutionReference>,
+    ) -> Vec<String> {
+        PrintedOutcome {
+            disposition,
+            message,
+            diagnostics: &[],
+            execution_reference,
+        }
+        .summary()
+    }
+
+    #[test]
+    fn outcome_summaries_follow_their_disposition() {
+        let completed = CommandDisposition::Completed {
+            already_existed: false,
+        };
+        assert_eq!(summary(completed.clone(), "created", None), ["created"]);
+        assert!(summary(completed, "", None).is_empty());
+        assert_eq!(
+            summary(CommandDisposition::Failed, "unknown relay", None),
+            ["error: unknown relay"]
+        );
+        assert_eq!(
+            summary(
+                CommandDisposition::ExecutionReferenceExpired,
+                "expired",
+                None
+            ),
+            ["error: expired"]
+        );
+        assert_eq!(
+            summary(
+                CommandDisposition::NotLeader(leader(Some("http://127.0.0.1:47393"))),
+                "",
+                None
+            ),
+            ["topology: not-a-leader, retry on leader 'node-2' at http://127.0.0.1:47393/"]
+        );
+        assert_eq!(
+            summary(CommandDisposition::NotLeader(leader(None)), "", None),
+            ["topology: not-a-leader, retry on leader 'node-2'"]
+        );
+        assert_eq!(
+            summary(
+                CommandDisposition::NotLeader(LeaderRedirect { leader: None }),
+                "",
+                None
+            ),
+            ["topology: not-a-leader"]
+        );
+
+        let reference = CommandExecutionReference::parse("command-1").assured("a valid reference");
+        assert_eq!(
+            summary(
+                CommandDisposition::OutcomeUnknown(
+                    nervix_client_core::UnknownOutcomeCause::StillApplying
+                ),
+                "the command is still applying",
+                Some(&reference),
+            ),
+            [
+                "the command is still applying",
+                "outcome: not known yet; the command was admitted, and retrying the same request \
+                 (execution reference command-1) recovers it",
+            ]
+        );
+    }
+
+    #[test]
+    fn statement_outcomes_print_like_the_command_outcomes_they_are_part_of() {
+        let statements = [
+            StatementOutcome {
+                disposition: StatementDisposition::Completed {
+                    already_existed: true,
+                },
+                message: "domain 'orders' already exists".to_string(),
+                diagnostics: Vec::new(),
+            },
+            StatementOutcome {
+                disposition: StatementDisposition::Failed,
+                message: "unknown schema 'order'".to_string(),
+                diagnostics: Vec::new(),
+            },
+            StatementOutcome {
+                disposition: StatementDisposition::NotLeader(leader(None)),
+                message: String::new(),
+                diagnostics: Vec::new(),
+            },
+        ];
+
+        let lines = statements
+            .iter()
+            .map(|statement| PrintedOutcome::of_statement(statement).summary())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            [
+                vec!["domain 'orders' already exists".to_string()],
+                vec!["error: unknown schema 'order'".to_string()],
+                vec!["topology: not-a-leader, retry on leader 'node-2'".to_string()],
+            ]
+        );
+    }
+
+    fn live_subscription() -> nervix_client_core::SubscriptionHandle {
+        nervix_client_core::SubscriptionHandle {
+            name: nervix_models::SubscriptionName::parse("live").assured("a valid name"),
+            generation: std::num::NonZeroU64::MIN,
+        }
+    }
+
+    fn rows_event(declared: nervix_models::ParseAsType) -> SubscriptionEvent {
+        use nervix_client_core::wire::{
+            ServerEvent as WireEvent, ServerMessage, SessionLimits, SubscriptionRowsEncoder,
+        };
+
+        let mut batch =
+            SubscriptionRowsEncoder::unbranched(live_subscription(), &SessionLimits::DEFAULT)
+                .assured("an unbranched batch starts within the limits");
+        for id in [1, 2] {
+            batch
+                .push_row(|cells| cells.push_u64(id))
+                .assured("a one-cell row fits the limits");
+        }
+        let frame = batch
+            .finish()
+            .assured("a two-row batch fits a frame")
+            .verify(&SessionLimits::DEFAULT)
+            .assured("an encoded frame verifies");
+        let ServerMessage::Event(WireEvent::SubscriptionRows(rows)) =
+            ServerMessage::decode(&frame).assured("an encoded frame decodes")
+        else {
+            panic!("a rows frame decodes as subscription rows");
+        };
+        let schema = nervix_client_core::RowSchema {
+            fields: vec![nervix_models::SchemaField {
+                name: nervix_models::FieldName::parse("id").assured("a valid field name"),
+                ty: declared,
+                optional: false,
+                sensitive: false,
+            }],
+            branch: None,
+        };
+        SubscriptionEvent::Rows(nervix_client_core::SubscriptionRowsEvent {
+            relay: nervix_models::RelayName::parse("orders").assured("a valid relay name"),
+            schema: Arc::new(schema),
+            rows,
+        })
+    }
+
+    #[test]
+    fn subscription_rows_print_one_line_per_row() {
+        assert_eq!(
+            format_subscription_event(&rows_event(nervix_models::ParseAsType::U64)),
+            [
+                "[events] subscription [live] from [orders]: {\"id\":1}",
+                "[events] subscription [live] from [orders]: {\"id\":2}",
+            ]
+        );
+    }
+
+    #[test]
+    fn rows_that_break_their_schema_print_one_notice() {
+        let lines = format_subscription_event(&rows_event(nervix_models::ParseAsType::String));
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].starts_with(
+                "[events] subscription [live] from [orders]: rows do not match the subscription \
+                 schema: "
+            ),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn subscription_notices_print_one_line_each() {
+        let ended = SubscriptionEvent::Ended(nervix_client_core::SubscriptionEnded {
+            subscription: live_subscription(),
+            reason: nervix_client_core::wire::SubscriptionEndReason::RelayClosed,
+            message: "relay 'orders' was rebuilt".to_string(),
+        });
+        assert_eq!(
+            format_subscription_event(&ended),
+            [
+                "[events] subscription [live] notice: the subscription ended: relay 'orders' was \
+                 rebuilt"
+            ]
+        );
+
+        let lost = SubscriptionEvent::DeliveryLost(nervix_client_core::SubscriptionDeliveryLost {
+            subscription: live_subscription(),
+            dropped_rows: std::num::NonZeroU64::new(3).assured("a non-zero count"),
+        });
+        assert_eq!(
+            format_subscription_event(&lost),
+            [
+                "[events] subscription [live] notice: 3 rows were dropped because the session \
+                 could not take them in time"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_prompt_shows_the_domain_and_its_active_transaction() {
+        let domain = DomainName::parse("tenant").assured("a valid domain name");
+        let status = |lifecycle| {
+            TransactionStatus::new(
+                "tx-1".to_string(),
+                domain.clone(),
+                lifecycle,
+                nervix_client_core::TransactionPosition::new(0),
+                0,
+            )
+            .assured("an empty transaction is consistent")
+        };
+        assert_eq!(prompt_domain(Some(&domain), None), "tenant");
+        assert_eq!(
+            prompt_domain(Some(&domain), Some(&status(TransactionLifecycle::Open))),
+            "tenant tx"
+        );
+        assert_eq!(
+            prompt_domain(
+                Some(&domain),
+                Some(&status(TransactionLifecycle::Committing))
+            ),
+            "tenant committing"
+        );
+        assert_eq!(
+            prompt_domain(
+                Some(&domain),
+                Some(&status(TransactionLifecycle::Committed))
+            ),
+            "tenant"
+        );
+        assert_eq!(prompt_domain(None, None), "no domain");
     }
 }

@@ -15,6 +15,7 @@ use nervix_models::{
 };
 
 use super::{
+    command_result::CommandResult,
     describe_output::{
         format_millis_duration, format_placement_runtime_node, placement_claim_owner,
     },
@@ -24,12 +25,9 @@ use super::{
     schedule_planning::DomainSchedulePlanningSnapshot,
     session_service::SessionServiceImpl,
 };
-use crate::{
-    proto::CommandResult,
-    registry::{
-        ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit,
-        ownership_handoff_relays_for_schedule,
-    },
+use crate::registry::{
+    ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit,
+    ownership_handoff_relays_for_schedule,
 };
 
 /// One unit member with the assignment the relocation gives it.

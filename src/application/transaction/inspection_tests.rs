@@ -6,22 +6,20 @@
 //! - **Must not know.** Production ownership beyond the parent module under test.
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_client_wire::CommandRequest;
 use nervix_consensus::{ReplicatedTransaction, TransactionState};
 use nervix_models::{
     DomainName, ExecutionStepOutcome, TransactionInspection, TransactionInspectionRejection,
     TransactionInspectionRequest, TransactionInspectionTarget, TransactionLifecycle,
-    TransactionOperationNumber, UserName,
+    TransactionOperationNumber, TransactionPosition, UserName,
 };
-use tokio::sync::mpsc;
 
 use super::{super::DEFAULT_TRANSACTION_MAX_OPEN, InspectingSession, TransactionInspectionOutcome};
-use crate::{
-    application::{
-        SessionServiceImpl,
-        subscription::SessionSubscriptions,
-        test_fixtures::{TestService, build_test_service, test_command_request},
-    },
-    proto::{CommandRequest, CommandResult, SessionResponse},
+use crate::application::{
+    SessionServiceImpl,
+    command_result::CommandResult,
+    subscription::SessionSubscriptions,
+    test_fixtures::{TestService, build_test_service, test_command_request},
 };
 
 fn inspect(target: TransactionInspectionTarget) -> TransactionInspectionRequest {
@@ -64,21 +62,23 @@ fn rejection(outcome: TransactionInspectionOutcome) -> TransactionInspectionReje
 async fn run(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
-    tx: &mpsc::Sender<Result<SessionResponse, tonic::Status>>,
     query: &str,
-    expected_transaction_position: Option<u64>,
+    expected_transaction_position: Option<usize>,
 ) -> CommandResult {
     let result = service
-        .process_command(
+        .test_command(
             CommandRequest {
-                expected_transaction_position,
+                expected_transaction_position: expected_transaction_position
+                    .map(TransactionPosition::new),
                 ..test_command_request(query, "default")
             },
-            tx,
             subscriptions,
         )
         .await;
-    assert!(result.success, "{query:?} should be accepted: {result:?}");
+    assert!(
+        result.succeeded(),
+        "{query:?} should be accepted: {result:?}"
+    );
     result
 }
 
@@ -86,13 +86,11 @@ async fn run(
 async fn two_operation_transaction(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
-    tx: &mpsc::Sender<Result<SessionResponse, tonic::Status>>,
 ) {
-    run(service, subscriptions, tx, "BEGIN;", None).await;
+    run(service, subscriptions, "BEGIN;", None).await;
     run(
         service,
         subscriptions,
-        tx,
         "CREATE SCHEMA inspected_first ( user_id U32 );",
         Some(0),
     )
@@ -100,7 +98,6 @@ async fn two_operation_transaction(
     run(
         service,
         subscriptions,
-        tx,
         "CREATE SCHEMA inspected_second ( order_id U32 );",
         Some(1),
     )
@@ -114,9 +111,8 @@ async fn inspecting_the_attached_transaction_reads_its_open_report() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    two_operation_transaction(&service, &mut subscriptions).await;
 
     let inspection = inspected(
         service
@@ -159,9 +155,8 @@ async fn repeated_inspection_of_an_unchanged_transaction_reads_the_same_basis() 
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    two_operation_transaction(&service, &mut subscriptions).await;
     let request = inspect(TransactionInspectionTarget::Attached);
     let session = InspectingSession::from(&subscriptions);
 
@@ -185,13 +180,11 @@ async fn an_unfinished_model_run_reads_as_an_incomplete_open_report() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    run(&service, &mut subscriptions, &tx, "BEGIN;", None).await;
+    run(&service, &mut subscriptions, "BEGIN;", None).await;
     run(
         &service,
         &mut subscriptions,
-        &tx,
         "CREATE RELAY inspected_relay SCHEMA inspected_missing UNBRANCHED;",
         Some(0),
     )
@@ -227,9 +220,8 @@ async fn inspecting_another_owned_transaction_changes_no_binding_or_queue_positi
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    two_operation_transaction(&service, &mut subscriptions).await;
     let attached = subscriptions
         .transaction_id()
         .verified("the fixture bound its transaction to this session")
@@ -390,9 +382,8 @@ async fn selecting_an_operation_names_it_without_narrowing_the_report() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    two_operation_transaction(&service, &mut subscriptions).await;
 
     let inspection = inspected(
         service
@@ -431,9 +422,8 @@ async fn selecting_an_operation_past_the_accepted_position_is_refused() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    two_operation_transaction(&service, &mut subscriptions).await;
 
     let outcome = service
         .inspect_transaction(
@@ -461,14 +451,13 @@ async fn inspecting_a_committed_transaction_reads_its_frozen_report_and_recorded
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    two_operation_transaction(&service, &mut subscriptions).await;
     let committed_id = subscriptions
         .transaction_id()
         .verified("the fixture bound its transaction to this session")
         .to_string();
-    run(&service, &mut subscriptions, &tx, "COMMIT;", None).await;
+    run(&service, &mut subscriptions, "COMMIT;", None).await;
 
     let inspection = inspected(
         service
@@ -505,14 +494,13 @@ async fn inspecting_a_transaction_that_never_planned_an_operation_is_refused() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    run(&service, &mut subscriptions, &tx, "BEGIN;", None).await;
+    run(&service, &mut subscriptions, "BEGIN;", None).await;
     let reverted_id = subscriptions
         .transaction_id()
         .verified("the fixture bound its transaction to this session")
         .to_string();
-    run(&service, &mut subscriptions, &tx, "REVERT;", None).await;
+    run(&service, &mut subscriptions, "REVERT;", None).await;
 
     let outcome = service
         .inspect_transaction(

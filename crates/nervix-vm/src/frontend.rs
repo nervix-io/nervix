@@ -13,8 +13,8 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator as ModelBinaryOperator,
     CaseBranch as ModelCaseBranch, Expression as ModelExpression, FieldName, FieldReference,
-    FieldScope, Inheritance, Literal as ModelLiteral, ParseAsType, RouteConstruction,
-    UnaryOperator as ModelUnaryOperator,
+    FieldScope, Inheritance, Literal as ModelLiteral, MembershipOperator, ParseAsType,
+    RangeOperator, RouteConstruction, UnaryOperator as ModelUnaryOperator,
 };
 use strum::VariantNames as _;
 use thiserror::Error;
@@ -1253,6 +1253,29 @@ fn resolve_expression(
                 .map(|result| resolve_expression(result, resolve_field).map(Box::new))
                 .transpose()?,
         },
+        ModelExpression::Membership {
+            operator,
+            operand,
+            set,
+        } => ModelExpression::Membership {
+            operator: *operator,
+            operand: Box::new(resolve_expression(operand, resolve_field)?),
+            set: set
+                .iter()
+                .map(|element| resolve_expression(element, resolve_field))
+                .collect::<FrontendResult<Vec<_>>>()?,
+        },
+        ModelExpression::Range {
+            operator,
+            operand,
+            low,
+            high,
+        } => ModelExpression::Range {
+            operator: *operator,
+            operand: Box::new(resolve_expression(operand, resolve_field)?),
+            low: Box::new(resolve_expression(low, resolve_field)?),
+            high: Box::new(resolve_expression(high, resolve_field)?),
+        },
     })
 }
 
@@ -1409,6 +1432,8 @@ fn lower_expression_with_span(
                 ModelBinaryOperator::LessThanOrEqual => BinaryOp::LtEq,
                 ModelBinaryOperator::And => BinaryOp::And,
                 ModelBinaryOperator::Or => BinaryOp::Or,
+                ModelBinaryOperator::IsDistinctFrom => BinaryOp::IsDistinctFrom,
+                ModelBinaryOperator::IsNotDistinctFrom => BinaryOp::IsNotDistinctFrom,
             },
             left: Box::new(lower_expression_with_span(left, scope_policy, span)?),
             right: Box::new(lower_expression_with_span(right, scope_policy, span)?),
@@ -1490,6 +1515,48 @@ fn lower_expression_with_span(
                 .map(|result| lower_expression_with_span(result, scope_policy, span).map(Box::new))
                 .transpose()?,
         },
+        // `NOT IN` is the negation of `IN`, so a null membership stays null under it.
+        ModelExpression::Membership {
+            operator,
+            operand,
+            set,
+        } => {
+            let membership = Expr::Membership {
+                operand: Box::new(lower_expression_with_span(operand, scope_policy, span)?),
+                set: set
+                    .iter()
+                    .map(|element| lower_expression_with_span(element, scope_policy, span))
+                    .collect::<FrontendResult<Vec<_>>>()?,
+            };
+            match operator {
+                MembershipOperator::In => membership,
+                MembershipOperator::NotIn => Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(spanned(membership, span)),
+                },
+            }
+        }
+        // `NOT BETWEEN` is the negation of `BETWEEN`, which is not the same test as comparing the
+        // operand outside the bounds: a NaN operand lies neither inside nor outside a range.
+        ModelExpression::Range {
+            operator,
+            operand,
+            low,
+            high,
+        } => {
+            let between = Expr::Between {
+                operand: Box::new(lower_expression_with_span(operand, scope_policy, span)?),
+                low: Box::new(lower_expression_with_span(low, scope_policy, span)?),
+                high: Box::new(lower_expression_with_span(high, scope_policy, span)?),
+            };
+            match operator {
+                RangeOperator::Between => between,
+                RangeOperator::NotBetween => Expr::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(spanned(between, span)),
+                },
+            }
+        }
     };
     Ok(spanned(expression, span))
 }

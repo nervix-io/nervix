@@ -175,9 +175,9 @@ changes.
 The harness reads cluster state with `SHOW CLUSTER STATUS;`. A status request opens a new connection
 to the node's session endpoint, in plaintext or over TLS trusting the test certificate authority
 when the node serves its session API over HTTPS. It opens a session authenticated as the default
-test user, sends the command with no domain and a fresh execution reference, and reads the session's
-events until the command result arrives, keeping the session's request stream open so the node never
-sees the session end while it answers.
+test user, sends the command with a request identity, no domain, and a fresh execution reference,
+and reads the session's frames until the reply naming that request identity arrives, keeping the
+session's request stream open so the node never sees the session end while it answers.
 
 The request has one deadline: 10 seconds, or what is left of the phase that sent it. Its four
 operations run in order, each within whatever that deadline has left.
@@ -187,17 +187,18 @@ operations run in order, each within whatever that deadline has left.
 | Endpoint connection | The transport connection, including the TLS handshake when the node serves HTTPS |
 | Session establishment | The node accepting the authenticated session |
 | Command send | Handing the command to the open session |
-| Response receive | The command result, past any server, subscription, or session events that arrive first |
+| Response receive | The reply naming the command's request identity, past any unsolicited server events that arrive first |
 
 A node that never completes an operation holds the request in it until the deadline: a listener that
 never accepts leaves a TLS handshake waiting, a node can accept the connection and never open the
 session, and a node can take the command and never answer it, or answer only with unrelated events.
 
 A request ends in one typed failure: the deadline passing, naming the operation still pending and
-the budget; an endpoint or TLS authority that could not be configured; a connection, session, or
-response-stream error carrying the transport's status; a session that ended before the result; or,
-when the caller needs the status text, an unsuccessful command result with its kind, message, and
-diagnostics.
+the budget; an endpoint or TLS authority that could not be configured; a command frame that could
+not be encoded; a connection, session, or response-stream error carrying the transport's status; a
+session that ended before the result; a frame from the node that does not decode, or a reply to the
+command that is not a command result; or, when the caller needs the status text, an unsuccessful
+command result with its disposition, message, and diagnostics.
 
 A **status wait** polls one node every 200 milliseconds until its parsed status satisfies a
 condition, within 40 seconds from the start of the wait. The waits the harness performs are a

@@ -4,15 +4,6 @@ build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 
-proto-fmt:
-    buf format -w
-
-proto-fmt-check:
-    buf format --exit-code
-
-proto-lint:
-    buf lint
-
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
 tests-deps: build-deps build-nspl-format
@@ -63,7 +54,7 @@ test-scenarios-reuse *args: tests-deps
     export NERVIX_TESTCONTAINERS_MODE=reusable
     cargo test --features testing --test scenarios -- {{ args }}
 
-# Measure the current protobuf public client protocol against a release nervix-server process.
+# Measure the public client protocol against a release nervix-server process.
 # The JSON report and raw Prometheus scrape record the workload, toolchain, hardware and limits.
 client-wire-baseline samples="100" upload_samples="5" payload_bytes="1024" output="target/client-wire-baseline": build-web-console download-onnxruntime
     #!/usr/bin/env bash
@@ -100,7 +91,7 @@ test-lib *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --lib -- {{ args }}
 
-# Run the Arrow-to-Row correctness cases and print its allocation comparison with task 01.
+# Run the Arrow-to-Row correctness cases and print the typed encoding's allocation evidence.
 test-subscription-rows: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
@@ -111,6 +102,10 @@ test-subscription-rows: tests-deps
 # arguments are forwarded to Cargo, so a server check can add `--features testing`.
 check-package package *args:
     cargo check --package {{ package }} --all-targets {{ args }}
+
+# Type-check only the library target of one package, leaving its tests, benches and binaries out.
+check-package-lib package *args:
+    cargo check --package {{ package }} --lib {{ args }}
 
 # Run the unit tests of one workspace package whose tests need no server test dependencies.
 test-package-lib package *args:
@@ -285,8 +280,8 @@ bench *args: build-web-console
     cargo bench --package nervix-server --bench wasm_checkpoint --features benchmarks -- {{ args }}
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
-# Compare direct Arrow-to-Row encoding with the protobuf/keyed-JSON wire construction it replaces.
-# The suite reports encoded bytes before Criterion measures CPU; its unit probe measures allocations.
+# Measure direct Arrow-to-Row subscription encoding. The suite reports encoded bytes before
+# Criterion measures CPU; its unit probe measures allocations.
 bench-subscription-rows *args:
     cargo bench --package nervix-server --bench subscription_row_encoding --features benchmarks -- {{ args }}
 
@@ -393,7 +388,7 @@ taplo-format:
     taplo format
 
 [parallel]
-fmt: cargo-fmt taplo-format dockerfmt proto-fmt gherkin-fmt nspl-fmt autoinherit
+fmt: cargo-fmt taplo-format dockerfmt gherkin-fmt nspl-fmt autoinherit
 
 cargo-fmt-check:
     cargo +nightly fmt --check
@@ -402,7 +397,7 @@ taplo-format-check:
     taplo format --check
 
 [parallel]
-fmt-check: cargo-fmt-check taplo-format-check dockerfmt-check proto-fmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
+fmt-check: cargo-fmt-check taplo-format-check dockerfmt-check gherkin-fmt-check nspl-fmt-check autoinherit-check
 
 gherkin-fmt:
     ghokin fmt replace tests/features
@@ -495,9 +490,9 @@ cargo-clippy-client-wire-wasm:
 cargo-clippy: cargo-clippy-all cargo-clippy-client cargo-clippy-server cargo-clippy-nspl-format cargo-clippy-web-console cargo-clippy-client-wire-wasm
 
 [parallel]
-lint-inner: cargo-clippy proto-lint
+lint-inner: cargo-clippy
 
-lint: build-web-console lint-inner proto-lint
+lint: build-web-console lint-inner
 
 audit:
     cargo audit

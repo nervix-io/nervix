@@ -16,7 +16,7 @@ use nervix_benchmark::{
     LoadedBenchmark, NERVIX_METRICS_PROMETHEUS_FILE, NERVIX_METRICS_REPORT_FILE,
     NervixImplementation, NervixMetricsReport, RunSettings, provision_topics,
 };
-use nervix_client_core::{Client, ConnectOptions, split_query_statements};
+use nervix_client_core::{Client, ConnectOptions, DomainName, split_query_statements};
 use nervix_models::ClusterNodeName;
 use nervix_test_environment::{
     ContainerMode, ContainerReadiness, DependencyEnvironment, KAFKA_ADDR, KAFKA_DOCKER_ADDR,
@@ -1091,7 +1091,7 @@ impl Subject {
             .await;
             match connection {
                 Ok((client, outcome))
-                    if outcome.success
+                    if outcome.succeeded()
                         && cluster_status_is_ready(&outcome.message, self.node_count) =>
                 {
                     fs::write(
@@ -1122,7 +1122,9 @@ impl Subject {
             &resolved.run_directory.join("create-domain.txt"),
         )
         .await?;
-        client.set_domain(domain).await;
+        let selected = DomainName::parse(domain)
+            .map_err(|report| anyhow!("benchmark domain '{domain}' is invalid: {report}"))?;
+        client.set_domain(Some(selected)).await;
         self.execute_graph_statements(
             &client,
             graph,
@@ -1173,7 +1175,7 @@ impl Subject {
                 .await
                 .context("failed to execute a Nervix benchmark command")?;
             transcript.push_str(&format!("{source}\n{outcome:#?}\n\n"));
-            if !outcome.success {
+            if !outcome.succeeded() {
                 fs::write(output_path, &transcript)?;
                 bail!(
                     "Nervix benchmark command failed: {}\nstatement: {source}\ndiagnostics: {:?}",
@@ -1195,9 +1197,11 @@ impl Subject {
             .password
             .as_deref()
             .ok_or_else(|| anyhow!("benchmark subject has no Nervix password"))?;
+        let domain = DomainName::parse(domain)
+            .map_err(|report| anyhow!("benchmark domain '{domain}' is invalid: {report}"))?;
         Client::connect_with_options(
             control_url,
-            domain.to_string(),
+            Some(domain),
             ConnectOptions::default().with_basic_auth(DEFAULT_USERNAME, password),
         )
         .await
@@ -1216,7 +1220,7 @@ impl Subject {
             .context("failed to execute a Nervix benchmark command")?;
         fs::write(output_path, format!("{outcome:#?}\n"))?;
         ensure!(
-            outcome.success,
+            outcome.succeeded(),
             "Nervix benchmark command failed: {}\ndiagnostics: {:?}",
             outcome.message,
             outcome.diagnostics

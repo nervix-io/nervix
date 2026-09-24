@@ -14,9 +14,12 @@
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
 use arrow_schema::{DataType, TimeUnit};
+use meticulous::OptionExt as _;
 
 use crate::{
     CompileError, RegisterType,
+    extremum::Extremum,
+    membership::MembershipSet,
     program::{BinaryOp, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
 };
@@ -375,7 +378,55 @@ pub enum BuiltinLowering {
     ShiftLeft,
     ShiftRight,
     BitCount,
+    /// `greatest` or `least`.
+    Extremum(Extremum),
+    Clamp,
+    /// An `IN` test, with the set of constants it was compiled with.
+    Membership(MembershipSet),
     Datetime(DatetimeFunction),
+}
+
+impl RegisterType {
+    /// Whether values of this type are single values rather than `ARRAY` or `VEC` lists.
+    pub fn is_scalar(self) -> bool {
+        match self {
+            Self::Generic => false,
+            Self::UInt8
+            | Self::Int8
+            | Self::UInt16
+            | Self::Int16
+            | Self::UInt32
+            | Self::Int32
+            | Self::UInt64
+            | Self::Int64
+            | Self::Float32
+            | Self::Float64
+            | Self::Boolean
+            | Self::Utf8
+            | Self::Binary
+            | Self::Datetime => true,
+        }
+    }
+
+    /// Whether `<`, `<=`, `>` and `>=` compare values of this type: numbers, `STRING` and
+    /// `DATETIME`.
+    pub fn is_ordered(self) -> bool {
+        match self {
+            Self::UInt8
+            | Self::Int8
+            | Self::UInt16
+            | Self::Int16
+            | Self::UInt32
+            | Self::Int32
+            | Self::UInt64
+            | Self::Int64
+            | Self::Float32
+            | Self::Float64
+            | Self::Utf8
+            | Self::Datetime => true,
+            Self::Boolean | Self::Binary | Self::Generic => false,
+        }
+    }
 }
 
 impl RegexpFunction {
@@ -639,11 +690,44 @@ pub const fn binary_descriptor(op: BinaryOp) -> BinaryDescriptor {
                 null_propagation: NullPropagation::Custom,
             },
         },
+        BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => BinaryDescriptor {
+            semantics: OperationSemantics {
+                volatility: Volatility::Immutable,
+                dependency_scope: DependencyScope::Constant,
+                has_side_effects: false,
+                can_error: false,
+                null_propagation: NullPropagation::NeverNull,
+            },
+        },
     }
 }
 
 pub const fn binary_op_semantics(op: BinaryOp) -> OperationSemantics {
     binary_descriptor(op).semantics
+}
+
+/// `IN`: an equality test against constants, which is null only for a null operand of a set with
+/// elements, since no value is an element of an empty set.
+pub const fn membership_semantics() -> OperationSemantics {
+    OperationSemantics {
+        volatility: Volatility::Immutable,
+        dependency_scope: DependencyScope::Constant,
+        has_side_effects: false,
+        can_error: false,
+        null_propagation: NullPropagation::Custom,
+    }
+}
+
+/// `BETWEEN`: the conjunction of two comparisons, which is false wherever one of them is false even
+/// when the other is null.
+pub const fn range_semantics() -> OperationSemantics {
+    OperationSemantics {
+        volatility: Volatility::Immutable,
+        dependency_scope: DependencyScope::Constant,
+        has_side_effects: false,
+        can_error: false,
+        null_propagation: NullPropagation::Custom,
+    }
 }
 
 pub const fn cast_descriptor() -> CastDescriptor {
@@ -686,7 +770,9 @@ pub const fn binary_arm_execution(op: BinaryOp) -> ArmExecution {
         | BinaryOp::GtEq
         | BinaryOp::LtEq
         | BinaryOp::And
-        | BinaryOp::Or => ArmExecution::WholeBatch,
+        | BinaryOp::Or
+        | BinaryOp::IsDistinctFrom
+        | BinaryOp::IsNotDistinctFrom => ArmExecution::WholeBatch,
     }
 }
 
@@ -760,7 +846,10 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::BitwiseNot
         | BuiltinLowering::ShiftLeft
         | BuiltinLowering::ShiftRight
-        | BuiltinLowering::BitCount => ArmExecution::WholeBatch,
+        | BuiltinLowering::BitCount
+        | BuiltinLowering::Extremum(_)
+        | BuiltinLowering::Clamp
+        | BuiltinLowering::Membership(_) => ArmExecution::WholeBatch,
         // Text sized by an argument must only spend its column's size limit on selected rows.
         BuiltinLowering::Repeat | BuiltinLowering::Lpad | BuiltinLowering::Rpad => {
             ArmExecution::SelectedRows
@@ -880,6 +969,9 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::ShiftLeft => BuiltinLowering::ShiftLeft,
         FunctionName::ShiftRight => BuiltinLowering::ShiftRight,
         FunctionName::BitCount => BuiltinLowering::BitCount,
+        FunctionName::Greatest => BuiltinLowering::Extremum(Extremum::Greatest),
+        FunctionName::Least => BuiltinLowering::Extremum(Extremum::Least),
+        FunctionName::Clamp => BuiltinLowering::Clamp,
         FunctionName::Datetime(function) => BuiltinLowering::Datetime(function.clone()),
         FunctionName::LeakSensitive
         | FunctionName::LookupHashMap
@@ -972,15 +1064,18 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: function.can_error(),
             null_propagation: NullPropagation::Strict,
         },
-        BuiltinLowering::Coalesce | BuiltinLowering::NullIf | BuiltinLowering::Concat => {
-            OperationSemantics {
-                volatility: Volatility::Immutable,
-                dependency_scope: DependencyScope::Constant,
-                has_side_effects: false,
-                can_error: false,
-                null_propagation: NullPropagation::Custom,
-            }
-        }
+        // `greatest` and `least` skip null arguments.
+        BuiltinLowering::Coalesce
+        | BuiltinLowering::NullIf
+        | BuiltinLowering::Concat
+        | BuiltinLowering::Extremum(_) => OperationSemantics {
+            volatility: Volatility::Immutable,
+            dependency_scope: DependencyScope::Constant,
+            has_side_effects: false,
+            can_error: false,
+            null_propagation: NullPropagation::Custom,
+        },
+        BuiltinLowering::Membership(_) => membership_semantics(),
         BuiltinLowering::IsNull => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
@@ -1013,6 +1108,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Trunc
         | BuiltinLowering::ShiftLeft
         | BuiltinLowering::ShiftRight
+        | BuiltinLowering::Clamp
         // A count can ask for more text than one STRING column holds.
         | BuiltinLowering::Repeat
         | BuiltinLowering::Lpad
@@ -1313,6 +1409,43 @@ fn builtin_output_type(
             require_integral_arg(function, count, span)?;
             Ok(value.data_type())
         }
+        BuiltinLowering::Extremum(_) => {
+            require_builtin_min_arity(function, arg_types, 1, span.clone())?;
+            let input = require_matching_operand_types(function, arg_types, span.clone())?;
+            // The extrema order the window MIN and MAX aggregates use, which also orders BOOL.
+            if !input.is_scalar() {
+                return Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires numeric, BOOL, STRING or DATETIME input, found \
+                         {input}",
+                        function.as_str()
+                    ),
+                    span: span.into(),
+                });
+            }
+            Ok(input.data_type())
+        }
+        BuiltinLowering::Clamp => {
+            require_builtin_arity_exact(function, arg_types, 3, span.clone())?;
+            let input = require_matching_operand_types(function, arg_types, span.clone())?;
+            if !input.is_ordered() {
+                return Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires numeric, STRING or DATETIME input, found {input}",
+                        function.as_str()
+                    ),
+                    span: span.into(),
+                });
+            }
+            Ok(input.data_type())
+        }
+        BuiltinLowering::Membership(_) => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            require_supported_register_type(function, &arg_types[0], span)?;
+            Ok(DataType::Boolean)
+        }
         BuiltinLowering::Concat => {
             require_builtin_min_arity(function, arg_types, 1, span.clone())?;
             for arg_type in arg_types {
@@ -1501,6 +1634,12 @@ pub fn binary_output_type(
     {
         return None;
     }
+    if let BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom = op {
+        let operand = RegisterType::from_data_type(left_type)?;
+        if !operand.is_scalar() {
+            return None;
+        }
+    }
     Some(output)
 }
 
@@ -1605,6 +1744,33 @@ fn require_supported_register_type(
         ),
         span: span.into(),
     })
+}
+
+/// The one register type every argument of `function` shares.
+fn require_matching_operand_types(
+    function: &FunctionName,
+    arg_types: &[DataType],
+    span: std::ops::Range<usize>,
+) -> Result<RegisterType, CompileError> {
+    let first = arg_types
+        .first()
+        .verified("the caller required at least one argument before asking for their shared type");
+    let input = require_supported_register_type(function, first, span.clone())?;
+    for arg_type in &arg_types[1..] {
+        if arg_type != first {
+            return Err(CompileError {
+                code: "type_mismatch",
+                message: format!(
+                    "function '{}' requires matching operand types, found {:?} and {:?}",
+                    function.as_str(),
+                    first,
+                    arg_type
+                ),
+                span: span.into(),
+            });
+        }
+    }
+    Ok(input)
 }
 
 /// Which elements an `ARRAY` or `VEC` function accepts.
@@ -1811,6 +1977,20 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
                 children,
             ))
         }
+        // The set's elements are constants the compiler evaluates once, and an element that cannot
+        // be evaluated rejects the program, so only the operand shapes what the test does per row.
+        Expr::Membership { operand, .. } => Some(ExpressionSemantics::from_operation(
+            membership_semantics(),
+            [expr_semantics(operand)?],
+        )),
+        Expr::Between { operand, low, high } => Some(ExpressionSemantics::from_operation(
+            range_semantics(),
+            [
+                expr_semantics(operand)?,
+                expr_semantics(low)?,
+                expr_semantics(high)?,
+            ],
+        )),
     }
 }
 
@@ -2009,9 +2189,16 @@ mod tests {
             BinaryOp::LtEq,
             BinaryOp::And,
             BinaryOp::Or,
+            BinaryOp::IsDistinctFrom,
+            BinaryOp::IsNotDistinctFrom,
         ] {
             let semantics = binary_op_semantics(op);
             assert_eq!(semantics.volatility, Volatility::Immutable);
+        }
+        for op in [BinaryOp::IsDistinctFrom, BinaryOp::IsNotDistinctFrom] {
+            let semantics = binary_op_semantics(op);
+            assert_eq!(semantics.null_propagation, NullPropagation::NeverNull);
+            assert!(!semantics.can_error);
         }
 
         assert_eq!(cast_semantics().volatility, Volatility::Immutable);

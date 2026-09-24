@@ -469,6 +469,10 @@ Supported expression surface:
 - identifiers: field references from the current row
 - arithmetic: `+`, `-`, `*`, `/`, `%`
 - comparisons: `=`, `!=`, `>`, `<`, `>=`, `<=`
+- [null-safe equality](filter-map-functions.md#comparison-and-equality): `IS DISTINCT FROM`,
+  `IS NOT DISTINCT FROM`
+- [membership and ranges](filter-map-functions.md#membership-and-ranges): `value [NOT] IN
+  (constant, ...)` and `value [NOT] BETWEEN low AND high`
 - boolean logic: `AND`, `OR`, `NOT`
 - [conditionals](filter-map-functions.md#conditional-expressions): `IF condition THEN value ELSE value END`, searched
   `CASE WHEN condition THEN value ... [ELSE value] END`, and simple
@@ -505,6 +509,7 @@ Supported built-ins include string, null-handling, numeric, regex, and contextua
 - string transforms: `lower`, `upper`, `trim`, `length`, `concat`
 - null handling: `coalesce`, `is_null`, `nullif`
 - numeric and predicates: `abs`, `contains`, `starts_with`, `ends_with`
+- extrema: `greatest`, `least`, `clamp`
 - datetime: `date_part`, `date_trunc`, `date_bin`, `date_add`, `date_diff`, `to_unix`, `from_unix`,
   `format_datetime`, `parse_datetime`, with calendar units and explicit time zones
 - contextual functions: `now`, `uuid_v4`, `uuid_v7`

@@ -19,18 +19,18 @@ shuttle = [
 ]
 
 [dependencies]
+ahash = { workspace = true }
 arch-into = { workspace = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 base64 = { workspace = true }
 error-stack = { workspace = true }
+indexmap = { workspace = true }
 meticulous = { workspace = true }
+nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
-nervix-proto = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
-prost = { workspace = true }
 rustls = { workspace = true }
-serde_json = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "fs",
   "io-util",
@@ -54,3 +54,13 @@ tonic = { workspace = true }
 triomphe = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+tokio-stream = { workspace = true, features = ["net"] }

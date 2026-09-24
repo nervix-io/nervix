@@ -36,12 +36,13 @@ use crate::{
     InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
     Inheritance, InputCollectPolicy, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal,
     MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos,
-    MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch,
-    ParseAsType, PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
-    ProcessorOutputs, PulsarIngestMode, QueueName, RabbitMqIngestMode, RedisPubSubIngestMode,
-    RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
+    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
+    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind,
+    OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, QueueName,
+    RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode, RelayBranching, RelayName,
+    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
     SubscriptionLiteral, TopicName, TransactionInspectionTarget, TransactionReportFormat,
     UnaryOperator, WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
 };
@@ -198,7 +199,9 @@ fn binary_precedence(operator: &BinaryOperator) -> u8 {
         | BinaryOperator::GreaterThan
         | BinaryOperator::LessThan
         | BinaryOperator::GreaterThanOrEqual
-        | BinaryOperator::LessThanOrEqual => PRECEDENCE_COMPARISON,
+        | BinaryOperator::LessThanOrEqual
+        | BinaryOperator::IsDistinctFrom
+        | BinaryOperator::IsNotDistinctFrom => PRECEDENCE_COMPARISON,
         BinaryOperator::Add | BinaryOperator::Subtract => PRECEDENCE_ADDITIVE,
         BinaryOperator::Multiply | BinaryOperator::Divide | BinaryOperator::Remainder => {
             PRECEDENCE_MULTIPLICATIVE
@@ -210,6 +213,7 @@ fn binary_precedence(operator: &BinaryOperator) -> u8 {
 fn precedence(expression: &Expression) -> u8 {
     match expression {
         Expression::Binary { operator, .. } => binary_precedence(operator),
+        Expression::Membership { .. } | Expression::Range { .. } => PRECEDENCE_COMPARISON,
         Expression::Unary { .. } => PRECEDENCE_UNARY,
         Expression::Cast { .. } => PRECEDENCE_CAST,
         _ => PRECEDENCE_ATOM,
@@ -288,8 +292,43 @@ pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNs
                 BinaryOperator::LessThanOrEqual => "<=",
                 BinaryOperator::And => "AND",
                 BinaryOperator::Or => "OR",
+                BinaryOperator::IsDistinctFrom => "IS DISTINCT FROM",
+                BinaryOperator::IsNotDistinctFrom => "IS NOT DISTINCT FROM",
             },
             operand_to_nspl(right, binary_precedence(operator) + 1)?
+        )),
+        // The operand is a left operand of the comparison level, which folds left, and each bound
+        // is read one level tighter, so a bound holding `AND` or a comparison keeps its parentheses.
+        Expression::Membership {
+            operator,
+            operand,
+            set,
+        } => Ok(format!(
+            "{} {} ({})",
+            operand_to_nspl(operand, PRECEDENCE_COMPARISON)?,
+            match operator {
+                MembershipOperator::In => "IN",
+                MembershipOperator::NotIn => "NOT IN",
+            },
+            set.iter()
+                .map(expression_to_nspl)
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ")
+        )),
+        Expression::Range {
+            operator,
+            operand,
+            low,
+            high,
+        } => Ok(format!(
+            "{} {} {} AND {}",
+            operand_to_nspl(operand, PRECEDENCE_COMPARISON)?,
+            match operator {
+                RangeOperator::Between => "BETWEEN",
+                RangeOperator::NotBetween => "NOT BETWEEN",
+            },
+            operand_to_nspl(low, PRECEDENCE_ADDITIVE)?,
+            operand_to_nspl(high, PRECEDENCE_ADDITIVE)?
         )),
         Expression::Cast { expression, target } => Ok(format!(
             "{} AS {}",

@@ -41,6 +41,16 @@ pub enum Token {
     Percent,
 }
 
+impl Token {
+    /// Whether the token opens or closes a parenthesized or bracketed group of an expression.
+    pub fn is_group_delimiter(&self) -> bool {
+        matches!(
+            self,
+            Self::LParen | Self::RParen | Self::LBracket | Self::RBracket
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Word {
     KnownWord { iden: Identifier, raw: String },
