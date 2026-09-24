@@ -7430,6 +7430,7 @@ dependencies = [
  "tempfile",
  "testcontainers",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
