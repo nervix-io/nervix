@@ -104,7 +104,8 @@ jobs:
           sudo apt update
           sudo apt install -y \
             gh \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev \
+            protobuf-compiler
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -224,7 +225,8 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev \
+            protobuf-compiler
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
@@ -357,7 +359,8 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev \
+            protobuf-compiler
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1

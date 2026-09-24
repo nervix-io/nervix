@@ -185,7 +185,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev \
+            protobuf-compiler
 
       - name: Configure kache daemon remote
         env:
@@ -446,7 +447,8 @@ jobs:
       - name: Install apt deps
         run: |
           sudo apt-get install --yes --no-install-recommends \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev \
+            protobuf-compiler
 
       - name: Setup flatc
         uses: Nugine/setup-flatc@v1
