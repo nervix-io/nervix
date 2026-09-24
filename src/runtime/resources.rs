@@ -239,7 +239,7 @@ impl Runtime {
         schema: Arc<CompiledSchema>,
         wire_format: ResolvedCodecWireFormat<'_>,
     ) -> Result<Arc<CompiledCodec>, RuntimeError> {
-        let protobuf_descriptor = if let CodecWireFormat::Protobuf(config) = &codec.wire_format {
+        let protobuf_descriptors = if let CodecWireFormat::Protobuf(config) = &codec.wire_format {
             let build_error = |reason: String| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason,
@@ -253,15 +253,25 @@ impl Runtime {
                 .compile_protobuf_descriptor_pool(resource, &config.config)
                 .await
                 .map_err(|error| build_error(error.to_string()))?;
-            Some(
-                pool.message(&config.message)
-                    .map_err(|error| build_error(error.to_string()))?,
-            )
+            let message = pool
+                .message(&config.message)
+                .map_err(|error| build_error(error.to_string()))?;
+            let batch_message = match &config.batch_message {
+                Some(batch_message) => Some(
+                    pool.message(batch_message)
+                        .map_err(|error| build_error(error.to_string()))?,
+                ),
+                None => None,
+            };
+            Some(ProtobufCodecDescriptors {
+                message,
+                batch_message,
+            })
         } else {
             None
         };
 
-        compile_codec_with_protobuf(codec, schema, wire_format, protobuf_descriptor).map_err(
+        compile_codec_with_protobuf(codec, schema, wire_format, protobuf_descriptors).map_err(
             |err| RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: err.to_string(),

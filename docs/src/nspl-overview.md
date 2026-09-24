@@ -53,17 +53,18 @@ CREATE [IF NOT EXISTS] CODEC <name>
   TO SCHEMA <schema>
   WITH JAQ TRANSFORMATIONS
   [ON INGESTION '<program>']
-  [ON EMITTING '<program>'];
+  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']];
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM PROTOBUF
   USING RESOURCE <resource> VERSION <n> | LATEST
   CONFIG {'file' = '<path.proto>', 'include' = '.'}
   MESSAGE '<package.Message>'
+  [BATCH MESSAGE '<package.BatchMessage>']
   TO SCHEMA <schema>
   WITH JAQ TRANSFORMATIONS
   [ON INGESTION '<program>']
-  [ON EMITTING '<program>'];
+  [ON EMITTING '<program>' [ON EMITTING BATCH '<program>']];
 
 CREATE [IF NOT EXISTS] CODEC <name>
   FROM SYSLOG
@@ -147,6 +148,7 @@ ALTER EMITTER <name>
   SET ENCODE USING <codec> | DROP ENCODE |
   SET COLLECT FOR <duration> [MAX BATCH SIZE <bytes>] | DROP COLLECT |
   SET ATTACHED | SET DETACHED |
+  SET BATCH MAX MESSAGES <n> MAX SIZE <bytes> | DROP BATCH |
   SET FLUSH EACH <duration> MAX BATCH SIZE <bytes> | SET FLUSH IMMEDIATE |
   SET COMMIT EACH <duration> MAX SIZE <bytes>
   [, ...];
@@ -449,8 +451,9 @@ Larger batches genuinely pay only at boundaries that do work per batch rather th
 Broker emitters — Kafka, Pulsar, NATS, RabbitMQ, MQTT, Redis, ZeroMQ, Sentry, and syslog — encode
 and publish one record at a time whatever the batch size; wire batching there belongs to the
 client, such as Kafka's `linger.ms` and `batch.size`. SQS `BATCH` groups at most ten records per
-request, and database sinks split every flush into statements of at most `WITH MAX BATCH <n>`
-records. On such routes a larger `MAX BATCH SIZE` or a longer interval buys only fewer flush
+request, and database sinks split every flush into statements of at most the
+[batching clause's](emitters.md#batching) `MAX MESSAGES` records. On such routes a larger
+`MAX BATCH SIZE` or a longer interval buys only fewer flush
 cycles, at the cost of latency, memory, and coarser failure and retry granularity: prefer the
 shortest interval the sink tolerates and let the byte cap protect memory.
 

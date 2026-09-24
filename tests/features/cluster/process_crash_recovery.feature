@@ -57,7 +57,8 @@ Feature: Real process crash recovery
           "postgres_now" = NOW() AS STRING,
           "postgres_action" = input.tenant
         }
-        WITH MAX BATCH 64 MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        MODE ACK RETRY POLICY BACKOFF 100ms MAX 5s
+        BATCH MAX MESSAGES 64 MAX SIZE 1MiB
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;

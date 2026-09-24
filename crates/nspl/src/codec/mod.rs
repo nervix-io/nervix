@@ -9,11 +9,37 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, codec_name, config_entries_block, field_ref,
-        if_not_exists_clause, into_parse_error, kw, lex_input, resource_ref,
+        if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input, resource_ref,
         resource_version_clause, schema_ref, string_lit, suggest_from, tok, wire_avro_schema_ref,
         wire_cbor_schema_ref, wire_json_schema_ref,
     },
 };
+
+/// `ON EMITTING` together with the `ON EMITTING BATCH` program that may follow it.
+struct EmittingTransformations {
+    on_emitting: String,
+    on_emitting_batch: Option<String>,
+}
+
+impl EmittingTransformations {
+    fn into_transformations(
+        on_ingestion: Option<String>,
+        emitting: Option<Self>,
+    ) -> CodecJaqTransformations {
+        let Some(emitting) = emitting else {
+            return CodecJaqTransformations {
+                on_ingestion,
+                on_emitting: None,
+                on_emitting_batch: None,
+            };
+        };
+        CodecJaqTransformations {
+            on_ingestion,
+            on_emitting: Some(emitting.on_emitting),
+            on_emitting_batch: emitting.on_emitting_batch,
+        }
+    }
+}
 
 /// The part of `CREATE CODEC` that follows `FROM`: the wire format the codec reads together with
 /// the wire schema that format needs, the Nervix schema it decodes into, and the per-field
@@ -30,28 +56,33 @@ pub fn create_codec_parser<'src>() -> impl Parser<
     CreateStatement<CreateCodec<RequestedResourceVersion>>,
     extra::Err<ParseError<'src>>,
 > + Clone {
-    let ingestion_transformations = kw(Identifier::On)
-        .ignore_then(kw(Identifier::Ingestion))
+    // `ON EMITTING BATCH` builds its input from the `ON EMITTING` outputs, so it is only
+    // reachable after that transformation.
+    let emitting_batch_transformation = kw(Identifier::On)
+        .ignore_then(kw(Identifier::Emitting))
+        .ignore_then(kw(Identifier::Batch))
         .ignore_then(string_lit())
-        .then(
-            kw(Identifier::On)
-                .ignore_then(kw(Identifier::Emitting))
-                .ignore_then(string_lit())
-                .or_not(),
-        )
-        .map(|(on_ingestion, on_emitting)| CodecJaqTransformations {
-            on_ingestion: Some(on_ingestion),
-            on_emitting,
-        });
+        .boxed();
     let emitting_transformations = kw(Identifier::On)
         .ignore_then(kw(Identifier::Emitting))
         .ignore_then(string_lit())
-        .map(|on_emitting| CodecJaqTransformations {
-            on_ingestion: None,
-            on_emitting: Some(on_emitting),
+        .then(emitting_batch_transformation.or_not())
+        .map(|(on_emitting, on_emitting_batch)| EmittingTransformations {
+            on_emitting,
+            on_emitting_batch,
+        })
+        .boxed();
+    let ingestion_transformations = kw(Identifier::On)
+        .ignore_then(kw(Identifier::Ingestion))
+        .ignore_then(string_lit())
+        .then(emitting_transformations.clone().or_not())
+        .map(|(on_ingestion, emitting)| {
+            EmittingTransformations::into_transformations(Some(on_ingestion), emitting)
         });
+    let emitting_only_transformations = emitting_transformations
+        .map(|emitting| EmittingTransformations::into_transformations(None, Some(emitting)));
     let directed_jaq_transformations =
-        choice((ingestion_transformations, emitting_transformations)).boxed();
+        choice((ingestion_transformations, emitting_only_transformations)).boxed();
     let jaq_transformations = kw(Identifier::With)
         .ignore_then(kw(Identifier::Jaq))
         .ignore_then(kw(Identifier::Transformations))
@@ -135,6 +166,11 @@ pub fn create_codec_parser<'src>() -> impl Parser<
         .boxed()
         .then_ignore(kw(Identifier::Message))
         .then(string_lit())
+        .then(
+            kw_phrase2(Identifier::Batch, Identifier::Message)
+                .ignore_then(string_lit())
+                .or_not(),
+        )
         .then_ignore(kw(Identifier::To))
         .then_ignore(kw(Identifier::Schema))
         .then(schema_ref())
@@ -143,7 +179,10 @@ pub fn create_codec_parser<'src>() -> impl Parser<
         .then(encoding_rules)
         .map(
             |(
-                (((((resource, resource_version), config), message), schema), transformations),
+                (
+                    (((((resource, resource_version), config), message), batch_message), schema),
+                    transformations,
+                ),
                 encoding_rules,
             )| {
                 CodecBody {
@@ -152,6 +191,7 @@ pub fn create_codec_parser<'src>() -> impl Parser<
                         resource_version,
                         config,
                         message,
+                        batch_message,
                         transformations,
                     }),
                     schema,
@@ -290,6 +330,7 @@ mod tests {
                 transformations: CodecJaqTransformations {
                     on_ingestion: on_ingestion.map(str::to_string),
                     on_emitting: on_emitting.map(str::to_string),
+                    on_emitting_batch: None,
                 },
             }
         );
@@ -322,9 +363,11 @@ mod tests {
                     },
                 ],
                 message: "nervix.test.Notification".to_string(),
+                batch_message: None,
                 transformations: CodecJaqTransformations {
                     on_ingestion: Some(".".to_string()),
                     on_emitting: Some(".".to_string()),
+                    on_emitting_batch: None,
                 },
             })
         );
@@ -443,6 +486,28 @@ mod tests {
         "CREATE CODEC notification_codec FROM WIRE JSON SCHEMA notification_wire TO SCHEMA \
          notification_schema WITH JAQ TRANSFORMATIONS ON INGESTION \".payload\";"
     )]
+    #[case::batch_transformation_without_emitting(
+        "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+         TRANSFORMATIONS ON EMITTING BATCH \".\";"
+    )]
+    #[case::batch_transformation_after_ingestion_only(
+        "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+         TRANSFORMATIONS ON INGESTION \".\" ON EMITTING BATCH \".\";"
+    )]
+    #[case::batch_transformation_before_emitting(
+        "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+         TRANSFORMATIONS ON EMITTING BATCH \".\" ON EMITTING \".\";"
+    )]
+    #[case::batch_message_before_message(
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 \
+         CONFIG {\"file\" = \"notification.proto\"} BATCH MESSAGE \"nervix.test.Batch\" MESSAGE \
+         \"nervix.test.Notification\" TO SCHEMA notification_schema WITH JAQ TRANSFORMATIONS ON \
+         EMITTING \".\";"
+    )]
+    #[case::batch_message_on_a_jaq_native_codec(
+        "CREATE CODEC notification_codec FROM JSON BATCH MESSAGE \"nervix.test.Batch\" TO SCHEMA \
+         notification_schema WITH JAQ TRANSFORMATIONS ON EMITTING \".\";"
+    )]
     fn rejects_invalid_codec_forms(#[case] input: &str) {
         assert!(parse_create_codec(input).is_err());
     }
@@ -533,6 +598,24 @@ mod tests {
         &["EMITTING"],
         &["INGESTION"]
     )]
+    #[case::emitting_batch_after_emitting_transformation(
+        "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+         TRANSFORMATIONS ON EMITTING \".\" ON EMITTING ",
+        &["BATCH"],
+        &["INGESTION"]
+    )]
+    #[case::emitting_after_ingestion_and_emitting_transformations(
+        "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+         TRANSFORMATIONS ON INGESTION \".\" ON EMITTING \".\" ON ",
+        &["EMITTING"],
+        &["INGESTION"]
+    )]
+    #[case::batch_message_after_protobuf_message(
+        "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 \
+         CONFIG {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" ",
+        &["BATCH MESSAGE", "TO"],
+        &["BATCH", "WITH"]
+    )]
     #[case::only_explicit_transformations_after_with_jaq(
         "CREATE CODEC notification_codec FROM XML TO SCHEMA notification_schema WITH JAQ ",
         &["TRANSFORMATIONS"],
@@ -551,5 +634,57 @@ mod tests {
         for rejected in rejected {
             assert!(!suggestions.iter().any(|suggestion| suggestion == rejected));
         }
+    }
+
+    #[test]
+    fn parses_an_emitting_batch_transformation_after_the_emitting_transformation() {
+        for (input, on_ingestion) in [
+            (
+                "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+                 TRANSFORMATIONS ON EMITTING \"{id: .user_id}\" ON EMITTING BATCH \"{records: \
+                 .}\";",
+                None,
+            ),
+            (
+                "CREATE CODEC notification_codec FROM JSON TO SCHEMA notification_schema WITH JAQ \
+                 TRANSFORMATIONS ON INGESTION \".\" ON EMITTING \"{id: .user_id}\" ON EMITTING \
+                 BATCH \"{records: .}\";",
+                Some(".".to_string()),
+            ),
+        ] {
+            let parsed = parse_create_codec(input).expect("the codec parses");
+
+            assert_eq!(
+                parsed.wire_format,
+                CodecWireFormat::JaqNative {
+                    format: CodecJaqFormat::Json,
+                    transformations: CodecJaqTransformations {
+                        on_ingestion,
+                        on_emitting: Some("{id: .user_id}".to_string()),
+                        on_emitting_batch: Some("{records: .}".to_string()),
+                    },
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn parses_a_protobuf_batch_message_after_the_message() {
+        let parsed = parse_create_codec(
+            "CREATE CODEC notification_codec FROM PROTOBUF USING RESOURCE proto_bundle VERSION 1 \
+             CONFIG {\"file\" = \"notification.proto\"} MESSAGE \"nervix.test.Notification\" \
+             BATCH MESSAGE \"nervix.test.NotificationBatch\" TO SCHEMA notification_schema WITH \
+             JAQ TRANSFORMATIONS ON EMITTING \".\";",
+        )
+        .expect("the protobuf codec parses");
+
+        let CodecWireFormat::Protobuf(config) = &parsed.wire_format else {
+            panic!("expected a protobuf codec, got {:?}", parsed.wire_format);
+        };
+        assert_eq!(config.message, "nervix.test.Notification");
+        assert_eq!(
+            config.batch_message.as_deref(),
+            Some("nervix.test.NotificationBatch")
+        );
     }
 }

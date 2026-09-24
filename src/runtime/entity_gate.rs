@@ -2089,6 +2089,7 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {

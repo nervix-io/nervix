@@ -323,7 +323,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
   bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key.
-- Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
+- Write an emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
+  sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
+  MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. For
   SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
 - Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put

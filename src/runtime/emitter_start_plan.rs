@@ -29,7 +29,9 @@ use nervix_connector_otel::{
 };
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
-use nervix_models::{ChannelName, CollectionName, QueueName, SubjectName, TableName, TopicName};
+use nervix_models::{
+    ChannelName, CollectionName, EmitterBatchPolicy, QueueName, SubjectName, TableName, TopicName,
+};
 
 use super::*;
 
@@ -100,6 +102,8 @@ pub(super) enum EmitterStartPlanError {
     RetryMaxBackoffBelowBackoff,
     #[error("ack timeout must be greater than zero")]
     ZeroAckTimeout,
+    #[error("{sink} emitter declares no BATCH MAX MESSAGES <n> MAX SIZE <bytes>")]
+    BatchRequired { sink: &'static str },
 }
 
 impl EmitterStartPlanError {
@@ -239,6 +243,7 @@ single_client_sink_plan! {
     KafkaSinkPlan {
         topic: TopicName,
         mode: BrokerPublishingMode,
+        batch: Option<EmitterBatchPolicy>,
     }
 }
 
@@ -248,6 +253,7 @@ single_client_sink_plan! {
     PulsarSinkPlan {
         topic: TopicName,
         mode: BrokerPublishingMode,
+        batch: Option<EmitterBatchPolicy>,
     }
 }
 
@@ -256,6 +262,7 @@ single_client_sink_plan! {
     RabbitMqSinkPlan {
         queue: QueueName,
         mode: BrokerPublishingMode,
+        batch: Option<EmitterBatchPolicy>,
     }
 }
 
@@ -264,6 +271,7 @@ single_client_sink_plan! {
     RedisSinkPlan {
         pool: ClientPoolBounds,
         channel: ChannelName,
+        batch: Option<EmitterBatchPolicy>,
     }
 }
 
@@ -272,6 +280,7 @@ single_client_sink_plan! {
     MqttSinkPlan {
         topic: TopicName,
         mode: MqttPublishingMode,
+        batch: Option<EmitterBatchPolicy>,
     }
 }
 
@@ -280,17 +289,22 @@ single_client_sink_plan! {
     NatsSinkPlan {
         subject: SubjectName,
         mode: NatsPublishingMode,
+        batch: Option<EmitterBatchPolicy>,
     }
 }
 
 single_client_sink_plan! {
     /// A ZeroMQ sink, which pushes every record through the socket its client configures.
-    ZeroMqSinkPlan {}
+    ZeroMqSinkPlan {
+        batch: Option<EmitterBatchPolicy>,
+    }
 }
 
 single_client_sink_plan! {
     /// A Syslog sink, which sends every record to the collector its client configures.
-    SyslogSinkPlan {}
+    SyslogSinkPlan {
+        batch: Option<EmitterBatchPolicy>,
+    }
 }
 
 single_client_sink_plan! {
@@ -298,12 +312,15 @@ single_client_sink_plan! {
     SqsSinkPlan {
         queue: String,
         mode: SqsPublishingMode,
+        batch: Option<EmitterBatchPolicy>,
     }
 }
 
 single_client_sink_plan! {
     /// A Sentry sink, which sends every record as an event to the project its client names.
-    SentrySinkPlan {}
+    SentrySinkPlan {
+        batch: Option<EmitterBatchPolicy>,
+    }
 }
 
 single_client_sink_plan! {
@@ -314,6 +331,7 @@ single_client_sink_plan! {
         attributes: Vec<OtelValueMapping>,
         resource: Vec<OtelValueMapping>,
         scope: Option<OtelScope>,
+        batch: Option<EmitterBatchPolicy>,
     }
 }
 
@@ -323,7 +341,7 @@ single_client_sink_plan! {
     ClickHouseSinkPlan {
         table: TableName,
         values: Vec<ClickHouseValueMapping>,
-        max_batch: NonZeroU64,
+        batch: EmitterBatchPolicy,
     }
 }
 
@@ -335,7 +353,7 @@ single_client_sink_plan! {
         table: TableName,
         values: Vec<PostgresValueMapping>,
         conflict_action: PostgresConflictAction,
-        max_batch: NonZeroU64,
+        batch: EmitterBatchPolicy,
     }
 }
 
@@ -347,7 +365,7 @@ single_client_sink_plan! {
         table: TableName,
         values: Vec<MySqlValueMapping>,
         conflict_action: MySqlConflictAction,
-        max_batch: NonZeroU64,
+        batch: EmitterBatchPolicy,
     }
 }
 
@@ -360,7 +378,7 @@ single_client_sink_plan! {
         collection: CollectionName,
         values: Vec<MongoDbValueMapping>,
         conflict_action: MongoDbConflictAction,
-        max_batch: NonZeroU64,
+        batch: EmitterBatchPolicy,
     }
 }
 
@@ -515,6 +533,7 @@ pub(super) struct IcebergSinkPlan<Config = ResolvedClientConfig> {
     pub(super) location: String,
     pub(super) commit_each: String,
     pub(super) max_commit_size: String,
+    pub(super) batch: Option<EmitterBatchPolicy>,
 }
 
 impl IcebergSinkPlan<DeclaredClientConfig> {
@@ -535,6 +554,7 @@ impl IcebergSinkPlan<DeclaredClientConfig> {
             location: self.location,
             commit_each: self.commit_each,
             max_commit_size: self.max_commit_size,
+            batch: self.batch,
         })
     }
 }
@@ -563,6 +583,29 @@ pub(super) enum EmitterSinkPlan<Config = ResolvedClientConfig> {
 }
 
 impl<Config> EmitterSinkPlan<Config> {
+    /// The batching clause this sink publishes under, absent when it publishes one record per
+    /// message.
+    pub(super) fn batch(&self) -> Option<EmitterBatchPolicy> {
+        match self {
+            Self::Kafka(plan) => plan.batch,
+            Self::Pulsar(plan) => plan.batch,
+            Self::RabbitMq(plan) => plan.batch,
+            Self::Redis(plan) => plan.batch,
+            Self::Mqtt(plan) => plan.batch,
+            Self::Nats(plan) => plan.batch,
+            Self::ZeroMq(plan) => plan.batch,
+            Self::Syslog(plan) => plan.batch,
+            Self::Sqs(plan) => plan.batch,
+            Self::Sentry(plan) => plan.batch,
+            Self::Otel(plan) => plan.batch,
+            Self::ClickHouse(plan) => Some(plan.batch),
+            Self::Postgres(plan) => Some(plan.batch),
+            Self::MySql(plan) => Some(plan.batch),
+            Self::MongoDb(plan) => Some(plan.batch),
+            Self::Iceberg(plan) => plan.batch,
+        }
+    }
+
     /// The transport this sink publishes over, as the emitter's diagnostics name it.
     pub(super) fn label(&self) -> &'static str {
         match self {
@@ -657,6 +700,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 },
                 Model::ClientKafka(client),
             ) => EmitterSinkPlan::Kafka(KafkaSinkPlan {
+                batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -673,6 +717,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 },
                 Model::ClientPulsar(client),
             ) => EmitterSinkPlan::Pulsar(PulsarSinkPlan {
+                batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -689,6 +734,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 },
                 Model::ClientRabbitMq(client),
             ) => EmitterSinkPlan::RabbitMq(RabbitMqSinkPlan {
+                batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -707,6 +753,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             ) => {
                 Self::require_no_ack(sink, mode)?;
                 EmitterSinkPlan::Redis(RedisSinkPlan {
+                    batch: emitter.batch,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -724,6 +771,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 },
                 Model::ClientMqtt(client),
             ) => EmitterSinkPlan::Mqtt(MqttSinkPlan {
+                batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -740,6 +788,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 },
                 Model::ClientNats(client),
             ) => EmitterSinkPlan::Nats(NatsSinkPlan {
+                batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -752,6 +801,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             (EmitSink::ZeroMq { client: expected }, Model::ClientZeroMq(client)) => {
                 Self::require_no_ack(sink, mode)?;
                 EmitterSinkPlan::ZeroMq(ZeroMqSinkPlan {
+                    batch: emitter.batch,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -763,6 +813,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             (EmitSink::Syslog { client: expected }, Model::ClientSyslog(client)) => {
                 Self::require_no_ack(sink, mode)?;
                 EmitterSinkPlan::Syslog(SyslogSinkPlan {
+                    batch: emitter.batch,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -779,6 +830,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 },
                 Model::ClientSqs(client),
             ) => EmitterSinkPlan::Sqs(SqsSinkPlan {
+                batch: emitter.batch,
                 client: EmitterClientSpec::declared(
                     expected,
                     &client.name,
@@ -791,6 +843,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             (EmitSink::Sentry { client: expected }, Model::ClientSentry(client)) => {
                 Self::require_request_ack(sink, mode)?;
                 EmitterSinkPlan::Sentry(SentrySinkPlan {
+                    batch: emitter.batch,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -812,6 +865,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
             ) => {
                 Self::require_request_ack(sink, mode)?;
                 EmitterSinkPlan::Otel(OtelSinkPlan {
+                    batch: emitter.batch,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -830,12 +884,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     client: expected,
                     table,
                     values,
-                    max_batch,
                 },
                 Model::ClientClickHouse(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
                 EmitterSinkPlan::ClickHouse(ClickHouseSinkPlan {
+                    batch: Self::require_batch(sink, emitter.batch)?,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -844,7 +898,6 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     )?,
                     table: table.clone(),
                     values: values.clone(),
-                    max_batch: *max_batch,
                 })
             }
             (
@@ -853,12 +906,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     table,
                     values,
                     conflict_action,
-                    max_batch,
                 },
                 Model::ClientPostgres(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
                 EmitterSinkPlan::Postgres(PostgresSinkPlan {
+                    batch: Self::require_batch(sink, emitter.batch)?,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -869,7 +922,6 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     table: table.clone(),
                     values: values.clone(),
                     conflict_action: postgres_conflict_action(conflict_action),
-                    max_batch: *max_batch,
                 })
             }
             (
@@ -878,12 +930,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     table,
                     values,
                     conflict_action,
-                    max_batch,
                 },
                 Model::ClientMySql(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
                 EmitterSinkPlan::MySql(MySqlSinkPlan {
+                    batch: Self::require_batch(sink, emitter.batch)?,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -894,7 +946,6 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     table: table.clone(),
                     values: values.clone(),
                     conflict_action: mysql_conflict_action(conflict_action),
-                    max_batch: *max_batch,
                 })
             }
             (
@@ -903,12 +954,12 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     collection,
                     values,
                     conflict_action,
-                    max_batch,
                 },
                 Model::ClientMongoDb(client),
             ) => {
                 Self::require_request_ack(sink, mode)?;
                 EmitterSinkPlan::MongoDb(MongoDbSinkPlan {
+                    batch: Self::require_batch(sink, emitter.batch)?,
                     client: EmitterClientSpec::declared(
                         expected,
                         &client.name,
@@ -919,7 +970,6 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                     collection: collection.clone(),
                     values: values.clone(),
                     conflict_action: mongodb_conflict_action(conflict_action),
-                    max_batch: *max_batch,
                 })
             }
             (
@@ -939,6 +989,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 let storage = Self::decide_iceberg_storage(sink, *backend, expected, storage)?;
                 let catalog = Self::decide_iceberg_catalog(catalog, clients.catalog_client)?;
                 EmitterSinkPlan::Iceberg(Box::new(IcebergSinkPlan {
+                    batch: emitter.batch,
                     backend: *backend,
                     storage,
                     catalog,
@@ -975,6 +1026,18 @@ impl EmitterStartPlan<DeclaredClientConfig> {
         Ok(EmitterStartPlan {
             retry_policy: self.retry_policy,
             sink,
+        })
+    }
+
+    /// The batching clause of a sink that has no unbounded write, which the registry requires.
+    fn require_batch(
+        sink: &EmitSink,
+        batch: Option<EmitterBatchPolicy>,
+    ) -> Result<EmitterBatchPolicy, Report<EmitterStartPlanError>> {
+        batch.ok_or_else(|| {
+            Report::new(EmitterStartPlanError::BatchRequired {
+                sink: sink.transport_label(),
+            })
         })
     }
 
@@ -1182,8 +1245,8 @@ fn decide_sqs_publishing_mode(
 #[cfg(test)]
 mod tests {
     use nervix_models::{
-        CreateClientClickHouse, CreateClientMongoDb, CreateClientMySql, CreateClientPostgres,
-        ProcessorInputs,
+        BatchMessageLimit, CreateClientClickHouse, CreateClientMongoDb, CreateClientMySql,
+        CreateClientPostgres, EmitterBatchRequirement, ProcessorInputs,
     };
     use nonzero_ext::nonzero;
     use rstest::rstest;
@@ -1237,6 +1300,13 @@ mod tests {
         }]
     }
 
+    fn batch_policy() -> EmitterBatchPolicy {
+        EmitterBatchPolicy {
+            max_messages: BatchMessageLimit::try_from(100u32).expect("100 is a valid limit"),
+            max_size: "1MiB".parse().expect("1MiB is a valid size"),
+        }
+    }
+
     fn declared_client(name: &str) -> EmitterClientSpec<DeclaredClientConfig> {
         EmitterClientSpec {
             name: named(name),
@@ -1253,6 +1323,7 @@ mod tests {
             from: ProcessorInputs::single(named("orders")),
             encode_using_codec: None,
             sink: Box::new(sink),
+            batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode,
@@ -1294,8 +1365,14 @@ mod tests {
     }
 
     impl SinkCase {
+        /// The emitter publishing to this case's sink, declaring the batching clause a database
+        /// sink requires and leaving it out everywhere else.
         fn emitter(&self) -> CreateEmitter {
-            emitter(self.sink.clone(), self.mode.clone())
+            let mut emitter = emitter(self.sink.clone(), self.mode.clone());
+            if let EmitterBatchRequirement::Required = self.sink.batch_requirement() {
+                emitter.batch = Some(batch_policy());
+            }
+            emitter
         }
 
         fn decide(
@@ -1507,7 +1584,6 @@ mod tests {
                         client: client(),
                         table: named("orders"),
                         values: Vec::new(),
-                        max_batch: nonzero!(100u64),
                     },
                     mode: request_ack(),
                     client: Model::ClientClickHouse(CreateClientClickHouse {
@@ -1523,7 +1599,6 @@ mod tests {
                         table: named("orders"),
                         values: Vec::new(),
                         conflict_action: nervix_models::PostgresConflictAction::None,
-                        max_batch: nonzero!(100u64),
                     },
                     mode: request_ack(),
                     client: Model::ClientPostgres(CreateClientPostgres {
@@ -1540,7 +1615,6 @@ mod tests {
                         table: named("orders"),
                         values: Vec::new(),
                         conflict_action: nervix_models::MySqlConflictAction::None,
-                        max_batch: nonzero!(100u64),
                     },
                     mode: request_ack(),
                     client: Model::ClientMySql(CreateClientMySql {
@@ -1557,7 +1631,6 @@ mod tests {
                         collection: named("orders"),
                         values: Vec::new(),
                         conflict_action: nervix_models::MongoDbConflictAction::None,
-                        max_batch: nonzero!(100u64),
                     },
                     mode: request_ack(),
                     client: Model::ClientMongoDb(CreateClientMongoDb {
@@ -1638,6 +1711,70 @@ mod tests {
     }
 
     #[test]
+    fn carries_the_batch_clause_into_the_plan_of_every_sink() {
+        for kind in [
+            SinkKind::Kafka,
+            SinkKind::Sentry,
+            SinkKind::Otel,
+            SinkKind::IcebergS3,
+        ] {
+            let case = kind.case();
+            let unbatched = case.decide().expect("the sink must be planned");
+            assert_eq!(unbatched.sink.batch(), None, "{}", kind.label());
+
+            let mut emitter = case.emitter();
+            emitter.batch = Some(batch_policy());
+            let batched = EmitterStartPlan::decide(
+                &emitter,
+                EmitterClientModels {
+                    client: Some(&case.client),
+                    catalog_client: case.catalog_client.as_ref(),
+                },
+            )
+            .expect("the batching sink must be planned");
+            assert_eq!(
+                batched.sink.batch(),
+                Some(batch_policy()),
+                "{}",
+                kind.label()
+            );
+        }
+
+        for kind in [
+            SinkKind::ClickHouse,
+            SinkKind::Postgres,
+            SinkKind::MySql,
+            SinkKind::MongoDb,
+        ] {
+            let plan = kind
+                .case()
+                .decide()
+                .expect("the database sink must be planned");
+            assert_eq!(plan.sink.batch(), Some(batch_policy()), "{}", kind.label());
+        }
+    }
+
+    #[test]
+    fn a_database_sink_without_its_batch_clause_is_not_planned() {
+        let case = SinkKind::MongoDb.case();
+        let mut emitter = case.emitter();
+        emitter.batch = None;
+
+        let error = EmitterStartPlan::decide(
+            &emitter,
+            EmitterClientModels {
+                client: Some(&case.client),
+                catalog_client: None,
+            },
+        )
+        .expect_err("a MongoDB sink has no unbounded write");
+        assert_eq!(
+            *error.current_context(),
+            EmitterStartPlanError::BatchRequired { sink: "MONGODB" }
+        );
+    }
+
+    #[test]
     fn carries_the_declared_client_and_the_sink_parameters() {
         let plan = SinkKind::Postgres
             .case()
@@ -1650,7 +1787,7 @@ mod tests {
         assert_eq!(sink.client, declared_client("upstream"));
         assert_eq!(sink.table, named::<TableName>("orders"));
         assert_eq!(sink.conflict_action, PostgresConflictAction::None);
-        assert_eq!(sink.max_batch, nonzero!(100u64));
+        assert_eq!(sink.batch, batch_policy());
         assert_eq!(
             sink.pooled_client(),
             PooledClientPlan {

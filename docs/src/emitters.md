@@ -26,6 +26,8 @@ An emitter defines:
 - the transport-specific sink
 - the sink's explicit publishing mode, confirmation window and bound where applicable, and retry
   pacing
+- an optional batching clause bounding how many records one external write carries and its encoded
+  size, required for database sinks
 - the flush policy used to collect a batch before publishing
 - whether the branch is `ATTACHED` or `DETACHED`
 - route-local codec construction or a direct `VALUES` mapping
@@ -146,6 +148,68 @@ flush; `MODE` controls when each record in that flush counts as published. `ATTA
 `DETACHED` are orthogonal: a detached emitter acknowledges upstream immediately but still performs
 its declared confirmations and retries for error visibility and backpressure.
 
+## Batching
+
+An emitter may declare two hard limits for every batch it publishes, written after the complete sink
+clause and its route construction, and before the flush policy:
+
+```nspl,ignore
+BATCH MAX MESSAGES <n> MAX SIZE <bytes>
+```
+
+`MAX MESSAGES` is the most source records one batch carries, from 1 to 65,536. `MAX SIZE` is the
+most bytes its encoded payload may occupy: a positive whole number followed by `B`, `KB`, `KiB`,
+`MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`. Neither limit has a default, neither may be omitted, and
+neither is derived from the other or from `FLUSH ... MAX BATCH SIZE`, which measures Arrow memory
+rather than encoded bytes.
+
+```nspl,ignore
+CREATE EMITTER kafka_notifications
+  FROM notifications
+  TO KAFKA kafka_main TOPIC notifications_out
+    MODE ACK PARALLEL MAX 100 ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING notification_codec
+  INHERIT ALL
+  BATCH MAX MESSAGES 500 MAX SIZE 1MiB
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+| Sinks | Clause |
+| --- | --- |
+| Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry, Syslog, OTEL, Iceberg | Optional |
+| ClickHouse, Postgres, MySQL, MongoDB | Required: a database write always carries several rows |
+
+A statement is rejected, naming the offending value, when:
+
+- `MAX MESSAGES` is zero or above 65,536;
+- `MAX SIZE` is zero, fractional, written without a unit, or past the 64-bit byte range;
+- `MAX SIZE` is above 256 KiB on an SQS emitter, the largest SQS message Nervix sends;
+- the clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter;
+- the clause is present on a Sentry emitter whose codec declares no `ON EMITTING BATCH`
+  transformation, because one Sentry envelope carries at most one event and only that
+  transformation can say where the members go;
+- the clause is present on an emitter whose protobuf codec declares no `BATCH MESSAGE`, because
+  protobuf has no self-delimiting sequence. Without an `ON EMITTING BATCH` transformation, the batch
+  message must declare exactly one field, `repeated <MESSAGE>`, which the domain build checks
+  against the compiled descriptors.
+
+The codec forms are described in [Schemas and codecs](schemas-and-codecs.md#batch-transformations).
+These checks cover the whole candidate graph, so replacing a codec that a batching emitter uses
+is validated against that emitter too.
+
+`SHOW CREATE EMITTER` renders the clause between the sink clause and `FLUSH`, with the size in the
+unit it was written in. `DESCRIBE EMITTER` reports it on the line after `sink:`, as
+`batch: MAX MESSAGES 500 MAX SIZE 1MiB` or `batch: none`.
+
+The database sinks bound every sequential insert or bulk write by `MAX MESSAGES`, as their sections
+below describe. The complete contract for batch payloads — packing, containers per wire format,
+exact size measurement and failure attribution for every sink — is defined in
+[Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
+Until an emitter's sink implements that contract, a declared clause is validated, stored and
+rendered, and the emitter publishes one record per message exactly as it does without it.
+
 ## Altering emitters
 
 `ALTER EMITTER` applies one or more comma-separated operations in written order:
@@ -165,6 +229,8 @@ ALTER EMITTER <emitter>
   | DROP COLLECT
   | SET ATTACHED
   | SET DETACHED
+  | SET BATCH MAX MESSAGES <n> MAX SIZE <bytes>
+  | DROP BATCH
   | SET FLUSH EACH <duration> MAX BATCH SIZE <bytes>
   | SET FLUSH IMMEDIATE
   | SET COMMIT EACH <duration> MAX SIZE <bytes>
@@ -172,11 +238,13 @@ ALTER EMITTER <emitter>
 ```
 
 `SET TO` accepts the same complete transport-specific sink body that follows `TO` in `CREATE
-EMITTER`, including its required `MODE`, SQS FIFO group, database maximum batch, and Iceberg commit
-policy. The existing construction and output flush policy remain in place. `SET MODE` changes only
+EMITTER`, including its required `MODE`, SQS FIFO group, and Iceberg commit policy. The existing
+construction, batching clause and output flush policy remain in place, so changing to a database
+sink requires the emitter to declare a batching clause, in the same statement if necessary. `SET MODE` changes only
 the current sink's publishing mode and rejects a body that the sink does not support. `SET CLIENT`
 changes only the client of the current sink kind. `SET COMMIT` is valid only for Iceberg. `DROP
-ENCODE` fails if the emitter has no codec configured.
+ENCODE` fails if the emitter has no codec configured. `SET BATCH` adds or replaces the batching
+clause. `DROP BATCH` fails when the emitter has no clause and when its sink requires one.
 
 `ADD FROM` rejects an already configured relay. `DROP FROM` cannot remove the final input.
 `ALTER FROM ... SET WHERE` adds or replaces that source's predicate; `ALTER FROM ... DROP WHERE`
@@ -184,8 +252,8 @@ fails when the source has no predicate.
 
 Changing only `FLUSH` is a `DYNAMIC` update. The live emitter keeps its pending Arrow batches,
 installs the new cadence, and receives a force-flush kick, so buffered output is neither discarded
-nor re-encoded. Source-predicate, sink, publishing-mode, client, codec, collection, and attachment
-changes use
+nor re-encoded. Source-predicate, sink, publishing-mode, client, codec, collection, batching, and
+attachment changes use
 `ENTITY_PAUSE`: Nervix gates all of the emitter's source relays, drains collected input and pending
 sink output, replaces that emitter task, and releases the gates. Changing source membership uses
 `DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
@@ -640,8 +708,8 @@ CREATE EMITTER to_ch
     "clickhouse_now" = NOW(),
     "clickhouse_action" = LOWER(input.action)
   }
-  WITH MAX BATCH 500
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
@@ -665,8 +733,8 @@ bounds both sending an insert body and waiting for ClickHouse to finish the inse
 result.
 For HTTPS endpoints, mount a TLS resource and set `'tls_ca_file'` to the mounted CA path.
 
-ClickHouse requires `WITH MAX BATCH <n>`. A larger flush is split into sequential inserts of at
-most `n` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and
+ClickHouse requires the [batching clause](#batching). A larger flush is split into sequential
+inserts of at most `MAX MESSAGES` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and
 MySQL, a failed multi-row insert is classified first as record-specific or infrastructure-wide.
 Infrastructure failures retry with backpressure. A record-specific failure is isolated by
 re-executing the chunk one record at a time so healthy rows land and only poison rows follow `ON
@@ -684,20 +752,20 @@ CREATE EMITTER to_pg
     "postgres_now" = NOW() AS STRING,
     "postgres_action" = LOWER(input.action)
   }
-  WITH MAX BATCH 500
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
 Postgres emitters use `VALUES` expressions and insert batches with `INSERT ... SELECT ... FROM
-unnest(...)`. `WITH MAX BATCH <n>` is required and is enforced as the maximum records in each
-sequential insert. The insert result acknowledges those records. On the poison-isolation path,
+unnest(...)`. The [batching clause](#batching) is required, and its `MAX MESSAGES` is enforced as
+the maximum records in each sequential insert. The insert result acknowledges those records. On the poison-isolation path,
 tables without an idempotent `ON CONFLICT` policy may observe duplicates when healthy records are
 re-executed.
 
-Postgres emitters may include an insert conflict policy before `WITH MAX BATCH`:
+Postgres emitters may include an insert conflict policy after `VALUES`:
 
 ```nspl,ignore
 ON CONFLICT ("postgres_user_id") DO UPDATE
@@ -736,19 +804,19 @@ CREATE EMITTER to_mysql
     "mysql_now" = NOW() AS STRING,
     "mysql_action" = LOWER(input.action)
   }
-  WITH MAX BATCH 500
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
 MySQL emitters use `VALUES` expressions and insert batches with a multi-row `INSERT ... VALUES (?,
-...), ...` command. `WITH MAX BATCH <n>` is required and is enforced as the maximum records in each
-sequential insert. The insert result acknowledges those records. Conflict clauses are the user's
+...), ...` command. The [batching clause](#batching) is required, and its `MAX MESSAGES` is
+enforced as the maximum records in each sequential insert. The insert result acknowledges those records. Conflict clauses are the user's
 tool for bounding duplicates when poison isolation re-executes a failed chunk.
 
-MySQL emitters may include an insert conflict policy before `WITH MAX BATCH`:
+MySQL emitters may include an insert conflict policy after `VALUES`:
 
 ```nspl,ignore
 ON CONFLICT DO UPDATE
@@ -782,15 +850,15 @@ CREATE EMITTER to_mongodb
     "mongodb_now" = NOW() AS STRING,
     "mongodb_action" = LOWER(input.action)
   }
-  WITH MAX BATCH 500
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
-MongoDB emitters use `VALUES` expressions and bulk writes. `WITH MAX BATCH <n>` is required and is
-enforced as the maximum documents in each write. MongoDB reports per-document outcomes, so healthy
+MongoDB emitters use `VALUES` expressions and bulk writes. The [batching clause](#batching) is
+required, and its `MAX MESSAGES` is enforced as the maximum documents in each write. MongoDB reports per-document outcomes, so healthy
 documents acknowledge and poison documents follow `ON MESSAGE ERROR` without a separate isolation
 pass. Transient or infrastructure failures retry only the undelivered documents.
 
@@ -801,7 +869,7 @@ inserted, and its value is never used as an `ON CONFLICT` target. The rejection 
 record does not retry. Every other record in the same write is unaffected, and a mapped value that
 is genuinely NULL is still written as BSON null.
 
-MongoDB emitters may include an insert conflict policy before `WITH MAX BATCH`:
+MongoDB emitters may include an insert conflict policy after `VALUES`:
 
 ```nspl,ignore
 ON CONFLICT ("mongodb_user_id") DO UPDATE
