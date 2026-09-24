@@ -23,9 +23,9 @@ mod exchange;
 mod outcome;
 mod upload;
 
-pub use client::Client;
+pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectOptions, TlsRequirement};
-pub use error::{ClientError, RequestKind};
+pub use error::{ClientError, EventStreamKind, RequestKind};
 pub use events::{
     AutocompleteSuggestion, ServerEvent, SubscriptionEvent, SubscriptionRequest,
     SubscriptionRowsEvent,
@@ -54,7 +54,7 @@ pub struct QuerySplitError {
 }
 
 /// Splits a batch into the exact NSPL source slices that should be submitted separately.
-pub fn split_query_statements(query: &str) -> Result<Vec<&str>, QuerySplitError> {
+pub fn split_query_statements(query: &str) -> error_stack::Result<Vec<&str>, QuerySplitError> {
     nervix_nspl::client_statement::parse_client_statement_sources(query)
         .map(|statements| {
             statements
@@ -62,8 +62,10 @@ pub fn split_query_statements(query: &str) -> Result<Vec<&str>, QuerySplitError>
                 .map(|statement| statement.source(query))
                 .collect()
         })
-        .map_err(|error| QuerySplitError {
-            message: error.to_string(),
+        .map_err(|error| {
+            error_stack::Report::new(QuerySplitError {
+                message: error.to_string(),
+            })
         })
 }
 

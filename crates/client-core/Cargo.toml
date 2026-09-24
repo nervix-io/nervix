@@ -30,6 +30,7 @@ nervix-client-wire = { workspace = true, features = ["grpc"] }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
+parking_lot = { workspace = true }
 rustls = { workspace = true }
 shuttle-tokio = { workspace = true, features = [
   "fs",

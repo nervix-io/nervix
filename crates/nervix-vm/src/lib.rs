@@ -71,9 +71,9 @@ pub use datetime::{
     TextExpectation, UnreadableText, Zone, ZoneDirective,
 };
 pub use error::{
-    BytesOperation, CompileError, DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation,
-    IntegerOperation, IpOperation, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError,
-    ShiftOperation, SideError, SideErrorReason, TextOperation, UrlOperation,
+    BytesOperation, CollectionLimit, CompileError, DatetimeOperation, DivisionOperation, ErrorCode,
+    FloatOperation, IntegerOperation, IpOperation, RowErrorLengths, RowErrorMask, RowErrors,
+    RuntimeError, ShiftOperation, SideError, SideErrorReason, TextOperation, UrlOperation,
 };
 pub use extremum::{ClampBoundsDefect, Extremum};
 pub use frontend::{

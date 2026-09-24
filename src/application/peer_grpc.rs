@@ -27,5 +27,6 @@ pub(in crate::application) fn grpc_client_connect_options(
             .flatten(),
         username: credentials.map(|credentials| credentials.username.clone()),
         password: credentials.map(|credentials| credentials.password.clone()),
+        ..ClientConnectOptions::default()
     }
 }

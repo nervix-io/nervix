@@ -7,7 +7,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use nervix_client_core::{Client, DomainName, SubscriptionEvent, SubscriptionRequest};
 
     let domain = DomainName::try_from("default")?;
-    let client = Client::connect("http://127.0.0.1:47391", Some(domain)).await?;
+    let client = Client::connect("http://127.0.0.1:47391", Some(domain))
+        .await
+        .map_err(error_stack::Report::into_error)?;
 
     let result = client.execute("SHOW CLUSTER STATUS;").await?;
     println!("{}", result.message);

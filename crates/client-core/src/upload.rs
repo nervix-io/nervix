@@ -19,7 +19,7 @@ use nervix_client_wire::{
     UploadReplyFrame, UploadStart, VerifiedFrame,
     grpc::{ClientUploadCodec, UPLOAD_RESOURCE_PATH},
 };
-use nervix_models::{ResourceName, ResourceUploadIdentity};
+use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 use tempfile::TempPath;
 use tokio::{
     fs::File,
@@ -30,7 +30,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, codegen::http::uri::PathAndQuery, transport::Channel};
 
 use crate::{
-    client::{Client, SessionRecovery},
+    client::{Client, RecoveryMode, SessionRecovery},
     connection::GrpcConnector,
     error::{ClientError, RequestKind},
     exchange::SESSION_LIMITS,
@@ -58,9 +58,13 @@ impl Client {
         directory: impl AsRef<Path>,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
     ) -> Result<CommandOutcome, ClientError> {
+        let Some(domain) = self.domain().await else {
+            return Err(ClientError::NoActiveDomain);
+        };
         self.upload_resource_from_directory_with_identity(
             identifier,
             directory,
+            domain,
             ResourceUploadIdentity::parse(uuid::Uuid::now_v7().to_string())
                 .assured("a UUID string satisfies the upload identity grammar"),
             on_progress,
@@ -68,13 +72,14 @@ impl Client {
         .await
     }
 
-    /// Uploads `directory` as a version of the resource `identifier` names. `upload_identity`
-    /// stays the same across every retry and redirect, so an upload the server already installed
-    /// is recovered rather than installed twice.
+    /// Uploads `directory` as a version of the resource `identifier` names. Both `domain` and
+    /// `upload_identity` stay the same across every retry and redirect, so an upload the server
+    /// already installed is recovered rather than installed twice.
     pub async fn upload_resource_from_directory_with_identity(
         &self,
         identifier: &str,
         directory: impl AsRef<Path>,
+        domain: DomainName,
         upload_identity: ResourceUploadIdentity,
         on_progress: impl Fn(u64) + Send + Sync + Clone + 'static,
     ) -> Result<CommandOutcome, ClientError> {
@@ -84,92 +89,113 @@ impl Client {
                 source: report.current_context().clone(),
             })?;
         let archive = UploadArchive::build(directory.as_ref()).await?;
-        for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
-            tokio::task::consume_budget().await;
-            let Some(domain) = self.domain().await else {
-                return Err(ClientError::NoActiveDomain);
-            };
-            let start = UploadStart {
-                request_id: UPLOAD_REQUEST_ID,
-                domain,
-                resource: resource.clone(),
-                upload_identity: upload_identity.clone(),
-                total_bytes: archive.total_bytes,
-            }
-            .encode(&SESSION_LIMITS)
-            .map_err(|report| ClientError::EncodeRequest {
-                request: RequestKind::UploadResource,
-                source: report.current_context().clone(),
-            })?;
-            let reader = File::open(&archive.path)
-                .await
-                .map_err(|_| ClientError::BuildUploadArchive)?;
-            let stream = UploadAttempt {
-                channel: self.current_channel().await,
-                start,
-                archive: reader,
-            };
-            let response = match stream
-                .send(&self.inner.connector, on_progress.clone())
-                .await
-            {
-                Ok(response) => response,
-                Err(status)
-                    if upload_status_is_retryable(&status) && Self::await_retry(attempt).await =>
-                {
-                    match self.recover_session().await? {
-                        SessionRecovery::Ready => continue,
-                        SessionRecovery::Unavailable => {
-                            return Err(ClientError::UploadResource(status));
+        let result = tokio::time::timeout(self.inner.connector.retry_timeout(), async {
+            for attempt in 0..Self::MAX_LEADER_ROUTING_ATTEMPTS {
+                tokio::task::consume_budget().await;
+                let start = UploadStart {
+                    request_id: UPLOAD_REQUEST_ID,
+                    domain: domain.clone(),
+                    resource: resource.clone(),
+                    upload_identity: upload_identity.clone(),
+                    total_bytes: archive.total_bytes,
+                }
+                .encode(&SESSION_LIMITS)
+                .map_err(|report| ClientError::EncodeRequest {
+                    request: RequestKind::UploadResource,
+                    source: report.current_context().clone(),
+                })?;
+                let reader = File::open(&archive.path)
+                    .await
+                    .map_err(|_| ClientError::BuildUploadArchive)?;
+                let stream = UploadAttempt {
+                    channel: self.current_channel().await,
+                    start,
+                    archive: reader,
+                };
+                let sent = tokio::time::timeout(
+                    self.inner.connector.request_timeout(),
+                    stream.send(&self.inner.connector, on_progress.clone()),
+                )
+                .await;
+                let response = match sent.unwrap_or_else(|_| {
+                    Err(Box::new(Status::deadline_exceeded(
+                        "upload request deadline exceeded",
+                    )))
+                }) {
+                    Ok(response) => response,
+                    Err(status)
+                        if upload_status_is_retryable(&status)
+                            && Self::await_retry(attempt).await =>
+                    {
+                        match self.recover_session(RecoveryMode::Replace).await? {
+                            SessionRecovery::Ready => continue,
+                            SessionRecovery::Unavailable => {
+                                return Err(ClientError::UploadResource(status));
+                            }
                         }
                     }
+                    Err(status) => return Err(ClientError::UploadResource(status)),
+                };
+                let reply = UploadReply::decode(response.get_ref()).map_err(|report| {
+                    ClientError::InvalidUploadReply(report.current_context().clone())
+                })?;
+                if let Some(request_id) = reply.request_id
+                    && request_id != UPLOAD_REQUEST_ID
+                {
+                    return Err(ClientError::UnexpectedReply {
+                        request: RequestKind::UploadResource,
+                    });
                 }
-                Err(status) => return Err(ClientError::UploadResource(status)),
-            };
-            let reply = UploadReply::decode(response.get_ref()).map_err(|report| {
-                ClientError::InvalidUploadReply(report.current_context().clone())
-            })?;
-            if let Some(request_id) = reply.request_id
-                && request_id != UPLOAD_REQUEST_ID
-            {
-                return Err(ClientError::UnexpectedReply {
-                    request: RequestKind::UploadResource,
-                });
+                let received = match &reply.disposition {
+                    UploadDisposition::Installed {
+                        upload_identity, ..
+                    } => Some(upload_identity),
+                    UploadDisposition::Failed {
+                        upload_identity, ..
+                    } => upload_identity.as_ref(),
+                    UploadDisposition::NotLeader(_) => None,
+                };
+                if let Some(received) = received
+                    && received != &upload_identity
+                {
+                    return Err(ClientError::UploadIdentityMismatch {
+                        expected: upload_identity.clone(),
+                        received: received.clone(),
+                    });
+                }
+                let outcome = CommandOutcome::from_upload(reply, upload_identity.clone());
+                match outcome.routing() {
+                    Routing::Redirect(leader) => self.follow_leader(leader).await?,
+                    Routing::AwaitElection if Self::await_retry(attempt).await => {}
+                    _ => return Ok(outcome),
+                }
             }
-            let received = match &reply.disposition {
-                UploadDisposition::Installed {
-                    upload_identity, ..
-                } => Some(upload_identity),
-                UploadDisposition::Failed {
-                    upload_identity, ..
-                } => upload_identity.as_ref(),
-                UploadDisposition::NotLeader(_) => None,
-            };
-            if let Some(received) = received
-                && received != &upload_identity
-            {
-                return Err(ClientError::UploadIdentityMismatch {
-                    expected: upload_identity,
-                    received: received.clone(),
-                });
-            }
-            let outcome = CommandOutcome::from_upload(reply, upload_identity.clone());
-            match outcome.routing() {
-                Routing::Redirect(leader) => self.follow_leader(leader).await?,
-                Routing::AwaitElection if Self::await_retry(attempt).await => {}
-                _ => return Ok(outcome),
-            }
-        }
 
-        let mut exhausted =
-            CommandOutcome::failed_locally("upload redirect loop exceeded".to_string());
-        exhausted.resource_upload = Some(ResourceUploadOutcome {
-            identity: upload_identity,
-            version: None,
-            origin: None,
-            failure: None,
-        });
-        Ok(exhausted)
+            let mut exhausted =
+                CommandOutcome::failed_locally("upload redirect loop exceeded".to_string());
+            exhausted.resource_upload = Some(ResourceUploadOutcome {
+                identity: upload_identity.clone(),
+                version: None,
+                origin: None,
+                failure: None,
+            });
+            Ok(exhausted)
+        })
+        .await;
+        match result {
+            Ok(Ok(outcome)) => Ok(outcome),
+            Ok(Err(error)) if error.can_hide_installed_upload() => {
+                Err(ClientError::UncertainUpload {
+                    identity: upload_identity,
+                    source: Box::new(error),
+                })
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => Err(ClientError::UncertainUpload {
+                identity: upload_identity,
+                source: Box::new(ClientError::RetryDeadline),
+            }),
+        }
     }
 }
 
