@@ -790,6 +790,76 @@ fn compile_regex_argument_patterns() -> Arc<CompiledProgram> {
     .expect("argument pattern benchmark program must compile")
 }
 
+fn compile_multi_pattern_search(constant: bool) -> Arc<CompiledProgram> {
+    let expression = if constant {
+        "contains_any(input.text, vec('needle7', 'absent'))"
+    } else {
+        "contains_any(input.text, vec(input.pattern, 'absent'))"
+    };
+    let source = format!("SET matched = {expression}");
+    let program = parse_program(&source).assured("the benchmark expression is valid NSPL");
+    let output = with_output_fields(&regex_schema(), &[("matched", DataType::Boolean)]);
+    compile_program_with_options_for_bindings(
+        &program,
+        output,
+        [CompileBinding::writable("input", regex_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .assured("the benchmark has a BOOL output for its search result")
+}
+
+fn multi_pattern_batch(cardinality: usize, text_length: usize) -> TypedBatch {
+    let prefix = "x".repeat(text_length);
+    let text = StringArray::from_iter((0..1_024).map(|_| Some(format!("{prefix}needle7"))));
+    let pattern =
+        StringArray::from_iter((0..1_024).map(|row| Some(format!("needle{}", row % cardinality))));
+    TypedBatch::try_new(
+        regex_schema(),
+        vec![TypedArray::Utf8(text), TypedArray::Utf8(pattern)],
+    )
+    .assured("the benchmark columns match the two STRING fields")
+}
+
+fn string_search_benches(c: &mut Criterion) {
+    let constant = compile_multi_pattern_search(true);
+    let dynamic = compile_multi_pattern_search(false);
+    let runtime = benchmark_runtime();
+    let mut group = c.benchmark_group("string_search");
+    group.throughput(Throughput::Elements(1_024));
+    for text_length in [32, 1_024] {
+        let batch = multi_pattern_batch(16, text_length);
+        group.bench_with_input(
+            BenchmarkId::new("constant_set", text_length),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&constant),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        for cardinality in [1, 16, 64] {
+            let batch = multi_pattern_batch(cardinality, text_length);
+            group.bench_with_input(
+                BenchmarkId::new(format!("dynamic_{cardinality}"), text_length),
+                &batch,
+                |b, batch| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(&dynamic),
+                            black_box(batch),
+                        ))
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn unoptimized_options() -> CompileOptions {
     CompileOptions {
         optimize_temp_registers: false,
@@ -2816,6 +2886,7 @@ criterion_group!(
     calendar_kernel_benches,
     membership_kernel_benches,
     network_kernel_benches,
-    json_extraction_benches
+    json_extraction_benches,
+    string_search_benches
 );
 criterion_main!(benches);

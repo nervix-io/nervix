@@ -90,6 +90,7 @@ use crate::{
         cast_arm_execution, unary_arm_execution,
     },
     text_column::TextColumnBuilder,
+    text_search,
     url_component::{self, UrlComponent},
 };
 
@@ -2263,6 +2264,9 @@ fn execute_builtin(
         BuiltinLowering::BitLength => {
             Ok(TypedArray::Int64(execute_bit_length(as_utf8(&column(0)?)?)))
         }
+        BuiltinLowering::OctetLength => Ok(TypedArray::Int64(execute_octet_length(as_utf8(
+            &column(0)?,
+        )?))),
         BuiltinLowering::Ascii => Ok(TypedArray::Int64(execute_ascii(as_utf8(&column(0)?)?))),
         BuiltinLowering::Coalesce => execute_coalesce(registers, inputs),
         BuiltinLowering::IsNull => Ok(TypedArray::Boolean(execute_is_null_typed(&column(0)?))),
@@ -2282,6 +2286,66 @@ fn execute_builtin(
             }
             Ok(TypedArray::Utf8(execute_concat(row_count, &parts)))
         }
+        BuiltinLowering::ConcatWs => {
+            let mut parts = Vec::with_capacity(inputs.len());
+            for index in 0..inputs.len() {
+                parts.push(text(index)?);
+            }
+            Ok(TypedArray::Utf8(text_search::concat_ws(
+                &parts,
+                row_count,
+                extent.rows_per_value(),
+                row_errors,
+                span,
+            )))
+        }
+        BuiltinLowering::Split => Ok(TypedArray::Generic(StdArc::new(text_search::split(
+            as_utf8(&column(0)?)?,
+            text(1)?,
+            row_errors,
+            span,
+        )))),
+        BuiltinLowering::Join => Ok(TypedArray::Utf8(
+            text_search::join(
+                &column(0)?,
+                text(1)?,
+                extent.rows_per_value(),
+                row_errors,
+                span,
+            )
+            .map_err(RuntimeError::text_search_kernel)?,
+        )),
+        BuiltinLowering::Like => Ok(TypedArray::Boolean(
+            text_search::wildcard_match(text(0)?, text(1)?, row_count, false, row_errors, span)
+                .map_err(RuntimeError::text_search_kernel)?,
+        )),
+        BuiltinLowering::ILike => Ok(TypedArray::Boolean(
+            text_search::wildcard_match(text(0)?, text(1)?, row_count, true, row_errors, span)
+                .map_err(RuntimeError::text_search_kernel)?,
+        )),
+        BuiltinLowering::ContainsAny(call) => {
+            let lists = if let text_search::ContainsAnyCall::Dynamic = call {
+                Some(column(1)?)
+            } else {
+                None
+            };
+            Ok(TypedArray::Boolean(
+                text_search::contains_any(
+                    call,
+                    as_utf8(&column(0)?)?,
+                    lists.as_ref(),
+                    row_errors,
+                    span,
+                )
+                .map_err(RuntimeError::text_search_kernel)?,
+            ))
+        }
+        BuiltinLowering::NormalizeNfc => Ok(TypedArray::Utf8(text_search::normalize_nfc(
+            as_utf8(&column(0)?)?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
         BuiltinLowering::ArrayConstruct => {
             Ok(ListConstruction::Fixed.construct(&columns()?, row_count)?)
         }
@@ -4385,6 +4449,15 @@ fn execute_bit_length(input: &StringArray) -> Int64Array {
     Int64Array::new(lengths.into(), input.nulls().cloned())
 }
 
+fn execute_octet_length(input: &StringArray) -> Int64Array {
+    let lengths = input
+        .value_offsets()
+        .windows(2)
+        .map(|offsets| i64::from(offsets[1] - offsets[0]))
+        .collect::<Vec<_>>();
+    Int64Array::new(lengths.into(), input.nulls().cloned())
+}
+
 fn execute_ascii(input: &StringArray) -> Int64Array {
     let mut builder = Int64Builder::new();
     for row in 0..input.len() {
@@ -5223,6 +5296,24 @@ fn execute_regexp(
             row_errors,
             span,
         )),
+        RegexpFunction::Extract => {
+            let group_input = match &call.pattern {
+                PatternSource::Constant(_) => 1,
+                PatternSource::Argument(_) => 2,
+            };
+            let group = registers.any_operand(inputs[group_input])?;
+            let group = CountOperand::of(group).ok_or_else(|| RuntimeError::InvalidBatch {
+                message: "regexp_extract requires an integer group index".to_string(),
+            })?;
+            TypedArray::Utf8(execute_regexp_extract(
+                text,
+                group,
+                &patterns,
+                &mut active,
+                row_errors,
+                span,
+            ))
+        }
         RegexpFunction::Replace => {
             // The replacement follows the text and, when the pattern is read from an argument,
             // the pattern.
@@ -5340,6 +5431,46 @@ fn execute_regexp_substr(
         match &mut active[slot] {
             ActivePattern::Regex(regex) => match regex.find(text.value(row)) {
                 Some(matched) => builder.append_value(matched),
+                None => builder.append_null(),
+            },
+            ActivePattern::Invalid(error) => {
+                builder.append_null();
+                invalid_pattern_error(row, error, row_errors, span);
+            }
+        }
+    }
+    builder.finish()
+}
+
+fn execute_regexp_extract(
+    text: &StringArray,
+    group: CountOperand<'_>,
+    patterns: &BatchPatterns,
+    active: &mut [ActivePattern<'_>],
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> StringArray {
+    let mut builder = string_builder_like(text);
+    for row in 0..text.len() {
+        if text.is_null(row) {
+            builder.append_null();
+            continue;
+        }
+        let Some(group) = group.value(row) else {
+            builder.append_null();
+            continue;
+        };
+        let SignedCount::NonNegative(group) = group else {
+            builder.append_null();
+            continue;
+        };
+        let Some(slot) = patterns.slot(row) else {
+            builder.append_null();
+            continue;
+        };
+        match &mut active[slot] {
+            ActivePattern::Regex(regex) => match regex.extract(text.value(row), group) {
+                Some(capture) => builder.append_value(capture),
                 None => builder.append_null(),
             },
             ActivePattern::Invalid(error) => {
@@ -9370,6 +9501,156 @@ mod tests {
                 error.reason
             );
         }
+    }
+
+    #[test]
+    fn regex_extract_reads_numbered_optional_and_empty_captures_per_row() {
+        let parsed = parse_program(
+            "SET bytes = octet_length(input.text), capture = regexp_extract(input.text, \
+             input.pattern, input.group)",
+        )
+        .verified("the string calls have valid NSPL syntax");
+        let schema = schema(vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("pattern", DataType::Utf8, true),
+            Field::new("group", DataType::Int64, true),
+        ]);
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("bytes", DataType::Int64, true),
+                Field::new("capture", DataType::Utf8, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec![
+                    Some("ab"),
+                    Some("b"),
+                    Some("é"),
+                    Some("abc"),
+                    None,
+                ])),
+                TypedArray::Utf8(StringArray::from(vec![
+                    Some("(a)(b)"),
+                    Some("(a)?(b)"),
+                    Some(""),
+                    Some("("),
+                    Some("("),
+                ])),
+                TypedArray::Int64(Int64Array::from(vec![
+                    Some(1),
+                    Some(1),
+                    Some(0),
+                    Some(0),
+                    Some(0),
+                ])),
+            ],
+        )
+        .verified("the input columns match the declared schema");
+        let output = execute_program_sync(&compiled, &batch)
+            .verified("invalid regex patterns use row errors");
+        assert_eq!(
+            output_column(&output, "bytes"),
+            &TypedArray::Int64(Int64Array::from(vec![
+                Some(2),
+                Some(1),
+                Some(2),
+                Some(3),
+                None
+            ]))
+        );
+        assert_eq!(
+            output_column(&output, "capture"),
+            &TypedArray::Utf8(StringArray::from(vec![
+                Some("a"),
+                None,
+                Some(""),
+                None,
+                None,
+            ]))
+        );
+        assert!(output.errors().row(0).is_empty());
+        assert!(output.errors().row(1).is_empty());
+        assert!(output.errors().row(2).is_empty());
+        assert_eq!(output.errors().row(3)[0].code(), ErrorCode::InvalidArgument);
+        assert!(output.errors().row(4).is_empty());
+    }
+
+    #[test]
+    fn executes_string_search_and_normalization_on_arrow_columns() {
+        let parsed = parse_program(
+            "SET parts = split(input.text, input.delimiter), joined = join(split(input.text, \
+             input.delimiter), '|'), combined = concat_ws('-', input.text, input.optional), \
+             matched = like(input.text, input.pattern), folded = ilike(input.text, \
+             input.pattern), any_match = contains_any(input.text, vec(input.needle, 'missing')), \
+             normalized = normalize_nfc(input.decomposed)",
+        )
+        .verified("the string calls have valid NSPL syntax");
+        let fields = vec![
+            Field::new("text", DataType::Utf8, true),
+            Field::new("delimiter", DataType::Utf8, true),
+            Field::new("optional", DataType::Utf8, true),
+            Field::new("pattern", DataType::Utf8, true),
+            Field::new("needle", DataType::Utf8, true),
+            Field::new("decomposed", DataType::Utf8, true),
+        ];
+        let schema = schema(fields);
+        let list_type = DataType::List(Field::new("item", DataType::Utf8, false).into());
+        let compiled = compile_program_with_output_fields(
+            &parsed,
+            schema.clone(),
+            vec![
+                Field::new("parts", list_type, true),
+                Field::new("joined", DataType::Utf8, true),
+                Field::new("combined", DataType::Utf8, true),
+                Field::new("matched", DataType::Boolean, true),
+                Field::new("folded", DataType::Boolean, true),
+                Field::new("any_match", DataType::Boolean, true),
+                Field::new("normalized", DataType::Utf8, true),
+            ],
+        );
+        let batch = TypedBatch::try_new(
+            schema,
+            vec![
+                TypedArray::Utf8(StringArray::from(vec!["a,b", "É"])),
+                TypedArray::Utf8(StringArray::from(vec![",", ""])),
+                TypedArray::Utf8(StringArray::from(vec![Some("x"), None])),
+                TypedArray::Utf8(StringArray::from(vec!["a%", "é"])),
+                TypedArray::Utf8(StringArray::from(vec!["a", "É"])),
+                TypedArray::Utf8(StringArray::from(vec!["cafe\u{301}", "É"])),
+            ],
+        )
+        .verified("the input columns match the declared schema");
+        let output = execute_program_sync(&compiled, &batch)
+            .verified("valid string calls execute on Arrow columns");
+        assert_eq!(
+            output_column(&output, "joined"),
+            &TypedArray::Utf8(StringArray::from(vec!["a|b", "É"]))
+        );
+        assert_eq!(
+            output_column(&output, "combined"),
+            &TypedArray::Utf8(StringArray::from(vec!["a,b-x", "É"]))
+        );
+        assert_eq!(
+            output_column(&output, "matched"),
+            &TypedArray::Boolean(BooleanArray::from(vec![true, false]))
+        );
+        assert_eq!(
+            output_column(&output, "folded"),
+            &TypedArray::Boolean(BooleanArray::from(vec![true, true]))
+        );
+        assert_eq!(
+            output_column(&output, "any_match"),
+            &TypedArray::Boolean(BooleanArray::from(vec![true, true]))
+        );
+        assert_eq!(
+            output_column(&output, "normalized"),
+            &TypedArray::Utf8(StringArray::from(vec!["café", "É"]))
+        );
+        assert!(output.errors().iter().all(<[SideError]>::is_empty));
     }
 }
 
