@@ -2,8 +2,8 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Composing the Kafka connector plan with host-owned intake and replicated domain
-//!   offsets.
+//! - **Owns.** Composing the Kafka connector plan with host-owned intake, replicated domain
+//!   offsets, and the partition watch a domain-offset source rebalances on.
 //! - **Depends on.** The connector source contract, typed Kafka plans, and pre-resolved runtime
 //!   handles.
 //! - **Must not know.** The Kafka driver, NSPL parsing, registry validation, or placement
@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use error_stack::{Report, ResultExt as _};
-use nervix_connector::{SourceAckPolicy, SourceCapabilities, SourceConnector, SourcePlan};
+use nervix_connector::{SourceAckPolicy, SourceConnector, SourcePlan};
 use nervix_connector_kafka::{
     KafkaDomainOffsetError, KafkaDomainOffsetHost, KafkaDomainOffsetInitialization,
     KafkaDomainOffsetResult, KafkaDomainOffsetServices, KafkaDomainOffsetStart,
@@ -21,10 +21,8 @@ use nervix_connector_kafka::{
 
 use super::{
     super::*,
-    source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_source_instance},
+    source::{BrokerSourceInstance, SourceCompanion, SourceInstance, SourceStart},
 };
-
-pub(crate) struct KafkaIngestor;
 
 struct RuntimeKafkaDomainOffsets {
     runtime: Runtime,
@@ -126,90 +124,134 @@ impl KafkaDomainOffsetServices for RuntimeKafkaDomainOffsets {
     }
 }
 
-impl KafkaIngestor {
-    pub(in crate::runtime) async fn start(
+impl Runtime {
+    /// The domain offsets this node originates for a Kafka ingestor, while it is the primary its
+    /// offset state was placed on.
+    fn kafka_offset_originator(
+        &self,
+        placement: Option<&KafkaOffsetStatePlacement>,
+    ) -> Option<KafkaOffsetStateOriginator> {
+        let placement = placement?;
+        let dispatcher = self.inner.remote_dispatcher.load();
+        let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id)?;
+        if placement.primary_node.as_ref() != Some(local_node_id) {
+            return None;
+        }
+        let state = self
+            .inner
+            .replicated_kafka_offset_states
+            .get(&placement.placement)?;
+        ReplicatedKafkaOffsetState::current_originator(state.value())
+    }
+}
+
+/// Watches a domain-offset Kafka topic and tells the ingestor's instances when its partitions
+/// change, so they rebalance.
+struct KafkaPartitionWatch {
+    inspector: TopicPartitionInspector,
+    domain: DomainName,
+    ingestor: IngestorName,
+    topic: nervix_models::TopicName,
+    events: RuntimeEvents,
+    rebalance: watch::Sender<u64>,
+}
+
+impl SourceCompanion for KafkaPartitionWatch {
+    fn start(self: Box<Self>, shutdown: watch::Receiver<bool>) -> BoxFuture<'static, ()> {
+        Box::pin(self.run(shutdown))
+    }
+}
+
+impl KafkaPartitionWatch {
+    async fn run(self: Box<Self>, mut shutdown: watch::Receiver<bool>) {
+        let mut observed = match self.inspector.partitions(self.topic.as_str()).await {
+            Ok(mut partitions) => {
+                partitions.sort_unstable();
+                partitions
+            }
+            Err(error) => {
+                self.events.report_error(format!(
+                    "failed to inspect Kafka partitions for ingestor '{}' in domain '{}': {error}",
+                    self.ingestor.as_str(),
+                    self.domain.as_str(),
+                ));
+                Vec::new()
+            }
+        };
+        loop {
+            tokio::task::consume_budget().await;
+            tokio::select! {
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        break;
+                    }
+                }
+                _ = sleep(DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL) => {}
+            }
+            let mut current = match self.inspector.partitions(self.topic.as_str()).await {
+                Ok(partitions) => partitions,
+                Err(error) => {
+                    self.events.report_error(format!(
+                        "failed to inspect Kafka partitions for ingestor '{}' in domain '{}': \
+                         {error}",
+                        self.ingestor.as_str(),
+                        self.domain.as_str(),
+                    ));
+                    continue;
+                }
+            };
+            current.sort_unstable();
+            if current != observed {
+                observed = current.clone();
+                let epoch = self
+                    .rebalance
+                    .borrow()
+                    .checked_add(1)
+                    .assured("an ingestor cannot observe 2^64 partition rebalances");
+                self.rebalance.send_replace(epoch);
+                info!(
+                    domain = self.domain.as_str(),
+                    ingestor = self.ingestor.as_str(),
+                    topic = self.topic.as_str(),
+                    partitions = ?current,
+                    rebalance_epoch = epoch,
+                    "detected Kafka partition topology change"
+                );
+            }
+        }
+    }
+}
+
+impl KafkaIngestorStartPlan {
+    /// Composes the Kafka source, whose offset mode and partition watch shape its instances, so
+    /// it opens them itself rather than through the broker launcher.
+    pub(super) async fn compose(
+        self,
         runtime: &Runtime,
-        plan: KafkaIngestorStartPlan,
-        kafka_offset_state: Option<KafkaOffsetStateOriginator>,
-    ) -> Result<(), RuntimeError> {
+        ingestor: &IngestorSpec,
+    ) -> Result<SourceStart, RuntimeError> {
         let KafkaIngestorStartPlan {
-            ingestor,
             client,
             topic,
             offset_mode,
             instances,
             mode,
-            offset_state_placement: _,
-        } = plan;
+            offset_state_placement,
+        } = self;
         let domain = &ingestor.domain;
-        let key =
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if runtime.inner.ingestors.contains_key(&key) {
-            return Err(RuntimeError::IngestorAlreadyRunning {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-            });
-        }
-
-        let acknowledgement = match &mode {
-            KafkaIngestMode::AckParallel {
-                max,
-                batch_timeout,
-                timeout,
-                retry_policy,
-            } => SourceAckPolicy::Parallel {
-                max_in_flight: addressable_count(*max),
-                batch_timeout: Runtime::parse_duration_setting(
-                    domain,
-                    &ingestor.name,
-                    "batch timeout",
-                    batch_timeout,
-                )?,
-                timeout: Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?,
-                retry: Runtime::parse_retry_policy(domain, &ingestor.name, retry_policy)?,
-            },
-            KafkaIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            } => SourceAckPolicy::Sequential {
-                timeout: Runtime::parse_ack_timeout(domain, &ingestor.name, timeout)?,
-                retry: Runtime::parse_retry_policy(domain, &ingestor.name, retry_policy)?,
-            },
-            KafkaIngestMode::NoAckParallel => SourceAckPolicy::None,
-        };
-        let capabilities = SourceCapabilities::new(
-            ingestor.allow_header_reads,
-            ingestor.metadata_kind.source_scope(),
-            ingestor.quiesce.supports(ingestor.quiesce.mode()),
-            instances,
-            acknowledgement.support(),
-        );
-        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
-        let branched_runtime = runtime.start_branched_ingestor_runtime(
-            domain,
-            &ingestor.name,
-            dependencies.branched_templates,
-        );
-        let quiesce = runtime
-            .ingestor_quiesce_control(domain, &ingestor.name)
-            .verified(
-                "the runtime registers quiesce control for an ingestor before it starts the task",
-            );
+        let acknowledgement =
+            Runtime::parse_ingest_acknowledgement(domain, &ingestor.name, mode.acknowledgement())?;
+        let kafka_offset_state = runtime.kafka_offset_originator(offset_state_placement.as_ref());
         let resolved_client = runtime
             .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: error.to_string(),
-            })?;
+            .map_err(|error| ingestor.start_failure(error.to_string()))?;
 
-        let (shutdown_tx, _) = watch::channel(false);
         let rebalance_tx = if offset_mode == KafkaOffsetMode::Domain {
             Some(watch::channel(0_u64).0)
         } else {
             None
         };
-        let mut tasks = Vec::with_capacity(instances.get().arch_into());
+        let mut companions: Vec<Box<dyn SourceCompanion>> = Vec::new();
         if let Some(rebalance_tx) = rebalance_tx.as_ref() {
             let inspector = TopicPartitionInspector::new(
                 &resolved_client.entries,
@@ -219,73 +261,14 @@ impl KafkaIngestor {
                     ingestor.name.as_str(),
                 ),
             )
-            .map_err(|error| RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: error.to_string(),
-            })?;
-            let task_domain = domain.clone();
-            let task_ingestor = ingestor.name.clone();
-            let task_topic = topic.clone();
-            let task_events = runtime.events().clone();
-            let mut shutdown = shutdown_tx.subscribe();
-            let rebalance_tx = rebalance_tx.clone();
-            tasks.push(tokio::spawn(async move {
-                let mut observed = match inspector.partitions(task_topic.as_str()).await {
-                    Ok(mut partitions) => {
-                        partitions.sort_unstable();
-                        partitions
-                    }
-                    Err(error) => {
-                        task_events.report_error(format!(
-                            "failed to inspect Kafka partitions for ingestor '{}' in domain '{}': \
-                             {error}",
-                            task_ingestor.as_str(),
-                            task_domain.as_str(),
-                        ));
-                        Vec::new()
-                    }
-                };
-                loop {
-                    tokio::task::consume_budget().await;
-                    tokio::select! {
-                        changed = shutdown.changed() => {
-                            if changed.is_err() || *shutdown.borrow() {
-                                break;
-                            }
-                        }
-                        _ = sleep(DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL) => {}
-                    }
-                    let mut current = match inspector.partitions(task_topic.as_str()).await {
-                        Ok(partitions) => partitions,
-                        Err(error) => {
-                            task_events.report_error(format!(
-                                "failed to inspect Kafka partitions for ingestor '{}' in domain \
-                                 '{}': {error}",
-                                task_ingestor.as_str(),
-                                task_domain.as_str(),
-                            ));
-                            continue;
-                        }
-                    };
-                    current.sort_unstable();
-                    if current != observed {
-                        observed = current.clone();
-                        let epoch = rebalance_tx
-                            .borrow()
-                            .checked_add(1)
-                            .assured("an ingestor cannot observe 2^64 partition rebalances");
-                        rebalance_tx.send_replace(epoch);
-                        info!(
-                            domain = task_domain.as_str(),
-                            ingestor = task_ingestor.as_str(),
-                            topic = task_topic.as_str(),
-                            partitions = ?current,
-                            rebalance_epoch = epoch,
-                            "detected Kafka partition topology change"
-                        );
-                    }
-                }
+            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            companions.push(Box::new(KafkaPartitionWatch {
+                inspector,
+                domain: domain.clone(),
+                ingestor: ingestor.name.clone(),
+                topic: topic.clone(),
+                events: runtime.events().clone(),
+                rebalance: rebalance_tx.clone(),
             }));
         }
 
@@ -297,12 +280,8 @@ impl KafkaIngestor {
             },
             KafkaOffsetMode::Domain => {
                 let Some(state) = kafka_offset_state else {
-                    return Err(RuntimeError::StartIngestor {
-                        domain: domain.as_str().to_string(),
-                        ingestor: ingestor.name.as_str().to_string(),
-                        reason: "Kafka DOMAIN offsets are not authoritative on this node"
-                            .to_string(),
-                    });
+                    return Err(ingestor
+                        .start_failure("Kafka DOMAIN offsets are not authoritative on this node"));
                 };
                 let offsets = KafkaDomainOffsetHost::new(RuntimeKafkaDomainOffsets {
                     runtime: runtime.clone(),
@@ -328,77 +307,37 @@ impl KafkaIngestor {
         let source_plan = SourcePlan {
             connector: KafkaSourcePlan {
                 config: resolved_client.entries,
-                topic: topic.clone(),
+                topic,
                 offset_mode: source_offset_mode,
                 enable_auto_commit,
             },
-            capabilities,
+            capabilities: ingestor.source_capabilities(instances, acknowledgement.support()),
             acknowledgement,
         };
-        runtime.prepare_ingestor_readiness(
-            domain,
-            &ingestor.name,
-            source_plan.capabilities.instances(),
-        );
 
+        // An unacknowledged Kafka consumer reopens after the host's fixed source error delay
+        // rather than backing off, which the unacknowledged policy's zero retry expresses.
+        let retry = acknowledgement.retry();
+        let mut opened: Vec<Box<dyn SourceInstance>> =
+            Vec::with_capacity(source_plan.capabilities.instances().get().arch_into());
         for instance_index in 0..source_plan.capabilities.instances().get() {
+            tokio::task::consume_budget().await;
             let source = KafkaSource::open(&source_plan.connector, instance_index)
                 .await
-                .map_err(|error| RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
-            let host = RuntimeSourceHost::build(RuntimeSourceHostSpec {
-                runtime: runtime.clone(),
-                domain: domain.clone(),
-                ingestor: ingestor.name.clone(),
-                timestamp_source: ingestor.timestamp_source.clone(),
-                output_routes: dependencies.output_routes.clone(),
-                filter_where: dependencies.filter_where.clone(),
-                codec: dependencies.codec.clone(),
-                metrics: dependencies.metrics.clone(),
-                branched_senders: branched_runtime.senders.clone(),
-                quiesce: quiesce.clone(),
-                shutdown: shutdown_tx.subscribe(),
-                instance_index,
-                metadata_kind: ingestor.metadata_kind,
-                buffered_intake: false,
-                flush_each_intake: false,
-            });
-            let shutdown = shutdown_tx.subscribe();
-            let task_domain = domain.clone();
-            let task_ingestor = ingestor.name.clone();
-            let task_topic = topic.clone();
-            let acknowledgement = source_plan.acknowledgement;
-            let client_mounts = resolved_client.mounts.clone();
-            tasks.push(tokio::spawn(async move {
-                let _client_mounts = client_mounts;
-                info!(
-                    domain = task_domain.as_str(),
-                    ingestor = task_ingestor.as_str(),
-                    topic = task_topic.as_str(),
-                    instance = instance_index,
-                    "started Kafka ingestor"
-                );
-                run_source_instance(source, host, acknowledgement, shutdown).await;
-                info!(
-                    domain = task_domain.as_str(),
-                    ingestor = task_ingestor.as_str(),
-                    instance = instance_index,
-                    "stopped Kafka ingestor"
-                );
+                .map_err(|error| ingestor.start_failure(error.to_string()))?;
+            opened.push(Box::new(BrokerSourceInstance {
+                source,
+                acknowledgement,
+                retry,
             }));
         }
-
-        runtime.inner.ingestors.insert(
-            key,
-            IngestorRuntime::Background {
-                shutdown: shutdown_tx,
-                branched: branched_runtime.runtimes,
-                tasks,
-            },
-        );
-        Ok(())
+        Ok(SourceStart {
+            instances: opened,
+            companions,
+            buffered_intake: false,
+            flush_each_intake: false,
+            client_mounts: resolved_client.mounts.into_iter().collect(),
+            connector_label: "kafka",
+        })
     }
 }

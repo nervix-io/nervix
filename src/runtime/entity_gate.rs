@@ -1599,7 +1599,7 @@ mod tests {
         });
         runtime.inner.ingestors.insert(
             key.clone(),
-            IngestorRuntime::Background {
+            IngestorRuntime {
                 shutdown: shutdown_tx,
                 branched: Vec::new(),
                 tasks: vec![task],

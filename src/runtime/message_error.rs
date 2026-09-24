@@ -1046,7 +1046,7 @@ impl Runtime {
                     ));
                 };
                 schemas.input = codec.schema().into();
-                schemas.allow_header_reads = ingest_source_supports_headers(&model.source);
+                schemas.allow_header_reads = model.source.reads_headers();
                 schemas.partial_output = partial_output_schema(&model.output_routes)?;
             }
             Model::Reingestor(model) => {

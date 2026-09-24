@@ -1,9 +1,13 @@
-//! HTTP endpoint ingestion boundary.
+//! HTTP endpoint ingestion boundary: the request path of the endpoint source.
 //!
 //! Layer: data plane.
-//! - **Owns.** Endpoint route bindings, external request admission and response disposition.
-//! - **Depends on.** Installed ingestor plans, Arrow decoding and actual-UTC observation.
-//! - **Must not know.** NSPL parsing, placement policy or consensus storage.
+//! - **Owns.** Resolving a request's host and path to the endpoint routes and the ingestors bound
+//!   to them, request admission, the endpoint buffer, rejection with a retry delay, per-request
+//!   dispatch, and response disposition.
+//! - **Depends on.** The request intakes endpoint sources bind, Arrow decoding and actual-UTC
+//!   observation.
+//! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; NSPL
+//!   parsing, placement policy or consensus storage.
 
 use std::borrow::Cow;
 
@@ -40,6 +44,8 @@ pub(super) struct RoutedEndpoint {
 /// and then reads this map, which holds one entry per domain that claims that exact pair.
 pub(super) type RoutedEndpointsByDomain = HashMap<DomainName, RoutedEndpoint>;
 
+/// The intake one ingestor admits an endpoint's requests through, bound to every route the
+/// endpoint publishes while the ingestor's endpoint source runs.
 #[derive(Clone)]
 pub(super) struct EndpointIngestBinding {
     pub(super) runtime_key: DomainNodeRef,
@@ -266,7 +272,7 @@ impl Runtime {
         outcome
     }
 
-    pub(in crate::runtime) async fn dispatch_endpoint_binding(
+    async fn dispatch_endpoint_binding(
         &self,
         binding: &EndpointIngestBinding,
         payload: BufferedIngestPayload,

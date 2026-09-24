@@ -13,38 +13,35 @@ use nervix_connector_redis::{RedisPubSubSource, RedisPubSubSourcePlan};
 
 use super::{
     super::*,
-    source::{BrokerSourceStart, DeclaredSourceAcknowledgement},
+    source::{BrokerSourceStart, SourceStart},
 };
 
-pub(in crate::runtime) struct RedisPubSubIngestor;
-
-impl RedisPubSubIngestor {
-    pub(in crate::runtime) async fn start(
+impl RedisPubSubIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
         runtime: &Runtime,
-        plan: RedisPubSubIngestorStartPlan,
-    ) -> Result<(), RuntimeError> {
+        ingestor: &IngestorSpec,
+    ) -> Result<SourceStart, RuntimeError> {
         let RedisPubSubIngestorStartPlan {
-            ingestor,
             client,
             channel,
             mode,
-        } = plan;
+        } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
         let connector = RedisPubSubSourcePlan::new(resolved.entries, channel)
             .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
-        runtime
-            .start_broker_source::<RedisPubSubSource>(BrokerSourceStart {
-                ingestor: &ingestor,
-                connector,
-                instances: NonZeroU64::MIN,
-                acknowledgement: DeclaredSourceAcknowledgement::from(&mode),
-                buffered_intake: true,
-                flush_each_intake: false,
-                client_mounts: resolved.mounts.into_iter().collect(),
-                connector_label: "redis",
-            })
-            .await
+        BrokerSourceStart {
+            connector,
+            instances: NonZeroU64::MIN,
+            acknowledgement: mode.acknowledgement(),
+            buffered_intake: true,
+            flush_each_intake: false,
+            client_mounts: resolved.mounts.into_iter().collect(),
+            connector_label: "redis",
+        }
+        .open::<RedisPubSubSource>(ingestor)
+        .await
     }
 }

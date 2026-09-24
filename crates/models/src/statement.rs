@@ -3767,6 +3767,48 @@ impl IngestSource {
         }
     }
 
+    /// Whether the messages this source reads carry transport headers that `read_header` and
+    /// `read_headers` can read.
+    ///
+    /// This lives in the vocabulary so the registry can validate header reads without naming the
+    /// runtime that hosts the source.
+    pub const fn reads_headers(&self) -> bool {
+        match self {
+            Self::Endpoint { .. }
+            | Self::Http { .. }
+            | Self::Kafka { .. }
+            | Self::Nats { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Sqs { .. } => true,
+            Self::Mqtt { .. }
+            | Self::RedisPubSub { .. }
+            | Self::Prometheus { .. }
+            | Self::ZeroMq { .. }
+            | Self::Websockets { .. }
+            | Self::Syslog { .. } => false,
+        }
+    }
+
+    /// The acknowledgement this source's delivery mode declares. A source whose statement declares
+    /// no delivery mode acknowledges nothing.
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::Kafka { mode, .. } | Self::Pulsar { mode, .. } => mode.acknowledgement(),
+            Self::Mqtt { mode, .. } => mode.acknowledgement(),
+            Self::Nats { mode, .. } => mode.acknowledgement(),
+            Self::RabbitMq { mode, .. } => mode.acknowledgement(),
+            Self::RedisPubSub { mode, .. } => mode.acknowledgement(),
+            Self::ZeroMq { mode, .. } => mode.acknowledgement(),
+            Self::Sqs { mode, .. } => mode.acknowledgement(),
+            Self::Endpoint { mode, .. } => mode.acknowledgement(),
+            Self::Websockets { mode, .. } => mode.acknowledgement(),
+            Self::Http { .. } | Self::Prometheus { .. } | Self::Syslog { .. } => {
+                IngestAcknowledgement::Unacknowledged
+            }
+        }
+    }
+
     pub fn quiesce(&self) -> &IngestQuiesceMode {
         match self {
             Self::Http { quiesce, .. }
@@ -4029,6 +4071,28 @@ impl EmitterPublishingMode {
     }
 }
 
+/// The acknowledgement a source's delivery mode declares, with its durations as written.
+///
+/// Every delivery mode states its acknowledgement through this one shape, so validating a mode and
+/// parsing it into the policy a source runs read the same declaration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestAcknowledgement<'a> {
+    /// No message waits on an acknowledgement.
+    Unacknowledged,
+    /// One message at a time waits on its acknowledgement.
+    Sequential {
+        timeout: &'a str,
+        retry: &'a RetryPolicy,
+    },
+    /// Up to `max` messages wait on their acknowledgements together.
+    Parallel {
+        max: NonZeroU64,
+        batch_timeout: &'a str,
+        timeout: &'a str,
+        retry: &'a RetryPolicy,
+    },
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -4044,6 +4108,32 @@ pub enum KafkaIngestMode {
         retry_policy: RetryPolicy,
     },
     NoAckParallel,
+}
+
+impl KafkaIngestMode {
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Parallel {
+                max: *max,
+                batch_timeout,
+                timeout,
+                retry: retry_policy,
+            },
+            Self::AckSequential {
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+            Self::NoAckParallel => IngestAcknowledgement::Unacknowledged,
+        }
+    }
 }
 
 pub type PulsarIngestMode = KafkaIngestMode;
@@ -4138,6 +4228,32 @@ impl MqttIngestMode {
             Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => false,
         }
     }
+
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Parallel {
+                max: *max,
+                batch_timeout,
+                timeout,
+                retry: retry_policy,
+            },
+            Self::AckSequential {
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+            Self::NoAckSequential { .. } | Self::NoAckParallel { .. } => {
+                IngestAcknowledgement::Unacknowledged
+            }
+        }
+    }
 }
 
 #[derive(
@@ -4145,6 +4261,14 @@ impl MqttIngestMode {
 )]
 pub enum NatsIngestMode {
     NoAckSequential,
+}
+
+impl NatsIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+        }
+    }
 }
 
 #[derive(
@@ -4157,6 +4281,20 @@ pub enum RabbitMqIngestMode {
     },
 }
 
+impl RabbitMqIngestMode {
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::AckSequential {
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -4164,11 +4302,27 @@ pub enum RedisPubSubIngestMode {
     NoAckSequential,
 }
 
+impl RedisPubSubIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum ZeroMqIngestMode {
     NoAckSequential,
+}
+
+impl ZeroMqIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+        }
+    }
 }
 
 #[derive(
@@ -4181,6 +4335,20 @@ pub enum SqsIngestMode {
     },
 }
 
+impl SqsIngestMode {
+    pub fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::AckSequential {
+                timeout,
+                retry_policy,
+            } => IngestAcknowledgement::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
@@ -4188,11 +4356,27 @@ pub enum EndpointIngestMode {
     NoAckSequential,
 }
 
+impl EndpointIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+        }
+    }
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
 )]
 pub enum WebsocketsIngestMode {
     NoAckSequential,
+}
+
+impl WebsocketsIngestMode {
+    pub const fn acknowledgement(&self) -> IngestAcknowledgement<'_> {
+        match self {
+            Self::NoAckSequential => IngestAcknowledgement::Unacknowledged,
+        }
+    }
 }
 
 #[derive(
