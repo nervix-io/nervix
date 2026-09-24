@@ -32,7 +32,7 @@ use arrow_array::{
         TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
-use arrow_buffer::{NullBuffer, OffsetBuffer};
+use arrow_buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow_cast::{
     cast::{CastOptions, cast_with_options},
     display::FormatOptions,
@@ -40,7 +40,7 @@ use arrow_cast::{
 use arrow_ord::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow_schema::{ArrowError, DataType};
 use arrow_select::{
-    filter::FilterBuilder,
+    filter::{FilterBuilder, FilterPredicate, prep_null_mask_filter},
     nullif::nullif,
     take::{TakeOptions, take},
     zip::zip,
@@ -77,8 +77,9 @@ use crate::{
     program::{BinaryOp, DatetimeFunction, FunctionName, Span, UnaryOp},
     regexp::{ActivePattern, BatchPatterns, PatternSource, RegexpCall, RegexpFunction},
     semantics::{
-        BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, Volatility,
-        builtin_semantics_for_lowering,
+        ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, Volatility,
+        binary_arm_execution, builtin_arm_execution, builtin_semantics_for_lowering,
+        cast_arm_execution, unary_arm_execution,
     },
     text_column::TextColumnBuilder,
 };
@@ -150,6 +151,14 @@ impl<A: Broadcast> Register<A> {
         }
     }
 
+    /// The value a scalar register holds, or `None` for a column.
+    fn scalar_value(&self) -> Option<&A> {
+        match self {
+            Self::Column(_) => None,
+            Self::Scalar { value, .. } => Some(value),
+        }
+    }
+
     /// The register as a column of `rows` rows. A scalar read as one row is that row itself;
     /// otherwise it is expanded once and the expansion kept.
     fn column(&self, rows: usize) -> &A {
@@ -171,7 +180,8 @@ impl<A: Broadcast> Register<A> {
     }
 }
 
-/// An array type a register bank stores, which knows the bank slots of its type.
+/// An array type a register bank stores, which knows the bank slots of its type and the typed
+/// array variant that holds it.
 trait RegisterArray: Broadcast + Clone {
     const TYPE: RegisterType;
     const LABEL: &'static str;
@@ -179,6 +189,21 @@ trait RegisterArray: Broadcast + Clone {
     fn slot(bank: &TypedBank, index: usize) -> Option<&Register<Self>>;
 
     fn slot_mut(bank: &mut TypedBank, index: usize) -> Option<&mut Option<Register<Self>>>;
+
+    /// The array `typed` holds when it holds one of this type.
+    fn from_typed(typed: &TypedArray) -> Option<&Self>;
+
+    fn into_typed(self) -> TypedArray;
+}
+
+/// One operand of an instruction narrowed to the rows its arm selects, as that instruction reads
+/// it.
+enum NarrowedRegister {
+    /// A column of the batch narrowed to the selected rows.
+    Column(TypedArray),
+    /// A scalar, which stays a scalar. The column repeating it over the selected rows is built the
+    /// first time a kernel without a scalar form reads it, and dropped with the narrowing.
+    Scalar(OnceCell<TypedArray>),
 }
 
 macro_rules! declare_typed_bank {
@@ -213,6 +238,14 @@ macro_rules! declare_typed_bank {
             ) -> Option<&mut Option<Register<Self>>> {
                 bank.$field.get_mut(index)
             }
+
+            fn from_typed(typed: &TypedArray) -> Option<&Self> {
+                typed.$accessor()
+            }
+
+            fn into_typed(self) -> TypedArray {
+                TypedArray::$Variant(self)
+            }
         })+
     };
 }
@@ -230,6 +263,14 @@ impl RegisterArray for TimestampNanosecondArray {
     fn slot_mut(bank: &mut TypedBank, index: usize) -> Option<&mut Option<Register<Self>>> {
         bank.datetime.get_mut(index)
     }
+
+    fn from_typed(typed: &TypedArray) -> Option<&Self> {
+        typed.as_datetime()
+    }
+
+    fn into_typed(self) -> TypedArray {
+        TypedArray::Datetime(self)
+    }
 }
 
 impl RegisterArray for ArrayRef {
@@ -243,6 +284,17 @@ impl RegisterArray for ArrayRef {
     fn slot_mut(bank: &mut TypedBank, index: usize) -> Option<&mut Option<Register<Self>>> {
         bank.generic.get_mut(index)
     }
+
+    fn from_typed(typed: &TypedArray) -> Option<&Self> {
+        match typed {
+            TypedArray::Generic(array) => Some(array),
+            _ => None,
+        }
+    }
+
+    fn into_typed(self) -> TypedArray {
+        TypedArray::Generic(self)
+    }
 }
 
 struct RegisterBank {
@@ -251,9 +303,47 @@ struct RegisterBank {
     condition: TypedBank,
     outputs: TypedBank,
     uninitialized: HashMap<RegisterRef, DataType>,
-    /// How many rows a column read from the bank has: the batch's rows, or one while an
-    /// instruction whose operands are all scalars computes its shared value over a single row.
+    /// How many rows a column read from the bank has: the batch's rows, one while an instruction
+    /// whose operands are all scalars computes its shared value over a single row, or the rows a
+    /// conditional arm selects while an instruction narrowed to them runs.
     rows: usize,
+    /// The operands of the instruction narrowed to the rows its arm selects, while that
+    /// instruction runs. Empty otherwise, so an ordinary read costs one empty lookup.
+    narrowed: HashMap<RegisterRef, NarrowedRegister>,
+}
+
+impl RegisterBank {
+    /// Narrows the column operands among `operands` to the rows `narrowing` selects, so that the
+    /// instruction reading them computes those rows only. A scalar operand stays a scalar, and an
+    /// operand read twice is narrowed once.
+    fn narrow_operands(
+        &mut self,
+        operands: &[RegisterRef],
+        narrowing: &Narrowing,
+    ) -> Result<(), RuntimeError> {
+        for operand in operands {
+            if self.narrowed.contains_key(operand) {
+                continue;
+            }
+            let narrowed = if self.is_scalar(*operand) {
+                NarrowedRegister::Scalar(OnceCell::new())
+            } else {
+                let column = self.read_array(*operand)?;
+                let selected = narrowing
+                    .filter
+                    .filter(column.as_array())
+                    .map_err(|error| arrow_kernel_error("operand narrowing failed", error))?;
+                NarrowedRegister::Column(array_ref_to_typed_array(selected)?)
+            };
+            self.narrowed.insert(*operand, narrowed);
+        }
+        Ok(())
+    }
+
+    /// Reads every register over the batch's rows again once a narrowed instruction has run.
+    fn clear_narrowing(&mut self) {
+        self.narrowed.clear();
+    }
 }
 
 macro_rules! impl_register_bank {
@@ -267,6 +357,7 @@ macro_rules! impl_register_bank {
                     outputs: TypedBank::new(&layouts.outputs),
                     uninitialized: HashMap::new(),
                     rows,
+                    narrowed: HashMap::new(),
                 }
             }
 
@@ -308,16 +399,41 @@ macro_rules! impl_register_bank {
                     .ok_or(RuntimeError::MissingRegister { reg })
             }
 
-            /// The register as a column of the current row count.
+            /// The register as a column of the current row count. While an instruction narrowed
+            /// to the rows its arm selects runs, a column operand reads as its narrowed copy and a
+            /// scalar operand as a column repeating it over those rows.
             fn column<A: RegisterArray>(&self, reg: RegisterRef) -> Result<&A, RuntimeError> {
-                Ok(self.register::<A>(reg)?.column(self.rows))
+                let register = self.register::<A>(reg)?;
+                let narrowed = match self.narrowed.get(&reg) {
+                    None => return Ok(register.column(self.rows)),
+                    Some(NarrowedRegister::Column(array)) => array,
+                    Some(NarrowedRegister::Scalar(column)) => column.get_or_init(|| {
+                        let value = register.scalar_value().verified(
+                            "narrow_operands narrows a register as a scalar only when it holds one",
+                        );
+                        value.broadcast(self.rows).into_typed()
+                    }),
+                };
+                A::from_typed(narrowed).ok_or(RuntimeError::InvalidRegisterType {
+                    reg,
+                    expected: A::LABEL,
+                })
             }
 
-            /// The register as a kernel operand, which keeps a scalar a scalar.
+            /// The register as a kernel operand, which keeps a scalar a scalar. While an
+            /// instruction narrowed to the rows its arm selects runs, a column operand reads as
+            /// its narrowed copy.
             fn operand<A: RegisterArray>(
                 &self,
                 reg: RegisterRef,
             ) -> Result<Operand<'_, A>, RuntimeError> {
+                if let Some(NarrowedRegister::Column(array)) = self.narrowed.get(&reg) {
+                    let array = A::from_typed(array).ok_or(RuntimeError::InvalidRegisterType {
+                        reg,
+                        expected: A::LABEL,
+                    })?;
+                    return Ok(Operand::Column(array));
+                }
                 Ok(self.register::<A>(reg)?.operand(self.rows))
             }
 
@@ -514,6 +630,24 @@ impl RowSelection {
         };
         all.chain(selected.iter().copied())
     }
+
+    /// Whether this selection names rows of a batch of `row_count` rows: every row of that batch
+    /// when it selects all rows, and rows below `row_count` otherwise.
+    pub fn fits(&self, row_count: usize) -> bool {
+        match self {
+            Self::All(rows) => *rows == row_count,
+            Self::Selected(rows) => rows.iter().all(|row| *row < row_count),
+        }
+    }
+
+    /// The errors of the selected rows of `errors`, a channel over the batch, as a channel over
+    /// the selected rows in selection order.
+    pub fn select_errors(&self, errors: &RowErrors) -> RowErrors {
+        match self {
+            Self::All(_) => errors.clone(),
+            Self::Selected(rows) => errors.select_rows(rows),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -529,6 +663,14 @@ pub enum FunctionExecutionPolicy {
     SpawnBlocking,
 }
 
+/// Answers the calls a program makes out of the VM.
+///
+/// A call names the rows it is made for by their identity in the batch. Its arguments hold one
+/// value per named row, in selection order, and so does the mask of rows that already carry an
+/// error. The answer holds one output row per named row, in the same order, and reports a per-row
+/// error by the row's position in the selection. A conditional arm calls a function for the rows
+/// it selects only, so a function that looks a row up in context it holds, such as the headers of
+/// the message a row was decoded from, reads the row's identity from the selection.
 pub trait FunctionInjector: Send + Sync + fmt::Debug {
     fn execution_policy(&self, _function: &FunctionName) -> FunctionExecutionPolicy {
         FunctionExecutionPolicy::Inline
@@ -538,16 +680,19 @@ pub trait FunctionInjector: Send + Sync + fmt::Debug {
         &self,
         function: &FunctionName,
         arguments: &[TypedArray],
-        row_count: usize,
+        rows: &RowSelection,
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
     ) -> Result<InjectedResult, RuntimeError>;
 }
 
+/// The answer to one call out of the VM.
 #[derive(Debug, Clone)]
 pub struct InjectedResult {
+    /// One value per row the call was made for, in selection order.
     pub output: TypedArray,
+    /// Per-row failures, each on a row's position in the selection the call was made for.
     pub side_errors: Vec<(usize, SideError)>,
 }
 
@@ -599,14 +744,6 @@ pub async fn execute_predicate_in_context(
     })
 }
 
-pub async fn execute_program_in_context(
-    program: &triomphe::Arc<CompiledProgram>,
-    batch: &TypedBatch,
-    context: &ExecutionContext,
-) -> Result<ExecutionResult, RuntimeError> {
-    execute_program_with_selection_in_context(program, batch, context).await
-}
-
 pub async fn execute_program_with_selection_in_context(
     program: &triomphe::Arc<CompiledProgram>,
     batch: &TypedBatch,
@@ -643,32 +780,45 @@ fn program_requires_spawn_blocking(program: &CompiledProgram, context: &Executio
     })
 }
 
+/// Synchronous execution entry points for the tests of this module and its sibling test modules.
 #[cfg(test)]
-fn execute_program_sync(
-    program: &CompiledProgram,
-    batch: &TypedBatch,
-) -> Result<TypedBatch, RuntimeError> {
-    let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
-    execute_program_in_context_sync(program, batch, &context).map(|result| result.batch)
+mod test_execution {
+    use nervix_models::Timestamp;
+
+    use super::{
+        CompiledProgram, ExecutionContext, ExecutionResult, RuntimeError, TypedBatch,
+        execute_program_with_selection_in_context_sync,
+    };
+
+    pub(super) fn execute_program_sync(
+        program: &CompiledProgram,
+        batch: &TypedBatch,
+    ) -> Result<TypedBatch, RuntimeError> {
+        let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
+        execute_program_in_context_sync(program, batch, &context).map(|result| result.batch)
+    }
+
+    pub(super) fn execute_program_in_context_sync(
+        program: &CompiledProgram,
+        batch: &TypedBatch,
+        context: &ExecutionContext,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        execute_program_with_selection_in_context_sync(program, batch, context)
+    }
+
+    pub(super) fn execute_program_with_selection_sync(
+        program: &CompiledProgram,
+        batch: &TypedBatch,
+    ) -> Result<ExecutionResult, RuntimeError> {
+        let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
+        execute_program_with_selection_in_context_sync(program, batch, &context)
+    }
 }
 
 #[cfg(test)]
-fn execute_program_in_context_sync(
-    program: &CompiledProgram,
-    batch: &TypedBatch,
-    context: &ExecutionContext,
-) -> Result<ExecutionResult, RuntimeError> {
-    execute_program_with_selection_in_context_sync(program, batch, context)
-}
-
-#[cfg(test)]
-fn execute_program_with_selection_sync(
-    program: &CompiledProgram,
-    batch: &TypedBatch,
-) -> Result<ExecutionResult, RuntimeError> {
-    let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
-    execute_program_with_selection_in_context_sync(program, batch, &context)
-}
+use test_execution::{
+    execute_program_in_context_sync, execute_program_sync, execute_program_with_selection_sync,
+};
 
 fn execute_program_with_selection_in_context_sync(
     program: &CompiledProgram,
@@ -683,19 +833,40 @@ fn execute_program_with_selection_in_context_sync(
     registers.load_input_batch(&program.inputs, batch)?;
 
     let mut row_errors = batch.errors().clone();
+    let every_row = ArmRows::All;
+    // The rows the current arm selects, read from its mask register once and reused by every
+    // instruction that mask governs.
+    let mut arm: Option<ArmSelection> = None;
 
     for instruction in &program.instructions {
-        let baseline = instruction.error_mask.map(|_| row_errors.row_lengths());
+        let rows = match instruction.selection {
+            None => &every_row,
+            Some(mask) => {
+                let reusable = arm.as_ref().is_some_and(|current| current.mask == mask);
+                if !reusable {
+                    let operand = registers.operand::<BooleanArray>(mask)?;
+                    arm = Some(ArmSelection::read(mask, operand));
+                }
+                &arm.as_ref()
+                    .verified("the arm selection was read or reused just above")
+                    .rows
+            }
+        };
         instruction.execute(
             &mut registers,
-            batch.row_count(),
+            rows,
             &mut row_errors,
-            context,
-            program.injector.as_ref(),
+            Injectors {
+                context,
+                program: program.injector.as_ref(),
+            },
         )?;
-        if let (Some(mask_reg), Some(baseline)) = (instruction.error_mask, baseline) {
-            let mask = registers.column::<BooleanArray>(mask_reg)?;
-            row_errors.restore_unselected(&baseline, |row| row_selected(mask, row));
+        // A register the instruction rewrote no longer holds the mask that was read from it.
+        if arm
+            .as_ref()
+            .is_some_and(|current| current.mask == instruction.kind.output())
+        {
+            arm = None;
         }
     }
 
@@ -749,15 +920,15 @@ fn execute_program_with_selection_in_context_sync(
             )))
         };
         let selection_predicate = predicate_with_error_rows.as_ref().unwrap_or(predicate);
-        let selected = selected_rows(selection_predicate);
+        let selected = RowSelection::Selected(selected_rows(selection_predicate));
         for invocation in &mut invocations {
             invocation.arguments =
                 filter_columns(&invocation.arguments, selection_predicate, selected.len())?;
         }
         FilteredOutput {
             columns: filter_columns(&columns, selection_predicate, selected.len())?,
-            row_errors: row_errors.select_rows(&selected),
-            selected_rows: RowSelection::Selected(selected),
+            row_errors: selected.select_errors(&row_errors),
+            selected_rows: selected,
         }
     } else {
         FilteredOutput {
@@ -778,15 +949,162 @@ fn execute_program_with_selection_in_context_sync(
     })
 }
 
+/// The rows a conditional arm selects, read from the arm's mask register once and shared by every
+/// instruction that register governs until an instruction rewrites it.
+struct ArmSelection {
+    mask: RegisterRef,
+    rows: ArmRows,
+}
+
+impl ArmSelection {
+    fn read(mask: RegisterRef, operand: Operand<'_, BooleanArray>) -> Self {
+        let rows = match operand {
+            Operand::Scalar(value) => {
+                if row_selected(value, 0) {
+                    ArmRows::All
+                } else {
+                    ArmRows::None
+                }
+            }
+            Operand::Column(mask) => ArmRows::read(mask),
+        };
+        Self { mask, rows }
+    }
+}
+
+/// Which rows of the batch a conditional arm selects for the instructions it governs.
+enum ArmRows {
+    /// Every row, so an instruction runs over the batch as written.
+    All,
+    /// No row, so an instruction does not run and yields a null on every row.
+    None,
+    /// Some rows of the batch, but not all of them.
+    Some(Box<SelectedRows>),
+}
+
+impl ArmRows {
+    fn read(mask: &BooleanArray) -> Self {
+        let selected = mask.true_count();
+        if selected == mask.len() {
+            Self::All
+        } else if selected == 0 {
+            Self::None
+        } else {
+            Self::Some(Box::new(SelectedRows::new(mask)))
+        }
+    }
+}
+
+/// The rows an arm selects when it selects some rows of the batch but not all of them.
+struct SelectedRows {
+    /// The arm's mask with every null read as not selected.
+    mask: BooleanArray,
+    /// What narrowing an instruction to the selected rows takes, built the first time an
+    /// instruction the arm confines to those rows runs.
+    narrowing: OnceCell<Narrowing>,
+}
+
+impl SelectedRows {
+    fn new(mask: &BooleanArray) -> Self {
+        let mask = match mask.nulls() {
+            Some(_) => prep_null_mask_filter(mask),
+            None => mask.clone(),
+        };
+        Self {
+            mask,
+            narrowing: OnceCell::new(),
+        }
+    }
+
+    fn contains(&self, row: usize) -> bool {
+        self.mask.value(row)
+    }
+
+    /// The selected rows in batch order.
+    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.mask.values().set_indices()
+    }
+
+    fn narrowing(&self) -> &Narrowing {
+        self.narrowing.get_or_init(|| Narrowing::new(&self.mask))
+    }
+}
+
+/// Narrows an instruction's operands to the selected rows and scatters its result back over the
+/// batch.
+struct Narrowing {
+    /// The selected rows by their identity in the batch, in batch order.
+    selection: RowSelection,
+    /// Keeps the selected rows of a column.
+    filter: FilterPredicate,
+    /// The narrowed index of every selected row and a null for every other row, so that `take`
+    /// spreads a narrowed column back over the batch with a null wherever no row was selected.
+    scatter: UInt64Array,
+}
+
+impl Narrowing {
+    fn new(mask: &BooleanArray) -> Self {
+        let rows = mask.values().set_indices().collect::<Vec<_>>();
+        let mut narrowed_indices = vec![0_u64; mask.len()];
+        for (narrowed, row) in rows.iter().enumerate() {
+            narrowed_indices[*row] = narrowed.arch_into();
+        }
+        let scatter = UInt64Array::new(
+            ScalarBuffer::from(narrowed_indices),
+            Some(NullBuffer::new(mask.values().clone())),
+        );
+        Self {
+            selection: RowSelection::Selected(rows),
+            filter: FilterBuilder::new(mask).optimize().build(),
+            scatter,
+        }
+    }
+
+    fn row_count(&self) -> usize {
+        self.selection.len()
+    }
+
+    /// Spreads a column over the selected rows back over the batch, with a null on every row
+    /// that was not selected.
+    fn scatter(&self, narrowed: &TypedArray) -> TypedArray {
+        let spread = take(narrowed.as_array(), &self.scatter, None).assured(
+            "every narrowed index lies within the narrowed column, and take is defined for every \
+             array type a register can hold",
+        );
+        array_ref_to_typed_array(spread)
+            .assured("take keeps the narrowed column's data type, which is a register type")
+    }
+}
+
+/// A one-row null of a register type, which an instruction in an arm no row selects writes in
+/// place of computing. A generic register's element type lives in its arrays rather than in the
+/// register type, so no null can be written for it without computing.
+fn unselected_null(ty: RegisterType) -> Option<TypedArray> {
+    if let RegisterType::Generic = ty {
+        return None;
+    }
+    let null = array_ref_to_typed_array(new_null_array(&ty.data_type(), 1))
+        .assured("every register type but the generic one names the data type its arrays hold");
+    Some(null)
+}
+
+/// Where an instruction finds the injector to call: the execution context's, and then the
+/// program's own for a function the context's does not know.
+#[derive(Clone, Copy)]
+struct Injectors<'a> {
+    context: &'a ExecutionContext,
+    program: Option<&'a triomphe::Arc<Box<dyn FunctionInjector>>>,
+}
+
 impl Instruction {
     fn execute(
         &self,
         registers: &mut RegisterBank,
-        row_count: usize,
+        rows: &ArmRows,
         row_errors: &mut RowErrors,
-        context: &ExecutionContext,
-        default_injector: Option<&triomphe::Arc<Box<dyn FunctionInjector>>>,
+        injectors: Injectors<'_>,
     ) -> Result<(), RuntimeError> {
+        let row_count = registers.rows;
         match &self.kind {
             InstructionKind::Move { dst, input } => registers.copy(*dst, *input),
             InstructionKind::Assign {
@@ -807,7 +1125,7 @@ impl Instruction {
                 registers,
                 *dst,
                 false,
-                row_count,
+                rows,
                 row_errors,
                 |registers, _, row_errors| self.execute_unary(registers, *input, *op, row_errors),
             ),
@@ -820,7 +1138,7 @@ impl Instruction {
                 registers,
                 *dst,
                 false,
-                row_count,
+                rows,
                 row_errors,
                 |registers, _, row_errors| {
                     self.execute_binary(registers, *left, *right, *op, row_errors)
@@ -830,7 +1148,7 @@ impl Instruction {
                 registers,
                 *dst,
                 false,
-                row_count,
+                rows,
                 row_errors,
                 |registers, _, row_errors| {
                     cast_typed_array(
@@ -852,11 +1170,17 @@ impl Instruction {
                     registers,
                     *dst,
                     volatile,
-                    row_count,
+                    rows,
                     row_errors,
                     |registers, extent, row_errors| {
                         execute_builtin(
-                            lowering, registers, inputs, extent, row_errors, self.span, context,
+                            lowering,
+                            registers,
+                            inputs,
+                            extent,
+                            row_errors,
+                            self.span,
+                            injectors.context,
                         )
                     },
                 )
@@ -866,62 +1190,56 @@ impl Instruction {
                 function,
                 inputs,
                 output_type,
-            } => {
-                let arguments = inputs
-                    .iter()
-                    .map(|input| registers.read_array(*input))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let prior_error_rows = row_errors.mask();
-                let inject = |injector: &triomphe::Arc<Box<dyn FunctionInjector>>| {
-                    injector.inject_with_context(
+            } => match rows {
+                // An arm no row selects does not call out of the VM at all.
+                ArmRows::None => write_null_literal(registers, *dst, output_type),
+                ArmRows::All => {
+                    let arguments = inputs
+                        .iter()
+                        .map(|input| registers.read_array(*input))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let selection = RowSelection::All(row_count);
+                    let injected = self.call_injected_function(
                         function,
                         &arguments,
-                        row_count,
-                        self.span,
-                        context.now,
-                        prior_error_rows,
-                    )
-                };
-                let injected = if let Some(injector) = context.injector.as_ref() {
-                    match inject(injector) {
-                        Err(RuntimeError::MissingFunctionInjector { .. })
-                            if default_injector.is_some() =>
-                        {
-                            inject(default_injector.verified(
-                                "the match guard above requires the default injector to be present",
-                            ))?
-                        }
-                        result => result?,
+                        &selection,
+                        row_errors.mask(),
+                        output_type,
+                        injectors,
+                    )?;
+                    for (row, side_error) in injected.side_errors {
+                        row_errors.push(row, side_error);
                     }
-                } else if let Some(injector) = default_injector {
-                    inject(injector)?
-                } else {
-                    return Err(RuntimeError::MissingFunctionInjector {
-                        function: function.as_str().to_string(),
-                    });
-                };
-                let output = injected.output;
-                if output.data_type() != *output_type || output.len() != row_count {
-                    return Err(RuntimeError::InvalidInjectedResult {
-                        function: function.as_str().to_string(),
-                        expected_type: output_type.clone(),
-                        actual_type: output.data_type(),
-                        expected_rows: row_count,
-                        actual_rows: output.len(),
-                    });
+                    registers.set(*dst, injected.output, Shape::Column)
                 }
-                for (row, side_error) in injected.side_errors {
-                    if row >= row_count {
-                        return Err(RuntimeError::InvalidInjectedSideError {
-                            function: function.as_str().to_string(),
-                            row,
-                            row_count,
-                        });
+                ArmRows::Some(selected) => {
+                    let narrowing = selected.narrowing();
+                    registers.narrow_operands(inputs, narrowing)?;
+                    registers.rows = narrowing.row_count();
+                    let arguments = inputs
+                        .iter()
+                        .map(|input| registers.read_array(*input))
+                        .collect::<Result<Vec<_>, _>>();
+                    registers.rows = row_count;
+                    registers.clear_narrowing();
+                    let arguments = arguments?;
+                    let prior_errors = narrowing.selection.select_errors(row_errors);
+                    let injected = self.call_injected_function(
+                        function,
+                        &arguments,
+                        &narrowing.selection,
+                        prior_errors.mask(),
+                        output_type,
+                        injectors,
+                    )?;
+                    let mut narrowed_errors = RowErrors::new(narrowing.row_count());
+                    for (row, side_error) in injected.side_errors {
+                        narrowed_errors.push(row, side_error);
                     }
-                    row_errors.push(row, side_error);
+                    narrowed_errors.scatter_into(row_errors, narrowing.selection.iter());
+                    registers.set(*dst, narrowing.scatter(&injected.output), Shape::Column)
                 }
-                registers.set(*dst, output, Shape::Column)
-            }
+            },
             InstructionKind::Select {
                 dst,
                 arms,
@@ -930,49 +1248,210 @@ impl Instruction {
                 registers,
                 *dst,
                 false,
-                row_count,
+                rows,
                 row_errors,
                 |registers, _, _| execute_select(registers, arms, *otherwise),
             ),
         }
     }
 
-    /// Writes the value `compute` yields to `dst`.
+    /// Calls `function` out of the VM for the rows `selection` names, through the execution
+    /// context's injector and then the program's own, and checks that the answer covers exactly
+    /// those rows.
+    fn call_injected_function(
+        &self,
+        function: &FunctionName,
+        arguments: &[TypedArray],
+        selection: &RowSelection,
+        prior_error_rows: RowErrorMask<'_>,
+        output_type: &DataType,
+        injectors: Injectors<'_>,
+    ) -> Result<InjectedResult, RuntimeError> {
+        let inject = |injector: &triomphe::Arc<Box<dyn FunctionInjector>>| {
+            injector.inject_with_context(
+                function,
+                arguments,
+                selection,
+                self.span,
+                injectors.context.now,
+                prior_error_rows,
+            )
+        };
+        let injected = if let Some(injector) = injectors.context.injector.as_ref() {
+            match inject(injector) {
+                Err(RuntimeError::MissingFunctionInjector { .. })
+                    if injectors.program.is_some() =>
+                {
+                    inject(injectors.program.verified(
+                        "the match guard above requires the program's injector to be present",
+                    ))?
+                }
+                result => result?,
+            }
+        } else if let Some(injector) = injectors.program {
+            inject(injector)?
+        } else {
+            return Err(RuntimeError::MissingFunctionInjector {
+                function: function.as_str().to_string(),
+            });
+        };
+        let row_count = selection.len();
+        if injected.output.data_type() != *output_type || injected.output.len() != row_count {
+            return Err(RuntimeError::InvalidInjectedResult {
+                function: function.as_str().to_string(),
+                expected_type: output_type.clone(),
+                actual_type: injected.output.data_type(),
+                expected_rows: row_count,
+                actual_rows: injected.output.len(),
+            });
+        }
+        for (row, _) in &injected.side_errors {
+            if *row >= row_count {
+                return Err(RuntimeError::InvalidInjectedSideError {
+                    function: function.as_str().to_string(),
+                    row: *row,
+                    row_count,
+                });
+            }
+        }
+        Ok(injected)
+    }
+
+    /// How a conditional arm executes this instruction for the rows it selects.
+    fn arm_execution(&self) -> ArmExecution {
+        match &self.kind {
+            InstructionKind::Unary { op, .. } => unary_arm_execution(*op),
+            InstructionKind::Binary { op, .. } => binary_arm_execution(*op),
+            InstructionKind::Cast { input, target, .. } => cast_arm_execution(input.ty, *target),
+            InstructionKind::Builtin { lowering, .. } => builtin_arm_execution(lowering),
+            // Calling out of the VM costs far more per row than narrowing.
+            InstructionKind::Inject { .. } => ArmExecution::SelectedRows,
+            // These never carry a selection, so over the whole batch is how they always run.
+            InstructionKind::Move { .. }
+            | InstructionKind::Assign { .. }
+            | InstructionKind::Literal { .. }
+            | InstructionKind::NullLiteral { .. }
+            | InstructionKind::Uninitialized { .. }
+            | InstructionKind::Select { .. } => ArmExecution::WholeBatch,
+        }
+    }
+
+    /// Writes the value `compute` yields to `dst`, for the rows the arm selects.
     ///
     /// When every operand is a scalar and the computation is not volatile, computing it once is
     /// computing it for every row: it runs over a single row and `dst` becomes a scalar, and a
-    /// failure of that row is a failure of every row of the batch. Otherwise it runs over the
-    /// batch and `dst` becomes a column.
+    /// failure of that row is a failure of every selected row. Otherwise `dst` becomes a column,
+    /// computed over the batch when the arm selects every row; over the selected rows only, and
+    /// scattered back, when the kernel is worth narrowing; and over the batch with the errors of
+    /// unselected rows discarded when it is not. An arm no row selects writes a null instead.
     fn write_computed(
         &self,
         registers: &mut RegisterBank,
         dst: RegisterRef,
         volatile: bool,
-        row_count: usize,
+        rows: &ArmRows,
         row_errors: &mut RowErrors,
         compute: impl FnOnce(&RegisterBank, Extent, &mut RowErrors) -> Result<TypedArray, RuntimeError>,
     ) -> Result<(), RuntimeError> {
+        /// The rows whose errors a computation over the whole batch keeps.
+        enum Kept<'a> {
+            Every,
+            NoRow,
+            Selected(&'a SelectedRows),
+        }
+
+        /// How the instruction computes its rows.
+        enum Plan<'a> {
+            /// No row selects the arm, so the register takes a null without computing.
+            Null(TypedArray),
+            /// Every operand is a scalar, so one row is computed and every row shares it.
+            Shared,
+            /// The whole batch is computed and the errors of the rows outside `Kept` discarded.
+            Batch(Kept<'a>),
+            /// The selected rows alone are computed, then scattered back over the batch.
+            Narrowed(&'a Narrowing),
+        }
+
+        let row_count = registers.rows;
         let shared = !volatile
             && self
                 .kind
                 .operands()
                 .iter()
                 .all(|operand| registers.is_scalar(*operand));
-        if !shared {
-            let output = compute(registers, Extent::PerRow(row_count), row_errors)?;
-            return registers.set(dst, output, Shape::Column);
-        }
-        let mut shared_errors = RowErrors::new(1);
-        registers.rows = 1;
-        let computed = compute(registers, Extent::Shared(row_count), &mut shared_errors);
-        registers.rows = row_count;
-        let output = computed?;
-        for error in shared_errors.row(0) {
-            for row in 0..row_count {
-                row_errors.push(row, error.clone());
+        let plan = match rows {
+            ArmRows::None => match unselected_null(dst.ty) {
+                Some(null) => Plan::Null(null),
+                None if shared => Plan::Shared,
+                None => Plan::Batch(Kept::NoRow),
+            },
+            ArmRows::All if shared => Plan::Shared,
+            ArmRows::All => Plan::Batch(Kept::Every),
+            ArmRows::Some(_) if shared => Plan::Shared,
+            ArmRows::Some(selected) => match self.arm_execution() {
+                ArmExecution::WholeBatch => Plan::Batch(Kept::Selected(selected)),
+                ArmExecution::SelectedRows => Plan::Narrowed(selected.narrowing()),
+            },
+        };
+
+        match plan {
+            Plan::Null(null) => registers.set(dst, null, Shape::Scalar),
+            Plan::Shared => {
+                let mut shared_errors = RowErrors::new(1);
+                registers.rows = 1;
+                let computed = compute(registers, Extent::Shared(row_count), &mut shared_errors);
+                registers.rows = row_count;
+                let output = computed?;
+                for error in shared_errors.row(0) {
+                    match rows {
+                        ArmRows::All => {
+                            for row in 0..row_count {
+                                row_errors.push(row, error.clone());
+                            }
+                        }
+                        ArmRows::None => {}
+                        ArmRows::Some(selected) => {
+                            for row in selected.iter() {
+                                row_errors.push(row, error.clone());
+                            }
+                        }
+                    }
+                }
+                registers.set(dst, output, Shape::Scalar)
+            }
+            Plan::Batch(kept) => {
+                let baseline = match kept {
+                    Kept::Every => None,
+                    Kept::NoRow | Kept::Selected(_) => Some(row_errors.row_lengths()),
+                };
+                let output = compute(registers, Extent::PerRow(row_count), row_errors)?;
+                match (kept, baseline) {
+                    (Kept::NoRow, Some(baseline)) => {
+                        row_errors.restore_unselected(&baseline, |_| false);
+                    }
+                    (Kept::Selected(selected), Some(baseline)) => {
+                        row_errors.restore_unselected(&baseline, |row| selected.contains(row));
+                    }
+                    (Kept::Every, _) | (Kept::NoRow | Kept::Selected(_), None) => {}
+                }
+                registers.set(dst, output, Shape::Column)
+            }
+            Plan::Narrowed(narrowing) => {
+                registers.narrow_operands(&self.kind.operands(), narrowing)?;
+                registers.rows = narrowing.row_count();
+                let mut narrowed_errors = RowErrors::new(narrowing.row_count());
+                let computed = compute(
+                    registers,
+                    Extent::PerRow(narrowing.row_count()),
+                    &mut narrowed_errors,
+                );
+                registers.rows = row_count;
+                registers.clear_narrowing();
+                let output = narrowing.scatter(&computed?);
+                narrowed_errors.scatter_into(row_errors, narrowing.selection.iter());
+                registers.set(dst, output, Shape::Column)
             }
         }
-        registers.set(dst, output, Shape::Scalar)
     }
 
     fn execute_assign(
@@ -1329,8 +1808,15 @@ fn execute_coalesce(
 }
 
 /// A conditional selects, for each row, the value of the first arm whose mask holds, and the
-/// `otherwise` value when none does. Masks are columns; values are operands, so a literal arm is
-/// zipped in as one scalar.
+/// `otherwise` value when none does. The arms are applied last to first, so an earlier arm
+/// overrides a later one on the rows both hold.
+///
+/// Masks are columns. An arm whose mask holds on every row answers every row with its value, and
+/// an arm whose mask holds on no row changes nothing, so neither copies a row. Otherwise two
+/// literal arms are zipped as scalars, which Arrow answers in one pass over the mask, and a
+/// literal arm beside a column is read as the column repeating it, built once per register,
+/// because Arrow copies a scalar row by row into every gap of the mask, and a mask that selects
+/// few rows has more gaps than the arm's kernel has rows.
 fn execute_select(
     registers: &RegisterBank,
     arms: &[SelectArm],
@@ -1339,11 +1825,30 @@ fn execute_select(
     let mut selected: Option<ArrayRef> = None;
     for arm in arms.iter().rev() {
         let mask = registers.column::<BooleanArray>(arm.mask)?;
-        let value = registers.any_operand(arm.value)?;
+        let matching = mask.true_count();
+        if matching == 0 {
+            // The rows keep what the later arms, or `otherwise`, chose for them.
+            continue;
+        }
+        if matching == mask.len() {
+            // Every row takes this arm until an earlier arm overrides it.
+            let value = registers.read_array(arm.value)?.into_array_ref();
+            selected = Some(value);
+            continue;
+        }
         let zipped = match &selected {
-            Some(fallback) => zip(mask, &value, fallback),
-            None => {
+            Some(fallback) => {
+                let value = registers.read_array(arm.value)?.into_array_ref();
+                zip(mask, &value, fallback)
+            }
+            None if registers.is_scalar(arm.value) && registers.is_scalar(otherwise) => {
+                let value = registers.any_operand(arm.value)?;
                 let fallback = registers.any_operand(otherwise)?;
+                zip(mask, &value, &fallback)
+            }
+            None => {
+                let value = registers.read_array(arm.value)?.into_array_ref();
+                let fallback = registers.read_array(otherwise)?.into_array_ref();
                 zip(mask, &value, &fallback)
             }
         };
@@ -3801,7 +4306,7 @@ mod tests {
             &self,
             function: &FunctionName,
             arguments: &[TypedArray],
-            row_count: usize,
+            rows: &RowSelection,
             _span: Span,
             _now: Timestamp,
             _prior_error_rows: RowErrorMask<'_>,
@@ -3810,7 +4315,7 @@ mod tests {
             let [TypedArray::Utf8(names)] = arguments else {
                 panic!("read_header must receive one Utf8 array");
             };
-            assert_eq!(names.len(), row_count);
+            assert_eq!(names.len(), rows.len());
             Ok(InjectedResult::success(TypedArray::Utf8(
                 StringArray::from_iter(names.iter().map(|name| match name {
                     Some("route") => Some("primary"),
@@ -3835,7 +4340,7 @@ mod tests {
             &self,
             function: &FunctionName,
             arguments: &[TypedArray],
-            row_count: usize,
+            rows: &RowSelection,
             span: Span,
             now: Timestamp,
             prior_error_rows: RowErrorMask<'_>,
@@ -3851,7 +4356,7 @@ mod tests {
             TestHeaderInjector.inject_with_context(
                 function,
                 arguments,
-                row_count,
+                rows,
                 span,
                 now,
                 prior_error_rows,
@@ -6645,7 +7150,7 @@ mod tests {
         };
 
         let (result, ()) = tokio::join!(
-            execute_program_in_context(&compiled, &batch, &context),
+            execute_program_with_selection_in_context(&compiled, &batch, &context),
             async move {
                 tokio::task::yield_now().await;
                 release_tx
@@ -6687,7 +7192,7 @@ mod tests {
                     inputs: vec![float_input],
                 },
                 span: (0..1).into(),
-                error_mask: None,
+                selection: None,
             }],
             filter: None,
             invocations: Vec::new(),
@@ -6757,7 +7262,7 @@ mod tests {
                     op: BinaryOp::Add,
                 },
                 span: (0..1).into(),
-                error_mask: None,
+                selection: None,
             }],
             filter: None,
             invocations: Vec::new(),
@@ -7317,3 +7822,6 @@ mod datetime_tests;
 #[cfg(test)]
 #[path = "runtime_numeric_tests.rs"]
 mod numeric_tests;
+#[cfg(test)]
+#[path = "runtime_selection_tests.rs"]
+mod selection_tests;

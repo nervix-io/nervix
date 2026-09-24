@@ -115,10 +115,14 @@ equals a simple-`CASE` match value. All non-null results must have the same exac
 casts are not inserted. An omitted `ELSE` is a typed null and therefore requires an optional
 destination. An `IF` always includes `ELSE`.
 
-Conditional values are computed in the columnar batch engine. Per-message evaluation errors are
-observed only for the selected result arm, so an error in an unselected arm does not activate
-`ON MESSAGE ERROR`. Context-injected operations such as window aggregates and header reads retain
-their existing batch-level failure behavior.
+Conditional values are computed in the columnar batch engine, and every arm is evaluated only for
+the messages that select it: a condition is evaluated for the messages no earlier arm answered, and
+a result for the messages its condition selected. A function in an arm therefore never reports an
+error for a message that selects another arm, so an error in an unselected arm never activates
+`ON MESSAGE ERROR`, and a `CASE` guard shields a function from the messages it cannot handle.
+Context-injected operations such as window aggregates, header reads, and UDFs are invoked for the
+selected messages only, and not at all in a batch where no message selects their arm; a whole-batch
+failure of such an invocation still fails the batch it was invoked for.
 
 The words `IF`, `CASE`, `WHEN`, `THEN`, `ELSE`, and `END` are reserved in expressions, including
 after a field scope such as `input.<field>`. A schema may declare one of these field names, but an
@@ -260,9 +264,11 @@ empty `delimiter`, the whole text is part `1`.
 call produces for a batch share one `STRING` column, which holds at most 2,147,483,647 bytes of
 text, so a result that does not fit in what its column has left reports an `overflow` error, such
 as `repeat result exceeds the text one STRING column holds`, and yields null instead of being
-built. A call whose arguments are all literals computes one value that every message in the batch
-holds, so that value must fit once for each of them: `repeat('ab', 600000000)` fits a batch of one
-message but reports the error on every message of a batch of two.
+built. Inside a conditional arm the column holds only the results of the messages that select the
+arm, so a message that selects another arm uses none of its text. A call whose arguments are all
+literals computes one value that every message in the batch holds, so that value must fit once for
+each of them: `repeat('ab', 600000000)` fits a batch of one message but reports the error on every
+message of a batch of two.
 
 ## String Predicates
 

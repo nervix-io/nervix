@@ -361,8 +361,23 @@ impl RowErrors {
         RowErrorLengths(self.rows.iter().map(Vec::len).collect())
     }
 
-    /// Drops errors recorded past `lengths` for every row the instruction did not select,
-    /// so a conditional arm cannot leak errors from a branch it did not take.
+    /// Moves every error into `target`, on the row of `target` that `rows` names for each row of
+    /// this channel in turn, so the errors of an instruction narrowed to the rows its arm
+    /// selects land on the rows that selected it.
+    pub(crate) fn scatter_into(self, target: &mut RowErrors, rows: impl Iterator<Item = usize>) {
+        if self.rows.is_empty() {
+            return;
+        }
+        for (errors, row) in self.rows.into_iter().zip(rows) {
+            for error in errors {
+                target.push(row, error);
+            }
+        }
+    }
+
+    /// Drops errors recorded past `lengths` for every row the instruction did not select, so an
+    /// arm that runs a vectorized kernel over the whole batch reports nothing for a row it did
+    /// not select.
     pub fn restore_unselected(
         &mut self,
         lengths: &RowErrorLengths,
