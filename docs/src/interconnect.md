@@ -12,6 +12,24 @@ In particular, a transport response is not automatically a statement that runtim
 Relay delivery exposes separate receipt, admission, and downstream-completion boundaries so callers
 can distinguish those outcomes.
 
+## Simulation Boundary
+
+The interconnect and its execution dependency have an optional Turmoil test mode. It is separate
+from the Shuttle scheduler mode; selecting both is an invalid build configuration. The normal
+runtime dependency graph contains neither simulation scheduler. The synchronous Turmoil runner is
+a test harness outside product ownership, with a fixed seed, UTC epoch, network topology, simulated
+duration, step limit, and real wall-clock escape bound. It supervises host tasks so their failures
+fail the scenario.
+
+The initial runner qualifies bounded scheduling and Tokio timers. The production listener,
+outbound TCP connections, and DNS resolution still use Tokio's real network APIs; execution jobs
+still use Tokio's blocking pool. Certificate validity still reads the process wall clock, while
+process-epoch generation uses OS randomness. External connectors, filesystem and database work,
+gossip and consensus randomness, and domain-clock authority are outside this first simulation
+boundary. A simulated host crash tears down its runtime and is not evidence of power-loss or
+SIGKILL durability. A simulation result therefore makes no claim yet about production transport
+faults, authentication, or full-node recovery.
+
 ## Listener And Peer Topology
 
 Each node exposes one TCP listener for all node-to-node traffic. Every accepted connection uses
