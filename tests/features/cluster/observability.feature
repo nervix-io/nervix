@@ -9,8 +9,8 @@ Feature: Cluster observability
     Given Redis is running
     Then failure diagnostics redact dependency certificate bytes and endpoint values
 
-  Scenario: Ephemeral dependencies are removed when a test suite unwinds
-    Then an ephemeral dependency is removed when its test suite unwinds
+  Scenario: Ephemeral dependencies are cleaned up when their test process is killed
+    Then an ephemeral dependency is cleaned up when its test process is killed
 
   Scenario: Kafka exposes host and Docker network benchmark endpoints
     Given Kafka is running

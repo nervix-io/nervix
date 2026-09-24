@@ -1310,6 +1310,22 @@ fn encode_transaction_operation(
                 operation,
             )
         }
+        TransactionOperation::ResetWasmState { domain, processor } => {
+            let domain = encoder.text("ResetWasmStateOperation.domain", domain.as_str())?;
+            let processor =
+                encoder.text("ResetWasmStateOperation.processor", processor.as_str())?;
+            let operation = wire::ResetWasmStateOperation::create(
+                encoder.fbb(),
+                &wire::ResetWasmStateOperationArgs {
+                    domain: Some(domain),
+                    processor: Some(processor),
+                },
+            );
+            EncodedUnion::new(
+                wire::TransactionOperation::ResetWasmStateOperation,
+                operation,
+            )
+        }
     };
     Ok(union)
 }
@@ -1379,6 +1395,12 @@ fn decode_transaction_operation(
             version: operation.version(),
         });
     }
+    if let Some(operation) = report.operation_as_reset_wasm_state_operation() {
+        return Ok(TransactionOperation::ResetWasmState {
+            domain: decoder.name("ResetWasmStateOperation.domain", operation.domain())?,
+            processor: decoder.name("ResetWasmStateOperation.processor", operation.processor())?,
+        });
+    }
     Err(decoder.unknown_union("OperationReport.operation", report.operation_type().0))
 }
 
@@ -1445,6 +1467,14 @@ fn encode_reason<'fbb>(
                 rebinding,
             )
         }
+        OperationImpactReason::WasmStateReset { node } => {
+            let node = encode_node_ref(encoder, node)?;
+            let reset = wire::WasmStateResetReason::create(
+                encoder.fbb(),
+                &wire::WasmStateResetReasonArgs { node: Some(node) },
+            );
+            EncodedUnion::new(wire::OperationImpactReason::WasmStateResetReason, reset)
+        }
     };
     Ok(wire::OperationReason::create(
         encoder.fbb(),
@@ -1477,6 +1507,11 @@ fn decode_reason(
             resource: decoder.name("ResourceRebindingReason.resource", rebinding.resource())?,
             from_version: rebinding.previous_version(),
             to_version: rebinding.target_version(),
+        });
+    }
+    if let Some(reset) = reason.reason_as_wasm_state_reset_reason() {
+        return Ok(OperationImpactReason::WasmStateReset {
+            node: decode_node_ref(decoder, reset.node())?,
         });
     }
     match reason.reason_type() {

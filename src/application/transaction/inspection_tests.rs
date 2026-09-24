@@ -144,7 +144,7 @@ async fn inspecting_the_attached_transaction_reads_its_open_report() {
         &DomainName::parse("default").assured("the fixture domain is an accepted literal")
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -169,7 +169,7 @@ async fn repeated_inspection_of_an_unchanged_transaction_reads_the_same_basis() 
     );
     assert_eq!(first.report, second.report);
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -209,7 +209,7 @@ async fn an_unfinished_model_run_reads_as_an_incomplete_open_report() {
     );
     assert_eq!(inspection.report.position().accepted_operations(), 1);
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -286,7 +286,7 @@ async fn inspecting_another_owned_transaction_changes_no_binding_or_queue_positi
         "inspecting by identity must not bind the inspected transaction"
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -311,7 +311,7 @@ async fn inspecting_without_an_attached_transaction_is_refused() {
         TransactionInspectionRejection::NoAttachedTransaction
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -336,7 +336,7 @@ async fn inspecting_an_unknown_transaction_is_refused() {
         TransactionInspectionRejection::TransactionNotFound
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -371,7 +371,7 @@ async fn inspecting_a_transaction_owned_by_another_user_is_refused() {
 
     assert_eq!(rejection(outcome), TransactionInspectionRejection::NotOwner);
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -411,7 +411,7 @@ async fn selecting_an_operation_names_it_without_narrowing_the_report() {
         .verified("the selected operation is within the inspected report");
     assert!(selected.execution_step.contains(operation(2)));
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -440,7 +440,7 @@ async fn selecting_an_operation_past_the_accepted_position_is_refused() {
         TransactionInspectionRejection::OperationNotFound
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -483,7 +483,7 @@ async fn inspecting_a_committed_transaction_reads_its_frozen_report_and_recorded
         ExecutionStepOutcome::Applied
     ));
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -514,6 +514,6 @@ async fn inspecting_a_transaction_that_never_planned_an_operation_is_refused() {
         TransactionInspectionRejection::ReportUnavailable
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }

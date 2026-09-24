@@ -12,7 +12,7 @@ use std::{
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -1326,43 +1326,76 @@ fn then_kafka_exposes_host_and_docker_network_benchmark_endpoints(world: &mut Sc
     );
 }
 
-#[then("an ephemeral dependency is removed when its test suite unwinds")]
-async fn then_ephemeral_dependency_is_removed_when_test_suite_unwinds(_world: &mut ScenarioWorld) {
+#[then("an ephemeral dependency is cleaned up when its test process is killed")]
+async fn then_ephemeral_dependency_is_cleaned_up_when_test_process_is_killed(
+    _world: &mut ScenarioWorld,
+) {
+    use tokio::io::AsyncBufReadExt as _;
+
     let scope = format!("lifecycle-{}", Uuid::now_v7().as_simple());
-    let output = tokio::process::Command::new(
+    let mut child = tokio::process::Command::new(
         std::env::current_exe().expect("scenario executable path should be available"),
     )
     .env(DEPENDENCY_LIFECYCLE_HELPER_ENV, &scope)
     .env("NERVIX_TESTCONTAINERS_MODE", "ephemeral")
     .env("TESTCONTAINERS_COMMAND", "keep")
-    .output()
+    .kill_on_drop(true)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .expect("dependency lifecycle helper should start");
+    let stdout = child
+        .stdout
+        .take()
+        .expect("dependency lifecycle helper stdout should be piped");
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let container_id = tokio::time::timeout(Duration::from_secs(180), async {
+        while let Some(line) = lines
+            .next_line()
+            .await
+            .expect("dependency lifecycle helper stdout should be readable")
+        {
+            if let Some(container_id) = line.strip_prefix(DEPENDENCY_LIFECYCLE_STARTED) {
+                return container_id.to_string();
+            }
+        }
+        panic!("dependency lifecycle helper exited before reporting its container")
+    })
     .await
-    .expect("dependency lifecycle helper should run");
+    .expect("dependency lifecycle helper should start its container before the timeout");
+
+    child
+        .kill()
+        .await
+        .expect("dependency lifecycle helper should accept SIGKILL");
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("dependency lifecycle helper should exit after SIGKILL");
     assert!(
         !output.status.success(),
-        "dependency lifecycle helper must unwind to exercise emergency suite cleanup"
+        "dependency lifecycle helper must be killed to exercise Ryuk cleanup"
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let container_id = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix(DEPENDENCY_LIFECYCLE_STARTED))
-        .unwrap_or_else(|| {
-            panic!(
-                "dependency lifecycle helper did not start its container\nstdout:\n{}\nstderr:\n{}",
-                stdout,
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
-    if TestDependencies::container_exists(container_id)
-        .await
-        .expect("Docker should report whether the lifecycle container remains")
-    {
-        TestDependencies::force_remove_container(container_id)
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let remains = TestDependencies::container_exists(&container_id)
             .await
-            .expect("leaked lifecycle reproducer container should be removed");
-        panic!(
-            "ephemeral dependency container {container_id} remained after its test suite unwound"
-        );
+            .expect("Docker should report whether the lifecycle container remains");
+        if !remains {
+            return;
+        }
+        if Instant::now() >= deadline {
+            TestDependencies::force_remove_container(&container_id)
+                .await
+                .expect("leaked lifecycle reproducer container should be removed");
+            panic!(
+                "ephemeral dependency container {container_id} remained after its process was \
+                 killed\nhelper stderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -2976,15 +3009,15 @@ fn build_ingestor_logic_commands(
 
       CREATE SCHEMA logic_notification_list_operations (
         tenant STRING,
-        total I64,
-        first_value I64,
-        last_value I64,
-        second_value I64,
+        total I64 OPTIONAL,
+        first_value I64 OPTIONAL,
+        last_value I64 OPTIONAL,
+        second_value I64 OPTIONAL,
         value_count I64,
-        fixed_first I64,
-        fixed_last I64,
-        first_label STRING,
-        last_label STRING
+        fixed_first I64 OPTIONAL,
+        fixed_last I64 OPTIONAL,
+        first_label STRING OPTIONAL,
+        last_label STRING OPTIONAL
       );
 
       CREATE WIRE JSON SCHEMA logic_notification_ingest_wire MODE STRICT (
@@ -8873,8 +8906,18 @@ async fn when_named_client_begins_resource_upload_in_the_background(
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .assured("the scenario identity is an identifier-shaped literal");
     world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let upload_domain = client
+            .domain()
+            .await
+            .assured("the upload client selected a domain");
         let outcome = client
-            .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+            .upload_resource_from_directory_with_identity(
+                &resource,
+                directory,
+                upload_domain,
+                identity,
+                |_| {},
+            )
             .await
             .map_err(|error| error.to_string())?;
         if outcome.succeeded() {
@@ -9458,8 +9501,18 @@ async fn when_named_client_uploads_resource_with_identity(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .expect("scenario upload identity must be valid");
+    let upload_domain = client
+        .domain()
+        .await
+        .assured("the upload client selected a domain");
     let outcome = client
-        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .upload_resource_from_directory_with_identity(
+            &resource,
+            directory,
+            upload_domain,
+            identity,
+            |_| {},
+        )
         .await
         .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
     assert!(
@@ -9572,8 +9625,18 @@ async fn when_named_client_resource_upload_fails_with(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .expect("scenario upload identity must be valid");
+    let upload_domain = client
+        .domain()
+        .await
+        .assured("the upload client selected a domain");
     let outcome = client
-        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .upload_resource_from_directory_with_identity(
+            &resource,
+            directory,
+            upload_domain,
+            identity,
+            |_| {},
+        )
         .await
         .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
     assert!(
@@ -15150,6 +15213,31 @@ async fn then_node_observability_metric_with_labels_eventually_reaches(
 ) {
     world
         .wait_for_observability_metric_at_least(&node_id, &metric_name, minimum_value, None, step)
+        .await;
+}
+
+#[then(
+    expr = "within {string} node {string} observability metric {string} with labels eventually \
+            reaches at least {int}"
+)]
+async fn then_within_duration_node_observability_metric_with_labels_eventually_reaches(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    metric_name: String,
+    minimum_value: i64,
+    #[step] step: &Step,
+) {
+    let wait =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    world
+        .wait_for_observability_metric_at_least(
+            &node_id,
+            &metric_name,
+            minimum_value,
+            Some(wait),
+            step,
+        )
         .await;
 }
 
@@ -20952,6 +21040,10 @@ fn main() {
     outcome.end_process();
 }
 
+/// Holds one dependency container open until the parent scenario kills this process.
+///
+/// The helper never finishes on its own, so it never produces an outcome: the pending future
+/// carries the caller's return type rather than a value this function could never reach.
 async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     let mut dependencies = TestDependencies::default();
     dependencies
@@ -20968,7 +21060,7 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::io::stdout()
         .flush()
         .expect("lifecycle helper marker should flush");
-    panic!("intentional dependency lifecycle helper unwind");
+    std::future::pending::<SuiteOutcome>().await
 }
 
 /// Everything a scenario run may be configured with beyond cucumber's own options.

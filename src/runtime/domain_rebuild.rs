@@ -16,19 +16,31 @@ pub(super) fn branch_relays_from_branched_specs(specs: &BranchedNodeSpecs) -> Ha
 }
 
 impl Runtime {
+    /// The fan-out of `relay`, kept across rebuilds so buffered batches and attached consumers
+    /// survive them. Its session subscribers are closed when the relay's rows change definition.
     pub(in crate::runtime) async fn relay_boundary_fanout_with_capacity(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-        use_branch_collapse: bool,
         capacity: NonZeroUsize,
+        definition: RelaySubscriptionDefinition,
     ) -> RelayBoundaryFanout {
+        let use_branch_collapse = definition.is_branched();
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Relay, relay.clone());
-        if let Some(fanout) = self.inner.relay_boundary_fanouts.get(&key)
-            && fanout.uses_branch_collapse() == use_branch_collapse
-        {
-            fanout.set_capacity(capacity);
-            return fanout.clone();
+        let existing = self
+            .inner
+            .relay_boundary_fanouts
+            .get(&key)
+            .map(|fanout| fanout.clone());
+        if let Some(fanout) = existing {
+            if fanout.uses_branch_collapse() == use_branch_collapse {
+                fanout.set_capacity(capacity);
+                fanout.subscriptions().declare(definition);
+                return fanout;
+            }
+            // Branching changed, which is a change of definition too: the replaced fan-out's
+            // subscribers end before the replacement carries a batch.
+            fanout.subscriptions().withdraw();
         }
 
         let fanout = if use_branch_collapse {
@@ -36,10 +48,34 @@ impl Runtime {
         } else {
             RelayBoundaryFanout::direct_with_capacity(capacity)
         };
+        fanout.subscriptions().declare(definition);
         self.inner
             .relay_boundary_fanouts
             .insert(key, fanout.clone());
         fanout
+    }
+
+    /// Closes the session subscribers of every relay of `domain` this node no longer declares.
+    /// A relay that is declared again later is a new relay to them, so they are not kept waiting
+    /// for it.
+    pub(in crate::runtime) fn withdraw_undeclared_relay_subscriptions<F>(
+        &self,
+        domain: &DomainName,
+        declared: F,
+    ) where
+        F: Fn(&RelayName) -> bool,
+    {
+        for fanout in self.inner.relay_boundary_fanouts.iter() {
+            let key = fanout.key();
+            if &key.domain != domain {
+                continue;
+            }
+            let relay = RelayName::from(key.identifier());
+            if declared(&relay) {
+                continue;
+            }
+            fanout.value().subscriptions().withdraw();
+        }
     }
 
     pub(in crate::runtime) async fn domain_graph_handle(
@@ -129,6 +165,9 @@ impl Runtime {
         domain: &DomainName,
         mut execution: DomainExecution,
     ) {
+        self.withdraw_undeclared_relay_subscriptions(domain, |relay| {
+            execution.relay_services.contains_key(relay)
+        });
         self.publish_routed_endpoints(domain, &execution);
         execution.routing.publish();
         self.inner
@@ -196,6 +235,7 @@ impl Runtime {
         }
 
         let Some(schedule) = schedule else {
+            self.withdraw_undeclared_relay_subscriptions(domain, |_| false);
             self.clear_domain_ingestor_quiescence(domain);
             self.inner.compiled_domain_udfs.remove(domain);
             self.clear_state_identities(domain);
@@ -474,11 +514,15 @@ impl Runtime {
                     } else {
                         None
                     };
+                let branching = node
+                    .resolved_branching
+                    .clone()
+                    .assured("the schedule resolves every relay branch declaration");
                 let fanout = Box::pin(self.relay_boundary_fanout_with_capacity(
                     domain,
                     &relay.name,
-                    !relay.branching.is_unbranched(),
                     relay.buffer,
+                    RelaySubscriptionDefinition::new(schema.clone(), branching.clone()),
                 ))
                 .await;
                 let registry = match expiring_state.as_ref() {
@@ -495,10 +539,6 @@ impl Runtime {
                         remote_runtime_consumers: Vec::new(),
                     },
                 );
-                let branching = node
-                    .resolved_branching
-                    .clone()
-                    .assured("the schedule resolves every relay branch declaration");
                 relay_branchings.insert(relay.name.clone(), branching.clone());
                 relay_schemas.insert(relay.name.clone(), schema);
                 if relay.materialized_state.is_some() {
@@ -1181,12 +1221,16 @@ impl Runtime {
                     ),
                 });
             };
+            let branching = node
+                .resolved_branching
+                .clone()
+                .assured("the schedule resolves every relay branch declaration");
             let fanout = self
                 .relay_boundary_fanout_with_capacity(
                     domain,
-                    &relay.name.clone(),
-                    !relay.branching.is_unbranched(),
+                    &relay.name,
                     relay.buffer,
+                    RelaySubscriptionDefinition::new(schema.clone(), branching.clone()),
                 )
                 .await;
             relay_builders.insert(
@@ -1199,10 +1243,6 @@ impl Runtime {
                     remote_runtime_consumers: Vec::new(),
                 },
             );
-            let branching = node
-                .resolved_branching
-                .clone()
-                .assured("the schedule resolves every relay branch declaration");
             relay_branchings.insert(relay.name.clone(), branching);
             relay_schemas.insert(relay.name.clone(), schema);
         }

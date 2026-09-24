@@ -1360,21 +1360,43 @@ impl ClusterHandle {
         ready
     }
 
-    pub async fn set_local_subscription_interest(
+    /// Makes this node's advertised interest in `relay` match `interested`, which is read while
+    /// the node's gossip state is locked.
+    ///
+    /// Writes are ordered by that lock, so callers that change what `interested` reads and then
+    /// call this leave the advertisement matching their latest change, whatever order their calls
+    /// run in: a call that finishes late publishes the current answer rather than its own.
+    pub async fn reconcile_local_subscription_interest<F>(
         &self,
         domain: &str,
         relay: &str,
-        interested: bool,
-    ) {
+        interested: F,
+    ) where
+        F: FnOnce() -> bool,
+    {
         let key = subscription_interest_key(domain, relay);
         let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
         let state = chitchat.self_node_state();
+        let advertised = state.contains_key(&key);
+        let interested = interested();
+        if interested == advertised {
+            return;
+        }
         if interested {
             state.set(key, "1");
         } else {
             state.delete(&key);
         }
+    }
+
+    /// Whether this node's own gossip state advertises interest in `relay`.
+    #[cfg(test)]
+    pub(crate) async fn advertises_subscription_interest(&self, domain: &str, relay: &str) -> bool {
+        let key = subscription_interest_key(domain, relay);
+        let chitchat_handle = self.chitchat.clone();
+        let mut chitchat = chitchat_handle.lock().await;
+        chitchat.self_node_state().contains_key(&key)
     }
 
     pub(crate) fn subscription_interest_index(&self) -> Guard<Arc<SubscriptionInterestIndex>> {

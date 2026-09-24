@@ -40,6 +40,7 @@ mod datetime;
 mod error;
 mod extremum;
 mod frontend;
+mod ip_address;
 mod ir;
 mod membership;
 mod numeric;
@@ -49,6 +50,7 @@ mod regexp;
 mod runtime;
 mod semantics;
 mod text_column;
+mod url_component;
 pub mod window;
 
 pub use batch::{TypedArray, TypedBatch};
@@ -69,9 +71,9 @@ pub use datetime::{
     TextExpectation, UnreadableText, Zone, ZoneDirective,
 };
 pub use error::{
-    CompileError, DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation,
-    IntegerOperation, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, ShiftOperation,
-    SideError, SideErrorReason, TextOperation,
+    BytesOperation, CollectionLimit, CompileError, DatetimeOperation, DivisionOperation, ErrorCode,
+    FloatOperation, IntegerOperation, IpOperation, RowErrorLengths, RowErrorMask, RowErrors,
+    RuntimeError, ShiftOperation, SideError, SideErrorReason, TextOperation, UrlOperation,
 };
 pub use extremum::{ClampBoundsDefect, Extremum};
 pub use frontend::{
@@ -80,6 +82,7 @@ pub use frontend::{
     lower_expression, lower_finalized_output_filter, lower_generated_route,
     lower_route_construction, lower_set_only_route, lower_transforming_route,
 };
+pub use ip_address::{IpFamily, IpNetwork, NetworkDefect, NetworkSource};
 pub use ir::{
     CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
     InvocationBinding, OutputBinding, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace,

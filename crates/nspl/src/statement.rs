@@ -123,6 +123,7 @@ pub fn statement_parser<'src>()
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
         crate::relocation::relocate_parser().map(Statement::Relocate),
         crate::rebind_resource::rebind_resource_parser().map(Statement::RebindResource),
+        crate::reset_wasm_state::reset_wasm_state_parser().map(Statement::ResetWasmState),
         crate::relocation::describe_relocation_parser().map(Statement::DescribeRelocation),
         crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
         crate::drop_stmt::drop_parser().map(Statement::Drop),
@@ -1629,6 +1630,26 @@ mod tests {
             suggest_statement(literal, literal.len()),
             suggest_statement(conditional, conditional.len())
         );
+    }
+
+    #[test]
+    fn collection_expression_body_preserves_route_completion_context() {
+        let literal = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = 1 ";
+        for expression in [
+            "[input.first, input.second]",
+            "array(input.first, input.second)",
+            "vec(input.first, input.second)",
+            "slice(input.items, 0, 2)",
+        ] {
+            let input = format!(
+                "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = {expression} "
+            );
+            assert_eq!(
+                suggest_statement(literal, literal.len()),
+                suggest_statement(&input, input.len()),
+                "completion changed after {expression}",
+            );
+        }
     }
 
     #[test]

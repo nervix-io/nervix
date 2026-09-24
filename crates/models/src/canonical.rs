@@ -714,6 +714,26 @@ impl Statement {
                     rebind.resource.as_str()
                 ))
             }
+            Self::ResetWasmState(reset) => {
+                let scope = match &reset.scope {
+                    crate::ResetWasmStateScope::Unbranched => "UNBRANCHED".to_string(),
+                    crate::ResetWasmStateScope::AllBranches => "ALL BRANCHES".to_string(),
+                    crate::ResetWasmStateScope::Branch(fields) => {
+                        let mut rendered = Vec::with_capacity(fields.len());
+                        for field in fields {
+                            let value =
+                                expression_to_nspl(&Expression::Literal(field.value.clone()))?;
+                            rendered.push(format!("{} = {value}", field.name.as_str()));
+                        }
+                        format!("BRANCH VALUES {{ {} }}", rendered.join(", "))
+                    }
+                };
+                Ok(format!(
+                    "RESET WASM PROCESSOR {} STATE IN DOMAIN {} FOR {scope};",
+                    reset.processor.as_str(),
+                    reset.domain.as_str()
+                ))
+            }
             Self::UploadResource(upload) => Ok(format!(
                 "UPLOAD RESOURCE {} VERSION {};",
                 upload.identifier.as_str(),

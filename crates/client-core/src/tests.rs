@@ -36,8 +36,9 @@ use nervix_models::{
     SubscriptionName, TransactionImpactReport, TransactionInspection, TransactionLifecycle,
     TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
-use tokio::sync::{Mutex, mpsc, watch};
-use tonic::transport::Channel;
+use parking_lot::Mutex;
+use tokio::sync::{mpsc, watch};
+use tonic::{Status, transport::Channel};
 use triomphe::Arc;
 use url::Url;
 
@@ -46,8 +47,9 @@ use crate::{
     SubscriptionEvent, SubscriptionRequest, TlsRequirement,
     connection::{GrpcConnector, ServerDirectory},
     exchange::{
-        EventSinks, Exchange, ExchangeReader, ExchangeRequests, PendingReplies, ReaderFlow,
-        RegisteredRequest, SESSION_LIMITS, SessionEvents,
+        EventQueue, EventQueueError, EventSinks, Exchange, ExchangeReader, ExchangeRequests,
+        PendingReplies, ReaderFlow, RegisteredRequest, SERVER_NOTICE_BYTES, SESSION_LIMITS,
+        SUBSCRIPTION_EVENT_BYTES, SessionEvents,
     },
     outcome::Routing,
     split_query_statements,
@@ -225,8 +227,8 @@ fn ended_frame(handle: SubscriptionHandle) -> VerifiedFrame<ServerFrame> {
     verified(
         SubscriptionEnded {
             subscription: handle,
-            reason: SubscriptionEndReason::RelayClosed,
-            message: "relay 'orders' was rebuilt".to_string(),
+            reason: SubscriptionEndReason::RelayChanged,
+            message: "relay 'orders' was redefined".to_string(),
         }
         .encode(&SESSION_LIMITS)
         .assured("a test end fits a frame"),
@@ -238,6 +240,8 @@ fn detached_exchange(
     frames: mpsc::Sender<EncodedFrame<ClientFrame>>,
     pending: Arc<Mutex<PendingReplies>>,
 ) -> Exchange {
+    let sinks = SessionEvents::new().sinks;
+    let generation = sinks.begin_generation();
     Exchange {
         requests: Arc::new(ExchangeRequests {
             frames,
@@ -245,6 +249,8 @@ fn detached_exchange(
             channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
         }),
         reader: tokio::spawn(std::future::ready(())),
+        sinks,
+        generation,
     }
 }
 
@@ -307,7 +313,6 @@ impl Loopback {
         let waiter = self
             .pending
             .lock()
-            .await
             .take(request)
             .assured("the request waits for its reply");
         waiter
@@ -320,34 +325,31 @@ impl Loopback {
 struct ReaderFixture {
     reader: ExchangeReader,
     pending: Arc<Mutex<PendingReplies>>,
-    notice_sink: mpsc::Sender<ServerEvent>,
-    subscription_events: mpsc::Receiver<SubscriptionEvent>,
-    notices: mpsc::Receiver<ServerEvent>,
+    subscription_events: EventQueue<SubscriptionEvent>,
+    notices: EventQueue<ServerEvent>,
     leadership: watch::Receiver<Option<Leadership>>,
     domains: watch::Receiver<Option<Vec<DomainInfo>>>,
 }
 
 fn reader_fixture(capacity: usize) -> ReaderFixture {
-    let (subscriptions, subscription_events) = mpsc::channel(capacity);
-    let (notices, server_notices) = mpsc::channel(capacity);
+    let subscriptions = EventQueue::new(capacity, SUBSCRIPTION_EVENT_BYTES);
+    let notices = EventQueue::new(capacity, SERVER_NOTICE_BYTES);
     let (leadership, observed_leadership) = watch::channel(None);
     let (domains, observed_domains) = watch::channel(None);
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
-    let reader = ExchangeReader::new(
-        pending.clone(),
-        EventSinks {
-            subscriptions,
-            notices: notices.clone(),
-            leadership,
-            domains,
-        },
-    );
+    let sinks = EventSinks {
+        subscriptions: subscriptions.clone(),
+        notices: notices.clone(),
+        leadership,
+        domains,
+    };
+    let generation = sinks.begin_generation();
+    let reader = ExchangeReader::new(pending.clone(), sinks, generation);
     ReaderFixture {
         reader,
         pending,
-        notice_sink: notices,
-        subscription_events,
-        notices: server_notices,
+        subscription_events: subscriptions,
+        notices,
         leadership: observed_leadership,
         domains: observed_domains,
     }
@@ -356,7 +358,6 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
 async fn register(pending: &Mutex<PendingReplies>) -> RegisteredRequest {
     pending
         .lock()
-        .await
         .register()
         .assured("an open exchange registers requests")
 }
@@ -368,6 +369,18 @@ fn statement_splitting_returns_exact_source_slices() {
     assert_eq!(
         split_query_statements(query).assured("the literal statement batch is valid current NSPL"),
         ["USE prod;", "LIST DOMAINS;"]
+    );
+}
+
+#[test]
+fn statement_splitting_reports_invalid_source_with_context() {
+    let error = split_query_statements("CREATE SCHEMA ???;")
+        .expect_err("an invalid schema declaration cannot be split");
+    assert!(
+        error
+            .current_context()
+            .to_string()
+            .contains("failed to parse")
     );
 }
 
@@ -565,12 +578,11 @@ async fn a_frame_the_contract_does_not_describe_ends_the_exchange() {
         "the waiter observes the closed session"
     );
     assert!(
-        fixture.pending.lock().await.register().is_none(),
+        fixture.pending.lock().register().is_none(),
         "an ended exchange takes no further requests"
     );
-    let mut notices = fixture.notices;
     assert!(
-        notices.try_recv().is_err(),
+        fixture.notices.try_next().is_none(),
         "no frame after the violation is routed"
     );
 }
@@ -582,6 +594,7 @@ async fn connect_rejects_plain_server_when_tls_is_required() {
         ca_certificate_pem: None,
         username: None,
         password: None,
+        ..ConnectOptions::default()
     })
     .assured("options without credentials build no authorization metadata");
     let server = Url::parse("http://127.0.0.1:47391").assured("a literal loopback URL");
@@ -628,24 +641,16 @@ async fn response_reordering_cannot_take_another_requests_waiter() {
 }
 
 #[tokio::test]
-#[ignore = "CLIENT-WIRE-11 separates bounded event delivery from command replies"]
 async fn saturated_event_consumer_cannot_block_a_command_reply() {
     let ReaderFixture {
         mut reader,
         pending,
-        notice_sink,
         notices: _undrained_notices,
         ..
     } = reader_fixture(1);
     let command_request = register(&pending).await;
     let command_id = command_request.request_id;
-    notice_sink
-        .send(ServerEvent {
-            level: NoticeLevel::Info,
-            message: "undrained".to_string(),
-        })
-        .await
-        .assured("the receiver remains alive and its one slot starts empty");
+    reader.route(notice_frame("undrained")).await;
 
     let delivery = tokio::spawn(async move {
         if reader.route(notice_frame("also undrained")).await == ReaderFlow::End {
@@ -668,6 +673,115 @@ async fn saturated_event_consumer_cannot_block_a_command_reply() {
 }
 
 #[tokio::test]
+async fn overflowing_a_notice_stream_is_reported_without_losing_replies() {
+    let mut fixture = reader_fixture(1);
+    let request = register(&fixture.pending).await;
+    fixture.reader.route(notice_frame("first")).await;
+    fixture.reader.route(notice_frame("second")).await;
+    fixture
+        .reader
+        .route(reply_frame(
+            request.request_id,
+            command_reply(completed(), "complete"),
+        ))
+        .await;
+
+    assert!(matches!(
+        fixture.notices.next().await,
+        Err(error) if *error.current_context() == EventQueueError::Overflow
+    ));
+    assert!(matches!(request.reply.await, Ok(ReplyBody::Command(_))));
+}
+
+#[tokio::test]
+async fn overflowing_subscription_rows_cannot_delay_a_command_reply() {
+    let mut fixture = reader_fixture(1);
+    let subscribe = register(&fixture.pending).await;
+    let command = register(&fixture.pending).await;
+    let live = subscription("live", 1);
+    fixture
+        .reader
+        .route(reply_frame(
+            subscribe.request_id,
+            opened_reply(live.clone()),
+        ))
+        .await;
+    fixture
+        .reader
+        .route(rows_frame(live.clone(), &[(1, "first")]))
+        .await;
+    fixture
+        .reader
+        .route(rows_frame(live, &[(2, "second")]))
+        .await;
+    fixture
+        .reader
+        .route(reply_frame(
+            command.request_id,
+            command_reply(completed(), "complete"),
+        ))
+        .await;
+
+    assert!(matches!(
+        fixture.subscription_events.next().await,
+        Err(error) if *error.current_context() == EventQueueError::Overflow
+    ));
+    assert!(matches!(command.reply.await, Ok(ReplyBody::Command(_))));
+}
+
+#[tokio::test]
+async fn event_queue_counts_retained_bytes_as_well_as_records() {
+    let notices = EventQueue::new(10, 128);
+    let subscriptions = EventQueue::new(10, 128);
+    let (leadership, _) = watch::channel(None);
+    let (domains, _) = watch::channel(None);
+    let sinks = EventSinks {
+        subscriptions,
+        notices: notices.clone(),
+        leadership,
+        domains,
+    };
+    let generation = sinks.begin_generation();
+    notices.push(
+        &generation,
+        ServerEvent {
+            level: NoticeLevel::Info,
+            message: "oversized".to_string(),
+        },
+        129,
+    );
+
+    assert!(matches!(
+        notices.next().await,
+        Err(error) if *error.current_context() == EventQueueError::Overflow
+    ));
+}
+
+#[tokio::test]
+async fn closing_a_failed_exchange_preserves_its_grpc_status_for_waiters() {
+    let fixture = reader_fixture(1);
+    let (frames, _) = mpsc::channel(1);
+    let exchange = ExchangeRequests {
+        frames,
+        pending: fixture.pending.clone(),
+        channel: Channel::from_static("http://127.0.0.1:9").connect_lazy(),
+    };
+    let mut request = exchange.register().assured("the exchange is open");
+    fixture
+        .reader
+        .run(tokio_stream::iter([Err(Status::unauthenticated(
+            "credentials were rejected",
+        ))]))
+        .await;
+    assert!(request.receive().await.is_none());
+    let ClientError::Transport(status) = exchange.pending.lock().failure() else {
+        panic!("the transport status must reach its waiter");
+    };
+    assert_eq!(status.code(), tonic::Code::Unauthenticated);
+    assert_eq!(status.message(), "credentials were rejected");
+}
+
+#[tokio::test]
 async fn request_identities_start_at_one_and_are_never_reused() {
     let mut pending = PendingReplies::new();
     let first = pending
@@ -687,6 +801,88 @@ async fn request_identities_start_at_one_and_are_never_reused() {
         third.request_id,
         request_id(3),
         "an identity whose request completed is not handed out again"
+    );
+}
+
+#[tokio::test]
+async fn connection_options_reject_unbounded_seeds_and_deadlines_before_connecting() {
+    let endpoint = Url::parse("http://127.0.0.1:9").assured("the test endpoint is a URL");
+    let too_many_seeds = ConnectOptions {
+        seed_servers: vec![endpoint.clone(); 33],
+        ..ConnectOptions::default()
+    };
+    let Err(error) = Client::connect_with_options(endpoint.as_str(), None, too_many_seeds).await
+    else {
+        panic!("too many seeds are rejected before connecting");
+    };
+    assert!(matches!(
+        error,
+        ClientError::TooManySeedServers { count: 33 }
+    ));
+
+    let invalid_deadline = ConnectOptions {
+        request_timeout: Duration::ZERO,
+        ..ConnectOptions::default()
+    };
+    let Err(error) = Client::connect_with_options(endpoint.as_str(), None, invalid_deadline).await
+    else {
+        panic!("a zero request deadline is rejected before connecting");
+    };
+    assert!(matches!(
+        error,
+        ClientError::InvalidDeadline {
+            field: "request_timeout"
+        }
+    ));
+
+    let insecure_seed = ConnectOptions {
+        seed_servers: vec![endpoint],
+        ..ConnectOptions::default()
+    };
+    let Err(error) = Client::connect_with_options("https://127.0.0.1:9", None, insecure_seed).await
+    else {
+        panic!("a TLS session rejects a plaintext recovery seed");
+    };
+    assert!(matches!(error, ClientError::TlsRequired));
+}
+
+#[tokio::test]
+async fn a_prepared_execution_keeps_its_identity_domain_and_upload_identity() {
+    let client = test_client("tenant");
+    let execution = client
+        .prepare_execution("CREATE SCHEMA record (id I64);")
+        .await;
+    assert_eq!(execution.domain(), Some(&domain("tenant")));
+    assert!(!execution.reference().as_str().is_empty());
+    assert!(!execution.upload_identity().as_str().is_empty());
+    assert!(execution.can_have_admitted_command());
+    let invalid = client.prepare_execution("???").await;
+    assert!(invalid.can_have_admitted_command());
+    let local = client.prepare_execution("USE prod;").await;
+    assert!(!local.can_have_admitted_command());
+}
+
+#[test]
+fn transport_failure_classification_preserves_uncertainty_and_authentication() {
+    let retryable = ClientError::Transport(Box::new(Status::unavailable("connection lost")));
+    assert!(retryable.retryable_session_failure());
+    assert!(retryable.can_hide_admitted_work());
+    assert!(retryable.can_hide_installed_upload());
+    let rejected = ClientError::Transport(Box::new(Status::unauthenticated("bad credentials")));
+    assert!(!rejected.retryable_session_failure());
+    assert!(!rejected.can_hide_admitted_work());
+    let lost_upload =
+        ClientError::UploadResource(Box::new(Status::deadline_exceeded("lost reply")));
+    assert!(lost_upload.can_hide_installed_upload());
+    let rejected_upload =
+        ClientError::UploadResource(Box::new(Status::invalid_argument("bad upload")));
+    assert!(!rejected_upload.can_hide_installed_upload());
+    assert!(ClientError::RetryDeadline.can_hide_admitted_work());
+    assert!(
+        ClientError::RequestInterrupted {
+            request: RequestKind::Command
+        }
+        .retryable_session_failure()
     );
 }
 
@@ -739,14 +935,7 @@ async fn a_reply_no_request_waits_for_is_dropped() {
         waiting.reply.try_recv().is_err(),
         "a reply naming another identity leaves the waiting request untouched"
     );
-    assert!(
-        fixture
-            .pending
-            .lock()
-            .await
-            .take(waiting.request_id)
-            .is_some()
-    );
+    assert!(fixture.pending.lock().take(waiting.request_id).is_some());
 }
 
 #[tokio::test]
@@ -819,7 +1008,7 @@ async fn subscription_rows_render_against_the_schema_their_subscription_announce
         opened.disposition,
         SubscribeDisposition::Opened(_)
     ));
-    let Ok(SubscriptionEvent::Rows(rows)) = fixture.subscription_events.try_recv() else {
+    let Some(SubscriptionEvent::Rows(rows)) = fixture.subscription_events.try_next() else {
         panic!("the rows of the opened subscription are delivered");
     };
     assert_eq!(rows.relay.as_str(), "orders");
@@ -829,12 +1018,12 @@ async fn subscription_rows_render_against_the_schema_their_subscription_announce
             .assured("the rows follow the announced schema"),
         ["{\"id\":1,\"name\":\"a\"}", "{\"id\":2,\"name\":\"b\"}"]
     );
-    let Ok(SubscriptionEvent::Ended(ended)) = fixture.subscription_events.try_recv() else {
+    let Some(SubscriptionEvent::Ended(ended)) = fixture.subscription_events.try_next() else {
         panic!("the end of the subscription is delivered, and the stale generation's rows are not");
     };
     assert_eq!(ended.subscription, live);
     assert!(
-        fixture.subscription_events.try_recv().is_err(),
+        fixture.subscription_events.try_next().is_none(),
         "rows of a subscription that ended are dropped"
     );
 }
@@ -868,7 +1057,7 @@ async fn an_unsubscribe_reply_stops_the_subscription_rows() {
 
     assert!(unsubscribe.reply.await.is_ok());
     assert!(
-        fixture.subscription_events.try_recv().is_err(),
+        fixture.subscription_events.try_next().is_none(),
         "rows of a deleted subscription are dropped"
     );
 }
@@ -933,7 +1122,9 @@ async fn observations_keep_only_their_latest_value() {
 async fn the_client_reads_the_latest_observations_of_its_exchange() {
     let client = test_client("tenant");
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
-    let mut reader = ExchangeReader::new(pending, client.inner.events.sinks.clone());
+    let sinks = client.inner.events.sinks.clone();
+    let generation = sinks.begin_generation();
+    let mut reader = ExchangeReader::new(pending, sinks, generation);
     assert_eq!(client.leadership(), None);
 
     let observed = LeadershipObserved {
@@ -1454,6 +1645,68 @@ async fn a_command_carries_the_expectation_of_the_attached_transaction() {
 }
 
 #[tokio::test]
+async fn concurrent_commands_capture_transaction_position_in_send_order() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    loopback
+        .client
+        .adopt_transaction_status(open_transaction("tx-1", 0))
+        .await;
+    let first_client = loopback.client.clone();
+    let first_task =
+        tokio::spawn(async move { first_client.execute("SHOW CLUSTER STATUS;").await });
+    let first = loopback.next_request().await;
+    let ClientRequest::Command(first_command) = first.request else {
+        panic!("the first request is a command");
+    };
+    assert_eq!(
+        first_command.expected_transaction_position,
+        Some(TransactionPosition::new(0))
+    );
+
+    let second_client = loopback.client.clone();
+    let second_task =
+        tokio::spawn(async move { second_client.execute("SHOW CLUSTER STATUS;").await });
+    let mut first_outcome = wire_outcome(
+        first_command.execution_reference.as_str(),
+        completed(),
+        "first complete",
+    );
+    first_outcome.transaction = Some(open_transaction("tx-1", 1));
+    loopback
+        .answer(
+            first.request_id,
+            ReplyBody::Command(Box::new(first_outcome)),
+        )
+        .await;
+    first_task
+        .await
+        .assured("the first task completes")
+        .assured("the first command succeeds");
+    let second = loopback.next_request().await;
+    let ClientRequest::Command(second_command) = second.request else {
+        panic!("the second request is a command");
+    };
+    assert_eq!(
+        second_command.expected_transaction_position,
+        Some(TransactionPosition::new(1)),
+    );
+    loopback
+        .answer(
+            second.request_id,
+            ReplyBody::Command(Box::new(wire_outcome(
+                second_command.execution_reference.as_str(),
+                completed(),
+                "second complete",
+            ))),
+        )
+        .await;
+    second_task
+        .await
+        .assured("the second task completes")
+        .assured("the second command succeeds");
+}
+
+#[tokio::test]
 async fn an_unknown_outcome_is_recovered_with_the_same_execution_reference() {
     let mut loopback = Loopback::new(Some(domain("tenant")));
     let client = loopback.client.clone();
@@ -1473,6 +1726,7 @@ async fn an_unknown_outcome_is_recovered_with_the_same_execution_reference() {
             ))),
         )
         .await;
+    loopback.client.set_domain(Some(domain("changed"))).await;
     let second = loopback.next_request().await;
     let ClientRequest::Command(second_command) = second.request else {
         panic!("the retry is sent as a command");
@@ -1482,6 +1736,7 @@ async fn an_unknown_outcome_is_recovered_with_the_same_execution_reference() {
         second_command.execution_reference, first_command.execution_reference,
         "a retry repeats the execution reference so the admitted command is recovered"
     );
+    assert_eq!(second_command.domain, first_command.domain);
     let mut recovered = wire_outcome(
         second_command.execution_reference.as_str(),
         completed(),
@@ -1498,6 +1753,41 @@ async fn an_unknown_outcome_is_recovered_with_the_same_execution_reference() {
         .assured("the command completes");
     assert!(outcome.succeeded());
     assert_eq!(outcome.origin, Some(OutcomeOrigin::Recovered));
+}
+
+#[tokio::test]
+async fn a_command_reply_for_another_execution_cannot_claim_success() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let execution = tokio::spawn(async move { client.execute("SHOW CLUSTER STATUS;").await });
+    let request = loopback.next_request().await;
+    loopback
+        .answer(
+            request.request_id,
+            command_reply(completed(), "wrong execution"),
+        )
+        .await;
+    let result = execution.await.assured("the command task completes");
+    assert!(
+        result.is_err(),
+        "a completed reply with another durable identity is not proof for this command"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_command_releases_its_pending_reply() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
+    let waiter = tokio::spawn(async move { client.execute_prepared(&execution).await });
+    let request = loopback.next_request().await;
+
+    waiter.abort();
+    waiter.await.expect_err("the command waiter was cancelled");
+    assert!(
+        loopback.pending.lock().take(request.request_id).is_none(),
+        "a cancelled waiter cannot occupy the registry until a reply or disconnect"
+    );
 }
 
 #[tokio::test]
@@ -1631,8 +1921,8 @@ async fn list_domains_is_served_from_a_domain_list_request() {
 #[tokio::test]
 async fn next_event_calls_return_session_closed_when_channels_are_closed() {
     let client = test_client("tenant_a");
-    client.inner.events.subscriptions.lock().await.close();
-    client.inner.events.notices.lock().await.close();
+    client.inner.events.sinks.subscriptions.close_current();
+    client.inner.events.sinks.notices.close_current();
     let subscription_error = client
         .next_subscription()
         .await

@@ -6,17 +6,19 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nervix_models::{
     AckMode, AlterJunction, AlterProcessorOperation, AlterRelay, AlterRelayOperation, AlterSchema,
-    AlterSchemaOperation, BranchSelection, ClusterNodeName, ConcreteBranchCoverage, CreateResource,
-    CreateStatement, CreateVhost, DomainConfig, DomainPace, DomainStartPoint, DropModel, FieldName,
-    ImpactEdgeKind, ImpactPlanningBasis, Model, ModelKind, OutputBranch, ParseAsType, ResourceId,
-    ResourceName, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey, ResourceUploadState,
-    SchemaField, Statement, UserName, VhostTlsResource,
+    AlterSchemaOperation, BranchSelection, ClusterNodeName, CommandExecutionReference,
+    ConcreteBranchCoverage, CreateResource, CreateStatement, CreateVhost, DomainConfig, DomainPace,
+    DomainStartPoint, DropModel, FieldName, ImpactEdgeKind, ImpactPlanningBasis, Model, ModelKind,
+    OutputBranch, ParseAsType, ResetWasmBranchField, ResetWasmState, ResetWasmStateScope,
+    ResourceId, ResourceName, ResourceUpload, ResourceUploadIdentity, ResourceUploadKey,
+    ResourceUploadState, SchemaField, Statement, UserName, VhostTlsResource,
 };
 use nonzero_ext::nonzero;
 
 use super::*;
 use crate::registry::test_fixtures::{
-    client_model, codec, ingestor, junction, named, relay, schema, wire_schema,
+    branch, branch_schema_with_types, client_model, codec, ingestor, junction, named, relay,
+    relay_branched_by, schema, wasm_processor_branched_by, wire_schema,
 };
 
 fn domain_state(status: DomainStatus) -> ControlDomainState {
@@ -44,6 +46,7 @@ pub(super) fn snapshot(
         resource_uploads: ResourceUploads::default(),
         schedule: None,
         basis: ImpactPlanningBasis::new([7; 32]),
+        operation_references: Vec::new(),
     }
 }
 
@@ -66,6 +69,7 @@ pub(super) fn scheduled_snapshot(
         resource_uploads: ResourceUploads::default(),
         schedule: Some(schedule),
         basis: ImpactPlanningBasis::new([7; 32]),
+        operation_references: Vec::new(),
     }
 }
 
@@ -95,6 +99,190 @@ pub(super) fn preserve_schedule(
         schedule: current.cloned(),
         ownership_moves: CanonicalImpactSet::default(),
     }
+}
+
+fn wasm_reset_fixture() -> (
+    TransactionPlanningSnapshot,
+    Statement,
+    CommandExecutionReference,
+) {
+    let mut captured = scheduled_snapshot(
+        DomainStatus::Running,
+        [
+            schema("event_schema"),
+            branch_schema_with_types("tenant_schema", &[("tenant", ParseAsType::String)]),
+            branch("by_tenant", "tenant_schema"),
+            relay_branched_by("raw_events", "event_schema", "by_tenant"),
+            relay_branched_by("filtered_events", "event_schema", "by_tenant"),
+            wasm_processor_branched_by(
+                "filter_events",
+                "raw_events",
+                "filtered_events",
+                "by_tenant",
+            ),
+        ],
+    );
+    let request = CommandExecutionReference::parse("reset-filter-alpha")
+        .assured("the fixed reference satisfies the command identity grammar");
+    captured.operation_references.push(request.clone());
+    let statement = Statement::ResetWasmState(ResetWasmState {
+        domain: named("default"),
+        processor: named("filter_events"),
+        scope: ResetWasmStateScope::Branch(vec![ResetWasmBranchField {
+            name: named("tenant"),
+            value: nervix_models::Literal::String("alpha".to_string()),
+        }]),
+    });
+    (captured, statement, request)
+}
+
+#[test]
+fn reset_is_an_ordered_effect_and_replanning_the_same_identity_keeps_its_generation() {
+    let (mut captured, statement, _) = wasm_reset_fixture();
+    let plan = Registry::plan_transaction(
+        captured.clone(),
+        std::slice::from_ref(&statement),
+        0,
+        false,
+        preserve_schedule,
+    )
+    .assured("the captured schedule has the selected WASM processor");
+    let step = plan
+        .first_step()
+        .verified("one reset forms one ordered execution step");
+    assert_eq!(
+        step.impact.planned().effects.state_resets.as_slice().len(),
+        1
+    );
+    assert!(matches!(
+        &step.impact.planned().effects.state_resets.as_slice()[0]
+            .node
+            .branches,
+        Some(ConcreteBranchCoverage::Selected { .. })
+    ));
+    let PlannedTransactionStepKind::ResetWasmState { schedule, .. } = &step.kind else {
+        panic!("the reset must stay an effect even when no Model changes");
+    };
+    captured.schedule = Some(schedule.clone());
+    let repeated = Registry::plan_transaction(captured, &[statement], 0, false, preserve_schedule)
+        .assured("the same request can be planned again after publication");
+    let repeated_step = repeated
+        .first_step()
+        .verified("one repeated reset forms one execution step");
+    let PlannedTransactionStepKind::ResetWasmState {
+        schedule: repeated_schedule,
+        ..
+    } = &repeated_step.kind
+    else {
+        panic!("a repeated reset retains its typed step");
+    };
+    assert_eq!(repeated_schedule, schedule);
+}
+
+#[test]
+fn reset_planning_requires_a_running_scheduled_processor() {
+    let (captured, statement, _) = wasm_reset_fixture();
+    let mut stopped = captured.clone();
+    stopped.domain.status = DomainStatus::Stopped;
+    let error = Registry::plan_transaction(
+        stopped,
+        std::slice::from_ref(&statement),
+        0,
+        false,
+        preserve_schedule,
+    )
+    .expect_err("a stopped domain cannot apply a state reset");
+    assert!(matches!(
+        error.current_context(),
+        TransactionPlanningError::ResetProcessorNotRunning { .. }
+    ));
+
+    let mut unscheduled = captured.clone();
+    unscheduled.schedule = None;
+    let error = Registry::plan_transaction(
+        unscheduled,
+        std::slice::from_ref(&statement),
+        0,
+        false,
+        preserve_schedule,
+    )
+    .expect_err("a processor without an active schedule cannot be reset");
+    assert!(matches!(
+        error.current_context(),
+        TransactionPlanningError::ResetProcessorNotRunning { .. }
+    ));
+
+    let mut missing_execution = captured.clone();
+    missing_execution
+        .schedule
+        .as_mut()
+        .assured("the fixture has a captured schedule")
+        .nodes
+        .shift_remove(&node_ref(ModelKind::WasmProcessor, "filter_events"));
+    let error = Registry::plan_transaction(
+        missing_execution,
+        std::slice::from_ref(&statement),
+        0,
+        false,
+        preserve_schedule,
+    )
+    .expect_err("a stale schedule without the processor cannot reset it");
+    assert!(matches!(
+        error.current_context(),
+        TransactionPlanningError::ResetProcessorNotRunning { .. }
+    ));
+
+    let Statement::ResetWasmState(mut absent) = statement else {
+        panic!("the fixture is a WASM state reset");
+    };
+    absent.processor = named("absent_processor");
+    let error = Registry::plan_transaction(
+        captured,
+        &[Statement::ResetWasmState(absent)],
+        0,
+        false,
+        preserve_schedule,
+    )
+    .expect_err("the named processor must exist in the captured models");
+    assert!(matches!(
+        error.current_context(),
+        TransactionPlanningError::ResetProcessorNotFound { .. }
+    ));
+}
+
+#[test]
+fn reset_planning_rejects_a_second_identity_while_the_first_is_publishing() {
+    let (mut captured, statement, first_request) = wasm_reset_fixture();
+    let Statement::ResetWasmState(reset) = &statement else {
+        panic!("the fixture is a WASM state reset");
+    };
+    let entity = node_ref(ModelKind::WasmProcessor, "filter_events");
+    let schedule = captured
+        .schedule
+        .as_mut()
+        .assured("the fixture has a scheduled WASM processor");
+    let node = schedule
+        .nodes
+        .get_mut(&entity)
+        .assured("the fixture schedules the named WASM processor");
+    let branching = node
+        .resolved_branching
+        .as_ref()
+        .assured("the fixture resolves the WASM processor branch");
+    let selected = reset
+        .scope
+        .resolve(branching)
+        .assured("the fixture selects the declared branch field");
+    assert!(node.begin_wasm_state_reset(first_request, selected.scope()));
+    captured.operation_references[0] = CommandExecutionReference::parse("reset-filter-again")
+        .assured("the second fixed reference satisfies the command identity grammar");
+
+    let error = Registry::plan_transaction(captured, &[statement], 0, false, preserve_schedule)
+        .expect_err("a second command cannot supersede an in-progress state reset");
+    assert!(matches!(
+        error.current_context(),
+        TransactionPlanningError::ResetInProgress { .. }
+    ));
 }
 
 fn add_note() -> Statement {

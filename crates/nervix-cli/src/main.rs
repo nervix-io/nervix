@@ -605,6 +605,7 @@ fn connect_options_from_args(args: &Args) -> Result<ConnectOptions, StackReport<
         ca_certificate_pem,
         username: Some(args.username.clone()),
         password: Some(password),
+        ..ConnectOptions::default()
     })
 }
 
@@ -1676,14 +1677,14 @@ mod tests {
     fn subscription_notices_print_one_line_each() {
         let ended = SubscriptionEvent::Ended(nervix_client_core::SubscriptionEnded {
             subscription: live_subscription(),
-            reason: nervix_client_core::wire::SubscriptionEndReason::RelayClosed,
-            message: "relay 'orders' was rebuilt".to_string(),
+            reason: nervix_client_core::wire::SubscriptionEndReason::RelayChanged,
+            message: "relay 'orders' was redefined".to_string(),
         });
         assert_eq!(
             format_subscription_event(&ended),
             [
                 "[events] subscription [live] notice: the subscription ended: relay 'orders' was \
-                 rebuilt"
+                 redefined"
             ]
         );
 

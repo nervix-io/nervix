@@ -164,6 +164,9 @@ impl TransactionCommitAdmissionPlan {
                     Ok(inputs.after_resource_catalog(resource.clone()))
                 }
             }
+            TransactionCommitStepKind::ResetWasmState { schedule, .. } => {
+                Ok(inputs.after_schedule(Some((**schedule).clone())))
+            }
         }
     }
 
@@ -275,6 +278,24 @@ impl FrozenTransactionCommitStep {
                 },
                 Some(TransactionStepEffect::CreateResourceCatalog { inputs, identifier }),
             ) => **inputs == expected_inputs && identifier == resource,
+            (
+                TransactionCommitStepKind::ResetWasmState {
+                    reset,
+                    request,
+                    schedule,
+                },
+                Some(TransactionStepEffect::ResetWasmState {
+                    inputs,
+                    reset: applied_reset,
+                    request: applied_request,
+                    schedule: applied_schedule,
+                }),
+            ) => {
+                **inputs == expected_inputs
+                    && reset == applied_reset
+                    && request == applied_request
+                    && schedule == applied_schedule
+            }
             (TransactionCommitStepKind::Models { transitions, .. }, None) => transitions.is_empty(),
             (TransactionCommitStepKind::AlterDomain { next, schedule, .. }, None) => {
                 self.inputs.state() == Some(next.as_ref())

@@ -61,6 +61,10 @@ where
             .collect()
     }
 
+    pub(super) fn contains_key(&self, key: &K) -> bool {
+        self.entries.contains_key(key)
+    }
+
     pub(super) fn insert_restored(
         &mut self,
         key: K,

@@ -741,12 +741,17 @@ async fn measure_uploads(
             .map_err(|report| anyhow!("failed to create upload identity: {report}"))?;
         let chunks = Arc::new(parking_lot::Mutex::new(Vec::<u64>::new()));
         let recorded_chunks = chunks.clone();
+        let upload_domain = client
+            .domain()
+            .await
+            .context("upload client has an active domain")?;
         let started = Instant::now();
         let outcome = timeout(
             OPERATION_TIMEOUT,
             client.upload_resource_from_directory_with_identity(
                 "client_wire_resource",
                 directory.path(),
+                upload_domain,
                 identity.clone(),
                 move |bytes| recorded_chunks.lock().push(bytes),
             ),

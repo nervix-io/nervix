@@ -1,13 +1,14 @@
 use std::iter;
 
 use arrow_buffer::BooleanBuffer;
-use arrow_schema::DataType;
+use arrow_schema::{ArrowError, DataType};
 use strum::IntoStaticStr;
 use thiserror::Error;
 
 use crate::{
     datetime::{UnreadableText, Zone},
     extremum::ClampBoundsDefect,
+    ip_address::{IpFamily, NetworkDefect},
     ir::{RegisterRef, RegisterType},
     program::Span,
 };
@@ -76,6 +77,8 @@ pub enum SideErrorReason {
     /// A `clamp` whose bounds bound no value.
     #[error("{0}")]
     InvalidClampBounds(ClampBoundsDefect),
+    #[error("vector lengths differ: left has {left}, right has {right}")]
+    VectorLengthMismatch { left: usize, right: usize },
     /// A text builtin whose result, sized by its count, does not fit in the text its STRING column
     /// has left.
     #[error("{0} result exceeds the text one STRING column holds")]
@@ -86,6 +89,33 @@ pub enum SideErrorReason {
     InvalidUtf8Bytes,
     #[error("{0} result exceeds the bytes one column holds")]
     BytesTooLong(BytesOperation),
+    /// An `ip_from_string` input that writes no IPv4 or IPv6 address.
+    #[error("ip_from_string input is not an IPv4 or IPv6 address")]
+    UnreadableIpAddress,
+    /// A `BYTES` value an IP builtin read that is neither four nor sixteen octets long.
+    #[error("{0} input is not a 4 or 16 byte IP address")]
+    NotAnIpAddress(IpOperation),
+    /// An `ip_trunc` prefix length that is negative or longer than its address.
+    #[error(
+        "ip_trunc prefix length must be 0 to {longest} for an {family} address",
+        longest = family.bits()
+    )]
+    IpPrefixOutOfRange { family: IpFamily },
+    /// An `ip_in_network` network read from a row that is not a network in CIDR notation.
+    #[error("ip_in_network network {0}")]
+    InvalidIpNetwork(NetworkDefect),
+    /// A URL builtin input that is not an absolute URL, with the URL Standard's reason.
+    #[error("{operation} input is not an absolute URL: {defect}")]
+    InvalidUrl {
+        operation: UrlOperation,
+        defect: url::ParseError,
+    },
+    /// Text a URL builtin percent-decodes that is not percent-encoded UTF-8.
+    #[error("{0} input is not valid percent-encoded UTF-8")]
+    InvalidPercentEncoding(UrlOperation),
+    /// A `url_query_values` result whose values or text do not fit one `VEC<STRING>` column.
+    #[error("url_query_values result exceeds what one VEC<STRING> column holds")]
+    QueryValuesTooLong,
     /// A `uuid_v7` whose execution time is before the Unix epoch, where a version 7 UUID's
     /// millisecond field has no value for it.
     #[error("uuid_v7 execution time is before the Unix epoch")]
@@ -103,6 +133,7 @@ impl SideErrorReason {
             | Self::DateDiffOverflow
             | Self::TextTooLong(_)
             | Self::BytesTooLong(_)
+            | Self::QueryValuesTooLong
             | Self::UuidTimeBeforeEpoch => ErrorCode::Overflow,
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
             Self::NegativeShiftCount(_)
@@ -110,11 +141,18 @@ impl SideErrorReason {
             | Self::InvalidRegularExpression(_)
             | Self::SkippedLocalTime { .. }
             | Self::RepeatedLocalTime { .. }
-            | Self::InvalidClampBounds(_) => ErrorCode::InvalidArgument,
+            | Self::InvalidClampBounds(_)
+            | Self::VectorLengthMismatch { .. }
+            | Self::NotAnIpAddress(_)
+            | Self::IpPrefixOutOfRange { .. }
+            | Self::InvalidIpNetwork(_) => ErrorCode::InvalidArgument,
             Self::InvalidBytesEncoding(_)
             | Self::InvalidUtf8Bytes
             | Self::CastFailed { .. }
-            | Self::UnreadableDatetime(_) => ErrorCode::CastFailed,
+            | Self::UnreadableDatetime(_)
+            | Self::UnreadableIpAddress
+            | Self::InvalidUrl { .. }
+            | Self::InvalidPercentEncoding(_) => ErrorCode::CastFailed,
             Self::Injected { code, .. } => *code,
         }
     }
@@ -137,6 +175,8 @@ pub enum IntegerOperation {
     AbsoluteValue,
     #[strum(to_string = "sum")]
     Sum,
+    #[strum(to_string = "dot product")]
+    Dot,
     #[strum(to_string = "left shift")]
     LeftShift,
     /// `round` with a negative number of digits, which rounds to a multiple of a power of ten.
@@ -177,7 +217,8 @@ pub enum DatetimeOperation {
     ParseDatetime,
 }
 
-/// A text builtin whose count chooses the length of its result.
+/// A text builtin that sizes each value before it builds it, because its arguments choose how
+/// long the value is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum TextOperation {
     #[strum(to_string = "repeat")]
@@ -186,6 +227,22 @@ pub enum TextOperation {
     Lpad,
     #[strum(to_string = "rpad")]
     Rpad,
+    #[strum(to_string = "ip_to_string")]
+    IpToString,
+    #[strum(to_string = "url_scheme")]
+    UrlScheme,
+    #[strum(to_string = "url_host")]
+    UrlHost,
+    #[strum(to_string = "url_path")]
+    UrlPath,
+    #[strum(to_string = "url_query")]
+    UrlQuery,
+    #[strum(to_string = "url_fragment")]
+    UrlFragment,
+    #[strum(to_string = "url_query_value")]
+    UrlQueryValue,
+    #[strum(to_string = "url_decode")]
+    UrlDecode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -200,6 +257,48 @@ pub enum BytesOperation {
     HexEncode,
     #[strum(to_string = "sha256")]
     Sha256,
+    #[strum(to_string = "ip_from_string")]
+    IpFromString,
+    #[strum(to_string = "ip_trunc")]
+    IpTrunc,
+}
+
+/// A builtin that reads an IP address from a `BYTES` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum IpOperation {
+    #[strum(to_string = "ip_to_string")]
+    IpToString,
+    #[strum(to_string = "ip_family")]
+    IpFamily,
+    #[strum(to_string = "ip_trunc")]
+    IpTrunc,
+    #[strum(to_string = "ip_in_network")]
+    IpInNetwork,
+    #[strum(to_string = "ip_unmap")]
+    IpUnmap,
+}
+
+/// A builtin that parses a URL or percent-decodes part of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum UrlOperation {
+    #[strum(to_string = "url_scheme")]
+    UrlScheme,
+    #[strum(to_string = "url_host")]
+    UrlHost,
+    #[strum(to_string = "url_port")]
+    UrlPort,
+    #[strum(to_string = "url_path")]
+    UrlPath,
+    #[strum(to_string = "url_query")]
+    UrlQuery,
+    #[strum(to_string = "url_fragment")]
+    UrlFragment,
+    #[strum(to_string = "url_query_value")]
+    UrlQueryValue,
+    #[strum(to_string = "url_query_values")]
+    UrlQueryValues,
+    #[strum(to_string = "url_decode")]
+    UrlDecode,
 }
 
 /// A floating-point operation whose result has to be finite.
@@ -212,6 +311,12 @@ pub enum FloatOperation {
     AbsoluteValue,
     #[strum(to_string = "floating-point sum")]
     Sum,
+    #[strum(to_string = "mean")]
+    Mean,
+    #[strum(to_string = "dot product")]
+    Dot,
+    #[strum(to_string = "distance")]
+    Distance,
     #[strum(to_string = "ceil")]
     Ceil,
     #[strum(to_string = "floor")]
@@ -468,6 +573,44 @@ pub enum RuntimeError {
     SchemaMismatch,
     #[error("invalid batch: {message}")]
     InvalidBatch { message: String },
+    #[error("{operation} needs at least one collection argument")]
+    CollectionMissingArguments { operation: &'static str },
+    #[error("collection input must be ARRAY or VEC, found {actual:?}")]
+    CollectionExpectedList { actual: DataType },
+    #[error("collection {data_type:?} has the wrong Arrow backing array")]
+    CollectionBackingMismatch { data_type: DataType },
+    #[error("{operation} requires element type {expected:?}, found {actual:?}")]
+    CollectionTypeMismatch {
+        operation: &'static str,
+        expected: DataType,
+        actual: DataType,
+    },
+    #[error("{operation} requires {expected} rows, found {actual}")]
+    CollectionLengthMismatch {
+        operation: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("{operation} requires numeric collection elements, found {actual:?}")]
+    CollectionNonNumericElement {
+        operation: &'static str,
+        actual: DataType,
+    },
+    #[error("{operation} exceeds {limit}")]
+    CollectionTooLarge {
+        operation: &'static str,
+        limit: CollectionLimit,
+    },
+    #[error("{operation} Arrow kernel failed: {source}")]
+    CollectionArrow {
+        operation: &'static str,
+        #[source]
+        source: ArrowError,
+    },
+    #[error("collection kernel failed: {report}")]
+    CollectionKernel {
+        report: Box<error_stack::Report<RuntimeError>>,
+    },
     #[error("required output column '{column}' is uninitialized")]
     UninitializedRequiredColumn { column: String },
     #[error("required output column '{column}' contains null values")]
@@ -515,6 +658,24 @@ pub enum RuntimeError {
     FormattedDatetimesTooLarge { rows: usize, longest: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum CollectionLimit {
+    #[strum(to_string = "the addressable Arrow array length")]
+    AddressableLength,
+    #[strum(to_string = "the fixed ARRAY width")]
+    FixedWidth,
+    #[strum(to_string = "the VEC offset range")]
+    VectorOffsets,
+}
+
+impl From<error_stack::Report<RuntimeError>> for RuntimeError {
+    fn from(report: error_stack::Report<RuntimeError>) -> Self {
+        Self::CollectionKernel {
+            report: Box::new(report),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -550,6 +711,7 @@ mod tests {
                 "integer absolute value overflowed",
             ),
             (IntegerOperation::Sum, "integer sum overflowed"),
+            (IntegerOperation::Dot, "integer dot product overflowed"),
             (IntegerOperation::LeftShift, "integer left shift overflowed"),
             (IntegerOperation::Rounding, "integer rounding overflowed"),
         ];
@@ -597,6 +759,15 @@ mod tests {
             (
                 FloatOperation::Sum,
                 "floating-point sum produced a non-finite result",
+            ),
+            (FloatOperation::Mean, "mean produced a non-finite result"),
+            (
+                FloatOperation::Dot,
+                "dot product produced a non-finite result",
+            ),
+            (
+                FloatOperation::Distance,
+                "distance produced a non-finite result",
             ),
             (FloatOperation::Ceil, "ceil produced a non-finite result"),
             (FloatOperation::Floor, "floor produced a non-finite result"),

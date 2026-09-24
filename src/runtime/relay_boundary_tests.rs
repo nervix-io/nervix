@@ -525,8 +525,8 @@ async fn unbranched_relay_uses_direct_fanout_without_branch_collapse() {
         .relay_boundary_fanout_with_capacity(
             &domain,
             &relay,
-            false,
             STUPID_CHANNEL_CAPACITY_REMOVE_ME,
+            unbranched_subscription_definition(&[]),
         )
         .await;
 
@@ -662,11 +662,13 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
         .expect("subscription batch should encode");
     subscription_fanout
         .subscriptions
+        .receivers()
         .set_capacity(nonzero!(2usize));
     services.fanout_local_subscriptions(&batch).await;
     services.fanout_local_subscriptions(&batch).await;
     subscription_fanout
         .subscriptions
+        .receivers()
         .set_capacity(STUPID_CHANNEL_CAPACITY_REMOVE_ME);
 
     let inbound_runtime = runtime.clone();
@@ -692,7 +694,12 @@ async fn inbound_subscription_wait_does_not_hold_domain_execution() {
     timeout(Duration::from_secs(1), async {
         loop {
             tokio::task::consume_budget().await;
-            if subscription_fanout.subscriptions.waiting_publishers() == 1 {
+            if subscription_fanout
+                .subscriptions
+                .receivers()
+                .waiting_publishers()
+                == 1
+            {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1162,7 +1169,12 @@ async fn direct_fanout_owner_buffer_uses_configured_capacity() {
     let relay = named("orders");
     let schema = test_schema(&[]);
     let fanout = runtime
-        .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(1))
+        .relay_boundary_fanout_with_capacity(
+            &domain,
+            &relay,
+            nonzero_capacity(1),
+            unbranched_subscription_definition(&[]),
+        )
         .await;
     let mut receiver = fanout.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
     let owner_buffer = fanout.owner_buffer().expect("owner buffer must be active");
@@ -1230,18 +1242,28 @@ async fn relay_boundary_fanout_resize_preserves_existing_owner_receiver() {
     let relay = named("orders");
     let schema = test_schema(&[]);
     let fanout = runtime
-        .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(1))
+        .relay_boundary_fanout_with_capacity(
+            &domain,
+            &relay,
+            nonzero_capacity(1),
+            unbranched_subscription_definition(&[]),
+        )
         .await;
     let mut receiver = fanout.activate_owner_buffer(relay_metrics(&runtime, &domain, &relay));
     let resized = runtime
-        .relay_boundary_fanout_with_capacity(&domain, &relay, false, nonzero_capacity(5))
+        .relay_boundary_fanout_with_capacity(
+            &domain,
+            &relay,
+            nonzero_capacity(5),
+            unbranched_subscription_definition(&[]),
+        )
         .await;
 
     let broadcast = match (&fanout, &resized) {
         (RelayBoundaryFanout::Direct(original), RelayBoundaryFanout::Direct(resized_fanout)) => {
             assert!(Arc::ptr_eq(original, resized_fanout));
             assert_eq!(resized_fanout.owner_buffer_len(), Some((0, 5)));
-            assert_eq!(resized_fanout.subscriptions.capacity(), 1);
+            assert_eq!(resized_fanout.subscriptions.receivers().capacity(), 1);
             assert_eq!(resized_fanout.attached_runtime_consumers.capacity(), 1);
             assert_eq!(resized_fanout.detached_runtime_consumers.capacity(), 1);
             resized_fanout
@@ -1504,4 +1526,111 @@ async fn a_three_destination_fanout_shares_one_encoded_body() {
             "the optional field stays a typed null through the fanout"
         );
     }
+}
+
+/// A schedule declaring `notifications` over one `user_id` field, or no relay at all.
+fn notification_schedule(domain: &DomainName, relay: Option<bool>) -> DomainSchedule {
+    let schema = named::<SchemaName>("notification");
+    let mut nodes = Vec::new();
+    if let Some(sensitive) = relay {
+        nodes.push(scheduled_model(nervix_models::Model::Schema(
+            CreateSchema {
+                name: schema.clone(),
+                fields: vec![nervix_models::SchemaField {
+                    name: named("user_id"),
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive,
+                }],
+            },
+        )));
+        nodes.push(scheduled_model(nervix_models::Model::Relay(CreateRelay {
+            name: named("notifications"),
+            schema,
+            buffer: nonzero!(2usize),
+            branching: RelayBranching::unbranched(),
+            materialized_state: None,
+        })));
+    }
+    DomainSchedule::new(domain.clone(), nodes, Vec::new())
+}
+
+fn notification_definition(sensitive: bool) -> RelaySubscriptionDefinition {
+    let schema = compile_schema(&CreateSchema {
+        name: named("notification"),
+        fields: vec![nervix_models::SchemaField {
+            name: named("user_id"),
+            ty: ParseAsType::I64,
+            optional: false,
+            sensitive,
+        }],
+    });
+    RelaySubscriptionDefinition::new(Arc::new(schema), ResolvedBranching::unbranched())
+}
+
+#[tokio::test]
+async fn relay_rebuilds_end_subscribers_only_when_the_relay_rows_change() {
+    let runtime = Runtime::default();
+    let domain = domain("default");
+    runtime.sync_domains(&BTreeMap::from([(
+        domain.clone(),
+        unpaced_domain_state(domain.as_str()),
+    )]));
+    let node = ClusterNodeName::parse("node-1").expect("valid name");
+    let relay = named::<RelayName>("notifications");
+    let rebuild = |schedule: DomainSchedule| {
+        let runtime = runtime.clone();
+        let domain = domain.clone();
+        let node = node.clone();
+        async move {
+            runtime
+                .rebuild_domain_from_schedule(&node, &domain, Some(schedule), true)
+                .await
+                .expect("the notification schedule builds");
+        }
+    };
+
+    rebuild(notification_schedule(&domain, Some(false))).await;
+    let mut public = runtime
+        .subscribe_stream(&domain, &relay, &notification_definition(false))
+        .await
+        .expect("a subscriber describing the declared rows attaches");
+
+    rebuild(notification_schedule(&domain, Some(false))).await;
+    assert!(
+        matches!(public.try_recv(), RelayTryRecv::Empty),
+        "a rebuild that keeps the relay's rows keeps its subscribers"
+    );
+
+    rebuild(notification_schedule(&domain, Some(true))).await;
+    assert!(
+        timeout(Duration::from_secs(5), public.recv())
+            .await
+            .expect("a closed subscriber is woken")
+            .is_none(),
+        "a field that became sensitive ends every subscriber that announced it as public"
+    );
+    let refused = runtime
+        .subscribe_stream(&domain, &relay, &notification_definition(false))
+        .await
+        .expect_err("the relay no longer has the public definition");
+    assert!(matches!(refused, RuntimeError::RelayRedefined { .. }));
+    let mut sensitive = runtime
+        .subscribe_stream(&domain, &relay, &notification_definition(true))
+        .await
+        .expect("a subscriber describing the current rows attaches");
+
+    rebuild(notification_schedule(&domain, None)).await;
+    assert!(
+        timeout(Duration::from_secs(5), sensitive.recv())
+            .await
+            .expect("a withdrawn subscriber is woken")
+            .is_none(),
+        "removing the relay ends its subscribers"
+    );
+    let refused = runtime
+        .subscribe_stream(&domain, &relay, &notification_definition(true))
+        .await
+        .expect_err("the relay is gone");
+    assert!(matches!(refused, RuntimeError::RelayNotInstantiated { .. }));
 }

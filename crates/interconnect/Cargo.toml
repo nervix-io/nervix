@@ -22,6 +22,12 @@ shuttle = [
   "shuttle-tokio/shuttle",
   "shuttle-tokio-util/shuttle",
 ]
+turmoil = ["dep:turmoil", "nervix-execution/turmoil"]
+
+[[test]]
+name = "simulation"
+path = "tests/simulation.rs"
+required-features = ["turmoil"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -55,6 +61,7 @@ tokio-rustls = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 triomphe = { workspace = true }
+turmoil = { workspace = true, optional = true }
 url = { workspace = true }
 x509-parser = { workspace = true }
 

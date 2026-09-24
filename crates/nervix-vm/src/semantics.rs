@@ -11,14 +11,18 @@
 //! - **Must not know.** How execution walks Arrow buffers, registers or batches, and anything about
 //!   relays, branches, connectors or the registry.
 
-use std::ops::{BitAnd, BitOr, BitXor, Not};
+use std::{
+    ops::{BitAnd, BitOr, BitXor, Not},
+    sync::Arc,
+};
 
-use arrow_schema::{DataType, TimeUnit};
+use arrow_schema::{DataType, Field, TimeUnit};
 use meticulous::OptionExt as _;
 
 use crate::{
     CompileError, RegisterType,
     extremum::Extremum,
+    ip_address::NetworkSource,
     membership::MembershipSet,
     program::{BinaryOp, CastFailure, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
@@ -319,6 +323,16 @@ pub enum BuiltinLowering {
     Atan,
     Ceil,
     Concat,
+    ArrayConstruct,
+    VecConstruct,
+    EmptyVec(DataType),
+    Overlap,
+    Slice,
+    ListMin,
+    ListMax,
+    Mean,
+    Dot,
+    Distance,
     Sum,
     Last,
     First,
@@ -344,6 +358,25 @@ pub enum BuiltinLowering {
     HexDecode,
     Sha256,
     Xxh3_64,
+    IpFromString,
+    IsIpAddress,
+    IpToString,
+    IpFamily,
+    IpTrunc,
+    /// `ip_in_network`, with the network it was lowered with: parsed once when it was a
+    /// constant, or read from the network argument on every row.
+    IpInNetwork(NetworkSource),
+    IpUnmap,
+    UrlScheme,
+    UrlHost,
+    UrlPort,
+    UrlPath,
+    UrlQuery,
+    UrlFragment,
+    UrlQueryValue,
+    UrlQueryValues,
+    UrlDecode,
+    IsUrl,
     Pow,
     /// A regular-expression builtin, with the pattern it was lowered with: compiled once when it
     /// was a constant, or read from the pattern argument on every row.
@@ -816,6 +849,16 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::Abs
         | BuiltinLowering::Ceil
         | BuiltinLowering::Concat
+        | BuiltinLowering::ArrayConstruct
+        | BuiltinLowering::VecConstruct
+        | BuiltinLowering::EmptyVec(_)
+        | BuiltinLowering::Overlap
+        | BuiltinLowering::Slice
+        | BuiltinLowering::ListMin
+        | BuiltinLowering::ListMax
+        | BuiltinLowering::Mean
+        | BuiltinLowering::Dot
+        | BuiltinLowering::Distance
         | BuiltinLowering::Sum
         | BuiltinLowering::Last
         | BuiltinLowering::First
@@ -856,7 +899,13 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::BitCount
         | BuiltinLowering::Extremum(_)
         | BuiltinLowering::Clamp
-        | BuiltinLowering::Membership(_) => ArmExecution::WholeBatch,
+        | BuiltinLowering::Membership(_)
+        | BuiltinLowering::IsIpAddress
+        | BuiltinLowering::IsUrl
+        | BuiltinLowering::IpFamily
+        | BuiltinLowering::IpTrunc
+        | BuiltinLowering::IpUnmap
+        | BuiltinLowering::IpInNetwork(NetworkSource::Constant(_)) => ArmExecution::WholeBatch,
         // Text sized by an argument must only spend its column's size limit on selected rows.
         BuiltinLowering::Repeat | BuiltinLowering::Lpad | BuiltinLowering::Rpad => {
             ArmExecution::SelectedRows
@@ -883,6 +932,20 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::Log2
         | BuiltinLowering::Pow
         | BuiltinLowering::Regexp(_) => ArmExecution::SelectedRows,
+        // Reading and writing address and network text, and parsing URLs, walk each row's text.
+        // A URL component is text as long as its URL, so it spends the column's size limit too.
+        BuiltinLowering::IpFromString
+        | BuiltinLowering::IpToString
+        | BuiltinLowering::IpInNetwork(NetworkSource::Argument)
+        | BuiltinLowering::UrlScheme
+        | BuiltinLowering::UrlHost
+        | BuiltinLowering::UrlPort
+        | BuiltinLowering::UrlPath
+        | BuiltinLowering::UrlQuery
+        | BuiltinLowering::UrlFragment
+        | BuiltinLowering::UrlQueryValue
+        | BuiltinLowering::UrlQueryValues
+        | BuiltinLowering::UrlDecode => ArmExecution::SelectedRows,
         BuiltinLowering::Datetime(function) => function.arm_execution(),
     }
 }
@@ -911,6 +974,15 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Atan => BuiltinLowering::Atan,
         FunctionName::Ceil => BuiltinLowering::Ceil,
         FunctionName::Concat => BuiltinLowering::Concat,
+        FunctionName::Array => BuiltinLowering::ArrayConstruct,
+        FunctionName::Vec => BuiltinLowering::VecConstruct,
+        FunctionName::Overlap => BuiltinLowering::Overlap,
+        FunctionName::Slice => BuiltinLowering::Slice,
+        FunctionName::Min => BuiltinLowering::ListMin,
+        FunctionName::Max => BuiltinLowering::ListMax,
+        FunctionName::Mean => BuiltinLowering::Mean,
+        FunctionName::Dot => BuiltinLowering::Dot,
+        FunctionName::Distance => BuiltinLowering::Distance,
         FunctionName::Sum => BuiltinLowering::Sum,
         FunctionName::Last => BuiltinLowering::Last,
         FunctionName::First => BuiltinLowering::First,
@@ -936,6 +1008,23 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::HexDecode => BuiltinLowering::HexDecode,
         FunctionName::Sha256 => BuiltinLowering::Sha256,
         FunctionName::Xxh3_64 => BuiltinLowering::Xxh3_64,
+        FunctionName::IpFromString => BuiltinLowering::IpFromString,
+        FunctionName::IsIpAddress => BuiltinLowering::IsIpAddress,
+        FunctionName::IpToString => BuiltinLowering::IpToString,
+        FunctionName::IpFamily => BuiltinLowering::IpFamily,
+        FunctionName::IpTrunc => BuiltinLowering::IpTrunc,
+        FunctionName::IpInNetwork => BuiltinLowering::IpInNetwork(NetworkSource::Argument),
+        FunctionName::IpUnmap => BuiltinLowering::IpUnmap,
+        FunctionName::UrlScheme => BuiltinLowering::UrlScheme,
+        FunctionName::UrlHost => BuiltinLowering::UrlHost,
+        FunctionName::UrlPort => BuiltinLowering::UrlPort,
+        FunctionName::UrlPath => BuiltinLowering::UrlPath,
+        FunctionName::UrlQuery => BuiltinLowering::UrlQuery,
+        FunctionName::UrlFragment => BuiltinLowering::UrlFragment,
+        FunctionName::UrlQueryValue => BuiltinLowering::UrlQueryValue,
+        FunctionName::UrlQueryValues => BuiltinLowering::UrlQueryValues,
+        FunctionName::UrlDecode => BuiltinLowering::UrlDecode,
+        FunctionName::IsUrl => BuiltinLowering::IsUrl,
         FunctionName::Pow => BuiltinLowering::Pow,
         FunctionName::RegexpLike => {
             BuiltinLowering::Regexp(RegexpCall::reading_pattern_argument(RegexpFunction::Like))
@@ -1047,6 +1136,13 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::ToHex
         | BuiltinLowering::Translate
         | BuiltinLowering::Count
+        | BuiltinLowering::ArrayConstruct
+        | BuiltinLowering::VecConstruct
+        | BuiltinLowering::EmptyVec(_)
+        | BuiltinLowering::Overlap
+        | BuiltinLowering::Slice
+        | BuiltinLowering::ListMin
+        | BuiltinLowering::ListMax
         | BuiltinLowering::First
         | BuiltinLowering::Last
         | BuiltinLowering::Nth
@@ -1057,7 +1153,9 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::BitwiseOr
         | BuiltinLowering::BitwiseXor
         | BuiltinLowering::BitwiseNot
-        | BuiltinLowering::BitCount => OperationSemantics {
+        | BuiltinLowering::BitCount
+        | BuiltinLowering::IsIpAddress
+        | BuiltinLowering::IsUrl => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
@@ -1105,6 +1203,9 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Round
         | BuiltinLowering::Sqrt
         | BuiltinLowering::Sum
+        | BuiltinLowering::Mean
+        | BuiltinLowering::Dot
+        | BuiltinLowering::Distance
         | BuiltinLowering::Tan
         | BuiltinLowering::Sin
         | BuiltinLowering::Atan2
@@ -1131,12 +1232,37 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::HexDecode
         | BuiltinLowering::Base64Encode
         | BuiltinLowering::HexEncode
-        | BuiltinLowering::Sha256 => OperationSemantics {
+        | BuiltinLowering::Sha256
+        // Text can name no address, a `BYTES` value can hold none, a prefix or network can be
+        // invalid, and text can be no URL or no percent-encoded UTF-8.
+        | BuiltinLowering::IpFromString
+        | BuiltinLowering::IpToString
+        | BuiltinLowering::IpFamily
+        | BuiltinLowering::IpTrunc
+        | BuiltinLowering::IpInNetwork(_)
+        | BuiltinLowering::IpUnmap
+        | BuiltinLowering::UrlScheme
+        | BuiltinLowering::UrlPath
+        | BuiltinLowering::UrlQueryValues
+        | BuiltinLowering::UrlDecode => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
             can_error: true,
             null_propagation: NullPropagation::Strict,
+        },
+        // A URL can lack a host, a port, a query, a fragment or a query parameter, so each of
+        // these is null for such a URL as well as for a null one.
+        BuiltinLowering::UrlHost
+        | BuiltinLowering::UrlPort
+        | BuiltinLowering::UrlQuery
+        | BuiltinLowering::UrlFragment
+        | BuiltinLowering::UrlQueryValue => OperationSemantics {
+            volatility: Volatility::Immutable,
+            dependency_scope: DependencyScope::Constant,
+            has_side_effects: false,
+            can_error: true,
+            null_propagation: NullPropagation::Custom,
         },
     }
 }
@@ -1184,50 +1310,89 @@ fn builtin_output_type(
         }
         BuiltinLowering::BytesToUtf8
         | BuiltinLowering::Base64Encode
-        | BuiltinLowering::HexEncode => {
+        | BuiltinLowering::HexEncode
+        | BuiltinLowering::IpToString => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
-            if input != RegisterType::Binary {
-                return Err(CompileError {
-                    code: "unsupported_function",
-                    message: format!(
-                        "function '{}' requires BYTES input, found {input}",
-                        function.as_str()
-                    ),
-                    span: span.into(),
-                });
-            }
+            require_binary_arg(function, input, span)?;
             Ok(DataType::Utf8)
         }
-        BuiltinLowering::Sha256 => {
+        BuiltinLowering::Sha256 | BuiltinLowering::IpUnmap => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
-            if input != RegisterType::Binary {
-                return Err(CompileError {
-                    code: "unsupported_function",
-                    message: format!(
-                        "function '{}' requires BYTES input, found {input}",
-                        function.as_str()
-                    ),
-                    span: span.into(),
-                });
-            }
+            require_binary_arg(function, input, span)?;
             Ok(DataType::Binary)
         }
         BuiltinLowering::Xxh3_64 => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
             let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
-            if input != RegisterType::Binary {
-                return Err(CompileError {
-                    code: "unsupported_function",
-                    message: format!(
-                        "function '{}' requires BYTES input, found {input}",
-                        function.as_str()
-                    ),
-                    span: span.into(),
-                });
-            }
+            require_binary_arg(function, input, span)?;
             Ok(DataType::UInt64)
+        }
+        BuiltinLowering::IpFamily => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_binary_arg(function, input, span)?;
+            Ok(DataType::Int64)
+        }
+        BuiltinLowering::IpTrunc => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            let address = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            let prefix = require_supported_register_type(function, &arg_types[1], span.clone())?;
+            require_binary_arg(function, address, span.clone())?;
+            require_integral_arg(function, prefix, span)?;
+            Ok(DataType::Binary)
+        }
+        BuiltinLowering::IpInNetwork(_) => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            let address = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            let network = require_supported_register_type(function, &arg_types[1], span.clone())?;
+            require_binary_arg(function, address, span.clone())?;
+            require_utf8_arg(function, network, span)?;
+            Ok(DataType::Boolean)
+        }
+        BuiltinLowering::IpFromString => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_utf8_arg(function, input, span)?;
+            Ok(DataType::Binary)
+        }
+        BuiltinLowering::IsIpAddress | BuiltinLowering::IsUrl => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_utf8_arg(function, input, span)?;
+            Ok(DataType::Boolean)
+        }
+        BuiltinLowering::UrlScheme
+        | BuiltinLowering::UrlHost
+        | BuiltinLowering::UrlPath
+        | BuiltinLowering::UrlQuery
+        | BuiltinLowering::UrlFragment
+        | BuiltinLowering::UrlDecode => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_utf8_arg(function, input, span)?;
+            Ok(DataType::Utf8)
+        }
+        BuiltinLowering::UrlPort => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_utf8_arg(function, input, span)?;
+            Ok(DataType::Int64)
+        }
+        BuiltinLowering::UrlQueryValue | BuiltinLowering::UrlQueryValues => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            for arg_type in arg_types {
+                let input = require_supported_register_type(function, arg_type, span.clone())?;
+                require_utf8_arg(function, input, span.clone())?;
+            }
+            if let BuiltinLowering::UrlQueryValue = lowering {
+                return Ok(DataType::Utf8);
+            }
+            // `VEC<STRING>`: every value a query carries is present text.
+            Ok(DataType::List(
+                Field::new("item", DataType::Utf8, false).into(),
+            ))
         }
         BuiltinLowering::Now => {
             require_builtin_arity_exact(function, arg_types, 0, span)?;
@@ -1455,15 +1620,148 @@ fn builtin_output_type(
         }
         BuiltinLowering::Concat => {
             require_builtin_min_arity(function, arg_types, 1, span.clone())?;
+            if let DataType::List(_) | DataType::FixedSizeList(_, _) = &arg_types[0] {
+                let element =
+                    list_element_type(function, &arg_types[0], ListElements::Any, span.clone())?;
+                let mut fixed_width = Some(0_i32);
+                for arg_type in arg_types {
+                    let actual =
+                        list_element_type(function, arg_type, ListElements::Any, span.clone())?;
+                    if actual != element {
+                        return Err(CompileError {
+                            code: "type_mismatch",
+                            message: format!(
+                                "function '{}' requires exact matching element types, found {:?} \
+                                 and {:?}",
+                                function.as_str(),
+                                element,
+                                actual
+                            ),
+                            span: span.into(),
+                        });
+                    }
+                    fixed_width = match (fixed_width, arg_type) {
+                        (Some(total), DataType::FixedSizeList(_, width)) => {
+                            Some(total.checked_add(*width).ok_or_else(|| CompileError {
+                                code: "invalid_argument",
+                                message: "ARRAY concat exceeds Arrow's maximum width".to_string(),
+                                span: span.clone().into(),
+                            })?)
+                        }
+                        _ => None,
+                    };
+                }
+                let field = Arc::new(Field::new("item", element, false));
+                return Ok(match fixed_width {
+                    Some(width) => DataType::FixedSizeList(field, width),
+                    None => DataType::List(field),
+                });
+            }
             for arg_type in arg_types {
                 let input = require_supported_register_type(function, arg_type, span.clone())?;
                 require_utf8_arg(function, input, span.clone())?;
             }
             Ok(DataType::Utf8)
         }
+        BuiltinLowering::ArrayConstruct | BuiltinLowering::VecConstruct => {
+            require_builtin_min_arity(function, arg_types, 1, span.clone())?;
+            let element = &arg_types[0];
+            require_supported_register_type(function, element, span.clone())?;
+            for arg_type in &arg_types[1..] {
+                if arg_type != element {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires exact matching element types, found {:?} and \
+                             {:?}",
+                            function.as_str(),
+                            element,
+                            arg_type
+                        ),
+                        span: span.into(),
+                    });
+                }
+            }
+            let field = Arc::new(Field::new("item", element.clone(), false));
+            if let BuiltinLowering::ArrayConstruct = lowering {
+                let width = i32::try_from(arg_types.len()).map_err(|_| CompileError {
+                    code: "invalid_argument",
+                    message: "ARRAY constructor exceeds Arrow's maximum width".to_string(),
+                    span: span.into(),
+                })?;
+                Ok(DataType::FixedSizeList(field, width))
+            } else {
+                Ok(DataType::List(field))
+            }
+        }
+        BuiltinLowering::EmptyVec(data_type) => {
+            require_builtin_arity_exact(function, arg_types, 0, span)?;
+            Ok(data_type.clone())
+        }
+        BuiltinLowering::Overlap | BuiltinLowering::Dot | BuiltinLowering::Distance => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[0], ListElements::Scalar, span.clone())?;
+            let other =
+                list_element_type(function, &arg_types[1], ListElements::Scalar, span.clone())?;
+            if element != other {
+                return Err(CompileError {
+                    code: "type_mismatch",
+                    message: format!(
+                        "function '{}' requires exact matching element types, found {:?} and {:?}",
+                        function.as_str(),
+                        element,
+                        other
+                    ),
+                    span: span.into(),
+                });
+            }
+            if let BuiltinLowering::Overlap = lowering {
+                return Ok(DataType::Boolean);
+            }
+            let input = require_supported_register_type(function, &element, span.clone())?;
+            require_numeric_arg(function, input, span)?;
+            if let BuiltinLowering::Dot = lowering {
+                Ok(element)
+            } else {
+                Ok(DataType::Float64)
+            }
+        }
+        BuiltinLowering::Slice => {
+            require_builtin_arity_exact(function, arg_types, 3, span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[0], ListElements::Any, span.clone())?;
+            for index_type in &arg_types[1..] {
+                let index = require_supported_register_type(function, index_type, span.clone())?;
+                require_integral_arg(function, index, span.clone())?;
+            }
+            Ok(DataType::List(Arc::new(Field::new("item", element, false))))
+        }
+        BuiltinLowering::ListMin | BuiltinLowering::ListMax | BuiltinLowering::Mean => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[0], ListElements::Scalar, span.clone())?;
+            let input = require_supported_register_type(function, &element, span.clone())?;
+            if let BuiltinLowering::Mean = lowering {
+                require_numeric_arg(function, input, span)?;
+                Ok(DataType::Float64)
+            } else if input.is_ordered() || input == RegisterType::Boolean {
+                Ok(element)
+            } else {
+                Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires ordered scalar elements, found {:?}",
+                        function.as_str(),
+                        element
+                    ),
+                    span: span.into(),
+                })
+            }
+        }
         BuiltinLowering::Count => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
-            require_list_arg(function, &arg_types[0], span)?;
+            list_element_type(function, &arg_types[0], ListElements::Any, span)?;
             Ok(DataType::Int64)
         }
         BuiltinLowering::First | BuiltinLowering::Last => {
@@ -1494,6 +1792,25 @@ fn builtin_output_type(
         }
         BuiltinLowering::Contains | BuiltinLowering::StartsWith | BuiltinLowering::EndsWith => {
             require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            if let BuiltinLowering::Contains = lowering
+                && let DataType::List(_) | DataType::FixedSizeList(_, _) = &arg_types[0]
+            {
+                let element =
+                    list_element_type(function, &arg_types[0], ListElements::Scalar, span.clone())?;
+                if arg_types[1] != element {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires element type {:?}, found {:?}",
+                            function.as_str(),
+                            element,
+                            arg_types[1]
+                        ),
+                        span: span.into(),
+                    });
+                }
+                return Ok(DataType::Boolean);
+            }
             let left = require_supported_register_type(function, &arg_types[0], span.clone())?;
             let right = require_supported_register_type(function, &arg_types[1], span.clone())?;
             require_utf8_arg(function, left, span.clone())?;
@@ -1828,14 +2145,6 @@ fn list_element_type(
     Ok(element)
 }
 
-fn require_list_arg(
-    function: &FunctionName,
-    data_type: &DataType,
-    span: std::ops::Range<usize>,
-) -> Result<(), CompileError> {
-    list_element_type(function, data_type, ListElements::Any, span).map(|_| ())
-}
-
 fn require_utf8_arg(
     function: &FunctionName,
     input_type: RegisterType,
@@ -1848,6 +2157,25 @@ fn require_utf8_arg(
             code: "unsupported_function",
             message: format!(
                 "function '{}' requires Utf8 input, found {input_type}",
+                function.as_str()
+            ),
+            span: span.into(),
+        })
+    }
+}
+
+fn require_binary_arg(
+    function: &FunctionName,
+    input_type: RegisterType,
+    span: std::ops::Range<usize>,
+) -> Result<(), CompileError> {
+    if input_type == RegisterType::Binary {
+        Ok(())
+    } else {
+        Err(CompileError {
+            code: "unsupported_function",
+            message: format!(
+                "function '{}' requires BYTES input, found {input_type}",
                 function.as_str()
             ),
             span: span.into(),
@@ -2019,6 +2347,7 @@ mod tests {
     };
     use crate::{
         RegisterType,
+        ip_address::{IpNetwork, NetworkSource},
         program::{
             BinaryOp, CalendarUnit, CastFailure, DatetimeFunction, DatetimeUnit, Expr, FieldRef,
             FixedTimeUnit, FunctionName, Literal, SpannedNode, UnaryOp, Zone,
@@ -2095,6 +2424,74 @@ mod tests {
                 panic!("{function:?} must reject the opposite text or BYTES type");
             };
             assert_eq!(error.code, "unsupported_function", "{function:?}");
+        }
+    }
+
+    #[test]
+    fn network_builtins_fail_where_a_row_can_fail_and_are_null_where_a_url_lacks_a_part() {
+        let names = [
+            "ip_from_string",
+            "is_ip_address",
+            "ip_to_string",
+            "ip_family",
+            "ip_trunc",
+            "ip_in_network",
+            "ip_unmap",
+            "url_scheme",
+            "url_host",
+            "url_port",
+            "url_path",
+            "url_query",
+            "url_fragment",
+            "url_query_value",
+            "url_query_values",
+            "url_decode",
+            "is_url",
+        ];
+        for name in names {
+            let function = FunctionName::parse(&name.to_ascii_uppercase());
+            assert_eq!(function.as_str(), name);
+            let semantics =
+                builtin_function_semantics(&function).expect("the builtin must be classified");
+            assert_eq!(semantics.volatility, Volatility::Immutable, "{name}");
+            let never_fails = matches!(name, "is_ip_address" | "is_url");
+            assert_eq!(semantics.can_error, !never_fails, "{name}");
+            let may_lack = matches!(
+                name,
+                "url_host" | "url_port" | "url_query" | "url_fragment" | "url_query_value"
+            );
+            let expected = if may_lack {
+                NullPropagation::Custom
+            } else {
+                NullPropagation::Strict
+            };
+            assert_eq!(semantics.null_propagation, expected, "{name}");
+        }
+
+        let constant = "10.0.0.0/8"
+            .parse::<IpNetwork>()
+            .assured("the network is written in CIDR notation");
+        for (lowering, expected) in [
+            (
+                BuiltinLowering::IpInNetwork(NetworkSource::Constant(constant)),
+                ArmExecution::WholeBatch,
+            ),
+            (
+                BuiltinLowering::IpInNetwork(NetworkSource::Argument),
+                ArmExecution::SelectedRows,
+            ),
+            (BuiltinLowering::IpFamily, ArmExecution::WholeBatch),
+            (BuiltinLowering::IpTrunc, ArmExecution::WholeBatch),
+            (BuiltinLowering::IpUnmap, ArmExecution::WholeBatch),
+            (BuiltinLowering::IsIpAddress, ArmExecution::WholeBatch),
+            (BuiltinLowering::IsUrl, ArmExecution::WholeBatch),
+            (BuiltinLowering::IpFromString, ArmExecution::SelectedRows),
+            (BuiltinLowering::IpToString, ArmExecution::SelectedRows),
+            (BuiltinLowering::UrlHost, ArmExecution::SelectedRows),
+            (BuiltinLowering::UrlQueryValues, ArmExecution::SelectedRows),
+            (BuiltinLowering::UrlDecode, ArmExecution::SelectedRows),
+        ] {
+            assert_eq!(builtin_arm_execution(&lowering), expected, "{lowering:?}");
         }
     }
 

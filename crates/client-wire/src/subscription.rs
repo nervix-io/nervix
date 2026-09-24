@@ -365,18 +365,22 @@ impl SubscriptionRowsSkipped {
     }
 }
 
-/// Why the server closed a subscription.
+/// Why the server ended a subscription.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SubscriptionEndReason {
-    /// The relay was rebuilt, stopped or removed. Subscribe again against the current schema.
-    RelayClosed,
+    /// The relay, or the domain that held it, no longer exists.
+    RelayRemoved,
+    /// The relay was redefined, or removed and declared again, so the schema the subscription
+    /// announced no longer describes its rows. Subscribe again to read them under the current one.
+    RelayChanged,
 }
 
 wire_enum!(ALL_SUBSCRIPTION_END_REASONS: SubscriptionEndReason => wire::SubscriptionEndReason {
-    RelayClosed,
+    RelayRemoved,
+    RelayChanged,
 });
 
-/// The server closed the subscription. No further rows follow for its generation.
+/// The server ended the subscription. It is the last frame about its generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriptionEnded {
     pub subscription: SubscriptionHandle,

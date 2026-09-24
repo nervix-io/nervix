@@ -26,6 +26,8 @@ pub(crate) enum WasmStateResetRuntimeError {
         .processor.as_str()
     )]
     InvalidScope { processor: ModelName },
+    #[error("WASM processor '{}' has no active execution for the selected branch", .processor.as_str())]
+    BranchUnavailable { processor: ModelName },
     #[error("WASM processor '{}' reset branch key is invalid", .processor.as_str())]
     InvalidBranchKey { processor: ModelName },
     #[error(

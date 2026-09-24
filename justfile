@@ -37,6 +37,7 @@ test: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
+    just test-turmoil
 
 test-scenarios *args: tests-deps
     #!/usr/bin/env bash
@@ -182,6 +183,14 @@ test-shuttle-replay schedule: build-web-console wasm-processor-guests download-o
         cargo test --package "${shuttle_package}" --features shuttle --lib \
             "${shuttle_test}" -- --exact --test-threads=1 --nocapture
 
+# Tokio's unstable runtime knobs seed per-host scheduling and turn unhandled task panics into
+# runtime failures. Scope the cfg to this test mode; ordinary and Shuttle builds keep their flags.
+test-turmoil:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
+
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
     cargo test --package nervix-vm --lib -- {{ args }}
@@ -267,6 +276,8 @@ test-coverage: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
+    RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
+        cargo llvm-cov --no-rustc-wrapper --no-report --package nervix-interconnect --features turmoil --test simulation
     cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
 
@@ -293,6 +304,15 @@ test-coverage-feature feature additional_feature="": tests-deps
 # a change to those packages without the scenario suite that `test-coverage` runs.
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
+
+# Measure the Turmoil runner's changed lines without running the full scenario suite.
+coverage-turmoil output:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    cargo llvm-cov --no-rustc-wrapper --no-default-ignore-filename-regex \
+        --package nervix-interconnect --features turmoil --test simulation \
+        --lcov --output-path {{ quote(output) }}
 
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
 # `just bench --test` to execute each benchmark body once without recording runner timings.
@@ -488,6 +508,9 @@ cargo-clippy-all:
         --package nervix-interconnect \
         --package nervix-server \
         --package nervix-wasm
+    cargo clippy --all-targets --features turmoil \
+        --package nervix-execution \
+        --package nervix-interconnect
 
 # Lint one workspace package and all of its targets with warnings denied, sharing the workspace
 # lint build directory. Extra arguments are forwarded to Cargo.
@@ -525,9 +548,9 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
 
 # Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
 # graphs use the real synchronization crates directly and contain no Shuttle package.
@@ -540,6 +563,33 @@ validate-shuttle-dependencies:
     if printf '%s\n' "${production_dependencies}" \
         | grep -E '^shuttle([[:space:]-]|$)'; then
         echo "the production workspace includes a Shuttle package" >&2
+        exit 1
+    fi
+
+# The normal workspace graph must not pull the optional simulation scheduler into production.
+validate-turmoil-dependencies:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if cargo tree --workspace --edges normal --no-default-features --prefix none \
+        | grep -E '^turmoil([[:space:]-]|$)'; then
+        echo "the production workspace includes Turmoil" >&2
+        exit 1
+    fi
+
+# Keep a precise diagnostic when the two scheduler modes are accidentally selected together.
+validate-simulation-feature-conflict:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    diagnostics="$(mktemp)"
+    trap 'rm -f "${diagnostics}"' EXIT
+    if cargo check --package nervix-interconnect --features 'shuttle turmoil' --lib \
+        >"${diagnostics}" 2>&1; then
+        echo "Shuttle and Turmoil unexpectedly compiled together" >&2
+        exit 1
+    fi
+    if ! grep -Fq 'Shuttle and Turmoil scheduler modes cannot be enabled together' \
+        "${diagnostics}"; then
+        cat "${diagnostics}" >&2
         exit 1
     fi
 

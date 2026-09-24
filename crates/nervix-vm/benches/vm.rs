@@ -1,10 +1,11 @@
-use std::sync::Arc as StdArc;
+use std::{net::IpAddr, sync::Arc as StdArc};
 
 use arch_into::ArchInto as _;
 use arrow_array::{
-    BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray, StringArray,
-    TimestampNanosecondArray, UInt32Array, types::Int64Type,
+    BinaryArray, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray,
+    StringArray, TimestampNanosecondArray, UInt32Array, types::Int64Type,
 };
+use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use error_stack::{Report, ResultExt as _};
@@ -284,6 +285,49 @@ fn list_batch(row_count: usize) -> TypedBatch {
         ],
     )
     .expect("benchmark batch must build")
+}
+
+fn collection_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new(
+            "values",
+            DataType::List(StdArc::new(Field::new("item", DataType::Int64, false))),
+            true,
+        ),
+        Field::new("index", DataType::Int64, true),
+    ]))
+}
+
+fn collection_batch(row_count: usize) -> TypedBatch {
+    let mut lengths = Vec::with_capacity(row_count);
+    let mut validity = Vec::with_capacity(row_count);
+    let mut children = Vec::new();
+    for row in 0..row_count {
+        let valid = row % 7 != 0;
+        let length = if valid { row % 4 } else { 0 };
+        lengths.push(length);
+        validity.push(valid);
+        for item in 0..length {
+            children.push(benchmark_row_i64(row) + benchmark_row_i64(item));
+        }
+    }
+    let field = StdArc::new(Field::new("item", DataType::Int64, false));
+    let values = ListArray::try_new(
+        field,
+        OffsetBuffer::from_lengths(lengths),
+        StdArc::new(Int64Array::from(children)),
+        Some(NullBuffer::from(validity)),
+    )
+    .expect("benchmark list offsets and values must agree");
+    let index = Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row % 4))));
+    TypedBatch::try_new(
+        collection_schema(),
+        vec![
+            TypedArray::Generic(StdArc::new(values)),
+            TypedArray::Int64(index),
+        ],
+    )
+    .expect("benchmark collection batch must build")
 }
 
 fn long_tail_schema() -> StdArc<Schema> {
@@ -606,6 +650,37 @@ fn compile_list() -> Arc<CompiledProgram> {
     )
     .map(Arc::new)
     .expect("benchmark program must compile")
+}
+
+fn compile_fixed_collection() -> Arc<CompiledProgram> {
+    let item = StdArc::new(Field::new("item", DataType::Int64, false));
+    compile_numeric_program(
+        "SET constructed = [input.index, input.index], product = dot([input.index, input.index], \
+         [input.index, input.index])",
+        list_schema(),
+        &[
+            ("constructed", DataType::FixedSizeList(item, 2)),
+            ("product", DataType::Int64),
+        ],
+    )
+}
+
+fn compile_ragged_collection() -> Arc<CompiledProgram> {
+    let item = StdArc::new(Field::new("item", DataType::Int64, false));
+    compile_numeric_program(
+        "SET sliced = slice(input.values, 0, 2), member = contains(input.values, input.index), \
+         shared = overlap(input.values, input.values), least = min(input.values), average = \
+         mean(input.values), distance_value = distance(input.values, input.values)",
+        collection_schema(),
+        &[
+            ("sliced", DataType::List(item)),
+            ("member", DataType::Boolean),
+            ("shared", DataType::Boolean),
+            ("least", DataType::Int64),
+            ("average", DataType::Float64),
+            ("distance_value", DataType::Float64),
+        ],
+    )
 }
 
 /// The outputs of the literal-operand programs: each pairs a column with a constant operand.
@@ -2028,6 +2103,138 @@ fn membership_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// Rows in every network benchmark batch. It stays at the blocking threshold so no batch pays the
+/// blocking hop.
+const NETWORK_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+
+fn network_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("address_text", DataType::Utf8, true),
+        Field::new("address", DataType::Binary, true),
+        Field::new("network", DataType::Utf8, true),
+        Field::new("url", DataType::Utf8, true),
+    ]))
+}
+
+/// The text of the address one benchmark row holds: three rows in four hold IPv4 addresses, half
+/// of them inside `10.0.0.0/8` and half outside it, and the fourth holds an IPv6 address.
+fn benchmark_address_text(row: usize) -> String {
+    let low = row % 256;
+    if row % 4 == 3 {
+        return format!("2001:db8::{row:x}");
+    }
+    if row.is_multiple_of(2) {
+        return format!("10.{}.{}.{low}", (row / 256) % 256, row % 7);
+    }
+    format!("192.0.2.{low}")
+}
+
+/// Every row holds its address as text and already parsed into octets, and names one of two
+/// networks in runs of 64 rows. Each URL has a host, a path, a fragment and a query that carries
+/// the searched name after two other parameters.
+fn network_batch() -> TypedBatch {
+    let texts = (0..NETWORK_KERNEL_ROWS)
+        .map(benchmark_address_text)
+        .collect::<Vec<_>>();
+    let mut octets = Vec::with_capacity(texts.len());
+    for text in &texts {
+        let address = text
+            .parse::<IpAddr>()
+            .expect("every benchmark address text is an address");
+        let bytes = match address {
+            IpAddr::V4(address) => address.octets().to_vec(),
+            IpAddr::V6(address) => address.octets().to_vec(),
+        };
+        octets.push(bytes);
+    }
+    let networks = (0..NETWORK_KERNEL_ROWS).map(|row| {
+        if (row / 64).is_multiple_of(2) {
+            "10.0.0.0/8"
+        } else {
+            "2001:db8::/32"
+        }
+    });
+    let urls = (0..NETWORK_KERNEL_ROWS).map(|row| {
+        format!(
+            "https://host-{}.example.com/catalog/items/{row}?utm_source=mail&tag=a&q=term+{row}#top",
+            row % 16
+        )
+    });
+    TypedBatch::try_new(
+        network_schema(),
+        vec![
+            TypedArray::Utf8(StringArray::from_iter_values(texts.iter())),
+            TypedArray::Binary(BinaryArray::from_iter_values(octets.iter())),
+            TypedArray::Utf8(StringArray::from_iter_values(networks)),
+            TypedArray::Utf8(StringArray::from_iter_values(urls)),
+        ],
+    )
+    .expect("network benchmark batch must build")
+}
+
+/// Parsing address text against masking and testing addresses already parsed into octets, and
+/// reading URL components, over one batch.
+///
+/// `parse_text` and `parse_then_contain` pay for reading text; `contain_typed`,
+/// `contain_row_network`, `truncate_typed` and `format_typed` start from the typed `BYTES`
+/// column, so the difference is what parsing once and reusing the typed address saves.
+fn network_kernel_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let batch = network_batch();
+    let mut group = c.benchmark_group("network_kernels");
+    group.throughput(Throughput::Elements(NETWORK_KERNEL_ROWS.arch_into()));
+    let programs = [
+        (
+            "parse_text",
+            "SET out = ip_from_string(input.address_text)",
+            DataType::Binary,
+        ),
+        (
+            "contain_typed",
+            "SET out = ip_in_network(input.address, '10.0.0.0/8')",
+            DataType::Boolean,
+        ),
+        (
+            "parse_then_contain",
+            "SET out = ip_in_network(ip_from_string(input.address_text), '10.0.0.0/8')",
+            DataType::Boolean,
+        ),
+        (
+            "contain_row_network",
+            "SET out = ip_in_network(input.address, input.network)",
+            DataType::Boolean,
+        ),
+        (
+            "truncate_typed",
+            "SET out = ip_trunc(input.address, 24)",
+            DataType::Binary,
+        ),
+        (
+            "format_typed",
+            "SET out = ip_to_string(input.address)",
+            DataType::Utf8,
+        ),
+        ("url_host", "SET out = url_host(input.url)", DataType::Utf8),
+        (
+            "url_query_value",
+            "SET out = url_query_value(input.url, 'q')",
+            DataType::Utf8,
+        ),
+    ];
+    for (name, source, output_type) in programs {
+        let compiled = compile_numeric_program(source, network_schema(), &[("out", output_type)]);
+        group.bench_with_input(BenchmarkId::new(name, "columns"), &batch, |b, batch| {
+            b.iter(|| {
+                runtime.block_on(execute_benchmark_program(
+                    black_box(&compiled),
+                    black_box(batch),
+                ))
+            })
+        });
+    }
+    group.finish();
+}
+
 /// How many rows of a batch a conditional arm selects.
 #[derive(Debug, Clone, Copy)]
 enum Selectivity {
@@ -2301,6 +2508,8 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
     let nullable_casts_compiled = compile_nullable_casts();
     let text_transform_compiled = compile_text_transform();
     let list_compiled = compile_list();
+    let fixed_collection_compiled = compile_fixed_collection();
+    let ragged_collection_compiled = compile_ragged_collection();
     let key_projection_compiled = compile_key_projection();
     let window_aggregate_input_compiled = compile_window_aggregate_input();
     let correlate_where_compiled = compile_correlate_where();
@@ -2419,6 +2628,31 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
                 ))
             })
         });
+        group.bench_with_input(BenchmarkId::new("fixed_collection", rows), &rows, |b, _| {
+            b.iter(|| {
+                runtime
+                    .block_on(execute_benchmark_program(
+                        black_box(&fixed_collection_compiled),
+                        black_box(&batch),
+                    ))
+                    .assured("the fixed collection benchmark has valid inputs")
+            })
+        });
+        let batch = collection_batch(rows);
+        group.bench_with_input(
+            BenchmarkId::new("ragged_collection", rows),
+            &rows,
+            |b, _| {
+                b.iter(|| {
+                    runtime
+                        .block_on(execute_benchmark_program(
+                            black_box(&ragged_collection_compiled),
+                            black_box(&batch),
+                        ))
+                        .assured("the ragged collection benchmark has valid inputs")
+                })
+            },
+        );
 
         let batch = stateful_batch(&key_projection_compiled, rows);
         group.bench_with_input(BenchmarkId::new("key_projection", rows), &rows, |b, _| {
@@ -2475,6 +2709,7 @@ criterion_group!(
     numeric_kernel_benches,
     datetime_kernel_benches,
     calendar_kernel_benches,
-    membership_kernel_benches
+    membership_kernel_benches,
+    network_kernel_benches
 );
 criterion_main!(benches);

@@ -101,6 +101,12 @@ every selected usage observes the new pinned version. A validation or activation
 report a partially rebound set. [Resource Versions And Bindings](./resource-versions.md#rebinding)
 defines the rebinding contract.
 
+`RESET WASM PROCESSOR ... STATE` uses the same durable execution reference and retained outcome.
+The ordered transaction records the reset as an effect even though it changes no Model. Success
+waits for the selected guest-state generation to be durable and its replacement execution usable.
+Retrying an admitted reference resumes or reads the original outcome; an expired reference cannot
+start another destructive reset.
+
 ## All-live-node barriers
 
 A completion barrier continuously derives the required set from current effective live membership.

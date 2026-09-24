@@ -607,6 +607,14 @@ impl ImpactAttribution {
 pub struct BranchKeyFingerprint(#[serde(with = "fingerprint_hex")] [u8; 32]);
 
 impl BranchKeyFingerprint {
+    /// Fingerprint the canonical typed key text used by runtime branch keys and reset selectors.
+    pub fn of_canonical_text(text: &str) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"nervix/branch-key");
+        hasher.update(text.as_bytes());
+        Self::new(*hasher.finalize().as_bytes())
+    }
+
     pub const fn new(fingerprint: [u8; 32]) -> Self {
         Self(fingerprint)
     }
@@ -984,6 +992,10 @@ pub enum TransactionOperation {
         requested: RequestedResourceVersion,
         version: u64,
     },
+    ResetWasmState {
+        domain: DomainName,
+        processor: crate::WasmProcessorName,
+    },
 }
 
 impl TransactionOperation {
@@ -997,6 +1009,7 @@ impl TransactionOperation {
             | Self::StopDomain { domain }
             | Self::CreateResource { domain, .. }
             | Self::RebindResource { domain, .. } => domain,
+            Self::ResetWasmState { domain, .. } => domain,
         }
     }
 }
@@ -1036,6 +1049,9 @@ pub enum OperationImpactReason {
         resource: ResourceName,
         from_version: u64,
         to_version: u64,
+    },
+    WasmStateReset {
+        node: NodeRef,
     },
 }
 

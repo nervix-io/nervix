@@ -259,6 +259,9 @@ instance and all timeout handles it owned. A fresh initialization may request it
 no deadline armed by the replaced instance can fire in the new state lifetime even though domain
 logical time continued across the reset.
 
+An NSPL reset uses this same clock contract. Repeating its durable command reference resumes the
+same guest-state lifetime replacement without changing the domain clock mapping.
+
 Generated records use the snapshot assigned to their generating operation. Buffered emitter
 batches and their retries retain the snapshot from acceptance, while external observation fields
 whose contract is actual UTC obtain that value at the shared source-host intake boundary or their

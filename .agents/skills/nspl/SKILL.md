@@ -228,6 +228,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   a zero divisor, and a float or math result that is NaN or infinite fail only that message with a
   per-message error. Give a route whose operands can reach those values an `ON MESSAGE ERROR`
   policy, and cast to a wider type before arithmetic that can exceed the narrower one.
+- Build fixed arrays with `[a, b]` or `array(a, b)` and vectors with `vec(a, b)`; a direct `vec()`
+  assignment takes its empty vector type from the declared `VEC` field. Keep element types exact.
+  Use `slice`, `concat`, `contains`, `overlap`, `min`, `max`, `mean`, `dot`, and `distance` as specified
+  in `Filter-Map Functions` → `Array And Vector Functions`; equal lengths are required for `dot`
+  and `distance`.
 - Expect `round(x, digits)` to round a float's stored binary value exactly, so `round(2.675, 2)` is
   `2.67`. Test for NaN and infinities with `is_nan`, `is_finite`, and `is_infinite`, which accept
   only `F32` and `F64`. Give `bitwise_and`, `bitwise_or`, and `bitwise_xor` two arguments of one
@@ -280,6 +285,17 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   native bytes. Convert explicitly with `bytes_from_utf8`, `bytes_to_utf8`, `base64_encode`,
   `base64_decode`, `hex_encode`, and `hex_decode`; `sha256` returns raw digest bytes and `xxh3_64`
   returns a deterministic `U64`. Encoding and hashing keep input sensitivity.
+- Parse address text once with `ip_from_string` into a 4-octet IPv4 or 16-octet IPv6 `BYTES`
+  value, then test and mask the value with `ip_in_network(address, '<cidr>')`, `ip_trunc`,
+  `ip_family`, and `ip_unmap`, and write it with `ip_to_string`. Families never mix: an
+  IPv4-mapped `::ffff:a.b.c.d` address matches no IPv4 network until `ip_unmap`. Write a literal
+  network in exact CIDR form without host bits, or the statement is rejected.
+- Read URL parts with `url_scheme`, `url_host`, `url_port`, `url_path`, `url_query`,
+  `url_fragment`, `url_query_value`, and `url_query_values`, and decode escapes with `url_decode`.
+  Inputs must be absolute URLs; prefix a request target with a base explicitly. Host, port, query,
+  fragment, and query values are null when the URL lacks them, so write them to `OPTIONAL` fields or
+  `coalesce` them. Malformed addresses, networks, URLs, and escapes fail the message; guard with
+  `is_ip_address` or `is_url` in a `CASE` to route them without an error.
 - Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
   STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
   the same format-qualified ALTER form owns field evolution.
@@ -380,6 +396,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   state, and say that it replaces the lifetime once rather than retrying. Never present it as a
   recovery for a compile, initialization, fuel, memory, storage, replication, or authority failure;
   none of those discards state under either value.
+- To intentionally replace an existing WASM processor's guest state, use
+  `RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  Choose the explicit scope that matches its declared branch, and supply every branch-key field
+  with an exact typed literal for one selected branch. The processor must be running and the
+  selected branch must already exist. This command loses the selected computation state; a fresh
+  command reference is a new reset, while retrying the same reference returns its original outcome.
+  See the reset section in `Runtime Nodes` and `Command Completion` before suggesting it.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.

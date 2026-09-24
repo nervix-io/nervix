@@ -55,11 +55,11 @@ for the WASM isolation and memory boundary.
 
 Builtins are evaluated over Arrow columns: one call computes its result for every message in a
 batch together. A message's result never depends on the other messages in the batch, so batching
-does not change any value. The one limit a batch's messages share is the text a `STRING` column
-holds, which `repeat`, `lpad`, and `rpad` check before they build a result; see
-[String Functions](#string-functions). How a function traverses its column, whether through an Arrow
-compute kernel, one pass over the column's value buffer, or a loop over its rows, is internal to the
-function and does not change its results.
+does not change any value. The one limit a batch's messages share is the bytes one `STRING` or
+`BYTES` column holds, which `repeat`, `lpad`, `rpad`, and every function whose result can be longer
+than its arguments check before they build a result; see [String Functions](#string-functions). How
+a function traverses its column, whether through an Arrow compute kernel, one pass over the column's
+value buffer, or a loop over its rows, is internal to the function and does not change its results.
 
 A pass over a value buffer is written so the compiler can turn it into the vector instructions of
 the CPU a Nervix binary is built for. Builtins contain no hand-written SIMD code, and the vector
@@ -86,7 +86,7 @@ Every builtin follows these rules unless its own description says otherwise:
 | Property | Contract |
 | --- | --- |
 | Types | Arguments are never converted implicitly. A function that accepts several types, such as `abs` over every numeric type, takes each of them as it is. |
-| Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, `is_null`, `greatest`, and `least` define their own null handling. |
+| Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, `is_null`, `greatest`, and `least` define their own null handling, and `url_host`, `url_port`, `url_query`, `url_fragment`, and `url_query_value` are also null for a URL that lacks what they read. |
 | Sensitivity | A result is sensitive when any argument is sensitive, including results such as `length(...)`, `is_null(...)`, and `count(...)` that do not contain the argument's value. Only `leak_sensitive(...)` removes sensitivity. |
 | Volatility | Every builtin is deterministic except `now()`, which returns one value for an execution, and `uuid_v4()` and `uuid_v7()`, which return a new value for every message. |
 | Errors | A function that can fail reports a per-message error and yields null for that message. The error activates `ON MESSAGE ERROR`. Inside a conditional, only the selected arm can report one. |
@@ -420,6 +420,33 @@ Positions count from 1.
 | `to_hex(value)` | `STRING` | Lowercase hexadecimal digits without a prefix. Integral input only; a negative value is written as its two's complement at the input's width |
 | `md5(text)` | `STRING` | Lowercase hexadecimal digest of the UTF-8 bytes |
 
+`lower`, `upper`, and `initcap` use Unicode case mappings, which never depend on the node's locale.
+A mapping can change a value's length: `upper('Grüßen')` is `GRÜSSEN`. A literal, a field, and a
+computed value holding the same text always convert to the same result.
+
+`count`, `start`, `length`, and `index` may be any integer type and are never narrowed to another:
+an unsigned count above the `I64` range reaches past the end of any text, exactly as the largest
+`I64` count does.
+
+`substr` treats a `start` at or before `1` as the first character and counts `length` from there. A
+`start` past the end, or a negative `length`, returns an empty string.
+
+`lpad` and `rpad` shorten text longer than `length` to its first `length` characters, return an
+empty string when `length` is at most `0`, and return shorter text unchanged when `fill` is empty.
+
+`split_part` returns an empty string when `index` is at most `0` or past the last part. With an
+empty `delimiter`, the whole text is part `1`.
+
+`repeat`, `lpad`, and `rpad` compute the length of a result before they build it. The values one
+call produces for a batch share one `STRING` column, which holds at most 2,147,483,647 bytes of
+text, so a result that does not fit in what its column has left reports an `overflow` error, such
+as `repeat result exceeds the text one STRING column holds`, and yields null instead of being
+built. Inside a conditional arm the column holds only the results of the messages that select the
+arm, so a message that selects another arm uses none of its text. A call whose arguments are all
+literals computes one value that every message in the batch holds, so that value must fit once for
+each of them: `repeat('ab', 600000000)` fits a batch of one message but reports the error on every
+message of a batch of two.
+
 ## Bytes, Encodings And Hashes
 
 `BYTES` values hold arbitrary octets, including zero and non UTF-8 bytes. These functions accept
@@ -447,32 +474,174 @@ Decoding failures enter the route's `ON MESSAGE ERROR` policy with `error.code =
 `error.operation` names the route operation, such as `set`; the diagnostic names the failed
 function without exposing its input.
 
-`lower`, `upper`, and `initcap` use Unicode case mappings, which never depend on the node's locale.
-A mapping can change a value's length: `upper('Grüßen')` is `GRÜSSEN`. A literal, a field, and a
-computed value holding the same text always convert to the same result.
+## IP Addresses And Networks
 
-`count`, `start`, `length`, and `index` may be any integer type and are never narrowed to another:
-an unsigned count above the `I64` range reaches past the end of any text, exactly as the largest
-`I64` count does.
+An IP address is a `BYTES` value in network byte order: four octets for an IPv4 address and sixteen
+for an IPv6 address, so its length is its family. `ip_from_string` reads an address from text, and
+every other address function reads the octets as one 32-bit or 128-bit number and never reads text.
+Parse an address once into a `BYTES` field and mask and test that field, so each further test costs
+no second parse: `ip_from_string` can fail, so two calls of it are two parses even in one
+expression.
 
-`substr` treats a `start` at or before `1` as the first character and counts `length` from there. A
-`start` past the end, or a negative `length`, returns an empty string.
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `ip_from_string(text)` | `BYTES` | The address `text` writes: 4 octets for IPv4 and 16 for IPv6 |
+| `ip_to_string(address)` | `STRING` | The address in its canonical text form |
+| `ip_family(address)` | `I64` | `4` for an IPv4 address and `6` for an IPv6 address |
+| `ip_trunc(address, prefix_length)` | `BYTES` | The address with every bit after its first `prefix_length` bits cleared: the first address of the network of that length that holds it. `prefix_length` may be any integer type |
+| `ip_in_network(address, network)` | `BOOL` | True when `address` lies in `network`, a `STRING` in CIDR notation such as `'10.0.0.0/8'` |
+| `ip_unmap(address)` | `BYTES` | The IPv4 address an IPv4-mapped IPv6 address carries, and every other address unchanged |
+| `is_ip_address(text)` | `BOOL` | True when `ip_from_string` reads an address from `text`. Never fails |
 
-`lpad` and `rpad` shorten text longer than `length` to its first `length` characters, return an
-empty string when `length` is at most `0`, and return shorter text unchanged when `fill` is empty.
+`ip_from_string` reads an IPv4 address as four decimal numbers from `0` to `255` separated by dots,
+each without leading zeros, so `010.0.0.1` is rejected rather than read as octal. It reads an IPv6
+address in the text forms of RFC 4291: eight groups of one to four hexadecimal digits in either
+letter case, `::` in place of one run of zero groups, and optionally the last two groups written as
+an IPv4 address, as in `::ffff:192.0.2.1`. The text is the address alone: surrounding whitespace,
+brackets, a port, a prefix length, and an IPv6 zone index such as `%eth0` are rejected. No function
+resolves a name, so `ip_from_string('localhost')` fails like any other text that is not an address.
 
-`split_part` returns an empty string when `index` is at most `0` or past the last part. With an
-empty `delimiter`, the whole text is part `1`.
+`ip_to_string` writes an IPv4 address in dotted decimal and an IPv6 address in the canonical form of
+RFC 5952: lowercase hexadecimal groups without leading zeros, with the longest run of two or more
+zero groups, or the first of two equally long runs, written as `::`. An IPv4-mapped address is
+written with its IPv4 address in dotted decimal.
+`ip_to_string(ip_from_string('2001:DB8:0:0:0:0:0:1'))` is `2001:db8::1`, and
+`ip_to_string(ip_from_string('::FFFF:C000:201'))` is `::ffff:192.0.2.1`. A `BYTES` address renders
+as base64 in subscriptions and JSON payloads, so write it with `ip_to_string` to show it as text.
 
-`repeat`, `lpad`, and `rpad` compute the length of a result before they build it. The values one
-call produces for a batch share one `STRING` column, which holds at most 2,147,483,647 bytes of
-text, so a result that does not fit in what its column has left reports an `overflow` error, such
-as `repeat result exceeds the text one STRING column holds`, and yields null instead of being
-built. Inside a conditional arm the column holds only the results of the messages that select the
-arm, so a message that selects another arm uses none of its text. A call whose arguments are all
-literals computes one value that every message in the batch holds, so that value must fit once for
-each of them: `repeat('ab', 600000000)` fits a batch of one message but reports the error on every
-message of a batch of two.
+A network is written as an address, `/`, and a prefix length in decimal without leading zeros: `0`
+to `32` for an IPv4 network and `0` to `128` for an IPv6 network. The address may set no bit after
+the prefix, so `'10.0.0.1/8'` is rejected rather than read as `'10.0.0.0/8'`. `'0.0.0.0/0'` holds
+every IPv4 address and `'::/0'` every IPv6 address. A network written as a literal, or computed from
+literals alone, is read once when the statement is applied, and one that does not read rejects the
+statement with a message that names its defect, such as
+`function 'ip_in_network' network '10.0.0.1/8' has host bits set past its prefix length`. A network
+read from a field is read for each message, a message that repeats the previous message's network
+reuses that reading, and a network that does not read fails its message.
+
+Each address has exactly one family, and no function converts between families unless it says so:
+
+- `ip_in_network` is false for an address of the other family than its network, so no IPv6 address
+  lies in an IPv4 network.
+- `ip_from_string('::ffff:10.0.0.1')` is a 16-octet IPv6 address, the IPv4-mapped form of
+  `10.0.0.1` that dual-stack sockets report for IPv4 clients. It does not lie in `'10.0.0.0/8'`, and
+  `ip_unmap` of it does. Test `ip_in_network(ip_unmap(address), '10.0.0.0/8')` to treat such
+  clients as IPv4.
+- `ip_unmap` converts only IPv4-mapped addresses, the `::ffff:0:0/96` range. An IPv4-compatible
+  address such as `::a09:807`, and every other IPv6 or IPv4 address, is returned unchanged.
+- A prefix length counts bits at the address's own width, so `ip_trunc(address, 24)` keeps the first
+  24 of the 32 bits of an IPv4 address and the first 24 of the 128 bits of an IPv6 address. Where
+  both families occur, choose the length by family:
+  `ip_trunc(address, IF ip_family(address) = 4 THEN 24 ELSE 48 END)`.
+
+A null argument produces a null result. Otherwise a function fails only the messages it cannot
+answer:
+
+| Function | Fails when | Error |
+| --- | --- | --- |
+| `ip_from_string` | `text` is not an address in the forms above | `cast_failed`: `ip_from_string input is not an IPv4 or IPv6 address` |
+| `ip_to_string`, `ip_family`, `ip_trunc`, `ip_in_network`, `ip_unmap` | `address` is neither 4 nor 16 octets long | `invalid_argument`, such as `ip_family input is not a 4 or 16 byte IP address` |
+| `ip_trunc` | `prefix_length` is negative or longer than the address | `invalid_argument`, such as `ip_trunc prefix length must be 0 to 32 for an IPv4 address` |
+| `ip_in_network` | A network read from a field does not read | `invalid_argument`: `ip_in_network network` followed by the defect: `is not written as address/prefix`, `address is not an IPv4 or IPv6 address`, `prefix length is not a decimal number without leading zeros`, `prefix length must be 0 to 32 for an IPv4 network`, or `has host bits set past its prefix length` |
+
+To route malformed text explicitly instead of failing the message, test it first:
+`CASE WHEN is_ip_address(input.client) THEN ip_from_string(input.client) END` reads only the
+messages that hold an address and is null for the others. Address functions keep the sensitivity
+of their arguments, so whether a sensitive address lies in a network is sensitive.
+
+```nspl,ignore
+SET client = ip_from_string(input.client_ip),
+    client_subnet = ip_to_string(ip_trunc(output.client, IF ip_family(output.client) = 4 THEN 24 ELSE 48 END)),
+    internal = ip_in_network(ip_unmap(output.client), '10.0.0.0/8')
+WHERE NOT output.internal
+```
+
+## URLs
+
+URL functions read their `STRING` argument as an absolute URL under the WHATWG URL Standard, the
+rules web browsers apply, through the Rust `url` crate. They compute only from the text: none
+fetches a URL, resolves a host, or consults the public suffix list.
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `url_scheme(url)` | `STRING` | The scheme, lowercased, without its `:` |
+| `url_host(url)` | optional `STRING` | The host, or null when the URL has none |
+| `url_port(url)` | optional `I64` | The port, the scheme's default port when the URL names none, or null when it has neither |
+| `url_path(url)` | `STRING` | The path, percent-encoded |
+| `url_query(url)` | optional `STRING` | The query without its `?`, percent-encoded, or null when the URL has no `?` |
+| `url_fragment(url)` | optional `STRING` | The fragment without its `#`, or null when the URL has no `#` |
+| `url_query_value(url, name)` | optional `STRING` | The decoded value of the first query parameter named `name`, or null when there is none |
+| `url_query_values(url, name)` | `VEC<STRING>` | The decoded values of every query parameter named `name`, in query order, or an empty vector when there is none |
+| `url_decode(text)` | `STRING` | `text` with every percent escape decoded |
+| `is_url(text)` | `BOOL` | True when the other URL functions read `text` as a URL. Never fails |
+
+A URL is read and normalized as the URL Standard specifies:
+
+- Leading and trailing spaces and control characters are removed, and so are tabs and newlines
+  anywhere in the text.
+- The scheme is lowercased. For the schemes `http`, `https`, `ws`, `wss`, `ftp`, and `file`, the
+  host is lowercased and an internationalized domain name is written in its ASCII form, so the host
+  of `http://Bücher.example/` is `xn--bcher-kva.example`. An IPv4 host is written in dotted
+  decimal, including the forms browsers accept, so the host of `http://0x7f.1/` is `127.0.0.1`.
+- An IPv6 host is written as the URL Standard writes it, lowercase, compressed, and never in dotted
+  decimal, and `url_host` returns it without its brackets: the host of `http://[::FFFF:192.0.2.1]/`
+  is `::ffff:c000:201`, which `ip_from_string` reads.
+- `.` and `..` path segments are resolved, and a space or any other character a path cannot hold is
+  percent-encoded: `url_path('https://example.com/a/./b/../c d')` is `/a/c%20d`. The path of a URL
+  of those six schemes starts with `/`.
+- A port equal to the scheme's default is removed, so `url_port` answers `80` for
+  `http://example.com:80/` as for `http://example.com/`. The defaults are `80` for `http` and `ws`,
+  `443` for `https` and `wss`, and `21` for `ftp`. A URL of any other scheme that names no port has
+  a null port.
+- Other schemes have no default port and may have no host: the path of `mailto:ops@example.com` is
+  `ops@example.com`, and its host is null.
+
+A component the URL lacks is null: the host of a `mailto:` or `urn:` URL and of a `file:` URL with
+an empty host, the query of a URL without `?`, and the fragment of a URL without `#`. A URL that ends
+in `?` or `#` has an empty query or fragment rather than a null one.
+
+The query is read as `application/x-www-form-urlencoded` parameters. It is split at every `&`, an
+empty parameter is skipped, and each parameter is split at its first `=` into a name and a value; a
+parameter without `=` has an empty value. Names and values are percent-decoded with `+` read as a
+space, so the query `q=hello+world%21&tag=x&tag=y%26z` has the value `hello world!` for `q` and the
+values `x` and `y&z` for `tag`. A parameter matches when its decoded name equals `name` exactly,
+letter case included. A parameter whose name does not decode matches no name, and a matching value
+that does not decode fails the message.
+
+`url_decode` replaces each `%` followed by two hexadecimal digits of either case with the octet they
+name, and keeps every other character as it is, `+` included, so `url_decode(url_path(input.url))`
+is the readable path. Rather than guess, it fails a message whose text has a `%` not followed by two
+hexadecimal digits, or whose decoded octets are not UTF-8.
+
+A null argument produces a null result. Otherwise a function fails only the messages it cannot
+answer:
+
+| Function | Fails when | Error |
+| --- | --- | --- |
+| Every URL function except `url_decode` and `is_url` | `url` is not an absolute URL | `cast_failed`, naming the function and the URL Standard's reason, such as `url_host input is not an absolute URL: relative URL without a base`; other reasons include `empty host`, `invalid port number`, and `invalid international domain name` |
+| `url_query_value`, `url_query_values` | The value of a matching parameter is not percent-encoded UTF-8 | `cast_failed`, such as `url_query_value input is not valid percent-encoded UTF-8` |
+| `url_decode` | `text` is not percent-encoded UTF-8 | `cast_failed`: `url_decode input is not valid percent-encoded UTF-8` |
+
+A relative reference, such as the request target `/search?q=x` of an HTTP request line, is not an
+absolute URL. Prefix it with a base explicitly:
+`url_query_value(concat('http://localhost', input.target), 'q')`. To route text that may not be a
+URL, test it first: `CASE WHEN is_url(input.referrer) THEN url_host(input.referrer) END` is null for
+the messages whose referrer is not a URL.
+
+Each call reads its own URL, so `url_host(input.url)` and `url_path(input.url)` each parse it, while
+a URL that every message shares, such as a literal, is read once per batch. Percent-encoding and
+ASCII domain names can make a component longer than the text it came from, and like the results of
+`repeat`, a component that does not fit in what its `STRING` column has left reports an `overflow`
+error. URL functions keep the sensitivity of their arguments, so the host of a sensitive URL is
+sensitive.
+
+```nspl,ignore
+SET scheme = url_scheme(input.referrer),
+    referrer_host = url_host(input.referrer),
+    campaign = url_query_value(input.referrer, 'utm_campaign'),
+    tags = url_query_values(input.referrer, 'tag'),
+    landing_path = url_decode(url_path(input.referrer))
+```
 
 ## String Predicates
 
@@ -950,9 +1119,16 @@ names.
 
 ## Array And Vector Functions
 
-These functions take one `ARRAY` or `VEC` value, described in
+`[a, b, ...]` and `array(a, b, ...)` construct an `ARRAY` whose fixed width is the number of
+arguments. `vec(a, b, ...)` constructs a `VEC`; `vec()` constructs an empty vector when assigned
+directly to a declared `VEC` field, which supplies its element type. Constructor elements must
+have exactly the same declared type. If any element is null, the constructed container is null;
+schema elements themselves remain required. A fixed `ARRAY` has at least one element.
+
+The functions below take `ARRAY` or `VEC` values described in
 [Schemas And Codecs](schemas-and-codecs.md#internal-schemas). The elements of a multidimensional
-`ARRAY` are its outermost items. A null list produces a null result.
+`ARRAY` are its outermost items. A null container produces a null result, including for binary
+functions when either container is null.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
@@ -961,6 +1137,14 @@ These functions take one `ARRAY` or `VEC` value, described in
 | `first(list)` | element type | The first element, or null for an empty list |
 | `last(list)` | element type | The last element, or null for an empty list |
 | `nth(list, index)` | element type | The element at `index`, counting from `0`, or null when `index` is negative or past the end. `index` may be any integer type |
+| `contains(list, element)` | `BOOL` | Whether a scalar element occurs in the list. Empty lists return `false`; a null element argument returns null |
+| `overlap(left, right)` | `BOOL` | Whether two lists of the same exact element type share an element. An empty list returns `false` |
+| `slice(list, start, length)` | `VEC<element>` | Selects up to `length` elements from the zero-based `start`; negative bounds act as zero and bounds past the end are clipped. Null bounds return null |
+| `concat(list, ...)` | `ARRAY` or `VEC` | Concatenates lists with one exact element type. All fixed arrays produce a fixed array whose width is their sum; any vector input produces a vector |
+| `min(list)`, `max(list)` | element type | Least or greatest scalar element. Empty lists return null; float ordering follows IEEE total order, including distinct signed zeros and NaNs |
+| `mean(list)` | `F64` | Arithmetic mean of numeric elements. An empty list returns null; integer inputs round to `F64` for the calculation |
+| `dot(left, right)` | element type | Numeric dot product. Empty vectors return zero. Integer multiplication and accumulation are checked at the element type |
+| `distance(left, right)` | `F64` | Euclidean distance of numeric elements. Empty vectors return zero; integer inputs round to `F64` for the calculation |
 
 `nth` counts from `0`, unlike string positions: `nth(input.values, 0)` is the same element as
 `first(input.values)`. `first`, `last`, and `nth` require scalar or `DATETIME` elements; a list
@@ -968,6 +1152,11 @@ whose elements are themselves `ARRAY` or `VEC` values is rejected when the state
 
 `sum` follows the arithmetic operators. An integer sum that overflows its type reports an overflow,
 and a floating-point sum that is not finite reports a per-message error.
+`dot` and `distance` require equal lengths in every message; a mismatch reports
+`invalid_argument` for that message. A non-finite `mean`, `dot`, or `distance` result reports
+`invalid_argument`. `contains` and `overlap` use the scalar equality contract: NaN equals no
+element, and positive and negative zero are equal. These functions compare exact element types;
+they never cast or stringify list elements.
 
 In a [window processor](processors.md#window-processor) route, `count`, `sum`, `first`, and `last`
 are always window aggregates, like every other

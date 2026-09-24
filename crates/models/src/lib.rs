@@ -27,6 +27,7 @@ mod node_ref;
 mod quiesce;
 mod rebind_resource;
 mod remote;
+mod reset_wasm_state;
 mod resource;
 mod resource_binding;
 mod schema;
@@ -99,6 +100,10 @@ pub use rebind_resource::{RebindResource, RebindResourceMembers, RebindResourceS
 pub use remote::{
     RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeElementValue,
     RemoteRuntimeField, RemoteRuntimeRecord, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+};
+pub use reset_wasm_state::{
+    ResetWasmBranchField, ResetWasmState, ResetWasmStateScope, ResetWasmStateSelectionError,
+    ResolvedResetWasmStateScope,
 };
 pub use resource::{
     RequestedResourceVersion, ResourceId, ResourceNodeState, ResourceNodeStatus,

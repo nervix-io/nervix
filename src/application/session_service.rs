@@ -63,7 +63,7 @@ use super::{
     service_tasks::ServiceTasks,
     session::admission::{CancelledBeforeAdmission, RequestAdmission},
     subscription::{
-        SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterestKey,
+        SessionCommandOperation, SessionSubscriptions, SessionView, SubscriptionInterests,
     },
     tls::HttpsListenerCertificates,
     transaction::TransactionRecovery,
@@ -158,8 +158,8 @@ pub(in crate::application) struct SessionServiceInner {
     /// Keeps internal coordination available until admitted work has drained.
     pub(in crate::application) drain_support_shutdown: CancellationToken,
     pub(in crate::application) events: SessionEvents,
-    pub(in crate::application) subscription_interest_counts:
-        DashMap<SubscriptionInterestKey, usize, RandomState>,
+    /// Also held by every subscription delivery, whose interest lease releases into it.
+    pub(in crate::application) subscription_interests: SubscriptionInterests,
     pub(in crate::application) interconnect: Transport,
     pub(in crate::application) service_tasks: ServiceTasks,
     pub(in crate::application) configured_basic_auth: Option<BasicAuthCredentials>,
@@ -1261,7 +1261,7 @@ mod tests {
             "{values:?}"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -1286,7 +1286,7 @@ mod tests {
             suggestion_values(&service, &subscriptions, "CREATE RELAY orders SCHEMA ").await;
         assert!(values.contains(&"queued_order".to_string()), "{values:?}");
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -1335,7 +1335,7 @@ mod tests {
             "{recreated:?}"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -1366,8 +1366,8 @@ mod tests {
             "{unbound:?}"
         );
 
-        writer.stop_all(&service).await;
-        observer.stop_all(&service).await;
+        writer.stop_all().await;
+        observer.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -1422,7 +1422,7 @@ mod tests {
             "{reattached:?}"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -1465,8 +1465,8 @@ mod tests {
         let holder = suggestion_values(&service, &second, "CREATE RELAY orders SCHEMA ").await;
         assert!(holder.contains(&"takeover_order".to_string()), "{holder:?}");
 
-        first.stop_all(&service).await;
-        second.stop_all(&service).await;
+        first.stop_all().await;
+        second.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -1505,7 +1505,7 @@ mod tests {
         assert!(values.contains(&"queued_state".to_string()), "{values:?}");
         assert!(values.contains(&"queued_plain".to_string()), "{values:?}");
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 }

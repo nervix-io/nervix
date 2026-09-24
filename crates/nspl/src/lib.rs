@@ -54,6 +54,7 @@ pub mod reingestor;
 pub mod relay;
 pub mod relocation;
 pub mod reorderer;
+pub mod reset_wasm_state;
 pub mod schema;
 #[cfg(feature = "server")]
 pub mod server_statement;

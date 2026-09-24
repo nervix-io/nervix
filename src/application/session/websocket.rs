@@ -18,20 +18,24 @@ use bytes::Bytes;
 use error_stack::Report;
 use futures_util::{Sink, SinkExt as _, Stream, StreamExt as _, stream};
 use nervix_client_wire::{
-    EncodedFrame, ServerFrame, SessionLimits,
+    SessionLimits,
     websocket::{ServerWebSocketCodec, WebSocketData, WebSocketError},
 };
 use nervix_models::UserName;
 use nervix_recovery::{Discarded as _, Reported as _};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{
     self, Message,
     error::CapacityError,
     protocol::{CloseFrame, WebSocketConfig, frame::coding::CloseCode},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
-use super::{InboundFrame, SESSION_OUTBOUND_CAPACITY, SessionTransport};
+use super::{
+    InboundFrame, SessionTransport,
+    outbound::{self, SessionFrames},
+};
 use crate::application::session_service::SessionServiceImpl;
 
 /// The close code for a message larger than the frame limit, which tungstenite refuses before it
@@ -140,7 +144,7 @@ impl SessionServiceImpl {
             .filter_map(move |message| ready(violations.inbound_frame(&reader_codec, message)))
             .chain(stream::once(ready(InboundFrame::Failed)));
         let inbound = Box::pin(inbound);
-        let (outbound, frames) = mpsc::channel(SESSION_OUTBOUND_CAPACITY);
+        let (outbound, frames) = outbound::channel(CancellationToken::new());
         let writer = self
             .inner
             .service_tasks
@@ -158,13 +162,13 @@ impl SessionServiceImpl {
 async fn write_frames<S, E>(
     mut sink: S,
     codec: ServerWebSocketCodec,
-    mut frames: mpsc::Receiver<EncodedFrame<ServerFrame>>,
+    mut frames: SessionFrames,
     violation: oneshot::Receiver<Violation>,
 ) where
     S: Sink<Message, Error = E> + Unpin,
     E: std::fmt::Display,
 {
-    while let Some(frame) = frames.recv().await {
+    while let Some(frame) = frames.next().await {
         tokio::task::consume_budget().await;
         let payload = Vec::from(codec.encode(frame));
         if let Err(error) = sink.send(Message::Binary(payload)).await {
