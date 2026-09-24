@@ -108,7 +108,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: Membership, range and null-safe predicates filter source inputs, routes and read-only session subscriptions
+  Scenario Outline: Membership, range and null-safe predicates filter ingested messages, source inputs, routes and read-only session subscriptions
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -135,6 +135,8 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       CREATE INGESTOR parcel_source
         FROM ENDPOINT parcel_ingress MODE NO_ACK SEQUENTIAL
         ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING parcel_batch_codec
+        FILTER WHERE input.id NOT IN ('heartbeat', 'ping')
+          AND input.id NOT BETWEEN 'probe-000' AND 'probe-999'
         TO parcels
           INHERIT ALL
           UNBRANCHED
@@ -161,7 +163,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       """
     And http payload is posted to node "node-1" with host "parcel-filters-{{test_id}}.example.com" path "/parcels"
       """
-      [{"id":"void-parcel","status":"void","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"switched","status":"open","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"too-heavy","status":"open","weight":60.0,"carrier":"dhl","preferred":"ups"},{"id":"kept-carrier","status":"open","weight":5.0,"carrier":"ups","preferred":"ups"},{"id":"test-parcel","status":"test","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"unassigned","status":"held","weight":1.0,"carrier":null,"preferred":"ups"},{"id":"both-unassigned","status":"held","weight":50.0,"carrier":null,"preferred":null},{"id":"closed","status":"closed","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"boundary","status":"open","weight":50.0,"carrier":"fedex","preferred":null}]
+      [{"id":"void-parcel","status":"void","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"switched","status":"open","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"too-heavy","status":"open","weight":60.0,"carrier":"dhl","preferred":"ups"},{"id":"kept-carrier","status":"open","weight":5.0,"carrier":"ups","preferred":"ups"},{"id":"test-parcel","status":"test","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"unassigned","status":"held","weight":1.0,"carrier":null,"preferred":"ups"},{"id":"both-unassigned","status":"held","weight":50.0,"carrier":null,"preferred":null},{"id":"closed","status":"closed","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"heartbeat","status":"open","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"probe-042","status":"open","weight":5.0,"carrier":"dhl","preferred":"ups"},{"id":"boundary","status":"open","weight":50.0,"carrier":"fedex","preferred":null}]
       """
     Then within "30s" the relay subscription receives payloads in order
       """
@@ -287,7 +289,185 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: Membership, ranges, null-safe equality and extrema reject operands outside their signatures when the statement is applied
+  Scenario Outline: Membership and range tests choose the key of a LOOKUP_HASH_MAP call
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has resource directory "tiers_dir" containing
+      """
+      {
+        "tiers.jsonl": "{\"tier\":\"gold\",\"discount\":20.0}\n{\"tier\":\"domestic\",\"discount\":5.0}\n{\"tier\":\"standard\",\"discount\":0.0}\n"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE RESOURCE tiers_data;
+      UPLOAD RESOURCE tiers_data VERSION '{{tiers_dir}}';
+      """
+    Then the last command output contains
+      """
+      uploaded resource version 1
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA order_line (
+        id STRING,
+        score I64,
+        country STRING
+      );
+      CREATE SCHEMA priced_line (
+        id STRING,
+        discount F64 OPTIONAL
+      );
+      CREATE SCHEMA tier (
+        tier STRING,
+        discount F64
+      );
+      CREATE WIRE JSON SCHEMA tier_wire MODE STRICT (
+        tier string,
+        discount number
+      );
+      CREATE CODEC tier_codec
+        FROM WIRE JSON SCHEMA tier_wire
+        TO SCHEMA tier;
+      CREATE CODEC order_line_batch_codec
+        FROM JSON
+        TO SCHEMA order_line
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY order_lines SCHEMA order_line UNBRANCHED;
+      CREATE RELAY priced_lines SCHEMA priced_line UNBRANCHED;
+      CREATE HASH MAP discounts_by_tier
+        KEY tier
+        FROM RESOURCE tiers_data VERSION 1
+        PATH 'tiers.jsonl'
+        DECODE USING tier_codec;
+      CREATE VHOST edge tiers-{{test_id}}.example.com;
+      CREATE ENDPOINT order_ingress ON edge PATH '/orders' TYPE HTTP;
+      CREATE INGESTOR order_source
+        FROM ENDPOINT order_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING order_line_batch_codec
+        TO order_lines
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION price_order_lines
+        FROM order_lines
+        UNBRANCHED
+        TO priced_lines
+          SET id = input.id,
+              discount = LOOKUP_HASH_MAP(
+                'discounts_by_tier',
+                CASE
+                  WHEN input.score BETWEEN 90 AND 100 THEN 'gold'
+                  WHEN input.country IN ('us', 'ca') THEN 'domestic'
+                  ELSE 'standard'
+                END,
+                'discount'
+              )
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION priced_lines_subscription TO priced_lines;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "tiers-{{test_id}}.example.com" path "/orders"
+      """
+      [{"id":"top-score","score":95,"country":"de"},{"id":"perfect-local","score":100,"country":"us"},{"id":"local","score":40,"country":"ca"},{"id":"abroad","score":89,"country":"fr"}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "id":"top-score" | "discount":20.0
+      "id":"perfect-local" | "discount":20.0
+      "id":"local" | "discount":5.0
+      "id":"abroad" | "discount":0.0
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
+  Scenario Outline: Membership and range tests select the tensor an inferencer input mapping sends to its model
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA banded_value (
+        band STRING,
+        value F32,
+        fallback F32
+      );
+      CREATE SCHEMA inference_result (
+        result F32
+      );
+      CREATE CODEC banded_value_batch_codec
+        FROM JSON
+        TO SCHEMA banded_value
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY banded_values SCHEMA banded_value UNBRANCHED;
+      CREATE RELAY inference_results SCHEMA inference_result UNBRANCHED;
+      CREATE VHOST edge infer-membership-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/values' TYPE HTTP;
+      CREATE INGESTOR banded_value_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING banded_value_batch_codec
+        TO banded_values
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INFERENCER select_values FROM banded_values
+        USING RESOURCE inference VERSION 1
+        FILE 'models/scalar_identity.onnx'
+        INPUTS {
+          "value" <tensor_type>[] = CASE
+            WHEN input.band IN ('low', 'mid')
+              AND input.value BETWEEN (0.0 AS F32) AND (10.0 AS F32) THEN input.value
+            ELSE input.fallback
+          END
+        }
+        OUTPUT SCHEMA { "result" <tensor_type>[] }
+        UNBRANCHED
+        TO inference_results
+          SET result = result
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION inference_results_subscription TO inference_results;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "infer-membership-{{test_id}}.example.com" path "/values"
+      """
+      [{"band":"low","value":3.0,"fallback":-1.0},{"band":"high","value":4.0,"fallback":-2.0},{"band":"mid","value":42.0,"fallback":-3.0},{"band":"mid","value":10.0,"fallback":-4.0}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      {"result":3.0}
+      {"result":-2.0}
+      {"result":-3.0}
+      {"result":10.0}
+      """
+
+    Examples:
+      | cluster_size | replica_count | tensor_type       |
+      | 1            | 0             | DENSE TENSOR<F32> |
+      | 3            | 0             | DENSE TENSOR<F32> |
+
+  Scenario Outline: Membership, ranges, null-safe equality and extrema reject operands outside their signatures and nondeterministic materialized-state defaults when the statement is applied
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
       """
@@ -312,6 +492,7 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
       );
       CREATE RELAY samples SCHEMA sample UNBRANCHED;
       CREATE RELAY verdicts SCHEMA verdict UNBRANCHED;
+      CREATE RELAY latest_verdicts SCHEMA verdict UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
       """
     When these NSPL commands fail with "IN set element 1 has type Int64, but the operand has type Int32"
       """
@@ -441,6 +622,41 @@ Feature: Membership, ranges, null-safe equality and scalar extrema
         TO verdicts
           SET id = input.id,
               flag = input.salary IN (1.0, 2.0),
+              amount = input.weight
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands fail with "materialized-state DEFAULT for 'latest_verdicts' must use deterministic side-effect-free expressions"
+      """
+      CREATE JUNCTION generated_default_member
+        FROM samples
+        UNBRANCHED
+        USING MATERIALIZED STATE latest_verdicts DEFAULT {
+          id = 'none',
+          flag = 'none' IN ('none', uuid_v4()),
+          amount = 0.0
+        }
+        TO verdicts
+          SET id = input.id,
+              flag = relay_state.latest_verdicts.flag,
+              amount = input.weight
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands fail with "materialized-state DEFAULT for 'latest_verdicts' must use deterministic side-effect-free expressions"
+      """
+      CREATE JUNCTION clock_default_bound
+        FROM samples
+        UNBRANCHED
+        USING MATERIALIZED STATE latest_verdicts DEFAULT {
+          id = 'none',
+          flag = ('2026-01-01T00:00:00Z' AS DATETIME)
+            BETWEEN ('2025-01-01T00:00:00Z' AS DATETIME) AND now(),
+          amount = 0.0
+        }
+        TO verdicts
+          SET id = input.id,
+              flag = relay_state.latest_verdicts.flag,
               amount = input.weight
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
