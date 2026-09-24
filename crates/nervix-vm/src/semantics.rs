@@ -11,9 +11,12 @@
 //! - **Must not know.** How execution walks Arrow buffers, registers or batches, and anything about
 //!   relays, branches, connectors or the registry.
 
-use std::ops::{BitAnd, BitOr, BitXor, Not};
+use std::{
+    ops::{BitAnd, BitOr, BitXor, Not},
+    sync::Arc,
+};
 
-use arrow_schema::{DataType, TimeUnit};
+use arrow_schema::{DataType, Field, TimeUnit};
 use meticulous::OptionExt as _;
 
 use crate::{
@@ -319,6 +322,16 @@ pub enum BuiltinLowering {
     Atan,
     Ceil,
     Concat,
+    ArrayConstruct,
+    VecConstruct,
+    EmptyVec(DataType),
+    Overlap,
+    Slice,
+    ListMin,
+    ListMax,
+    Mean,
+    Dot,
+    Distance,
     Sum,
     Last,
     First,
@@ -816,6 +829,16 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::Abs
         | BuiltinLowering::Ceil
         | BuiltinLowering::Concat
+        | BuiltinLowering::ArrayConstruct
+        | BuiltinLowering::VecConstruct
+        | BuiltinLowering::EmptyVec(_)
+        | BuiltinLowering::Overlap
+        | BuiltinLowering::Slice
+        | BuiltinLowering::ListMin
+        | BuiltinLowering::ListMax
+        | BuiltinLowering::Mean
+        | BuiltinLowering::Dot
+        | BuiltinLowering::Distance
         | BuiltinLowering::Sum
         | BuiltinLowering::Last
         | BuiltinLowering::First
@@ -911,6 +934,15 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Atan => BuiltinLowering::Atan,
         FunctionName::Ceil => BuiltinLowering::Ceil,
         FunctionName::Concat => BuiltinLowering::Concat,
+        FunctionName::Array => BuiltinLowering::ArrayConstruct,
+        FunctionName::Vec => BuiltinLowering::VecConstruct,
+        FunctionName::Overlap => BuiltinLowering::Overlap,
+        FunctionName::Slice => BuiltinLowering::Slice,
+        FunctionName::Min => BuiltinLowering::ListMin,
+        FunctionName::Max => BuiltinLowering::ListMax,
+        FunctionName::Mean => BuiltinLowering::Mean,
+        FunctionName::Dot => BuiltinLowering::Dot,
+        FunctionName::Distance => BuiltinLowering::Distance,
         FunctionName::Sum => BuiltinLowering::Sum,
         FunctionName::Last => BuiltinLowering::Last,
         FunctionName::First => BuiltinLowering::First,
@@ -1047,6 +1079,13 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::ToHex
         | BuiltinLowering::Translate
         | BuiltinLowering::Count
+        | BuiltinLowering::ArrayConstruct
+        | BuiltinLowering::VecConstruct
+        | BuiltinLowering::EmptyVec(_)
+        | BuiltinLowering::Overlap
+        | BuiltinLowering::Slice
+        | BuiltinLowering::ListMin
+        | BuiltinLowering::ListMax
         | BuiltinLowering::First
         | BuiltinLowering::Last
         | BuiltinLowering::Nth
@@ -1105,6 +1144,9 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Round
         | BuiltinLowering::Sqrt
         | BuiltinLowering::Sum
+        | BuiltinLowering::Mean
+        | BuiltinLowering::Dot
+        | BuiltinLowering::Distance
         | BuiltinLowering::Tan
         | BuiltinLowering::Sin
         | BuiltinLowering::Atan2
@@ -1455,11 +1497,144 @@ fn builtin_output_type(
         }
         BuiltinLowering::Concat => {
             require_builtin_min_arity(function, arg_types, 1, span.clone())?;
+            if let DataType::List(_) | DataType::FixedSizeList(_, _) = &arg_types[0] {
+                let element =
+                    list_element_type(function, &arg_types[0], ListElements::Any, span.clone())?;
+                let mut fixed_width = Some(0_i32);
+                for arg_type in arg_types {
+                    let actual =
+                        list_element_type(function, arg_type, ListElements::Any, span.clone())?;
+                    if actual != element {
+                        return Err(CompileError {
+                            code: "type_mismatch",
+                            message: format!(
+                                "function '{}' requires exact matching element types, found {:?} \
+                                 and {:?}",
+                                function.as_str(),
+                                element,
+                                actual
+                            ),
+                            span: span.into(),
+                        });
+                    }
+                    fixed_width = match (fixed_width, arg_type) {
+                        (Some(total), DataType::FixedSizeList(_, width)) => {
+                            Some(total.checked_add(*width).ok_or_else(|| CompileError {
+                                code: "invalid_argument",
+                                message: "ARRAY concat exceeds Arrow's maximum width".to_string(),
+                                span: span.clone().into(),
+                            })?)
+                        }
+                        _ => None,
+                    };
+                }
+                let field = Arc::new(Field::new("item", element, false));
+                return Ok(match fixed_width {
+                    Some(width) => DataType::FixedSizeList(field, width),
+                    None => DataType::List(field),
+                });
+            }
             for arg_type in arg_types {
                 let input = require_supported_register_type(function, arg_type, span.clone())?;
                 require_utf8_arg(function, input, span.clone())?;
             }
             Ok(DataType::Utf8)
+        }
+        BuiltinLowering::ArrayConstruct | BuiltinLowering::VecConstruct => {
+            require_builtin_min_arity(function, arg_types, 1, span.clone())?;
+            let element = &arg_types[0];
+            require_supported_register_type(function, element, span.clone())?;
+            for arg_type in &arg_types[1..] {
+                if arg_type != element {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires exact matching element types, found {:?} and \
+                             {:?}",
+                            function.as_str(),
+                            element,
+                            arg_type
+                        ),
+                        span: span.into(),
+                    });
+                }
+            }
+            let field = Arc::new(Field::new("item", element.clone(), false));
+            if let BuiltinLowering::ArrayConstruct = lowering {
+                let width = i32::try_from(arg_types.len()).map_err(|_| CompileError {
+                    code: "invalid_argument",
+                    message: "ARRAY constructor exceeds Arrow's maximum width".to_string(),
+                    span: span.into(),
+                })?;
+                Ok(DataType::FixedSizeList(field, width))
+            } else {
+                Ok(DataType::List(field))
+            }
+        }
+        BuiltinLowering::EmptyVec(data_type) => {
+            require_builtin_arity_exact(function, arg_types, 0, span)?;
+            Ok(data_type.clone())
+        }
+        BuiltinLowering::Overlap | BuiltinLowering::Dot | BuiltinLowering::Distance => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[0], ListElements::Scalar, span.clone())?;
+            let other =
+                list_element_type(function, &arg_types[1], ListElements::Scalar, span.clone())?;
+            if element != other {
+                return Err(CompileError {
+                    code: "type_mismatch",
+                    message: format!(
+                        "function '{}' requires exact matching element types, found {:?} and {:?}",
+                        function.as_str(),
+                        element,
+                        other
+                    ),
+                    span: span.into(),
+                });
+            }
+            if let BuiltinLowering::Overlap = lowering {
+                return Ok(DataType::Boolean);
+            }
+            let input = require_supported_register_type(function, &element, span.clone())?;
+            require_numeric_arg(function, input, span)?;
+            if let BuiltinLowering::Dot = lowering {
+                Ok(element)
+            } else {
+                Ok(DataType::Float64)
+            }
+        }
+        BuiltinLowering::Slice => {
+            require_builtin_arity_exact(function, arg_types, 3, span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[0], ListElements::Any, span.clone())?;
+            for index_type in &arg_types[1..] {
+                let index = require_supported_register_type(function, index_type, span.clone())?;
+                require_integral_arg(function, index, span.clone())?;
+            }
+            Ok(DataType::List(Arc::new(Field::new("item", element, false))))
+        }
+        BuiltinLowering::ListMin | BuiltinLowering::ListMax | BuiltinLowering::Mean => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[0], ListElements::Scalar, span.clone())?;
+            let input = require_supported_register_type(function, &element, span.clone())?;
+            if let BuiltinLowering::Mean = lowering {
+                require_numeric_arg(function, input, span)?;
+                Ok(DataType::Float64)
+            } else if input.is_ordered() || input == RegisterType::Boolean {
+                Ok(element)
+            } else {
+                Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires ordered scalar elements, found {:?}",
+                        function.as_str(),
+                        element
+                    ),
+                    span: span.into(),
+                })
+            }
         }
         BuiltinLowering::Count => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
@@ -1494,6 +1669,25 @@ fn builtin_output_type(
         }
         BuiltinLowering::Contains | BuiltinLowering::StartsWith | BuiltinLowering::EndsWith => {
             require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            if let BuiltinLowering::Contains = lowering
+                && let DataType::List(_) | DataType::FixedSizeList(_, _) = &arg_types[0]
+            {
+                let element =
+                    list_element_type(function, &arg_types[0], ListElements::Scalar, span.clone())?;
+                if arg_types[1] != element {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires element type {:?}, found {:?}",
+                            function.as_str(),
+                            element,
+                            arg_types[1]
+                        ),
+                        span: span.into(),
+                    });
+                }
+                return Ok(DataType::Boolean);
+            }
             let left = require_supported_register_type(function, &arg_types[0], span.clone())?;
             let right = require_supported_register_type(function, &arg_types[1], span.clone())?;
             require_utf8_arg(function, left, span.clone())?;

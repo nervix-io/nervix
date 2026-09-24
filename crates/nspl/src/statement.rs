@@ -1632,6 +1632,26 @@ mod tests {
     }
 
     #[test]
+    fn collection_expression_body_preserves_route_completion_context() {
+        let literal = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = 1 ";
+        for expression in [
+            "[input.first, input.second]",
+            "array(input.first, input.second)",
+            "vec(input.first, input.second)",
+            "slice(input.items, 0, 2)",
+        ] {
+            let input = format!(
+                "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = {expression} "
+            );
+            assert_eq!(
+                suggest_statement(literal, literal.len()),
+                suggest_statement(&input, input.len()),
+                "completion changed after {expression}",
+            );
+        }
+    }
+
+    #[test]
     fn tolerant_conversion_body_does_not_change_route_completion_context() {
         let literal = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = 1 ";
         let converted = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = \

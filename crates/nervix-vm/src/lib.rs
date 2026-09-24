@@ -69,7 +69,7 @@ pub use datetime::{
     TextExpectation, UnreadableText, Zone, ZoneDirective,
 };
 pub use error::{
-    CompileError, DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation,
+    CollectionLimit, CompileError, DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation,
     IntegerOperation, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, ShiftOperation,
     SideError, SideErrorReason, TextOperation,
 };

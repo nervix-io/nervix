@@ -773,6 +773,35 @@ mod tests {
         assert!(parse_expression("builtin::add_one(input.value)").is_err());
     }
 
+    #[test]
+    fn parses_collection_expressions_and_rejects_incomplete_elements() {
+        assert_eq!(
+            parse_expression("[input.first, input.second]").expect("ARRAY elements parse"),
+            Expression::Array(vec![field("first"), field("second")]),
+        );
+        for source in [
+            "array(input.first, input.second)",
+            "vec(input.first, input.second)",
+            "vec()",
+            "slice(input.items, 0, 2)",
+        ] {
+            assert!(matches!(
+                parse_expression(source).expect("collection call parses"),
+                Expression::Call { .. }
+            ));
+        }
+        for source in [
+            "[input.first,,input.second]",
+            "[input.first",
+            "vec(,input.first)",
+        ] {
+            assert!(
+                parse_expression(source).is_err(),
+                "{source} must be rejected"
+            );
+        }
+    }
+
     fn field(name: &str) -> Expression {
         Expression::Field(FieldReference::scoped(
             FieldScope::Input,

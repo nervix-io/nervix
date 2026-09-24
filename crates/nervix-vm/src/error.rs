@@ -1,7 +1,7 @@
 use std::iter;
 
 use arrow_buffer::BooleanBuffer;
-use arrow_schema::DataType;
+use arrow_schema::{ArrowError, DataType};
 use strum::IntoStaticStr;
 use thiserror::Error;
 
@@ -76,6 +76,8 @@ pub enum SideErrorReason {
     /// A `clamp` whose bounds bound no value.
     #[error("{0}")]
     InvalidClampBounds(ClampBoundsDefect),
+    #[error("vector lengths differ: left has {left}, right has {right}")]
+    VectorLengthMismatch { left: usize, right: usize },
     /// A text builtin whose result, sized by its count, does not fit in the text its STRING column
     /// has left.
     #[error("{0} result exceeds the text one STRING column holds")]
@@ -111,6 +113,7 @@ impl SideErrorReason {
             | Self::SkippedLocalTime { .. }
             | Self::RepeatedLocalTime { .. }
             | Self::InvalidClampBounds(_) => ErrorCode::InvalidArgument,
+            Self::VectorLengthMismatch { .. } => ErrorCode::InvalidArgument,
             Self::InvalidBytesEncoding(_)
             | Self::InvalidUtf8Bytes
             | Self::CastFailed { .. }
@@ -137,6 +140,8 @@ pub enum IntegerOperation {
     AbsoluteValue,
     #[strum(to_string = "sum")]
     Sum,
+    #[strum(to_string = "dot product")]
+    Dot,
     #[strum(to_string = "left shift")]
     LeftShift,
     /// `round` with a negative number of digits, which rounds to a multiple of a power of ten.
@@ -212,6 +217,12 @@ pub enum FloatOperation {
     AbsoluteValue,
     #[strum(to_string = "floating-point sum")]
     Sum,
+    #[strum(to_string = "mean")]
+    Mean,
+    #[strum(to_string = "dot product")]
+    Dot,
+    #[strum(to_string = "distance")]
+    Distance,
     #[strum(to_string = "ceil")]
     Ceil,
     #[strum(to_string = "floor")]
@@ -468,6 +479,44 @@ pub enum RuntimeError {
     SchemaMismatch,
     #[error("invalid batch: {message}")]
     InvalidBatch { message: String },
+    #[error("{operation} needs at least one collection argument")]
+    CollectionMissingArguments { operation: &'static str },
+    #[error("collection input must be ARRAY or VEC, found {actual:?}")]
+    CollectionExpectedList { actual: DataType },
+    #[error("collection {data_type:?} has the wrong Arrow backing array")]
+    CollectionBackingMismatch { data_type: DataType },
+    #[error("{operation} requires element type {expected:?}, found {actual:?}")]
+    CollectionTypeMismatch {
+        operation: &'static str,
+        expected: DataType,
+        actual: DataType,
+    },
+    #[error("{operation} requires {expected} rows, found {actual}")]
+    CollectionLengthMismatch {
+        operation: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    #[error("{operation} requires numeric collection elements, found {actual:?}")]
+    CollectionNonNumericElement {
+        operation: &'static str,
+        actual: DataType,
+    },
+    #[error("{operation} exceeds {limit}")]
+    CollectionTooLarge {
+        operation: &'static str,
+        limit: CollectionLimit,
+    },
+    #[error("{operation} Arrow kernel failed: {source}")]
+    CollectionArrow {
+        operation: &'static str,
+        #[source]
+        source: ArrowError,
+    },
+    #[error("collection kernel failed: {report}")]
+    CollectionKernel {
+        report: Box<error_stack::Report<RuntimeError>>,
+    },
     #[error("required output column '{column}' is uninitialized")]
     UninitializedRequiredColumn { column: String },
     #[error("required output column '{column}' contains null values")]
@@ -515,6 +564,24 @@ pub enum RuntimeError {
     FormattedDatetimesTooLarge { rows: usize, longest: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum CollectionLimit {
+    #[strum(to_string = "the addressable Arrow array length")]
+    AddressableLength,
+    #[strum(to_string = "the fixed ARRAY width")]
+    FixedWidth,
+    #[strum(to_string = "the VEC offset range")]
+    VectorOffsets,
+}
+
+impl From<error_stack::Report<RuntimeError>> for RuntimeError {
+    fn from(report: error_stack::Report<RuntimeError>) -> Self {
+        Self::CollectionKernel {
+            report: Box::new(report),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -550,6 +617,7 @@ mod tests {
                 "integer absolute value overflowed",
             ),
             (IntegerOperation::Sum, "integer sum overflowed"),
+            (IntegerOperation::Dot, "integer dot product overflowed"),
             (IntegerOperation::LeftShift, "integer left shift overflowed"),
             (IntegerOperation::Rounding, "integer rounding overflowed"),
         ];
@@ -597,6 +665,15 @@ mod tests {
             (
                 FloatOperation::Sum,
                 "floating-point sum produced a non-finite result",
+            ),
+            (FloatOperation::Mean, "mean produced a non-finite result"),
+            (
+                FloatOperation::Dot,
+                "dot product produced a non-finite result",
+            ),
+            (
+                FloatOperation::Distance,
+                "distance produced a non-finite result",
             ),
             (FloatOperation::Ceil, "ceil produced a non-finite result"),
             (FloatOperation::Floor, "floor produced a non-finite result"),

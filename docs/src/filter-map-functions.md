@@ -950,9 +950,16 @@ names.
 
 ## Array And Vector Functions
 
-These functions take one `ARRAY` or `VEC` value, described in
+`[a, b, ...]` and `array(a, b, ...)` construct an `ARRAY` whose fixed width is the number of
+arguments. `vec(a, b, ...)` constructs a `VEC`; `vec()` constructs an empty vector when assigned
+directly to a declared `VEC` field, which supplies its element type. Constructor elements must
+have exactly the same declared type. If any element is null, the constructed container is null;
+schema elements themselves remain required. A fixed `ARRAY` has at least one element.
+
+The functions below take `ARRAY` or `VEC` values described in
 [Schemas And Codecs](schemas-and-codecs.md#internal-schemas). The elements of a multidimensional
-`ARRAY` are its outermost items. A null list produces a null result.
+`ARRAY` are its outermost items. A null container produces a null result, including for binary
+functions when either container is null.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
@@ -961,6 +968,14 @@ These functions take one `ARRAY` or `VEC` value, described in
 | `first(list)` | element type | The first element, or null for an empty list |
 | `last(list)` | element type | The last element, or null for an empty list |
 | `nth(list, index)` | element type | The element at `index`, counting from `0`, or null when `index` is negative or past the end. `index` may be any integer type |
+| `contains(list, element)` | `BOOL` | Whether a scalar element occurs in the list. Empty lists return `false`; a null element argument returns null |
+| `overlap(left, right)` | `BOOL` | Whether two lists of the same exact element type share an element. An empty list returns `false` |
+| `slice(list, start, length)` | `VEC<element>` | Selects up to `length` elements from the zero-based `start`; negative bounds act as zero and bounds past the end are clipped. Null bounds return null |
+| `concat(list, ...)` | `ARRAY` or `VEC` | Concatenates lists with one exact element type. All fixed arrays produce a fixed array whose width is their sum; any vector input produces a vector |
+| `min(list)`, `max(list)` | element type | Least or greatest scalar element. Empty lists return null; float ordering follows IEEE total order, including distinct signed zeros and NaNs |
+| `mean(list)` | `F64` | Arithmetic mean of numeric elements. An empty list returns null; integer inputs round to `F64` for the calculation |
+| `dot(left, right)` | element type | Numeric dot product. Empty vectors return zero. Integer multiplication and accumulation are checked at the element type |
+| `distance(left, right)` | `F64` | Euclidean distance of numeric elements. Empty vectors return zero; integer inputs round to `F64` for the calculation |
 
 `nth` counts from `0`, unlike string positions: `nth(input.values, 0)` is the same element as
 `first(input.values)`. `first`, `last`, and `nth` require scalar or `DATETIME` elements; a list
@@ -968,6 +983,11 @@ whose elements are themselves `ARRAY` or `VEC` values is rejected when the state
 
 `sum` follows the arithmetic operators. An integer sum that overflows its type reports an overflow,
 and a floating-point sum that is not finite reports a per-message error.
+`dot` and `distance` require equal lengths in every message; a mismatch reports
+`invalid_argument` for that message. A non-finite `mean`, `dot`, or `distance` result reports
+`invalid_argument`. `contains` and `overlap` use the scalar equality contract: NaN equals no
+element, and positive and negative zero are equal. These functions compare exact element types;
+they never cast or stringify list elements.
 
 In a [window processor](processors.md#window-processor) route, `count`, `sum`, `first`, and `last`
 are always window aggregates, like every other
