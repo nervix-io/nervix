@@ -415,6 +415,98 @@ Feature: Expression function semantics
       | 1            | 0             | VEC<I64>     |
       | 3            | 0             | VEC<I64>     |
 
+  Scenario Outline: Count and position functions read unsigned counts in full and refuse text a STRING cannot hold
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA sizing (
+        id STRING,
+        text STRING,
+        position U64,
+        times U64 OPTIONAL,
+        width U64 OPTIONAL
+      );
+      CREATE SCHEMA sized_text (
+        id STRING,
+        lefted STRING,
+        righted STRING,
+        tail STRING,
+        part STRING,
+        guarded STRING,
+        repeated STRING OPTIONAL,
+        left_padded STRING OPTIONAL,
+        right_padded STRING OPTIONAL
+      );
+      CREATE SCHEMA sizing_error (
+        source_id STRING,
+        error_message STRING
+      );
+      CREATE CODEC sizing_batch_codec
+        FROM JSON
+        TO SCHEMA sizing
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY sizings SCHEMA sizing UNBRANCHED;
+      CREATE RELAY sized_texts SCHEMA sized_text UNBRANCHED;
+      CREATE RELAY sizing_errors SCHEMA sizing_error UNBRANCHED;
+      CREATE VHOST edge text-sizing-{{test_id}}.example.com;
+      CREATE ENDPOINT sizing_ingress ON edge PATH '/sizings' TYPE HTTP;
+      CREATE INGESTOR sizing_source
+        FROM ENDPOINT sizing_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING sizing_batch_codec
+        TO sizings
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION size_texts
+        FROM sizings
+        UNBRANCHED
+        TO sized_texts
+          SET id = input.id,
+              lefted = left(input.text, input.position),
+              righted = right(input.text, input.position),
+              tail = substr(input.text, input.position),
+              part = split_part(input.text, '.', input.position),
+              guarded = CASE
+                WHEN input.position < (10 AS U64) THEN repeat(input.text, input.position)
+                ELSE 'skipped'
+              END,
+              repeated = repeat(input.text, input.times),
+              left_padded = lpad(input.text, input.width, '*'),
+              right_padded = rpad(input.text, input.width, '*')
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO sizing_errors
+            SET source_id = input.id,
+                error_message = error.message;
+      CREATE SUBSCRIPTION sized_texts_subscription TO sized_texts;
+      CREATE SUBSCRIPTION sizing_errors_subscription TO sizing_errors;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "text-sizing-{{test_id}}.example.com" path "/sizings"
+      """
+      [{"id":"small","text":"a.b","position":2,"times":2,"width":5},{"id":"wide","text":"a.b","position":18446744073709551615,"times":1,"width":1},{"id":"repeat-oversized","text":"a.b","position":1,"times":18446744073709551615,"width":1},{"id":"pad-oversized","text":"a.b","position":1,"times":1,"width":18446744073709551615},{"id":"absent","text":"a.b","position":1,"times":null,"width":null}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      {"guarded":"a.ba.b","id":"small","left_padded":"**a.b","lefted":"a.","part":"b","repeated":"a.ba.b","right_padded":"a.b**","righted":".b","tail":".b"}
+      {"guarded":"skipped","id":"wide","left_padded":"a","lefted":"a.b","part":"","repeated":"a.b","right_padded":"a","righted":"a.b","tail":""}
+      {"guarded":"a.b","id":"absent","lefted":"a","part":"a","righted":"b","tail":"a.b"}
+      "source_id":"repeat-oversized" | "error_message":"junction 'size_texts' FILTER-MAP side error overflow: repeat result exceeds the text one STRING column holds
+      "source_id":"pad-oversized" | "error_message":"junction 'size_texts' FILTER-MAP side error overflow: lpad result exceeds the text one STRING column holds
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 0             |
+
   Scenario Outline: List item functions reject nested elements when the statement is applied
     Given a <cluster_size> node nervix cluster is started
     When these NSPL commands fail with "function 'first' requires ARRAY or VEC elements of a scalar type"

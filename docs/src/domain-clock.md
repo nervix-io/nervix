@@ -244,9 +244,12 @@ VM, Roto, and WASM execution instead of giving those engines a context-free time
 One snapshot is shared by all expressions in that unit, including construction, routing,
 deduplication, ordering, correlation, windows, inferencer mappings, emitter filters, `VALUES`, and
 subscription predicates. This prevents two expressions in one operation from observing different
-logical instants. Message-error handling retains the failing operation's snapshot. Work that begins
-later, such as a processor flush, scheduled callback, or message released from materialized
-`REQUIRED WAIT`, receives a fresh snapshot for that execution.
+logical instants. A paced domain may place its logical time before the Unix epoch, and expressions
+consume the snapshot as it is: `now()` returns it, while `uuid_v7()`, whose timestamp field starts
+at the epoch, fails each message that evaluates it rather than encoding a different instant.
+Message-error handling retains the failing operation's snapshot. Work that begins later, such as a
+processor flush, scheduled callback, or message released from materialized `REQUIRED WAIT`,
+receives a fresh snapshot for that execution.
 
 A coordinated WASM state reset does not change the domain lifecycle generation, mapping, authority,
 or logical frontier. Preparing a fresh guest and saving its initial state each use a snapshot from

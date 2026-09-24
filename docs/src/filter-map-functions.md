@@ -54,8 +54,10 @@ for the WASM isolation and memory boundary.
 
 Builtins are evaluated over Arrow columns: one call computes its result for every message in a
 batch together. A message's result never depends on the other messages in the batch, so batching
-does not change any value. How a function traverses its column, whether through an Arrow compute
-kernel, one pass over the column's value buffer, or a loop over its rows, is internal to the
+does not change any value. The one limit a batch's messages share is the text a `STRING` column
+holds, which `repeat`, `lpad`, and `rpad` check before they build a result; see
+[String Functions](#string-functions). How a function traverses its column, whether through an Arrow
+compute kernel, one pass over the column's value buffer, or a loop over its rows, is internal to the
 function and does not change its results.
 
 A pass over a value buffer is written so the compiler can turn it into the vector instructions of
@@ -186,7 +188,12 @@ envelope; if any call fails, no payload or partial header envelope is published.
 | `leak_sensitive(value)` | same type as input | Explicitly removes the sensitivity flag from a value |
 | `now()` | `DATETIME` | Current execution-local domain timestamp |
 | `uuid_v4()` | `STRING` | Random UUID string, new for every message |
-| `uuid_v7()` | `STRING` | Time-ordered UUID string based on the execution-local domain clock, new for every message |
+| `uuid_v7()` | `STRING` | Time-ordered UUID string based on the execution-local domain clock, new for every message. Reports an `overflow` error when that time is before the Unix epoch |
+
+A version 7 UUID encodes its time as milliseconds since `1970-01-01T00:00:00Z`. In a paced domain
+whose logical time is earlier, such as one started with `START AT '1969-07-20T20:17:00Z'`,
+`uuid_v7()` reports `uuid_v7 execution time is before the Unix epoch` for every message that
+evaluates it until domain time reaches the epoch. It never encodes another instant instead.
 
 ## Null Handling
 
@@ -236,6 +243,10 @@ Positions count from 1.
 A mapping can change a value's length: `upper('Grüßen')` is `GRÜSSEN`. A literal, a field, and a
 computed value holding the same text always convert to the same result.
 
+`count`, `start`, `length`, and `index` may be any integer type and are never narrowed to another:
+an unsigned count above the `I64` range reaches past the end of any text, exactly as the largest
+`I64` count does.
+
 `substr` treats a `start` at or before `1` as the first character and counts `length` from there. A
 `start` past the end, or a negative `length`, returns an empty string.
 
@@ -244,6 +255,14 @@ empty string when `length` is at most `0`, and return shorter text unchanged whe
 
 `split_part` returns an empty string when `index` is at most `0` or past the last part. With an
 empty `delimiter`, the whole text is part `1`.
+
+`repeat`, `lpad`, and `rpad` compute the length of a result before they build it. The values one
+call produces for a batch share one `STRING` column, which holds at most 2,147,483,647 bytes of
+text, so a result that does not fit in what its column has left reports an `overflow` error, such
+as `repeat result exceeds the text one STRING column holds`, and yields null instead of being
+built. A call whose arguments are all literals computes one value that every message in the batch
+holds, so that value must fit once for each of them: `repeat('ab', 600000000)` fits a batch of one
+message but reports the error on every message of a batch of two.
 
 ## String Predicates
 

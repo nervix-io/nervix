@@ -125,15 +125,6 @@ macro_rules! declare_typed_arrays {
                     Self::Uninitialized { len, .. } => *len,
                 }
             }
-
-            pub(crate) fn is_null(&self, row: usize) -> bool {
-                match self {
-                    $(Self::$Variant(array) => array.is_null(row),)+
-                    Self::Datetime(array) => array.is_null(row),
-                    Self::Generic(array) => array.is_null(row),
-                    Self::Uninitialized { .. } => true,
-                }
-            }
         }
     };
 }
