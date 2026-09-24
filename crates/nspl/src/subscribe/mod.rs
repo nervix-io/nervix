@@ -269,6 +269,51 @@ mod tests {
     }
 
     #[test]
+    fn subscription_filters_hold_membership_ranges_and_null_safe_equality() {
+        let parsed = parse_create_subscription(
+            "CREATE SUBSCRIPTION routed TO parcels WHERE input.carrier IS DISTINCT FROM \
+             input.preferred AND input.status IN ('open', 'held') AND input.weight NOT BETWEEN \
+             1.0 AND 2.0;",
+        )
+        .expect("the read-only filter must parse");
+        let where_clause = parsed
+            .where_clause
+            .as_ref()
+            .expect("the subscription has a filter");
+        assert!(matches!(
+            where_clause,
+            nervix_models::Expression::Binary {
+                operator: nervix_models::BinaryOperator::And,
+                ..
+            }
+        ));
+        let query = create_subscription_query(
+            "routed",
+            "parcels",
+            SubscriptionDeliveryBehavior::Blocking,
+            None,
+            Some(where_clause),
+        );
+        assert_eq!(
+            parse_create_subscription(&query).expect("the rendered query must parse"),
+            parsed
+        );
+    }
+
+    #[test]
+    fn completion_after_a_subscription_filter_offers_no_earlier_clause() {
+        let input = "CREATE SUBSCRIPTION routed TO parcels WHERE input.status NOT IN ('open') AND \
+                     input.carrier IS NOT DISTINCT FROM 'dhl' ";
+        let suggestions = suggest_create_subscription(input, input.len());
+        for earlier in ["TO", "ref:relay", "BLOCKING", "DROPPING", "BATCH", "WHERE"] {
+            assert!(
+                !suggestions.contains(&earlier.to_string()),
+                "{earlier} leaked into {suggestions:?}"
+            );
+        }
+    }
+
+    #[test]
     fn suggests_delivery_options_after_subscription_relay() {
         let input = "CREATE SUBSCRIPTION sampled_telemetry TO telemetry D";
         let suggestions = suggest_create_subscription(input, input.len());
