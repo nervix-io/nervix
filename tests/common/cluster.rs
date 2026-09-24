@@ -40,7 +40,7 @@ use nervix_consensus::RaftRetentionPolicy;
 use nervix_execution::Executor;
 use nervix_interconnect::{
     ControlEnvelope, Envelope, PeerTarget, RuntimeErrorEvent, TlsConfigBundle, Transport,
-    TransportOptions,
+    TransportClock, TransportOptions,
 };
 use nervix_models::ClusterNodeName;
 
@@ -1140,9 +1140,13 @@ impl Cluster {
             validity,
             probe_directory.path(),
         )?;
-        let tls =
-            TlsConfigBundle::from_pem_files(&self.interconnect_ca.path, certificate_path, key_path)
-                .map_err(|error| io::Error::other(error.to_string()))?;
+        let tls = TlsConfigBundle::from_pem_files(
+            &self.interconnect_ca.path,
+            certificate_path,
+            key_path,
+            TransportClock::system(),
+        )
+        .map_err(|error| io::Error::other(error.to_string()))?;
         let options = TransportOptions {
             connection_setup_timeout: Duration::from_millis(750),
             request_timeout: Duration::from_millis(750),

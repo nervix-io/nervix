@@ -18,7 +18,7 @@ use std::{
         Arc as StdArc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -35,15 +35,12 @@ use nervix_execution::{
 use nervix_models::{
     ClusterNodeName, CoordinationIdentity, RemoteAckOutcome, RemoteAckRegistration,
 };
-use rand_core::{OsRng, RngCore as _};
-use rustls::pki_types::ServerName;
 use strum::EnumCount as _;
 use tokio::{
     net::{TcpListener, TcpStream},
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc},
     time::{Instant, sleep, sleep_until, timeout},
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 use triomphe::Arc;
@@ -98,7 +95,7 @@ const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
 const RESET_LIMIT: usize = 128;
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct ConnectionSlotKey {
     node_id: ClusterNodeName,
     target: PeerTarget,
@@ -721,13 +718,14 @@ impl TransportState {
         tls.certificate
             .validate_local(&cluster_id, &node_id, &advertised_host)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        ensure_current(&tls.certificate)
+        tls.clock
+            .ensure_current(&tls.certificate)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
 
         let listener = TcpListener::bind(listen_addr).await?;
         let local_addr = listener.local_addr()?;
         let (incoming_tx, incoming_rx) = mpsc::channel(options.incoming_queue_capacity);
-        let process_epoch = OsRng.next_u64();
+        let process_epoch = options.entropy.next_u64();
         let management_connection_reserve = options
             .max_peers
             .checked_mul(2)
@@ -929,12 +927,14 @@ impl TransportState {
             })
             .collect::<BTreeMap<_, _>>();
 
+        // Retire in node order, not map order, so the cancellations a replacement causes happen in
+        // the same sequence in every process.
         let removed = self
             .targets
             .iter()
             .filter(|entry| accepted.get(entry.key()) != Some(&entry.value().target))
             .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
         for node in removed {
             self.targets.remove(&node);
             self.cancel_slots_for_node(&node);
@@ -1006,19 +1006,10 @@ impl TransportState {
             let tcp = TcpStream::connect(target.addr).await?;
             tcp.set_nodelay(true)?;
             let tls = self.tls.current().bundle;
-            ensure_current(&tls.certificate)
-                .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-            let server_name = ServerName::try_from(target.server_name.clone())
-                .map_err(|_| TransportError::InvalidServerName(target.server_name.clone()))?;
-            let stream = TlsConnector::from(tls.client_config.clone())
-                .connect(server_name, tcp)
+            let session = tls
+                .connect(tcp, &target.server_name, &self.cluster_id, None)
                 .await?;
-            let identity = validate_tls_session(
-                stream.get_ref().1.alpn_protocol(),
-                stream.get_ref().1.peer_certificates(),
-                &self.cluster_id,
-                None,
-            )?;
+            let identity = session.peer;
             if !identity.matches_endpoint(&target.server_name) {
                 return Err(TransportError::InvalidHandshake(format!(
                     "peer certificate does not identify bootstrap endpoint '{}'",
@@ -1044,7 +1035,7 @@ impl TransportState {
             .iter()
             .filter(|target| !live_nodes.contains(target.key()))
             .map(|target| target.key().clone())
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
         for node in departed {
             self.targets.remove(&node);
             self.cancel_slots_for_node(&node);
@@ -1095,7 +1086,7 @@ impl TransportState {
             .iter()
             .filter(|slot| &slot.key().node_id == node_id)
             .map(|slot| (slot.key().clone(), slot.cancel.clone()))
-            .collect::<Vec<_>>();
+            .collect::<BTreeMap<_, _>>();
         for (key, cancel) in slots {
             self.retire_slot(&key, &cancel);
         }
@@ -1300,21 +1291,16 @@ impl TransportState {
                 generation,
                 bundle: tls,
             } = self.tls.current();
-            ensure_current(&tls.certificate)
-                .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-            let server_name = ServerName::try_from(key.target.server_name.clone())
-                .map_err(|_| TransportError::InvalidServerName(key.target.server_name.clone()))?;
-            let stream = TlsConnector::from(tls.client_config.clone())
-                .connect(server_name, tcp)
+            let session = tls
+                .connect(
+                    tcp,
+                    &key.target.server_name,
+                    &self.cluster_id,
+                    Some(&key.node_id),
+                )
                 .await?;
-            let peer_identity = validate_tls_session(
-                stream.get_ref().1.alpn_protocol(),
-                stream.get_ref().1.peer_certificates(),
-                &self.cluster_id,
-                Some(&key.node_id),
-            )?;
-            let certificate_expires_at =
-                certificate_expiration_deadline([&tls.certificate, &peer_identity])?;
+            let stream = session.stream;
+            let certificate_expires_at = session.expires_at;
 
             let mut builder = client::Builder::new();
             configure_client_builder(&mut builder, &self.options, key.class)?;
@@ -1760,26 +1746,17 @@ impl TransportState {
             generation,
             bundle: tls,
         } = self.tls.current();
-        ensure_current(&tls.certificate)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        let stream = timeout(
-            self.options.connection_setup_timeout,
-            TlsAcceptor::from(tls.server_config.clone()).accept(tcp),
-        )
-        .await
-        .map_err(|_| TransportError::ConnectionSetupTimeout {
-            peer: peer_addr,
-            timeout: self.options.connection_setup_timeout,
-        })?
-        .map_err(TransportError::from)?;
-        let peer_identity = validate_tls_session(
-            stream.get_ref().1.alpn_protocol(),
-            stream.get_ref().1.peer_certificates(),
-            &self.cluster_id,
-            None,
-        )?;
-        let certificate_expires_at =
-            certificate_expiration_deadline([&tls.certificate, &peer_identity])?;
+        let session = tls
+            .accept(
+                tcp,
+                peer_addr,
+                self.options.connection_setup_timeout,
+                &self.cluster_id,
+            )
+            .await?;
+        let stream = session.stream;
+        let peer_identity = session.peer;
+        let certificate_expires_at = session.expires_at;
         let mut builder = server::Builder::new();
         configure_server_builder(&mut builder, &self.options)?;
         let mut connection = timeout(
@@ -2408,7 +2385,8 @@ impl TransportState {
         tls.certificate
             .validate_local(&self.cluster_id, &self.node_id, &self.advertised_host)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        ensure_current(&tls.certificate)
+        tls.clock
+            .ensure_current(&tls.certificate)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
         let next_generation =
             self.tls
@@ -2423,9 +2401,9 @@ impl TransportState {
         let targets = self
             .targets
             .iter()
-            .map(|entry| Arc::clone(entry.value()))
-            .collect::<Vec<_>>();
-        for target in targets {
+            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+            .collect::<BTreeMap<_, _>>();
+        for target in targets.into_values() {
             self.ensure_preconnected_slots(&target);
         }
         Ok(())
@@ -2436,7 +2414,7 @@ impl TransportState {
             .slots
             .iter()
             .map(|entry| (entry.key().clone(), entry.cancel.clone()))
-            .collect::<Vec<_>>();
+            .collect::<BTreeMap<_, _>>();
         for (key, cancel) in slots {
             self.retire_slot(&key, &cancel);
         }
@@ -2855,99 +2833,6 @@ async fn read_body_into(
             .write_all(&chunk)
             .map_err(|error| TransportError::Decode(error.to_string()))?;
         body.flow_control().release_capacity(chunk.len())?;
-    }
-    Ok(())
-}
-
-fn validate_tls_session(
-    alpn: Option<&[u8]>,
-    certificates: Option<&[rustls::pki_types::CertificateDer<'static>]>,
-    cluster_id: &str,
-    expected_node: Option<&ClusterNodeName>,
-) -> Result<CertificateIdentity, TransportError> {
-    if alpn != Some(b"h2".as_slice()) {
-        return Err(TransportError::InvalidHandshake(
-            "TLS did not negotiate ALPN h2".to_string(),
-        ));
-    }
-    let Some(certificates) = certificates else {
-        return Err(TransportError::InvalidHandshake(
-            "peer did not present a certificate".to_string(),
-        ));
-    };
-    let Some(certificate) = certificates.first() else {
-        return Err(TransportError::InvalidHandshake(
-            "peer did not present a certificate".to_string(),
-        ));
-    };
-    let identity = CertificateIdentity::from_certificate(certificate)
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    ensure_current(&identity)
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    if identity.cluster_id != cluster_id {
-        return Err(TransportError::InvalidHandshake(format!(
-            "peer certificate identifies cluster '{}', expected '{}'",
-            identity.cluster_id, cluster_id
-        )));
-    }
-    if let Some(expected_node) = expected_node
-        && &identity.node_id != expected_node
-    {
-        return Err(TransportError::InvalidHandshake(format!(
-            "peer certificate identifies node '{}', expected '{}'",
-            identity.node_id, expected_node
-        )));
-    }
-    Ok(identity)
-}
-
-fn certificate_expiration_deadline<'a>(
-    identities: impl IntoIterator<Item = &'a CertificateIdentity>,
-) -> Result<Instant, TransportError> {
-    let expires_at = identities
-        .into_iter()
-        .map(|identity| identity.not_after_unix_seconds)
-        .min()
-        .ok_or_else(|| {
-            TransportError::InvalidHandshake(
-                "a connection has no certificate expiration".to_string(),
-            )
-        })?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    let now = i64::try_from(now.as_secs())
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    let remaining = expires_at
-        .checked_sub(now)
-        .ok_or_else(|| TransportError::InvalidHandshake("certificate has expired".to_string()))?;
-    if remaining <= 0 {
-        return Err(TransportError::InvalidHandshake(
-            "certificate has expired".to_string(),
-        ));
-    }
-    let remaining = u64::try_from(remaining)
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    Instant::now()
-        .checked_add(Duration::from_secs(remaining))
-        .ok_or_else(|| {
-            TransportError::InvalidHandshake(
-                "certificate expiration exceeds the monotonic clock range".to_string(),
-            )
-        })
-}
-
-fn ensure_current(identity: &CertificateIdentity) -> Result<(), super::TlsConfigError> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| super::TlsConfigError::InvalidCertificate(error.to_string()))?;
-    let now = i64::try_from(now.as_secs())
-        .map_err(|error| super::TlsConfigError::InvalidCertificate(error.to_string()))?;
-    if identity.not_before_unix_seconds > now {
-        return Err(super::TlsConfigError::NotYetValid);
-    }
-    if identity.not_after_unix_seconds <= now {
-        return Err(super::TlsConfigError::Expired);
     }
     Ok(())
 }

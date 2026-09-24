@@ -21,7 +21,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandRequest, SuggestRequest};
 use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
 use nervix_execution::sync::DashMap;
-use nervix_interconnect::{TlsConfigBundle, Transport};
+use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig,
@@ -302,8 +302,13 @@ fn test_session_service(
 
 pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeName) -> Transport {
     let files = test_tls_files(cluster_id, node_id);
-    let tls = TlsConfigBundle::from_pem_files(&files.ca, &files.certificate, &files.private_key)
-        .expect("test TLS bundle should load");
+    let tls = TlsConfigBundle::from_pem_files(
+        &files.ca,
+        &files.certificate,
+        &files.private_key,
+        TransportClock::system(),
+    )
+    .expect("test TLS bundle should load");
     let addr = "127.0.0.1:0"
         .parse()
         .expect("ephemeral interconnect address must parse");
