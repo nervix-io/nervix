@@ -85,8 +85,8 @@ base-to-final quiesce level at the current prefix; a lifecycle, domain, or resou
 that run, and a later run cannot repair it. `COMMIT` reports only the maximum level actually
 executed and does not repeat statement outputs. Correct a rejected statement and continue the same
 transaction. A `COMMIT` refused because the preview it expected no longer describes the transaction
-applies nothing and leaves the transaction open; commit again against the identity that refusal
-reports instead of starting the transaction over. Do not imply that one undivided request can mix
+applies nothing and leaves the transaction open; inspect the attached transaction again before
+retrying the commit against its reviewed basis. Do not imply that one undivided request can mix
 those phases.
 
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or

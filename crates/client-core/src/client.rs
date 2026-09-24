@@ -8,7 +8,7 @@
 //!   layer for splitting and classifying statements.
 //! - **Must not know.** How a frame is routed off an exchange.
 
-use std::{path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
@@ -179,9 +179,9 @@ pub(crate) struct ClientInner {
     pub(crate) reconnect_lock: Mutex<()>,
     pub(crate) command_lock: Mutex<()>,
     pub(crate) transaction: Mutex<Option<TransactionStatus>>,
-    /// The preview the attached transaction's last accepted append made current. A COMMIT sends
-    /// it so the server can refuse a transaction that moved since this session last read it.
-    pub(crate) commit_basis: Mutex<Option<TransactionPreviewIdentity>>,
+    /// Identified previews keyed by target transaction and accepted-operation position. A newer
+    /// position replaces an older one; a stale refusal never updates this cache.
+    pub(crate) previews: Mutex<BTreeMap<(String, TransactionPosition), TransactionPreviewIdentity>>,
     pub(crate) events: SessionEvents,
 }
 
@@ -293,7 +293,7 @@ impl Client {
                 reconnect_lock: Mutex::new(()),
                 command_lock: Mutex::new(()),
                 transaction: Mutex::new(None),
-                commit_basis: Mutex::new(None),
+                previews: Mutex::new(BTreeMap::new()),
                 events,
             }),
         }
@@ -322,15 +322,6 @@ impl Client {
     /// while a transaction is active and every queued statement must select that domain.
     pub(crate) async fn adopt_transaction_status(&self, status: TransactionStatus) {
         self.set_domain(Some(status.domain().clone())).await;
-        // A cached basis names one transaction. Following the session to a different transaction
-        // leaves it describing something this session is no longer committing.
-        let mut basis = self.inner.commit_basis.lock().await;
-        if let Some(preview) = basis.as_ref()
-            && preview.transaction_id != status.transaction_id()
-        {
-            *basis = None;
-        }
-        drop(basis);
         *self.inner.transaction.lock().await = Some(status);
     }
 
@@ -421,9 +412,35 @@ impl Client {
 
     /// Updates the basis a later COMMIT fences against from what the server just reported.
     pub(crate) async fn record_commit_basis(&self, outcome: &CommandOutcome) {
-        if let Some(basis) = outcome.commit_basis() {
-            *self.inner.commit_basis.lock().await = Some(basis.clone());
+        let Some(basis) = outcome.commit_basis() else {
+            return;
+        };
+        self.record_preview(basis).await;
+    }
+
+    /// The command lock serializes replies at equal positions. A response for an older queue
+    /// position cannot displace the newer identified preview for that transaction.
+    async fn record_preview(&self, preview: TransactionPreviewIdentity) {
+        let mut cached = self.inner.previews.lock().await;
+        let first = (preview.transaction_id.clone(), TransactionPosition::new(0));
+        let last = (
+            preview.transaction_id.clone(),
+            TransactionPosition::new(usize::MAX),
+        );
+        let previous = cached
+            .range(first..=last)
+            .next_back()
+            .map(|(key, _)| key.clone());
+        if let Some(previous) = &previous
+            && previous.1 > preview.position
+        {
+            return;
         }
+        if let Some(previous) = previous {
+            cached.remove(&previous);
+        }
+        let key = (preview.transaction_id.clone(), preview.position);
+        cached.insert(key, preview);
     }
 
     /// What this session expects of the transaction the next command runs against.
@@ -434,8 +451,11 @@ impl Client {
         let Some(status) = self.active_transaction_status().await else {
             return TransactionExpectation::default();
         };
-        let cached = self.inner.commit_basis.lock().await.clone();
-        let preview = cached.filter(|preview| preview.transaction_id == status.transaction_id());
+        let key = (
+            status.transaction_id().to_string(),
+            status.accepted_operations(),
+        );
+        let preview = self.inner.previews.lock().await.get(&key).cloned();
         TransactionExpectation {
             position: Some(status.accepted_operations()),
             preview,
@@ -513,7 +533,17 @@ impl Client {
                         self.follow_leader(leader).await?;
                     }
                     Routing::AwaitElection if Self::await_retry(attempt).await => {}
-                    _ => return Ok(outcome),
+                    _ => {
+                        if let InspectionOutcome::Inspected(inspection) = &outcome {
+                            let preview = TransactionPreviewIdentity {
+                                transaction_id: inspection.transaction.transaction_id().to_string(),
+                                position: inspection.report.position(),
+                                planning_basis: inspection.report.planning_basis(),
+                            };
+                            self.record_preview(preview).await;
+                        }
+                        return Ok(outcome);
+                    }
                 }
             }
             // Only a session that closed again on the last attempt leaves the loop.

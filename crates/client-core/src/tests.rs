@@ -89,6 +89,12 @@ fn test_preview(transaction_id: &str, position: usize) -> TransactionPreviewIden
     }
 }
 
+async fn cache_test_preview(client: &Client, transaction_id: &str, position: usize) {
+    let preview = test_preview(transaction_id, position);
+    let key = (preview.transaction_id.clone(), preview.position);
+    client.inner.previews.lock().await.insert(key, preview);
+}
+
 fn empty_report() -> TransactionImpactReport {
     TransactionImpactReport::new(
         domain("tenant"),
@@ -390,7 +396,7 @@ async fn a_commit_fences_against_the_basis_its_own_transaction_reported() {
     client
         .adopt_transaction_status(open_transaction("tx-1", 1))
         .await;
-    *client.inner.commit_basis.lock().await = Some(test_preview("tx-1", 1));
+    cache_test_preview(&client, "tx-1", 1).await;
 
     let expectation = client.transaction_expectation().await;
 
@@ -404,7 +410,7 @@ async fn a_basis_read_for_another_transaction_never_fences_this_one() {
     client
         .adopt_transaction_status(open_transaction("tx-2", 1))
         .await;
-    *client.inner.commit_basis.lock().await = Some(test_preview("tx-1", 4));
+    cache_test_preview(&client, "tx-1", 4).await;
 
     let expectation = client.transaction_expectation().await;
 
@@ -416,11 +422,12 @@ async fn a_basis_read_for_another_transaction_never_fences_this_one() {
 }
 
 #[tokio::test]
-async fn a_refused_commit_leaves_the_current_basis_for_the_next_attempt() {
+async fn a_refused_commit_does_not_adopt_an_unreviewed_basis() {
     let client = test_client("tenant");
     client
         .adopt_transaction_status(open_transaction("tx-1", 1))
         .await;
+    cache_test_preview(&client, "tx-1", 1).await;
     let outcome = CommandOutcome::from(wire_outcome(
         "commit-1",
         CommandDisposition::PreviewStale {
@@ -434,8 +441,70 @@ async fn a_refused_commit_leaves_the_current_basis_for_the_next_attempt() {
 
     assert_eq!(
         client.transaction_expectation().await.preview,
-        Some(test_preview("tx-1", 2))
+        Some(test_preview("tx-1", 1))
     );
+}
+
+#[tokio::test]
+async fn inspection_refreshes_only_the_attached_transaction_at_its_queue_position() {
+    let client = test_client("tenant");
+    client
+        .adopt_transaction_status(open_transaction("tx-bound", 0))
+        .await;
+    let mut described = wire_outcome("describe-1", completed(), "described");
+    described.transaction = Some(open_transaction("tx-bound", 0));
+    described.inspection = Some(Box::new(TransactionInspection {
+        transaction: open_transaction("tx-other", 0),
+        operation: None,
+        report: empty_report(),
+    }));
+    client
+        .record_commit_basis(&CommandOutcome::from(described.clone()))
+        .await;
+    assert_eq!(client.transaction_expectation().await.preview, None);
+    let other_key = ("tx-other".to_string(), TransactionPosition::new(0));
+    assert_eq!(
+        client.inner.previews.lock().await.get(&other_key),
+        Some(&test_preview("tx-other", 0))
+    );
+
+    described.inspection = Some(Box::new(TransactionInspection {
+        transaction: open_transaction("tx-bound", 0),
+        operation: None,
+        report: empty_report(),
+    }));
+    client
+        .record_commit_basis(&CommandOutcome::from(described))
+        .await;
+    assert_eq!(
+        client.transaction_expectation().await.preview,
+        Some(test_preview("tx-bound", 0))
+    );
+}
+
+#[tokio::test]
+async fn an_older_inspection_cannot_replace_a_newer_queue_preview() {
+    let client = test_client("tenant");
+    client
+        .adopt_transaction_status(open_transaction("tx-bound", 1))
+        .await;
+    cache_test_preview(&client, "tx-bound", 1).await;
+    let mut described = wire_outcome("describe-1", completed(), "described");
+    described.inspection = Some(Box::new(TransactionInspection {
+        transaction: open_transaction("tx-bound", 0),
+        operation: None,
+        report: empty_report(),
+    }));
+
+    client
+        .record_commit_basis(&CommandOutcome::from(described))
+        .await;
+
+    assert_eq!(
+        client.transaction_expectation().await.preview,
+        Some(test_preview("tx-bound", 1))
+    );
+    assert_eq!(client.inner.previews.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -1603,7 +1672,7 @@ async fn a_command_carries_the_expectation_of_the_attached_transaction() {
         .client
         .adopt_transaction_status(open_transaction("tx-1", 2))
         .await;
-    *loopback.client.inner.commit_basis.lock().await = Some(test_preview("tx-1", 2));
+    cache_test_preview(&loopback.client, "tx-1", 2).await;
     let client = loopback.client.clone();
     let execution = tokio::spawn(async move { client.execute("COMMIT;").await });
 

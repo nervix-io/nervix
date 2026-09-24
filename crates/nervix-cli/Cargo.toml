@@ -15,16 +15,17 @@ byte-unit = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 error-stack = { workspace = true }
+meticulous = { workspace = true }
 nervix-client-core = { workspace = true, features = ["autocomplete"] }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
 reedline = { workspace = true, features = ["external_printer"] }
 rpassword = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 triomphe = { workspace = true }
 
 [dev-dependencies]
-meticulous = { workspace = true }
 url = { workspace = true }

@@ -19,8 +19,8 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainPace, DomainStatus, FieldName, ParseAsType,
-    RelayName, SchemaField, SubscriptionName, TransactionInspectionRejection,
-    TransactionInspectionTarget,
+    RelayName, SchemaField, SubscriptionName, TransactionInspection,
+    TransactionInspectionRejection, TransactionInspectionTarget,
 };
 use tokio::{
     net::TcpListener,
@@ -594,6 +594,55 @@ async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
             .assured("the inspection task completes")
             .assured("the seed answers the inspection"),
         rejected
+    );
+}
+
+#[tokio::test]
+async fn typed_inspection_refreshes_the_attached_preview() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    client
+        .adopt_transaction_status(super::open_transaction("tx-1", 0))
+        .await;
+    let mut exchange = server.next_exchange().await;
+    let inspecting = client.clone();
+    let task = tokio::spawn(async move {
+        inspecting
+            .inspect_transaction(
+                TransactionInspectionTarget::Transaction {
+                    transaction_id: "tx-1".to_string(),
+                },
+                None,
+            )
+            .await
+    });
+    let request = exchange.next_request().await;
+    assert!(matches!(
+        request.request,
+        ClientRequest::InspectTransaction(_)
+    ));
+    let inspection = TransactionInspection {
+        transaction: super::open_transaction("tx-1", 0),
+        operation: None,
+        report: super::empty_report(),
+    };
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::Inspection(InspectionOutcome::Inspected(Box::new(inspection.clone()))),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(task)
+            .await
+            .assured("the inspection task completes")
+            .assured("the server returns the typed inspection"),
+        InspectionOutcome::Inspected(Box::new(inspection))
+    );
+    assert_eq!(
+        client.transaction_expectation().await.preview,
+        Some(super::test_preview("tx-1", 0))
     );
 }
 

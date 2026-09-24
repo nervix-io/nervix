@@ -280,6 +280,10 @@ belong to the same user, and reading it never attaches it or selects its domain.
 statements were queued, and leads the report with that operation and the
 execution step it belongs to without narrowing the rest. `TEXT` is the default;
 `FORMAT JSON` prints the same report as one JSON document.
+In the Rust client, reading the attached transaction at its current queue position refreshes the
+preview supplied with a later `COMMIT`. An inspection of another id leaves that preview and the
+session binding untouched. After a stale-preview refusal, inspect the attached transaction again
+before retrying the commit.
 
 The statement is the one read-only statement allowed while a transaction is
 open. It is answered before queueing, so it never becomes transaction content and
