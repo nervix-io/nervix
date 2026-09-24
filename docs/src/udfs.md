@@ -85,9 +85,10 @@ CREATE JUNCTION scoring FROM raw_events
 ```
 
 The NSPL compiler validates exact arity and types when the consuming model is created. Use an
-explicit `CAST` when conversion is intended. An unqualified call never resolves to a UDF. The
-separate namespace allows a UDF name to equal a builtin name without changing either call when a
-later Nervix version adds builtins. Results retain the maximum sensitivity of their arguments.
+explicit `AS` or `TRY_CAST` conversion when conversion is intended. An unqualified call never
+resolves to a UDF. The separate namespace allows a UDF name to equal a builtin name without
+changing either call when a later Nervix version adds builtins. Results retain the maximum
+sensitivity of their arguments.
 
 Roto `test` blocks execute during `CREATE UDF`. If any test rejects, creation fails with
 `Roto test block failed` and the UDF is not persisted.

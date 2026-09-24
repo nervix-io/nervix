@@ -77,7 +77,7 @@ use crate::{
         Shift, ShiftCounts, ShiftedInteger, SignedInteger,
     },
     operand::{Broadcast, Operand},
-    program::{BinaryOp, DatetimeFunction, FunctionName, Span, UnaryOp},
+    program::{BinaryOp, CastFailure, DatetimeFunction, FunctionName, Span, UnaryOp},
     regexp::{ActivePattern, BatchPatterns, PatternSource, RegexpCall, RegexpFunction},
     semantics::{
         ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, Volatility,
@@ -1147,7 +1147,12 @@ impl Instruction {
                     self.execute_binary(registers, *left, *right, *op, row_errors)
                 },
             ),
-            InstructionKind::Cast { dst, input, target } => self.write_computed(
+            InstructionKind::Cast {
+                dst,
+                input,
+                target,
+                on_failure,
+            } => self.write_computed(
                 registers,
                 *dst,
                 false,
@@ -1157,6 +1162,7 @@ impl Instruction {
                     cast_typed_array(
                         registers.read_array(*input)?,
                         *target,
+                        *on_failure,
                         row_errors,
                         self.span,
                     )
@@ -4335,9 +4341,13 @@ fn string_right(value: &str, count: SignedCount) -> &str {
     }
 }
 
+/// Converts `input` to `target` with Arrow's safe conversion, which writes a null for every value
+/// the target type cannot hold. A cast that reports those values records an error for each row
+/// the conversion nulled; one that yields null for them leaves the nulls as its result.
 fn cast_typed_array(
     input: TypedArray,
     target: RegisterType,
+    on_failure: CastFailure,
     row_errors: &mut RowErrors,
     span: Span,
 ) -> Result<TypedArray, RuntimeError> {
@@ -4348,7 +4358,9 @@ fn cast_typed_array(
     let output = cast_values(&input, target)
         .map_err(|error| arrow_kernel_error("cast kernel failed", error))?;
     let output = array_ref_to_typed_array(output)?;
-    annotate_cast_failures(&input, &output, target, row_errors, span);
+    if on_failure.reports_error() {
+        annotate_cast_failures(&input, &output, target, row_errors, span);
+    }
     Ok(output)
 }
 
@@ -8022,6 +8034,9 @@ mod tests {
 #[cfg(test)]
 #[path = "runtime_comparison_tests.rs"]
 mod comparison_tests;
+#[cfg(test)]
+#[path = "runtime_conversion_tests.rs"]
+mod conversion_tests;
 #[cfg(test)]
 #[path = "runtime_datetime_tests.rs"]
 mod datetime_tests;

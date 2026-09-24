@@ -3,16 +3,17 @@
 //! Layer: test harness.
 //!
 //! - **Owns.** Compiling conditional programs whose arms call injected functions, pattern
-//!   matching, casts and float kernels, executing them over batches that select some, every or no
-//!   row, and checking which rows each injected function is invoked for, which rows report errors,
-//!   and that the results and errors land on the rows that selected them.
+//!   matching, casts, tolerant conversions and float kernels, executing them over batches that
+//!   select some, every or no row, and checking which rows each injected function is invoked for,
+//!   which rows report errors, and that the results and errors land on the rows that selected
+//!   them.
 //! - **Depends on.** The VM compiler and runtime entry points.
 //! - **Must not know.** How the runtime narrows operands or scatters results.
 
 use std::sync::{Arc as StdArc, Mutex};
 
 use arrow_array::{
-    Array, BooleanArray, Float64Array, Int64Array, StringArray,
+    Array, BooleanArray, Float64Array, Int64Array, StringArray, UInt8Array,
     builder::{Int64Builder, ListBuilder, StringBuilder},
 };
 use arrow_schema::{DataType, Field, Schema};
@@ -23,11 +24,11 @@ use super::{
     execute_program_in_context_sync, execute_program_sync,
 };
 use crate::{
-    CompileBinding, CompileOptions, CompiledProgram, ErrorCode, RowErrorMask, RuntimeError,
-    SideError, SideErrorReason, TypedArray, TypedBatch, UdfParameter, UdfSignature, UdfSignatures,
-    compile_program_with_options_for_bindings,
+    CompileBinding, CompileOptions, CompiledProgram, ErrorCode, RegisterType, RowErrorMask,
+    RuntimeError, SideError, SideErrorReason, TypedArray, TypedBatch, UdfParameter, UdfSignature,
+    UdfSignatures, compile_program_with_options_for_bindings,
     ir::InstructionKind,
-    program::{FunctionName, Span},
+    program::{CastFailure, FunctionName, Span},
     regexp::{PatternSource, RegexpCall},
     semantics::BuiltinLowering,
     test_support::parse_program,
@@ -907,4 +908,115 @@ fn a_header_read_repeated_outside_its_arm_is_made_for_every_row() {
             .expect("the header call log is only locked by the test thread"),
         [RowSelection::Selected(vec![0, 2]), RowSelection::All(3)]
     );
+}
+
+fn flag_and_text_schema() -> StdArc<Schema> {
+    schema(vec![
+        Field::new("flag", DataType::Boolean, true),
+        Field::new("text", DataType::Utf8, true),
+    ])
+}
+
+fn flag_and_text_batch(flags: Vec<Option<bool>>, texts: Vec<Option<&str>>) -> TypedBatch {
+    TypedBatch::try_new(
+        flag_and_text_schema(),
+        vec![
+            TypedArray::Boolean(BooleanArray::from(flags)),
+            TypedArray::Utf8(StringArray::from(texts)),
+        ],
+    )
+    .expect("the batch must build")
+}
+
+/// Whether the program's tolerant conversion to `target` runs under a conditional arm's selection.
+fn tolerant_cast_observes_selection(compiled: &CompiledProgram, target: RegisterType) -> bool {
+    let mut observes = None;
+    for instruction in &compiled.instructions {
+        if let InstructionKind::Cast {
+            target: cast_target,
+            on_failure: CastFailure::Null,
+            ..
+        } = &instruction.kind
+            && *cast_target == target
+        {
+            observes = Some(instruction.selection.is_some());
+        }
+    }
+    observes.expect("the program compiles the tolerant conversion")
+}
+
+#[test]
+fn a_tolerant_cast_in_an_arm_parses_only_the_rows_it_selects() {
+    let compiled = compile(
+        "SET parsed = CASE WHEN input.flag THEN TRY_CAST(input.text AS I64) ELSE -1 END",
+        &flag_and_text_schema(),
+        vec![Field::new("parsed", DataType::Int64, true)],
+        CompileOptions::default(),
+    );
+    assert!(
+        tolerant_cast_observes_selection(&compiled, RegisterType::Int64),
+        "a conversion that parses text is narrowed to the rows its arm selects"
+    );
+    let batch = flag_and_text_batch(
+        vec![Some(true), Some(false), Some(true), None],
+        vec![Some("7"), Some("x"), Some("y"), Some("8")],
+    );
+
+    let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+    assert_eq!(
+        output_column(&output, "parsed"),
+        &TypedArray::Int64(Int64Array::from(vec![Some(7), Some(-1), None, Some(-1)]))
+    );
+    assert!(output.errors().is_error_free());
+}
+
+#[test]
+fn a_tolerant_numeric_cast_in_an_arm_runs_over_the_batch() {
+    let compiled = compile(
+        "SET narrowed = CASE WHEN input.flag THEN TRY_CAST(input.value AS U8) ELSE 0 AS U8 END",
+        &flag_and_value_schema(),
+        vec![Field::new("narrowed", DataType::UInt8, true)],
+        CompileOptions::default(),
+    );
+    assert!(
+        !tolerant_cast_observes_selection(&compiled, RegisterType::UInt8),
+        "a vectorized conversion that cannot fail needs no selection"
+    );
+    let batch = flag_and_value_batch(
+        vec![Some(true), Some(false), Some(true)],
+        vec![Some(7), Some(300), Some(-1)],
+    );
+
+    let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+    assert_eq!(
+        output_column(&output, "narrowed"),
+        &TypedArray::UInt8(UInt8Array::from(vec![Some(7), Some(0), None]))
+    );
+    assert!(output.errors().is_error_free());
+}
+
+#[test]
+fn a_tolerant_cast_repeated_outside_its_arm_converts_every_row() {
+    let compiled = compile(
+        "SET parsed = coalesce(CASE WHEN input.flag THEN TRY_CAST(input.text AS I64) END, \
+         TRY_CAST(input.text AS I64))",
+        &flag_and_text_schema(),
+        vec![Field::new("parsed", DataType::Int64, true)],
+        CompileOptions::default(),
+    );
+    let batch = flag_and_text_batch(
+        vec![Some(true), Some(false), Some(true)],
+        vec![Some("1"), Some("2"), Some("x")],
+    );
+
+    let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+    assert_eq!(
+        output_column(&output, "parsed"),
+        &TypedArray::Int64(Int64Array::from(vec![Some(1), Some(2), None])),
+        "the conversion outside the arm answers the row the arm did not select"
+    );
+    assert!(output.errors().is_error_free());
 }

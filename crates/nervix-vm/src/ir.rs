@@ -3,7 +3,7 @@ use std::{fmt, sync::Arc};
 use arrow_schema::{DataType, Schema, TimeUnit};
 
 use crate::{
-    program::{BinaryOp, FunctionName, Span, UnaryOp},
+    program::{BinaryOp, CastFailure, FunctionName, Span, UnaryOp},
     semantics::BuiltinLowering,
 };
 
@@ -177,6 +177,7 @@ pub enum InstructionKind {
         dst: RegisterRef,
         input: RegisterRef,
         target: RegisterType,
+        on_failure: CastFailure,
     },
     Builtin {
         dst: RegisterRef,
@@ -260,8 +261,9 @@ pub struct Instruction {
     /// kernel whose cost per row dwarfs narrowing run over the selected rows only, a vectorized
     /// kernel runs over the batch and keeps only the selected rows' errors, and an arm no row
     /// selects skips the instruction altogether. Only an instruction that can report a per-row
-    /// error or calls out of the VM carries a selection; any other instruction's result on an
-    /// unselected row is never observed.
+    /// error, calls out of the VM, or parses or formats text in a cast that yields null for a
+    /// failure carries a selection; any other instruction's result on an unselected row is never
+    /// observed.
     pub selection: Option<RegisterRef>,
 }
 

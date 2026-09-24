@@ -288,6 +288,12 @@ test-coverage-feature feature additional_feature="": tests-deps
     fi
     cargo llvm-cov report --lcov --output-path lcov.info
 
+# Write the line coverage of the unit tests of the packages named in `args`, such as
+# `--package nervix-vm --package nervix-nspl`, as LCOV to `output`. It checks the patch coverage of
+# a change to those packages without the scenario suite that `test-coverage` runs.
+coverage-lib output *args:
+    cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
+
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
 # `just bench --test` to execute each benchmark body once without recording runner timings.
 # The server benches link the console the server serves, so the console is built first rather than

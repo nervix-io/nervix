@@ -346,11 +346,13 @@ fn rewrite_lookup_hash_map_expr(
         Expr::Cast {
             expr: inner,
             data_type,
+            on_failure,
         } => Expr::Cast {
             expr: Box::new(rewrite_lookup_hash_map_expr(
                 domain, identifier, models, inner, calls, next_field,
             )?),
             data_type: data_type.clone(),
+            on_failure: *on_failure,
         },
         Expr::Call { function, args } => {
             if let FunctionName::LookupHashMap = function {

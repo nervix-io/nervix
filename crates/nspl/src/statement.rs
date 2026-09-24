@@ -448,7 +448,7 @@ mod tests {
             };
         }
 
-        match g.next_u8() % 9 {
+        match g.next_u8() % 10 {
             0..=3 => {
                 let operator = g.choose(&[
                     BinaryOperator::Or,
@@ -501,6 +501,15 @@ mod tests {
                     set,
                 }
             }
+            8 => Expression::TryCast {
+                expression: Box::new(gen_expression(g, depth - 1)),
+                target: g.choose(&[
+                    nervix_models::ParseAsType::String,
+                    nervix_models::ParseAsType::I64,
+                    nervix_models::ParseAsType::F64,
+                    nervix_models::ParseAsType::Datetime,
+                ]),
+            },
             _ => Expression::Range {
                 operator: g.choose(&[RangeOperator::Between, RangeOperator::NotBetween]),
                 operand: Box::new(gen_expression(g, depth - 1)),
@@ -1619,6 +1628,27 @@ mod tests {
         assert_eq!(
             suggest_statement(literal, literal.len()),
             suggest_statement(conditional, conditional.len())
+        );
+    }
+
+    #[test]
+    fn tolerant_conversion_body_does_not_change_route_completion_context() {
+        let literal = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = 1 ";
+        let converted = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = \
+                         TRY_CAST(input.raw AS I64) ";
+        assert_eq!(
+            suggest_statement(literal, literal.len()),
+            suggest_statement(converted, converted.len())
+        );
+
+        let unfinished_conditional =
+            "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET result = CASE WHEN ";
+        let unfinished_conversion = "CREATE JUNCTION merge FROM orders UNBRANCHED TO routed SET \
+                                     result = TRY_CAST(input.raw AS ";
+        assert_eq!(
+            suggest_statement(unfinished_conditional, unfinished_conditional.len()),
+            suggest_statement(unfinished_conversion, unfinished_conversion.len()),
+            "an unfinished conversion offers what any unfinished expression offers"
         );
     }
 

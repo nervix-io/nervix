@@ -79,6 +79,13 @@ pub enum Expression {
         #[rkyv(omit_bounds)]
         high: Box<Self>,
     },
+    /// `TRY_CAST(expression AS target)`: the conversion `Cast` performs, except that a value the
+    /// target type cannot hold becomes a typed null instead of failing the message.
+    TryCast {
+        #[rkyv(omit_bounds)]
+        expression: Box<Self>,
+        target: ParseAsType,
+    },
 }
 
 #[derive(
@@ -105,7 +112,9 @@ impl Expression {
         match self {
             Self::Literal(_) => {}
             Self::Field(field) => visitor(field),
-            Self::Unary { expression, .. } | Self::Cast { expression, .. } => {
+            Self::Unary { expression, .. }
+            | Self::Cast { expression, .. }
+            | Self::TryCast { expression, .. } => {
                 expression.visit_fields(visitor);
             }
             Self::Binary { left, right, .. } => {
@@ -166,7 +175,9 @@ impl Expression {
     pub fn visit_calls(&self, visitor: &mut impl FnMut(&BuiltinFunctionName, &[Self])) {
         match self {
             Self::Literal(_) | Self::Field(_) => {}
-            Self::Unary { expression, .. } | Self::Cast { expression, .. } => {
+            Self::Unary { expression, .. }
+            | Self::Cast { expression, .. }
+            | Self::TryCast { expression, .. } => {
                 expression.visit_calls(visitor);
             }
             Self::Binary { left, right, .. } => {
@@ -236,7 +247,9 @@ impl Expression {
     pub fn visit_udf_calls(&self, visitor: &mut impl FnMut(&UdfName, &[Self])) {
         match self {
             Self::Literal(_) | Self::Field(_) => {}
-            Self::Unary { expression, .. } | Self::Cast { expression, .. } => {
+            Self::Unary { expression, .. }
+            | Self::Cast { expression, .. }
+            | Self::TryCast { expression, .. } => {
                 expression.visit_udf_calls(visitor);
             }
             Self::Binary { left, right, .. } => {
@@ -651,5 +664,39 @@ impl OutputBranch {
             Self::BranchedBy { assignments, .. } => assignments,
             Self::Unbranched => &[],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visitors_reach_the_operand_of_a_tolerant_conversion() {
+        let amount = Expression::Field(FieldReference::bare(
+            FieldName::parse("amount").expect("valid field name"),
+        ));
+        let scaled = Expression::UdfCall {
+            function: UdfName::parse("scale").expect("valid UDF name"),
+            arguments: vec![amount],
+        };
+        let expression = Expression::TryCast {
+            expression: Box::new(Expression::Call {
+                function: BuiltinFunctionName::parse("abs").expect("valid function name"),
+                arguments: vec![scaled],
+            }),
+            target: ParseAsType::I64,
+        };
+
+        let mut fields = Vec::new();
+        expression.visit_fields(&mut |field| fields.push(field.field.as_str().to_string()));
+        assert_eq!(fields, ["amount"]);
+        let mut calls = Vec::new();
+        expression.visit_calls(&mut |function, _| calls.push(function.as_str().to_string()));
+        assert_eq!(calls, ["abs"]);
+        let mut udf_calls = Vec::new();
+        expression
+            .visit_udf_calls(&mut |function, _| udf_calls.push(function.as_str().to_string()));
+        assert_eq!(udf_calls, ["scale"]);
     }
 }

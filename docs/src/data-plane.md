@@ -82,7 +82,7 @@ The current VM surface covers:
 
 - arithmetic operators: `+`, `-`, `*`, `/`, `%`
 - comparisons and boolean operators: `=`, `!=`, `>`, `<`, `>=`, `<=`, `AND`, `OR`, `NOT`
-- explicit casts
+- explicit casts and tolerant conversions
 - built-ins: `lower`, `upper`, `trim`, `length`, `coalesce`, `is_null`, `nullif`, `abs`, `contains`, `starts_with`, `ends_with`
 
 These expressions can be nested, and builtin calls can be chained.

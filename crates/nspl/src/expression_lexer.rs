@@ -26,6 +26,7 @@ pub enum Token {
     Sensitive,
     Invoke,
     As,
+    TryCast,
     And,
     Or,
     Not,
@@ -80,6 +81,7 @@ fn classify_identifier(raw: &str) -> Token {
         "SENSITIVE" => Token::Sensitive,
         "INVOKE" => Token::Invoke,
         "AS" => Token::As,
+        "TRY_CAST" => Token::TryCast,
         "AND" => Token::And,
         "OR" => Token::Or,
         "NOT" => Token::Not,
@@ -297,6 +299,24 @@ mod tests {
                 Token::Then,
                 Token::Else,
                 Token::End,
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_the_tolerant_conversion_keyword_case_insensitively() {
+        let tokens = lex("TRY_CAST try_cast Try_Cast try cast").expect("keywords must lex");
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::TryCast,
+                Token::TryCast,
+                Token::TryCast,
+                Token::Identifier("try".to_string()),
+                Token::Identifier("cast".to_string()),
             ]
         );
     }

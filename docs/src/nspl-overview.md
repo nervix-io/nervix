@@ -478,7 +478,9 @@ Supported expression surface:
   `CASE WHEN condition THEN value ... [ELSE value] END`, and simple
   `CASE operand WHEN match THEN value ... [ELSE value] END`
 - parentheses for nesting and precedence control
-- explicit casts only: `expr AS TYPE`
+- [explicit conversions](filter-map-functions.md#conversions) only: `expr AS TYPE`, which fails a
+  message whose value does not convert, and `TRY_CAST(expr AS TYPE)`, which yields a typed null
+  for it instead
 
 Conditional result arms must have one exact type. Searched `CASE` conditions and the `IF` condition
 must be `BOOL`; simple `CASE` match values must have the operand's exact type. Arms are tested in
@@ -504,6 +506,8 @@ The parser accepts both long and short cast spellings where relevant, for exampl
 - `AS BOOL`
 - `AS DATETIME`
 
+`TRY_CAST(expr AS TYPE)` accepts the same spellings.
+
 Supported built-ins include string, null-handling, numeric, regex, and contextual functions such as:
 
 - string transforms: `lower`, `upper`, `trim`, `length`, `concat`
@@ -524,7 +528,8 @@ General expression rules:
 
 - builtin calls may be nested or chained, for example `lower(trim(raw))`
 - arithmetic and predicate expressions may also be nested with parentheses
-- there is no implicit cast insertion; type mismatches must be resolved with explicit `AS ...`
+- there is no implicit cast insertion; type mismatches must be resolved with an explicit `AS ...` or
+  `TRY_CAST(... AS ...)`
 - relay names are graph references, never expression qualifiers
 - language scopes are `message`, `input`, `output`, `branch`, `left`, `right`,
   `relay_state.<relay>`, `metadata`, `partial_output`, and `error`; availability depends on context

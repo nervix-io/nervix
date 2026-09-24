@@ -128,6 +128,7 @@ pub enum Expr {
     Cast {
         expr: Box<SpannedExpr>,
         data_type: DataType,
+        on_failure: CastFailure,
     },
     Call {
         function: FunctionName,
@@ -151,6 +152,25 @@ pub enum Expr {
         low: Box<SpannedExpr>,
         high: Box<SpannedExpr>,
     },
+}
+
+/// What a cast yields for a value its target type cannot hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CastFailure {
+    /// The row reports a `cast_failed` error and yields null, as `expr AS TYPE` does.
+    Error,
+    /// The row yields a typed null and reports nothing, as `TRY_CAST(expr AS TYPE)` does.
+    Null,
+}
+
+impl CastFailure {
+    /// Whether a value that does not convert reports a per-row error.
+    pub const fn reports_error(self) -> bool {
+        match self {
+            Self::Error => true,
+            Self::Null => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -209,20 +229,31 @@ impl PartialEq for CaseArm {
 impl Eq for CaseArm {}
 
 impl Expr {
-    /// Whether evaluating this expression calls a function answered outside the VM.
-    pub(crate) fn calls_out_of_the_vm(&self) -> bool {
+    /// Whether evaluating this expression under a conditional arm may leave a null, rather than
+    /// its value, on the rows the arm does not select. A call out of the VM is made for the
+    /// selected rows only, and a cast that yields null for a failure may convert only those rows.
+    /// Every other operation confined to the selected rows can report an error, and an expression
+    /// that can report one is never shared in the first place.
+    pub(crate) fn may_answer_selected_rows_only(&self) -> bool {
         match self {
             Self::Literal(_) | Self::FieldRef(_) | Self::InternalFieldRef(_) => false,
-            Self::Unary { expr, .. } | Self::Cast { expr, .. } => expr.inner.calls_out_of_the_vm(),
+            Self::Unary { expr, .. } => expr.inner.may_answer_selected_rows_only(),
+            Self::Cast {
+                expr, on_failure, ..
+            } => match on_failure {
+                CastFailure::Null => true,
+                CastFailure::Error => expr.inner.may_answer_selected_rows_only(),
+            },
             Self::Binary { left, right, .. } => {
-                left.inner.calls_out_of_the_vm() || right.inner.calls_out_of_the_vm()
+                left.inner.may_answer_selected_rows_only()
+                    || right.inner.may_answer_selected_rows_only()
             }
             Self::Call { function, args } => {
                 if function.is_injected() {
                     return true;
                 }
                 for argument in args {
-                    if argument.inner.calls_out_of_the_vm() {
+                    if argument.inner.may_answer_selected_rows_only() {
                         return true;
                     }
                 }
@@ -234,37 +265,37 @@ impl Expr {
                 else_result,
             } => {
                 if let Some(operand) = operand
-                    && operand.inner.calls_out_of_the_vm()
+                    && operand.inner.may_answer_selected_rows_only()
                 {
                     return true;
                 }
                 for branch in branches {
-                    if branch.when.inner.calls_out_of_the_vm()
-                        || branch.result.inner.calls_out_of_the_vm()
+                    if branch.when.inner.may_answer_selected_rows_only()
+                        || branch.result.inner.may_answer_selected_rows_only()
                     {
                         return true;
                     }
                 }
                 if let Some(else_result) = else_result {
-                    return else_result.inner.calls_out_of_the_vm();
+                    return else_result.inner.may_answer_selected_rows_only();
                 }
                 false
             }
             Self::Membership { operand, set } => {
-                if operand.inner.calls_out_of_the_vm() {
+                if operand.inner.may_answer_selected_rows_only() {
                     return true;
                 }
                 for element in set {
-                    if element.inner.calls_out_of_the_vm() {
+                    if element.inner.may_answer_selected_rows_only() {
                         return true;
                     }
                 }
                 false
             }
             Self::Between { operand, low, high } => {
-                operand.inner.calls_out_of_the_vm()
-                    || low.inner.calls_out_of_the_vm()
-                    || high.inner.calls_out_of_the_vm()
+                operand.inner.may_answer_selected_rows_only()
+                    || low.inner.may_answer_selected_rows_only()
+                    || high.inner.may_answer_selected_rows_only()
             }
         }
     }
@@ -322,13 +353,16 @@ impl Ord for Expr {
                 Self::Cast {
                     expr: left_expr,
                     data_type: left_type,
+                    on_failure: left_failure,
                 },
                 Self::Cast {
                     expr: right_expr,
                     data_type: right_type,
+                    on_failure: right_failure,
                 },
             ) => left_type
                 .cmp(right_type)
+                .then_with(|| left_failure.cmp(right_failure))
                 .then_with(|| cmp_spanned(left_expr, right_expr)),
             (
                 Self::Call {

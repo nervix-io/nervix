@@ -20,7 +20,7 @@ use crate::{
     CompileError, RegisterType,
     extremum::Extremum,
     membership::MembershipSet,
-    program::{BinaryOp, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
+    program::{BinaryOp, CastFailure, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
 };
 
@@ -730,20 +730,27 @@ pub const fn range_semantics() -> OperationSemantics {
     }
 }
 
-pub const fn cast_descriptor() -> CastDescriptor {
+/// A cast that reports a value it cannot convert fails that row, and its result is null exactly
+/// where its operand is. One that yields null for such a value never fails, and its result can be
+/// null for any row.
+pub const fn cast_descriptor(on_failure: CastFailure) -> CastDescriptor {
+    let null_propagation = match on_failure {
+        CastFailure::Error => NullPropagation::Strict,
+        CastFailure::Null => NullPropagation::Custom,
+    };
     CastDescriptor {
         semantics: OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
-            can_error: true,
-            null_propagation: NullPropagation::Strict,
+            can_error: on_failure.reports_error(),
+            null_propagation,
         },
     }
 }
 
-pub const fn cast_semantics() -> OperationSemantics {
-    cast_descriptor().semantics
+pub const fn cast_semantics(on_failure: CastFailure) -> OperationSemantics {
+    cast_descriptor(on_failure).semantics
 }
 
 /// How a conditional arm executes a unary operator: negation is vectorized, and `NOT` never
@@ -1909,8 +1916,12 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
                 expr_semantics(right.as_ref())?,
             ],
         )),
-        Expr::Cast { expr: inner, .. } => Some(ExpressionSemantics::from_operation(
-            cast_semantics(),
+        Expr::Cast {
+            expr: inner,
+            on_failure,
+            ..
+        } => Some(ExpressionSemantics::from_operation(
+            cast_semantics(*on_failure),
             [expr_semantics(inner.as_ref())?],
         )),
         Expr::Call { function, args } => {
@@ -2009,8 +2020,8 @@ mod tests {
     use crate::{
         RegisterType,
         program::{
-            BinaryOp, CalendarUnit, DatetimeFunction, DatetimeUnit, Expr, FieldRef, FixedTimeUnit,
-            FunctionName, Literal, SpannedNode, UnaryOp, Zone,
+            BinaryOp, CalendarUnit, CastFailure, DatetimeFunction, DatetimeUnit, Expr, FieldRef,
+            FixedTimeUnit, FunctionName, Literal, SpannedNode, UnaryOp, Zone,
         },
         regexp::{RegexpCall, RegexpFunction},
     };
@@ -2201,7 +2212,11 @@ mod tests {
             assert!(!semantics.can_error);
         }
 
-        assert_eq!(cast_semantics().volatility, Volatility::Immutable);
+        for on_failure in [CastFailure::Error, CastFailure::Null] {
+            let semantics = cast_semantics(on_failure);
+            assert_eq!(semantics.volatility, Volatility::Immutable);
+            assert_eq!(semantics.can_error, on_failure.reports_error());
+        }
     }
 
     #[test]
@@ -2258,6 +2273,7 @@ mod tests {
         let expr = spanned(Expr::Cast {
             expr: Box::new(spanned(Expr::Literal(Literal::String("bad".to_string())))),
             data_type: arrow_schema::DataType::Int64,
+            on_failure: CastFailure::Error,
         });
 
         let semantics = expr_semantics(&expr).expect("cast must have semantics");
@@ -2273,6 +2289,29 @@ mod tests {
             }
         );
         assert!(!semantics.supports_constant_folding());
+    }
+
+    #[test]
+    fn a_cast_that_yields_null_for_a_failure_never_fails_and_can_be_null_for_any_row() {
+        let expr = spanned(Expr::Cast {
+            expr: Box::new(spanned(Expr::Literal(Literal::String("bad".to_string())))),
+            data_type: arrow_schema::DataType::Int64,
+            on_failure: CastFailure::Null,
+        });
+
+        let semantics = expr_semantics(&expr).expect("cast must have semantics");
+
+        assert_eq!(
+            semantics,
+            ExpressionSemantics {
+                volatility: Volatility::Immutable,
+                dependency_scope: DependencyScope::Constant,
+                has_side_effects: false,
+                can_error: false,
+                null_propagation: NullPropagation::Custom,
+            }
+        );
+        assert!(semantics.supports_common_subexpression_elimination());
     }
 
     #[test]
