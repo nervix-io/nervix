@@ -24,7 +24,6 @@ use crate::registry::{
     graph::{ActiveNode, EdgeKind, expect_kind},
     validation::{
         branching::{format_branch_name, relay_declared_branch},
-        connector::ingest_source_supports_headers,
         materialized_state::referenced_materialized_stream_bindings,
         processor::processor_first_input_relay,
         schema::{
@@ -98,7 +97,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
                 &node.output_routes,
                 MessageErrorSchemas {
                     input: Some(input),
-                    allow_header_reads: ingest_source_supports_headers(&node.source),
+                    allow_header_reads: node.source.reads_headers(),
                     ..MessageErrorSchemas::default()
                 },
                 None,

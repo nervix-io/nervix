@@ -1,4 +1,5 @@
-use nervix_connector::ParsedRetryPolicy;
+use nervix_connector::{ParsedRetryPolicy, SourceAckPolicy};
+use nervix_models::IngestAcknowledgement;
 
 use super::*;
 
@@ -15,81 +16,40 @@ impl Runtime {
         })
     }
 
-    pub(super) fn validate_ingestor_start_settings(
+    /// Parses the acknowledgement a delivery mode declares into the policy its source loop runs.
+    ///
+    /// A domain build parses every ingestor's declaration before it builds anything, so a mode
+    /// whose durations do not parse fails the build instead of a later start.
+    pub(in crate::runtime) fn parse_ingest_acknowledgement(
         domain: &DomainName,
-        ingestor: &CreateIngestor,
-    ) -> Result<(), RuntimeError> {
-        match &ingestor.source {
-            IngestSource::Kafka { mode, .. } | IngestSource::Pulsar { mode, .. } => match mode {
-                KafkaIngestMode::AckParallel {
+        ingestor: &IngestorName,
+        acknowledgement: IngestAcknowledgement<'_>,
+    ) -> Result<SourceAckPolicy, RuntimeError> {
+        match acknowledgement {
+            IngestAcknowledgement::Unacknowledged => Ok(SourceAckPolicy::None),
+            IngestAcknowledgement::Sequential { timeout, retry } => {
+                let timeout = Self::parse_ack_timeout(domain, ingestor, timeout)?;
+                let retry = Self::parse_retry_policy(domain, ingestor, retry)?;
+                Ok(SourceAckPolicy::Sequential { timeout, retry })
+            }
+            IngestAcknowledgement::Parallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry,
+            } => {
+                let batch_timeout =
+                    Self::parse_duration_setting(domain, ingestor, "batch timeout", batch_timeout)?;
+                let timeout = Self::parse_ack_timeout(domain, ingestor, timeout)?;
+                let retry = Self::parse_retry_policy(domain, ingestor, retry)?;
+                Ok(SourceAckPolicy::Parallel {
+                    max_in_flight: addressable_count(max),
                     batch_timeout,
                     timeout,
-                    retry_policy,
-                    ..
-                } => {
-                    Self::parse_duration_setting(
-                        domain,
-                        &ingestor.name,
-                        "batch timeout",
-                        batch_timeout,
-                    )?;
-                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
-                    Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
-                }
-                KafkaIngestMode::AckSequential {
-                    timeout,
-                    retry_policy,
-                } => {
-                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
-                    Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
-                }
-                KafkaIngestMode::NoAckParallel => {}
-            },
-            IngestSource::Mqtt { mode, .. } => match mode {
-                MqttIngestMode::AckParallel {
-                    batch_timeout,
-                    timeout,
-                    retry_policy,
-                    ..
-                } => {
-                    Self::parse_duration_setting(
-                        domain,
-                        &ingestor.name,
-                        "batch timeout",
-                        batch_timeout,
-                    )?;
-                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
-                    Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
-                }
-                MqttIngestMode::AckSequential {
-                    timeout,
-                    retry_policy,
-                } => {
-                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
-                    Self::parse_retry_policy(domain, &ingestor.name, retry_policy)?;
-                }
-                MqttIngestMode::NoAckParallel { .. } | MqttIngestMode::NoAckSequential { .. } => {}
-            },
-            IngestSource::RabbitMq { mode, .. } => match mode {
-                RabbitMqIngestMode::AckSequential { timeout, .. } => {
-                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
-                }
-            },
-            IngestSource::Sqs { mode, .. } => match mode {
-                SqsIngestMode::AckSequential { timeout, .. } => {
-                    Self::parse_ack_timeout(domain, &ingestor.name, timeout)?;
-                }
-            },
-            IngestSource::Http { .. }
-            | IngestSource::Prometheus { .. }
-            | IngestSource::RedisPubSub { .. }
-            | IngestSource::Nats { .. }
-            | IngestSource::ZeroMq { .. }
-            | IngestSource::Websockets { .. }
-            | IngestSource::Syslog { .. }
-            | IngestSource::Endpoint { .. } => {}
+                    retry,
+                })
+            }
         }
-        Ok(())
     }
 
     pub(in crate::runtime) fn parse_duration_setting(
@@ -288,6 +248,83 @@ mod tests {
             .expect_err("invalid retry max_backoff");
         assert!(
             matches!(err, RuntimeError::StartIngestor { reason, .. } if reason.contains("retry max backoff") && reason.contains("oops"))
+        );
+    }
+
+    #[test]
+    fn declared_acknowledgements_parse_into_the_policy_a_source_loop_runs() {
+        let domain = domain("default");
+        let ingestor = named("orders_ingestor");
+        let retry = RetryPolicy {
+            backoff: "100ms".to_string(),
+            max_backoff: "1s".to_string(),
+        };
+        let parsed_retry = ParsedRetryPolicy {
+            backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+        };
+
+        assert_eq!(
+            Runtime::parse_ingest_acknowledgement(
+                &domain,
+                &ingestor,
+                IngestAcknowledgement::Unacknowledged,
+            )
+            .expect("an unacknowledged mode has nothing to parse"),
+            SourceAckPolicy::None
+        );
+        assert_eq!(
+            Runtime::parse_ingest_acknowledgement(
+                &domain,
+                &ingestor,
+                IngestAcknowledgement::Sequential {
+                    timeout: "2s",
+                    retry: &retry,
+                },
+            )
+            .expect("valid sequential mode"),
+            SourceAckPolicy::Sequential {
+                timeout: Duration::from_secs(2),
+                retry: parsed_retry,
+            }
+        );
+        assert_eq!(
+            Runtime::parse_ingest_acknowledgement(
+                &domain,
+                &ingestor,
+                IngestAcknowledgement::Parallel {
+                    max: NonZeroU64::new(4).assured("four is non-zero"),
+                    batch_timeout: "250ms",
+                    timeout: "2s",
+                    retry: &retry,
+                },
+            )
+            .expect("valid parallel mode"),
+            SourceAckPolicy::Parallel {
+                max_in_flight: NonZeroUsize::new(4).assured("four is non-zero"),
+                batch_timeout: Duration::from_millis(250),
+                timeout: Duration::from_secs(2),
+                retry: parsed_retry,
+            }
+        );
+
+        // A retry policy the mode declares is checked along with its timeout, whichever delivery
+        // mode declares it.
+        let bad_retry = RetryPolicy {
+            backoff: "oops".to_string(),
+            max_backoff: "1s".to_string(),
+        };
+        let err = Runtime::parse_ingest_acknowledgement(
+            &domain,
+            &ingestor,
+            IngestAcknowledgement::Sequential {
+                timeout: "2s",
+                retry: &bad_retry,
+            },
+        )
+        .expect_err("invalid retry backoff");
+        assert!(
+            matches!(err, RuntimeError::StartIngestor { reason, .. } if reason.contains("invalid retry backoff 'oops'"))
         );
     }
 }

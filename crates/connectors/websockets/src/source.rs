@@ -283,3 +283,33 @@ impl SignalingDataSink for QueuedSignalingDataSink {
         std::future::ready(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_plan_reads_its_endpoint_from_the_client_config() {
+        let config = vec![ClientConfigEntry {
+            key: "endpoint".to_string(),
+            value: "wss://example.com/socket".to_string(),
+        }];
+
+        assert_eq!(
+            WebsocketSourcePlan::endpoint_from_config(&config).expect("endpoint"),
+            "wss://example.com/socket"
+        );
+    }
+
+    #[test]
+    fn source_plan_names_a_missing_endpoint_key() {
+        let error =
+            WebsocketSourcePlan::endpoint_from_config(&[]).expect_err("missing websocket endpoint");
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing WebSockets client config key 'endpoint'")
+        );
+    }
+}

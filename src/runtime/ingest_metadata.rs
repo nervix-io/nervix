@@ -110,15 +110,6 @@ pub(super) enum IngestMetadataError {
 }
 
 impl IngestMetadataKind {
-    #[cfg(test)]
-    pub(super) fn for_source(source: &IngestSource) -> Self {
-        match source {
-            IngestSource::Kafka { .. } => Self::Kafka,
-            IngestSource::Syslog { .. } => Self::Syslog,
-            _ => Self::Headers,
-        }
-    }
-
     /// The `metadata` namespace this source kind exposes to programs, or `None` when it
     /// exposes transport headers only.
     pub(super) fn integration_arrow_schema(self) -> Option<StdArc<arrow_schema::Schema>> {
@@ -513,19 +504,6 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
             message: format!("function '{}' is not injectable", function.as_str()),
         })
     }
-}
-
-pub(super) fn ingest_source_supports_headers(source: &IngestSource) -> bool {
-    matches!(
-        source,
-        IngestSource::Endpoint { .. }
-            | IngestSource::Http { .. }
-            | IngestSource::Kafka { .. }
-            | IngestSource::Nats { .. }
-            | IngestSource::Pulsar { .. }
-            | IngestSource::RabbitMq { .. }
-            | IngestSource::Sqs { .. }
-    )
 }
 
 pub(super) fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
@@ -925,8 +903,8 @@ mod tests {
         let program = compile_ingestor_filter_map_program(
             &domain("default"),
             named::<ModelName>("header_ingestor"),
-            IngestMetadataKind::for_source(&source),
-            ingest_source_supports_headers(&source),
+            IngestMetadataKind::Kafka,
+            source.reads_headers(),
             &construction(
                 "INHERIT tenant SET first = read_header(lower(input.header_name)), total = \
                  count(read_headers(lower(input.header_name))) WHERE read_header(\"tenant\") = \

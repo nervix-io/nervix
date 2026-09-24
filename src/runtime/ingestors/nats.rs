@@ -13,38 +13,35 @@ use nervix_connector_nats::{NatsSource, NatsSourcePlan};
 
 use super::{
     super::*,
-    source::{BrokerSourceStart, DeclaredSourceAcknowledgement},
+    source::{BrokerSourceStart, SourceStart},
 };
 
-pub(in crate::runtime) struct NatsIngestor;
-
-impl NatsIngestor {
-    pub(in crate::runtime) async fn start(
+impl NatsIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
         runtime: &Runtime,
-        plan: NatsIngestorStartPlan,
-    ) -> Result<(), RuntimeError> {
+        ingestor: &IngestorSpec,
+    ) -> Result<SourceStart, RuntimeError> {
         let NatsIngestorStartPlan {
-            ingestor,
             client,
             subject,
             queue_group,
             instances,
             mode,
-        } = plan;
+        } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
-        runtime
-            .start_broker_source::<NatsSource>(BrokerSourceStart {
-                ingestor: &ingestor,
-                connector: NatsSourcePlan::new(resolved.entries, subject, queue_group),
-                instances,
-                acknowledgement: DeclaredSourceAcknowledgement::from(&mode),
-                buffered_intake: true,
-                flush_each_intake: false,
-                client_mounts: resolved.mounts.into_iter().collect(),
-                connector_label: "nats",
-            })
-            .await
+        BrokerSourceStart {
+            connector: NatsSourcePlan::new(resolved.entries, subject, queue_group),
+            instances,
+            acknowledgement: mode.acknowledgement(),
+            buffered_intake: true,
+            flush_each_intake: false,
+            client_mounts: resolved.mounts.into_iter().collect(),
+            connector_label: "nats",
+        }
+        .open::<NatsSource>(ingestor)
+        .await
     }
 }

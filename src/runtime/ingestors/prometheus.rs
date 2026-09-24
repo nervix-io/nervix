@@ -2,145 +2,45 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Composing the Prometheus connector with host-owned cadence, intake, quiescence and
-//!   readiness.
+//! - **Owns.** Composing the Prometheus connector plan with the domain cadence the host polls it
+//!   on.
 //! - **Depends on.** The connector source contract, typed Prometheus plans and pre-resolved runtime
 //!   handles.
 //! - **Must not know.** Prometheus query or sample details, NSPL parsing, registry validation, or
 //!   placement computation.
 
-use nervix_connector::{SourceAckPolicy, SourceCapabilities, SourceConnector, SourcePlan};
 use nervix_connector_prometheus::{PrometheusSource, PrometheusSourcePlan};
 
 use super::{
     super::*,
-    source::{RuntimeSourceHost, RuntimeSourceHostSpec, run_paced_source},
+    source::{PacedSourceStart, SourceStart},
 };
 
-pub(in crate::runtime) struct PrometheusIngestor;
-
-impl PrometheusIngestor {
-    pub(in crate::runtime) async fn start(
+impl PrometheusIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
         runtime: &Runtime,
-        plan: PrometheusIngestorStartPlan,
-    ) -> Result<(), RuntimeError> {
+        ingestor: &IngestorSpec,
+    ) -> Result<SourceStart, RuntimeError> {
         let PrometheusIngestorStartPlan {
-            ingestor,
             client,
             query,
             every,
-        } = plan;
-        let domain = &ingestor.domain;
-        let key =
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if runtime.inner.ingestors.contains_key(&key) {
-            return Err(RuntimeError::IngestorAlreadyRunning {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-            });
-        }
-
-        let dependencies = runtime.ingestor_dependencies(domain, &ingestor).await?;
-        let resolved_client = runtime
-            .resolve_client_config(domain, client.mount.as_ref(), &client.config)
-            .map_err(|error| RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: error.to_string(),
-            })?;
-        let acknowledgement = SourceAckPolicy::None;
-        let source_plan = SourcePlan {
+        } = self;
+        let resolved = runtime
+            .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
+            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+        PacedSourceStart {
             connector: PrometheusSourcePlan {
-                config: resolved_client.entries,
+                config: resolved.entries,
                 query,
             },
-            capabilities: SourceCapabilities::new(
-                ingestor.allow_header_reads,
-                ingestor.metadata_kind.source_scope(),
-                ingestor.quiesce.supports(ingestor.quiesce.mode()),
-                NonZeroU64::MIN,
-                acknowledgement.support(),
-            ),
-            acknowledgement,
-        };
-        let source = PrometheusSource::open(&source_plan.connector, 0)
-            .await
-            .map_err(|error| RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: error.to_string(),
-            })?;
-        let cadence = runtime
-            .bind_domain_cadence(domain, every, DomainCadenceStart::AfterInterval)
-            .map_err(|error| RuntimeError::StartIngestor {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-                reason: error.to_string(),
-            })?;
-        let branched_runtime = runtime.start_branched_ingestor_runtime(
-            domain,
-            &ingestor.name,
-            dependencies.branched_templates,
-        );
-        let quiesce = runtime
-            .ingestor_quiesce_control(domain, &ingestor.name)
-            .verified(
-                "the runtime registers quiesce control for an ingestor before it starts the task",
-            );
-        runtime.prepare_ingestor_readiness(
-            domain,
-            &ingestor.name,
-            source_plan.capabilities.instances(),
-        );
-
-        let (shutdown_tx, _) = watch::channel(false);
-        let host = RuntimeSourceHost::new(RuntimeSourceHostSpec {
-            runtime: runtime.clone(),
-            domain: domain.clone(),
-            ingestor: ingestor.name.clone(),
-            timestamp_source: ingestor.timestamp_source,
-            output_routes: dependencies.output_routes,
-            filter_where: dependencies.filter_where,
-            codec: dependencies.codec,
-            metrics: dependencies.metrics,
-            branched_senders: branched_runtime.senders.clone(),
-            quiesce,
-            shutdown: shutdown_tx.subscribe(),
-            instance_index: 0,
-            metadata_kind: ingestor.metadata_kind,
-            buffered_intake: false,
-            flush_each_intake: false,
-        });
-        let shutdown = shutdown_tx.subscribe();
-        let task_domain = domain.clone();
-        let task_ingestor = ingestor.name.clone();
-        let task_query = source_plan.connector.query;
-        let client_mounts = resolved_client.mounts;
-        let task = tokio::spawn(async move {
-            let _client_mounts = client_mounts;
-            info!(
-                domain = task_domain.as_str(),
-                ingestor = task_ingestor.as_str(),
-                query = task_query.as_str(),
-                every = %every,
-                "started prometheus ingestor"
-            );
-            run_paced_source(source, host, cadence, shutdown).await;
-            info!(
-                domain = task_domain.as_str(),
-                ingestor = task_ingestor.as_str(),
-                "stopped prometheus ingestor"
-            );
-        });
-
-        runtime.inner.ingestors.insert(
-            key,
-            IngestorRuntime::Background {
-                shutdown: shutdown_tx,
-                branched: branched_runtime.runtimes,
-                tasks: vec![task],
-            },
-        );
-        Ok(())
+            every,
+            cadence_start: DomainCadenceStart::AfterInterval,
+            client_mounts: resolved.mounts.into_iter().collect(),
+            connector_label: "prometheus",
+        }
+        .open::<PrometheusSource>(runtime, ingestor)
+        .await
     }
 }

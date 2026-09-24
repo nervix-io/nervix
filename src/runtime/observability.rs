@@ -556,7 +556,7 @@ impl Runtime {
         }
 
         let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
-        let Some(runtime) = self.inner.ingestors.get(&key) else {
+        if !self.inner.ingestors.contains_key(&key) {
             let transient_error =
                 if let Some(error) = self.ingestor_transient_error(domain, ingestor) {
                     Some(error)
@@ -577,7 +577,7 @@ impl Runtime {
                 reconnect_wait_millis: self.ingestor_reconnect_wait_millis(domain, ingestor),
                 kafka_domain_offsets: None,
             });
-        };
+        }
         let Some(execution) = self.inner.executions.get(domain) else {
             return Ok(IngestorDescribe {
                 running: true,
@@ -602,27 +602,22 @@ impl Runtime {
                 Model::Ingestor(ingestor) => Some((node, ingestor.clone())),
                 _ => None,
             });
-        let kafka_domain_offsets = match runtime.value() {
-            IngestorRuntime::Background { .. } => {
-                if let Some((node, ingestor)) = scheduled_ingestor
-                    && let IngestSource::Kafka {
-                        topic,
-                        offset_mode: KafkaOffsetMode::Domain,
-                        instances,
-                        ..
-                    } = &ingestor.source
-                    && let Some(schedule) = node.kafka_partition_schedule.as_ref()
-                {
-                    Some(kafka_domain_offset_describe_from_schedule(
-                        topic.as_str(),
-                        *instances,
-                        schedule,
-                    ))
-                } else {
-                    None
-                }
-            }
-            IngestorRuntime::Endpoint { .. } => None,
+        let kafka_domain_offsets = if let Some((node, ingestor)) = scheduled_ingestor
+            && let IngestSource::Kafka {
+                topic,
+                offset_mode: KafkaOffsetMode::Domain,
+                instances,
+                ..
+            } = &ingestor.source
+            && let Some(schedule) = node.kafka_partition_schedule.as_ref()
+        {
+            Some(kafka_domain_offset_describe_from_schedule(
+                topic.as_str(),
+                *instances,
+                schedule,
+            ))
+        } else {
+            None
         };
         Ok(IngestorDescribe {
             running: true,

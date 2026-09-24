@@ -11,28 +11,6 @@ use super::*;
 
 pub(super) const DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
-pub(super) enum IngestorRuntime {
-    Background {
-        shutdown: watch::Sender<bool>,
-        branched: Vec<Arc<IngestorRouteRuntime>>,
-        tasks: Vec<JoinHandle<()>>,
-    },
-    Endpoint {
-        route_keys: Vec<HttpRouteKey>,
-        branched: Vec<Arc<IngestorRouteRuntime>>,
-        shutdown: watch::Sender<bool>,
-        tasks: Vec<JoinHandle<()>>,
-    },
-}
-
-impl IngestorRuntime {
-    pub(super) fn branch_runtimes(&self) -> &[Arc<IngestorRouteRuntime>] {
-        match self {
-            Self::Background { branched, .. } | Self::Endpoint { branched, .. } => branched,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::IntoStaticStr)]
 pub(in crate::runtime) enum IngestorQuiesceCause {
     #[strum(serialize = "entity hold")]
@@ -1566,7 +1544,7 @@ mod tests {
 
         runtime.inner.ingestors.insert(
             key.clone(),
-            IngestorRuntime::Background {
+            IngestorRuntime {
                 shutdown: shutdown_tx,
                 branched: Vec::new(),
                 tasks: vec![task],

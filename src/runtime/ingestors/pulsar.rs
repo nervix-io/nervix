@@ -13,24 +13,22 @@ use nervix_connector_pulsar::{PulsarSource, PulsarSourcePlan, PulsarSourceSettin
 
 use super::{
     super::*,
-    source::{BrokerSourceStart, DeclaredSourceAcknowledgement},
+    source::{BrokerSourceStart, SourceStart},
 };
 
-pub(in crate::runtime) struct PulsarIngestor;
-
-impl PulsarIngestor {
-    pub(in crate::runtime) async fn start(
+impl PulsarIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
         runtime: &Runtime,
-        plan: PulsarIngestorStartPlan,
-    ) -> Result<(), RuntimeError> {
+        ingestor: &IngestorSpec,
+    ) -> Result<SourceStart, RuntimeError> {
         let PulsarIngestorStartPlan {
-            ingestor,
             client,
             topic,
             subscription,
             instances,
             mode,
-        } = plan;
+        } = self;
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
@@ -42,17 +40,16 @@ impl PulsarIngestor {
         })
         .await
         .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
-        runtime
-            .start_broker_source::<PulsarSource>(BrokerSourceStart {
-                ingestor: &ingestor,
-                connector,
-                instances,
-                acknowledgement: DeclaredSourceAcknowledgement::from(&mode),
-                buffered_intake: false,
-                flush_each_intake: false,
-                client_mounts: resolved.mounts.into_iter().collect(),
-                connector_label: "pulsar",
-            })
-            .await
+        BrokerSourceStart {
+            connector,
+            instances,
+            acknowledgement: mode.acknowledgement(),
+            buffered_intake: false,
+            flush_each_intake: false,
+            client_mounts: resolved.mounts.into_iter().collect(),
+            connector_label: "pulsar",
+        }
+        .open::<PulsarSource>(ingestor)
+        .await
     }
 }

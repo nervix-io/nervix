@@ -13,32 +13,25 @@ use nervix_connector_zeromq::{ZeroMqSource, ZeroMqSourcePlan};
 
 use super::{
     super::*,
-    source::{BrokerSourceStart, DeclaredSourceAcknowledgement},
+    source::{BrokerSourceStart, SourceStart},
 };
 
-pub(in crate::runtime) struct ZeroMqIngestor;
-
-impl ZeroMqIngestor {
-    pub(in crate::runtime) async fn start(
-        runtime: &Runtime,
-        plan: ZeroMqIngestorStartPlan,
-    ) -> Result<(), RuntimeError> {
-        let ZeroMqIngestorStartPlan {
-            ingestor,
-            client,
-            mode,
-        } = plan;
-        runtime
-            .start_broker_source::<ZeroMqSource>(BrokerSourceStart {
-                ingestor: &ingestor,
-                connector: ZeroMqSourcePlan::new(client.config),
-                instances: NonZeroU64::MIN,
-                acknowledgement: DeclaredSourceAcknowledgement::from(&mode),
-                buffered_intake: true,
-                flush_each_intake: false,
-                client_mounts: Vec::new(),
-                connector_label: "zeromq",
-            })
-            .await
+impl ZeroMqIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
+        ingestor: &IngestorSpec,
+    ) -> Result<SourceStart, RuntimeError> {
+        let ZeroMqIngestorStartPlan { client, mode } = self;
+        BrokerSourceStart {
+            connector: ZeroMqSourcePlan::new(client.config),
+            instances: NonZeroU64::MIN,
+            acknowledgement: mode.acknowledgement(),
+            buffered_intake: true,
+            flush_each_intake: false,
+            client_mounts: Vec::new(),
+            connector_label: "zeromq",
+        }
+        .open::<ZeroMqSource>(ingestor)
+        .await
     }
 }
