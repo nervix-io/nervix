@@ -601,9 +601,17 @@ fn processor_reset_target_keys(
     match (template.branch.as_ref(), scope, branch_key) {
         (None, WasmStateResetScope::Unbranched, None) => Ok(vec![None]),
         (Some(_), WasmStateResetScope::Branch(selected), Some(branch))
-            if branch.fingerprint() == selected =>
+            if branch.fingerprint() == selected
+                && instances.contains_key(&Some(branch.clone())) =>
         {
             Ok(vec![Some(branch)])
+        }
+        (Some(_), WasmStateResetScope::Branch(selected), Some(branch))
+            if branch.fingerprint() == selected =>
+        {
+            Err(Report::new(WasmStateResetRuntimeError::BranchUnavailable {
+                processor: processor.clone(),
+            }))
         }
         (Some(_), WasmStateResetScope::Branch(selected), None) => Ok(instances
             .snapshot_entries()

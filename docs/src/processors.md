@@ -466,6 +466,28 @@ guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` reports how 
 node's branch checkpoints are awaiting local storage, awaiting replicas, or failed. See
 [Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements).
 
+### Reset guest state from NSPL
+
+`RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR <scope>;` replaces the selected
+guest-state lifetime of an existing, running processor. The scope is mandatory:
+
+```nspl
+RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR UNBRANCHED;
+RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR ALL BRANCHES;
+RESET WASM PROCESSOR normalize_events STATE IN DOMAIN sales FOR BRANCH VALUES { tenant = 'acme' };
+```
+
+Use `FOR UNBRANCHED` only for an unbranched processor. Use `FOR ALL BRANCHES` or exact
+`FOR BRANCH VALUES` fields only for a branched processor. Values must match the declared branch
+schema exactly. A selected branch must already be active; the command does not create one.
+The selected branch loses its previous guest computation state and starts from the guest's initial
+state. Sibling branches keep their state and continue processing.
+
+The normal client and CLI command path returns success only after the new generation is durable
+and its replacement execution is usable. Repeating the same command execution reference returns
+the retained outcome without creating another generation. A fresh command is a new reset. See
+[Command Completion](command-completion.md) for retry validity and expired references.
+
 ## Correlator
 
 Correlators use explicit sides and have no default input scope:

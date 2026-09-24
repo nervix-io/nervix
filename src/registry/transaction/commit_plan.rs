@@ -100,6 +100,15 @@ impl PlannedTransactionStepKind {
                 resource: resource.clone(),
                 already_existed: *already_existed,
             },
+            Self::ResetWasmState {
+                reset,
+                request,
+                schedule,
+            } => TransactionCommitStepKind::ResetWasmState {
+                reset: Box::new(reset.clone()),
+                request: request.clone(),
+                schedule: Box::new(schedule.clone()),
+            },
         }
     }
 

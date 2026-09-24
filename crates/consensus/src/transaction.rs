@@ -1088,6 +1088,12 @@ pub enum TransactionStepEffect {
         inputs: Box<DomainPlanningInputs>,
         identifier: ResourceName,
     },
+    ResetWasmState {
+        inputs: Box<DomainPlanningInputs>,
+        reset: Box<nervix_models::ResetWasmState>,
+        request: nervix_models::CommandExecutionReference,
+        schedule: Box<nervix_models::DomainSchedule>,
+    },
 }
 
 impl TransactionStepEffect {
@@ -1098,6 +1104,7 @@ impl TransactionStepEffect {
             | Self::StartDomain { inputs, .. }
             | Self::StopDomain { inputs }
             | Self::CreateResourceCatalog { inputs, .. } => inputs,
+            Self::ResetWasmState { inputs, .. } => inputs,
         }
     }
 }

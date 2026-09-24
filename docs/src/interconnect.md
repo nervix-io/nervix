@@ -123,6 +123,12 @@ one concrete fingerprint, the explicit unbranched instance, or all concrete bran
 match the complete domain, relay and entity set, purpose, and scope. It cannot widen a one-branch
 hold or release another reset's hold.
 
+An operator's NSPL reset enters through the ordinary typed session command protocol and ordered
+transaction planner. The transaction step retains the command execution reference and exact scope;
+the leader uses that reference when invoking this same coordinator request. A reconnect or a new
+leader resumes the recorded step with the same identity. No separate public reset wire request or
+JSON command path is introduced.
+
 The management pool exposes one typed coordinator request for internal administrative, SDK, and
 recovery callers. It carries the stable execution reference and exact reset target to the leader,
 which runs the single control-plane operation. Its lower-level runtime requests have three actions.

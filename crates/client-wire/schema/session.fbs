@@ -379,6 +379,11 @@ table RebindResourceOperation {
   version: ulong;
 }
 
+table ResetWasmStateOperation {
+  domain: string (required);
+  processor: string (required);
+}
+
 union TransactionOperation {
   CreateConfigurationOperation,
   AlterConfigurationOperation,
@@ -387,7 +392,8 @@ union TransactionOperation {
   StartDomainOperation,
   StopDomainOperation,
   CreateResourceOperation,
-  RebindResourceOperation
+  RebindResourceOperation,
+  ResetWasmStateOperation
 }
 
 enum ModelChangeAspect : ubyte {
@@ -491,13 +497,18 @@ table ResourceRebindingReason {
   target_version: ulong;
 }
 
+table WasmStateResetReason {
+  node: NodeRef (required);
+}
+
 union OperationImpactReason {
   ConfigurationReason,
   DomainPlacementReason,
   DomainStartReason,
   DomainStopReason,
   ResourceCatalogReason,
-  ResourceRebindingReason
+  ResourceRebindingReason,
+  WasmStateResetReason
 }
 
 table OperationReason {

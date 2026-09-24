@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use error_stack::{Report, ResultExt as _};
 use futures_util::future::try_join_all;
 use meticulous::OptionExt as _;
-use nervix_consensus::{DomainMutationLease, DomainPlanningInputs};
+use nervix_consensus::{DomainMutationLease, DomainPlanningInputs, ReplicatedTransaction};
 use nervix_interconnect::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse, EntityGatePurpose,
     RemoteOperationSubject, WasmStateResetRuntimeAction as RemoteWasmStateResetRuntimeAction,
@@ -22,8 +22,8 @@ use nervix_interconnect::{
 };
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainSchedule, DomainStatus,
-    ModelKind, ModelName, NodeRef, RelayName, RemoteRuntimeField, ResolvedBranching,
-    WasmStateResetPhase, WasmStateResetScope,
+    ModelKind, ModelName, NodeRef, RelayName, RemoteRuntimeField, ResetWasmState,
+    ResolvedBranching, ResolvedResetWasmStateScope, WasmStateResetPhase, WasmStateResetScope,
 };
 #[cfg(feature = "testing")]
 use nervix_recovery::NoReceiver as _;
@@ -87,6 +87,62 @@ struct WasmStateResetPlan {
 }
 
 impl SessionServiceImpl {
+    /// Apply the reset effect of one durable transaction step. Its request reference belongs to
+    /// the queued statement and survives reconnects and leader changes unchanged.
+    pub(in crate::application) async fn apply_transaction_wasm_state_reset(
+        &self,
+        transaction: &ReplicatedTransaction,
+        reset: &ResetWasmState,
+        request: &CommandExecutionReference,
+    ) -> error_stack::Result<(), WasmStateResetError> {
+        let domain = &transaction.domain;
+        let processor = ModelName::from(&reset.processor);
+        if reset.domain != *domain {
+            return Err(Report::new(WasmStateResetError::InvalidTarget {
+                domain: domain.clone(),
+                processor,
+            }));
+        }
+        let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
+        let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
+        let scheduled_node = inputs
+            .schedule()
+            .and_then(|schedule| schedule.nodes.get(&entity));
+        let scheduled_node = scheduled_node.ok_or_else(|| {
+            Report::new(WasmStateResetError::ProcessorUnavailable {
+                domain: domain.clone(),
+                processor: processor.clone(),
+            })
+        })?;
+        let branching = scheduled_node.resolved_branching.as_ref().ok_or_else(|| {
+            Report::new(WasmStateResetError::ProcessorUnavailable {
+                domain: domain.clone(),
+                processor: processor.clone(),
+            })
+        })?;
+        let selection = reset.scope.resolve(branching).map_err(|error| {
+            error.change_context(WasmStateResetError::InvalidTarget {
+                domain: domain.clone(),
+                processor: processor.clone(),
+            })
+        })?;
+        let target = match selection {
+            ResolvedResetWasmStateScope::Unbranched => WasmStateResetTarget::Unbranched,
+            ResolvedResetWasmStateScope::AllBranches => WasmStateResetTarget::AllBranches,
+            ResolvedResetWasmStateScope::Branch { fields, .. } => {
+                WasmStateResetTarget::Branch(fields)
+            }
+        };
+        self.reset_wasm_processor_state(
+            domain,
+            &processor,
+            request.clone(),
+            target,
+            transaction.domain_mutation(),
+        )
+        .await
+    }
+
     /// Register everything this node runs for coordinated WASM state resets: the interconnect
     /// handlers that carry one between nodes, and the coordinator that turns a guest's request
     /// into one.

@@ -630,6 +630,7 @@ pub(in crate::application) fn is_queueable_transaction_statement(statement: &Sta
                 | Statement::StartDomain(_)
                 | Statement::StopDomain(_)
                 | Statement::CreateResource(_)
+                | Statement::ResetWasmState(_)
         )
 }
 
@@ -638,6 +639,7 @@ pub(in crate::application) fn transaction_statement_label(statement: &Statement)
         Statement::CreateDomain(_) => "CREATE DOMAIN",
         Statement::CreateUser(_) => "CREATE USER",
         Statement::UploadResource(_) => "UPLOAD RESOURCE",
+        Statement::ResetWasmState(_) => "RESET WASM PROCESSOR STATE",
         Statement::DropNode(_) => "DROP NODE",
         Statement::CordonNode(_) => "CORDON",
         Statement::UncordonNode(_) => "UNCORDON",
@@ -1281,6 +1283,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         statements: &[Statement],
+        operation_references: &[CommandExecutionReference],
         first_operation_index: usize,
         allow_incomplete_final_model_run: bool,
     ) -> Result<CapturedTransactionPlan, Report<TransactionPlanningError>> {
@@ -1332,6 +1335,7 @@ impl SessionServiceImpl {
             resource_uploads,
             schedule: control.planning_inputs.schedule().cloned(),
             basis,
+            operation_references: operation_references.to_vec(),
         };
         let planning_domain = domain.clone();
         let plan = Registry::plan_transaction(
@@ -1414,7 +1418,8 @@ impl SessionServiceImpl {
             } => *already_existed,
             PlannedTransactionStepKind::AlterDomain { .. }
             | PlannedTransactionStepKind::StartDomain { .. }
-            | PlannedTransactionStepKind::StopDomain => false,
+            | PlannedTransactionStepKind::StopDomain
+            | PlannedTransactionStepKind::ResetWasmState { .. } => false,
         };
         let impact = plan
             .operations()
@@ -1494,8 +1499,20 @@ impl SessionServiceImpl {
             .map(|queued| queued.statement.clone())
             .collect::<Vec<_>>();
         statements.push(candidate.statement.clone());
+        let mut operation_references = transaction
+            .statements
+            .iter()
+            .map(|queued| queued.request_reference.clone())
+            .collect::<Vec<_>>();
+        operation_references.push(candidate.request_reference.clone());
         let captured = self
-            .plan_transaction_statements(&transaction.domain, &statements, 0, true)
+            .plan_transaction_statements(
+                &transaction.domain,
+                &statements,
+                &operation_references,
+                0,
+                true,
+            )
             .await
             .map_err(|error| {
                 format!(
@@ -1532,8 +1549,19 @@ impl SessionServiceImpl {
             .iter()
             .map(|queued| queued.statement.clone())
             .collect::<Vec<_>>();
+        let operation_references = transaction
+            .statements
+            .iter()
+            .map(|queued| queued.request_reference.clone())
+            .collect::<Vec<_>>();
         let captured = self
-            .plan_transaction_statements(&transaction.domain, &statements, 0, false)
+            .plan_transaction_statements(
+                &transaction.domain,
+                &statements,
+                &operation_references,
+                0,
+                false,
+            )
             .await
             .change_context(TransactionCommitError::PreparePlan {
                 id: transaction.id.clone(),
@@ -1653,8 +1681,19 @@ impl SessionServiceImpl {
             .iter()
             .map(|queued| queued.statement.clone())
             .collect::<Vec<_>>();
+        let operation_references = transaction
+            .statements
+            .iter()
+            .map(|queued| queued.request_reference.clone())
+            .collect::<Vec<_>>();
         let captured = match self
-            .plan_transaction_statements(&transaction.domain, &statements, 0, true)
+            .plan_transaction_statements(
+                &transaction.domain,
+                &statements,
+                &operation_references,
+                0,
+                true,
+            )
             .await
         {
             Ok(captured) => captured,
@@ -2485,6 +2524,23 @@ impl SessionServiceImpl {
                     inputs: Box::new(inputs),
                 }),
             ),
+            PlannedTransactionStepKind::ResetWasmState {
+                reset,
+                request,
+                schedule,
+            } => (
+                command_ok(format!(
+                    "resetting WASM processor '{}' state in domain '{}'",
+                    reset.processor.as_str(),
+                    domain_id.as_str()
+                )),
+                Some(TransactionStepEffect::ResetWasmState {
+                    inputs: Box::new(inputs),
+                    reset: Box::new(reset),
+                    request,
+                    schedule: Box::new(schedule),
+                }),
+            ),
             PlannedTransactionStepKind::Models { .. } => {
                 return Err(Report::new(TransactionCommitError::InvalidProgress {
                     id: transaction.id.clone(),
@@ -2522,9 +2578,35 @@ impl SessionServiceImpl {
         self.pause_transaction_commit_if_armed(&advanced).await;
         let mut application_failure = None;
         if succeeded {
-            let activation_error = self
-                .apply_current_cluster_state_recording_recovery(&actual, &advanced)
-                .await;
+            let reset_effect = match &advanced.state {
+                TransactionState::Committing(progress) => match progress.applying.as_ref() {
+                    Some(applying) => match applying.effect.as_ref() {
+                        Some(TransactionStepEffect::ResetWasmState { reset, request, .. }) => {
+                            Some((reset.as_ref(), request))
+                        }
+                        _ => None,
+                    },
+                    None => None,
+                },
+                TransactionState::Open(_) | TransactionState::Finished(_) => None,
+            };
+            if let Some((reset, request)) = reset_effect
+                && let Err(error) = self
+                    .apply_transaction_wasm_state_reset(&advanced, reset, request)
+                    .await
+            {
+                application_failure = Some(format!(
+                    "transaction '{}' committed the WASM state reset, but it did not become \
+                     usable: {error:#}",
+                    transaction.id
+                ));
+            }
+            let activation_error = if reset_effect.is_some() {
+                None
+            } else {
+                self.apply_current_cluster_state_recording_recovery(&actual, &advanced)
+                    .await
+            };
             if let Some(error) = &activation_error {
                 self.broadcast_error(format!(
                     "failed to reconcile runtime after transaction '{}' step {}: {error}",

@@ -1940,7 +1940,7 @@ fn stored_placement(key: &[u8]) -> Result<StoredPlacement, Report<RuntimePersist
                     "runtime state key has an invalid branch key".to_string(),
                 )
             })?;
-            Some(BranchKey::fingerprint_of_canonical_text(text))
+            Some(BranchKeyFingerprint::of_canonical_text(text))
         }
         _ => {
             return Err(Report::new(RuntimePersistenceError::DecodeState(

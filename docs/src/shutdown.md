@@ -276,6 +276,11 @@ and interconnect handlers alive so the fresh initial checkpoint and `Ready` publ
 within their ordinary bounds. If shutdown ends first, restart observes `Publishing` and resumes the
 new generation rather than restoring the old one.
 
+An admitted NSPL reset is recorded as an ordered transaction effect. If shutdown interrupts the
+command after its effect is recorded, recovery resumes it with the original execution reference;
+it does not admit the text as a fresh reset. The client receives success only after the replacement
+is usable, or a retained failure when that cannot be established.
+
 Resetting one concrete branch does not turn a sibling branch into shutdown work. Its scoped relay
 gate and processor command lane select only that branch; sibling callbacks, checkpoints, outputs,
 ACKs, and timers continue until shutdown itself reaches them. Old timeout handles belong to the
