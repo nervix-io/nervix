@@ -464,6 +464,17 @@ pub(super) fn collect_expression_field_paths(
             fields.push(FieldPath::new(format!("{}.{}", field.relay, field.field)));
         }
         Expr::InternalFieldRef(_) => {}
+        Expr::Membership { operand, set } => {
+            collect_expression_field_paths(operand, fields);
+            for element in set {
+                collect_expression_field_paths(element, fields);
+            }
+        }
+        Expr::Between { operand, low, high } => {
+            collect_expression_field_paths(operand, fields);
+            collect_expression_field_paths(low, fields);
+            collect_expression_field_paths(high, fields);
+        }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
             collect_expression_field_paths(expr, fields);
         }

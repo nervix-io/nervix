@@ -3,9 +3,10 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** Each operation's accepted argument types, result type, volatility, dependency scope,
-//!   null propagation and whether it can report a per-row error, and the value contracts, such as
-//!   case mapping, floating-point classification and integer bit operations, that compile-time
-//!   folding and columnar execution both apply.
+//!   null propagation, whether it can report a per-row error and, for one that can, whether a
+//!   conditional arm runs it over the rows it selects or over the whole batch, and the value
+//!   contracts, such as case mapping, floating-point classification and integer bit operations,
+//!   that compile-time folding and columnar execution both apply.
 //! - **Depends on.** The VM program model and Arrow data types.
 //! - **Must not know.** How execution walks Arrow buffers, registers or batches, and anything about
 //!   relays, branches, connectors or the registry.
@@ -13,9 +14,12 @@
 use std::ops::{BitAnd, BitOr, BitXor, Not};
 
 use arrow_schema::{DataType, TimeUnit};
+use meticulous::OptionExt as _;
 
 use crate::{
     CompileError, RegisterType,
+    extremum::Extremum,
+    membership::MembershipSet,
     program::{BinaryOp, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
 };
@@ -39,6 +43,26 @@ pub enum NullPropagation {
     NeverNull,
     Strict,
     Custom,
+}
+
+/// How a conditional arm executes an operation that can report a per-row error.
+///
+/// Every such operation carries the rows its arm selects, so that no unselected row reports an
+/// error. Which rows the kernel visits is a cost decision. Narrowing the operands to the selected
+/// rows and scattering the result back over the batch costs a few nanoseconds per row of the
+/// batch, so it pays off only for a kernel whose own cost per row is well above that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmExecution {
+    /// The kernel runs over the whole batch and the arm discards the errors of the rows it did
+    /// not select. Right for a vectorized kernel, whose cost per row is at or below the cost of
+    /// narrowing it.
+    WholeBatch,
+    /// The kernel runs over the selected rows only. Right for pattern matching, text parsing and
+    /// formatting, calendar arithmetic, transcendental functions, UUID generation and calls out
+    /// of the VM, and required for a builtin that builds text of a length its arguments choose:
+    /// every row's text shares the one column's size limit, so text built for a row the arm did
+    /// not select could leave a selected row no room and fail it.
+    SelectedRows,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,7 +370,54 @@ pub enum BuiltinLowering {
     ShiftLeft,
     ShiftRight,
     BitCount,
+    /// `greatest` or `least`.
+    Extremum(Extremum),
+    Clamp,
+    /// An `IN` test, with the set of constants it was compiled with.
+    Membership(MembershipSet),
     Datetime(DatetimeFunction),
+}
+
+impl RegisterType {
+    /// Whether values of this type are single values rather than `ARRAY` or `VEC` lists.
+    pub fn is_scalar(self) -> bool {
+        match self {
+            Self::Generic => false,
+            Self::UInt8
+            | Self::Int8
+            | Self::UInt16
+            | Self::Int16
+            | Self::UInt32
+            | Self::Int32
+            | Self::UInt64
+            | Self::Int64
+            | Self::Float32
+            | Self::Float64
+            | Self::Boolean
+            | Self::Utf8
+            | Self::Datetime => true,
+        }
+    }
+
+    /// Whether `<`, `<=`, `>` and `>=` compare values of this type: numbers, `STRING` and
+    /// `DATETIME`.
+    pub fn is_ordered(self) -> bool {
+        match self {
+            Self::UInt8
+            | Self::Int8
+            | Self::UInt16
+            | Self::Int16
+            | Self::UInt32
+            | Self::Int32
+            | Self::UInt64
+            | Self::Int64
+            | Self::Float32
+            | Self::Float64
+            | Self::Utf8
+            | Self::Datetime => true,
+            Self::Boolean | Self::Generic => false,
+        }
+    }
 }
 
 impl RegexpFunction {
@@ -421,6 +492,21 @@ impl DatetimeFunction {
             | Self::DateDiff { .. }
             | Self::FromUnix(_)
             | Self::ParseDatetime(_) => true,
+        }
+    }
+
+    /// How a conditional arm executes this builtin. Binning and unit conversion are checked
+    /// integer arithmetic; every other function walks each row through a calendar, a zone, a
+    /// format or a parser.
+    const fn arm_execution(&self) -> ArmExecution {
+        match self {
+            Self::DateBin(_) | Self::ToUnix(_) | Self::FromUnix(_) => ArmExecution::WholeBatch,
+            Self::DatePart { .. }
+            | Self::DateTrunc { .. }
+            | Self::DateAdd { .. }
+            | Self::DateDiff { .. }
+            | Self::FormatDatetime { .. }
+            | Self::ParseDatetime(_) => ArmExecution::SelectedRows,
         }
     }
 }
@@ -584,11 +670,44 @@ pub const fn binary_descriptor(op: BinaryOp) -> BinaryDescriptor {
                 null_propagation: NullPropagation::Custom,
             },
         },
+        BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => BinaryDescriptor {
+            semantics: OperationSemantics {
+                volatility: Volatility::Immutable,
+                dependency_scope: DependencyScope::Constant,
+                has_side_effects: false,
+                can_error: false,
+                null_propagation: NullPropagation::NeverNull,
+            },
+        },
     }
 }
 
 pub const fn binary_op_semantics(op: BinaryOp) -> OperationSemantics {
     binary_descriptor(op).semantics
+}
+
+/// `IN`: an equality test against constants, which is null only for a null operand of a set with
+/// elements, since no value is an element of an empty set.
+pub const fn membership_semantics() -> OperationSemantics {
+    OperationSemantics {
+        volatility: Volatility::Immutable,
+        dependency_scope: DependencyScope::Constant,
+        has_side_effects: false,
+        can_error: false,
+        null_propagation: NullPropagation::Custom,
+    }
+}
+
+/// `BETWEEN`: the conjunction of two comparisons, which is false wherever one of them is false even
+/// when the other is null.
+pub const fn range_semantics() -> OperationSemantics {
+    OperationSemantics {
+        volatility: Volatility::Immutable,
+        dependency_scope: DependencyScope::Constant,
+        has_side_effects: false,
+        can_error: false,
+        null_propagation: NullPropagation::Custom,
+    }
 }
 
 pub const fn cast_descriptor() -> CastDescriptor {
@@ -605,6 +724,132 @@ pub const fn cast_descriptor() -> CastDescriptor {
 
 pub const fn cast_semantics() -> OperationSemantics {
     cast_descriptor().semantics
+}
+
+/// How a conditional arm executes a unary operator: negation is vectorized, and `NOT` never
+/// reports an error.
+pub const fn unary_arm_execution(op: UnaryOp) -> ArmExecution {
+    match op {
+        UnaryOp::Neg | UnaryOp::Not => ArmExecution::WholeBatch,
+    }
+}
+
+/// How a conditional arm executes a binary operator: checked arithmetic is vectorized, and a
+/// comparison or Boolean connective never reports an error.
+pub const fn binary_arm_execution(op: BinaryOp) -> ArmExecution {
+    match op {
+        BinaryOp::Add
+        | BinaryOp::Sub
+        | BinaryOp::Mul
+        | BinaryOp::Div
+        | BinaryOp::Rem
+        | BinaryOp::Eq
+        | BinaryOp::NotEq
+        | BinaryOp::Gt
+        | BinaryOp::Lt
+        | BinaryOp::GtEq
+        | BinaryOp::LtEq
+        | BinaryOp::And
+        | BinaryOp::Or
+        | BinaryOp::IsDistinctFrom
+        | BinaryOp::IsNotDistinctFrom => ArmExecution::WholeBatch,
+    }
+}
+
+/// How a conditional arm executes a cast: a cast that reads or writes text parses or formats
+/// every row, while every other cast is a vectorized conversion.
+pub const fn cast_arm_execution(input: RegisterType, target: RegisterType) -> ArmExecution {
+    if matches!(input, RegisterType::Utf8) || matches!(target, RegisterType::Utf8) {
+        ArmExecution::SelectedRows
+    } else {
+        ArmExecution::WholeBatch
+    }
+}
+
+/// How a conditional arm executes a builtin.
+pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
+    match lowering {
+        // Vectorized kernels, and builtins that never report a per-row error and so never run
+        // under a selection at all.
+        BuiltinLowering::Now
+        | BuiltinLowering::UuidV4
+        | BuiltinLowering::Lower
+        | BuiltinLowering::Upper
+        | BuiltinLowering::Trim
+        | BuiltinLowering::Btrim
+        | BuiltinLowering::Ltrim
+        | BuiltinLowering::Rtrim
+        | BuiltinLowering::Length
+        | BuiltinLowering::CharLength
+        | BuiltinLowering::BitLength
+        | BuiltinLowering::Ascii
+        | BuiltinLowering::Coalesce
+        | BuiltinLowering::IsNull
+        | BuiltinLowering::NullIf
+        | BuiltinLowering::Abs
+        | BuiltinLowering::Ceil
+        | BuiltinLowering::Concat
+        | BuiltinLowering::Sum
+        | BuiltinLowering::Last
+        | BuiltinLowering::First
+        | BuiltinLowering::Count
+        | BuiltinLowering::Nth
+        | BuiltinLowering::Contains
+        | BuiltinLowering::StartsWith
+        | BuiltinLowering::EndsWith
+        | BuiltinLowering::Floor
+        | BuiltinLowering::Initcap
+        | BuiltinLowering::Left
+        | BuiltinLowering::Md5
+        | BuiltinLowering::Replace
+        | BuiltinLowering::Reverse
+        | BuiltinLowering::Right
+        | BuiltinLowering::Round
+        | BuiltinLowering::SplitPart
+        | BuiltinLowering::Sqrt
+        | BuiltinLowering::Strpos
+        | BuiltinLowering::Substr
+        | BuiltinLowering::ToHex
+        | BuiltinLowering::Translate
+        | BuiltinLowering::Radians
+        | BuiltinLowering::Degrees
+        | BuiltinLowering::Sign
+        | BuiltinLowering::Trunc
+        | BuiltinLowering::IsNan
+        | BuiltinLowering::IsFinite
+        | BuiltinLowering::IsInfinite
+        | BuiltinLowering::BitwiseAnd
+        | BuiltinLowering::BitwiseOr
+        | BuiltinLowering::BitwiseXor
+        | BuiltinLowering::BitwiseNot
+        | BuiltinLowering::ShiftLeft
+        | BuiltinLowering::ShiftRight
+        | BuiltinLowering::BitCount
+        | BuiltinLowering::Extremum(_)
+        | BuiltinLowering::Clamp
+        | BuiltinLowering::Membership(_) => ArmExecution::WholeBatch,
+        // Text sized by an argument must only spend its column's size limit on selected rows.
+        BuiltinLowering::Repeat | BuiltinLowering::Lpad | BuiltinLowering::Rpad => {
+            ArmExecution::SelectedRows
+        }
+        // Transcendental functions, pattern matching and UUID generation cost far more per row
+        // than narrowing.
+        BuiltinLowering::UuidV7
+        | BuiltinLowering::Acos
+        | BuiltinLowering::Asin
+        | BuiltinLowering::Atan
+        | BuiltinLowering::Atan2
+        | BuiltinLowering::Cos
+        | BuiltinLowering::Sin
+        | BuiltinLowering::Tan
+        | BuiltinLowering::Exp
+        | BuiltinLowering::Ln
+        | BuiltinLowering::Log
+        | BuiltinLowering::Log2
+        | BuiltinLowering::Pow
+        | BuiltinLowering::Regexp(_) => ArmExecution::SelectedRows,
+        BuiltinLowering::Datetime(function) => function.arm_execution(),
+    }
 }
 
 pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> {
@@ -688,6 +933,9 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::ShiftLeft => BuiltinLowering::ShiftLeft,
         FunctionName::ShiftRight => BuiltinLowering::ShiftRight,
         FunctionName::BitCount => BuiltinLowering::BitCount,
+        FunctionName::Greatest => BuiltinLowering::Extremum(Extremum::Greatest),
+        FunctionName::Least => BuiltinLowering::Extremum(Extremum::Least),
+        FunctionName::Clamp => BuiltinLowering::Clamp,
         FunctionName::Datetime(function) => BuiltinLowering::Datetime(function.clone()),
         FunctionName::LeakSensitive
         | FunctionName::LookupHashMap
@@ -778,15 +1026,18 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: function.can_error(),
             null_propagation: NullPropagation::Strict,
         },
-        BuiltinLowering::Coalesce | BuiltinLowering::NullIf | BuiltinLowering::Concat => {
-            OperationSemantics {
-                volatility: Volatility::Immutable,
-                dependency_scope: DependencyScope::Constant,
-                has_side_effects: false,
-                can_error: false,
-                null_propagation: NullPropagation::Custom,
-            }
-        }
+        // `greatest` and `least` skip null arguments.
+        BuiltinLowering::Coalesce
+        | BuiltinLowering::NullIf
+        | BuiltinLowering::Concat
+        | BuiltinLowering::Extremum(_) => OperationSemantics {
+            volatility: Volatility::Immutable,
+            dependency_scope: DependencyScope::Constant,
+            has_side_effects: false,
+            can_error: false,
+            null_propagation: NullPropagation::Custom,
+        },
+        BuiltinLowering::Membership(_) => membership_semantics(),
         BuiltinLowering::IsNull => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
@@ -819,6 +1070,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Trunc
         | BuiltinLowering::ShiftLeft
         | BuiltinLowering::ShiftRight
+        | BuiltinLowering::Clamp
         // A count can ask for more text than one STRING column holds.
         | BuiltinLowering::Repeat
         | BuiltinLowering::Lpad
@@ -1049,6 +1301,43 @@ fn builtin_output_type(
             require_integral_arg(function, count, span)?;
             Ok(value.data_type())
         }
+        BuiltinLowering::Extremum(_) => {
+            require_builtin_min_arity(function, arg_types, 1, span.clone())?;
+            let input = require_matching_operand_types(function, arg_types, span.clone())?;
+            // The extrema order the window MIN and MAX aggregates use, which also orders BOOL.
+            if !input.is_scalar() {
+                return Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires numeric, BOOL, STRING or DATETIME input, found \
+                         {input}",
+                        function.as_str()
+                    ),
+                    span: span.into(),
+                });
+            }
+            Ok(input.data_type())
+        }
+        BuiltinLowering::Clamp => {
+            require_builtin_arity_exact(function, arg_types, 3, span.clone())?;
+            let input = require_matching_operand_types(function, arg_types, span.clone())?;
+            if !input.is_ordered() {
+                return Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires numeric, STRING or DATETIME input, found {input}",
+                        function.as_str()
+                    ),
+                    span: span.into(),
+                });
+            }
+            Ok(input.data_type())
+        }
+        BuiltinLowering::Membership(_) => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            require_supported_register_type(function, &arg_types[0], span)?;
+            Ok(DataType::Boolean)
+        }
         BuiltinLowering::Concat => {
             require_builtin_min_arity(function, arg_types, 1, span.clone())?;
             for arg_type in arg_types {
@@ -1237,6 +1526,12 @@ pub fn binary_output_type(
     {
         return None;
     }
+    if let BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom = op {
+        let operand = RegisterType::from_data_type(left_type)?;
+        if !operand.is_scalar() {
+            return None;
+        }
+    }
     Some(output)
 }
 
@@ -1341,6 +1636,33 @@ fn require_supported_register_type(
         ),
         span: span.into(),
     })
+}
+
+/// The one register type every argument of `function` shares.
+fn require_matching_operand_types(
+    function: &FunctionName,
+    arg_types: &[DataType],
+    span: std::ops::Range<usize>,
+) -> Result<RegisterType, CompileError> {
+    let first = arg_types
+        .first()
+        .verified("the caller required at least one argument before asking for their shared type");
+    let input = require_supported_register_type(function, first, span.clone())?;
+    for arg_type in &arg_types[1..] {
+        if arg_type != first {
+            return Err(CompileError {
+                code: "type_mismatch",
+                message: format!(
+                    "function '{}' requires matching operand types, found {:?} and {:?}",
+                    function.as_str(),
+                    first,
+                    arg_type
+                ),
+                span: span.into(),
+            });
+        }
+    }
+    Ok(input)
 }
 
 /// Which elements an `ARRAY` or `VEC` function accepts.
@@ -1547,17 +1869,39 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
                 children,
             ))
         }
+        // The set's elements are constants the compiler evaluates once, and an element that cannot
+        // be evaluated rejects the program, so only the operand shapes what the test does per row.
+        Expr::Membership { operand, .. } => Some(ExpressionSemantics::from_operation(
+            membership_semantics(),
+            [expr_semantics(operand)?],
+        )),
+        Expr::Between { operand, low, high } => Some(ExpressionSemantics::from_operation(
+            range_semantics(),
+            [
+                expr_semantics(operand)?,
+                expr_semantics(low)?,
+                expr_semantics(high)?,
+            ],
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BitwiseOperation, DependencyScope, ExpressionSemantics, FloatClass, IntegerBits,
-        NullPropagation, Volatility, binary_op_semantics, builtin_function_semantics,
-        cast_semantics, expr_semantics, unary_op_semantics,
+        ArmExecution, BitwiseOperation, BuiltinLowering, DependencyScope, ExpressionSemantics,
+        FloatClass, IntegerBits, NullPropagation, Volatility, binary_arm_execution,
+        binary_op_semantics, builtin_arm_execution, builtin_function_semantics, cast_arm_execution,
+        cast_semantics, expr_semantics, unary_arm_execution, unary_op_semantics,
     };
-    use crate::program::{BinaryOp, Expr, FieldRef, FunctionName, Literal, SpannedNode, UnaryOp};
+    use crate::{
+        RegisterType,
+        program::{
+            BinaryOp, CalendarUnit, DatetimeFunction, DatetimeUnit, Expr, FieldRef, FixedTimeUnit,
+            FunctionName, Literal, SpannedNode, UnaryOp, Zone,
+        },
+        regexp::{RegexpCall, RegexpFunction},
+    };
 
     fn spanned(inner: Expr) -> SpannedNode<Expr> {
         SpannedNode {
@@ -1696,9 +2040,16 @@ mod tests {
             BinaryOp::LtEq,
             BinaryOp::And,
             BinaryOp::Or,
+            BinaryOp::IsDistinctFrom,
+            BinaryOp::IsNotDistinctFrom,
         ] {
             let semantics = binary_op_semantics(op);
             assert_eq!(semantics.volatility, Volatility::Immutable);
+        }
+        for op in [BinaryOp::IsDistinctFrom, BinaryOp::IsNotDistinctFrom] {
+            let semantics = binary_op_semantics(op);
+            assert_eq!(semantics.null_propagation, NullPropagation::NeverNull);
+            assert!(!semantics.can_error);
         }
 
         assert_eq!(cast_semantics().volatility, Volatility::Immutable);
@@ -1773,5 +2124,64 @@ mod tests {
             }
         );
         assert!(!semantics.supports_constant_folding());
+    }
+
+    #[test]
+    fn arms_narrow_expensive_kernels_and_run_vectorized_ones_over_the_batch() {
+        assert_eq!(unary_arm_execution(UnaryOp::Neg), ArmExecution::WholeBatch);
+        assert_eq!(
+            binary_arm_execution(BinaryOp::Div),
+            ArmExecution::WholeBatch
+        );
+        assert_eq!(
+            cast_arm_execution(RegisterType::Int32, RegisterType::Int64),
+            ArmExecution::WholeBatch
+        );
+        assert_eq!(
+            cast_arm_execution(RegisterType::Utf8, RegisterType::Int64),
+            ArmExecution::SelectedRows
+        );
+        assert_eq!(
+            cast_arm_execution(RegisterType::Datetime, RegisterType::Utf8),
+            ArmExecution::SelectedRows
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Round),
+            ArmExecution::WholeBatch
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Exp),
+            ArmExecution::SelectedRows
+        );
+        for sized_text in [
+            BuiltinLowering::Repeat,
+            BuiltinLowering::Lpad,
+            BuiltinLowering::Rpad,
+        ] {
+            assert_eq!(
+                builtin_arm_execution(&sized_text),
+                ArmExecution::SelectedRows,
+                "{sized_text:?} must spend its column's size limit on selected rows only"
+            );
+        }
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Regexp(
+                RegexpCall::reading_pattern_argument(RegexpFunction::Like)
+            )),
+            ArmExecution::SelectedRows
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Datetime(DatetimeFunction::FromUnix(
+                FixedTimeUnit::Second
+            ))),
+            ArmExecution::WholeBatch
+        );
+        assert_eq!(
+            builtin_arm_execution(&BuiltinLowering::Datetime(DatetimeFunction::DateAdd {
+                unit: DatetimeUnit::Calendar(CalendarUnit::Month),
+                zone: Zone::UTC,
+            })),
+            ArmExecution::SelectedRows
+        );
     }
 }

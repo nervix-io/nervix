@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::{
     datetime::{UnreadableText, Zone},
+    extremum::ClampBoundsDefect,
     ir::{RegisterRef, RegisterType},
     program::Span,
 };
@@ -72,6 +73,9 @@ pub enum SideErrorReason {
     /// A `parse_datetime` input naming a local time that its zone repeats.
     #[error("parse_datetime local time is ambiguous in {zone}")]
     RepeatedLocalTime { zone: Zone },
+    /// A `clamp` whose bounds bound no value.
+    #[error("{0}")]
+    InvalidClampBounds(ClampBoundsDefect),
     /// A text builtin whose result, sized by its count, does not fit in the text its STRING column
     /// has left.
     #[error("{0} result exceeds the text one STRING column holds")]
@@ -98,7 +102,8 @@ impl SideErrorReason {
             | Self::NonFiniteResult(_)
             | Self::InvalidRegularExpression(_)
             | Self::SkippedLocalTime { .. }
-            | Self::RepeatedLocalTime { .. } => ErrorCode::InvalidArgument,
+            | Self::RepeatedLocalTime { .. }
+            | Self::InvalidClampBounds(_) => ErrorCode::InvalidArgument,
             Self::CastFailed { .. } | Self::UnreadableDatetime(_) => ErrorCode::CastFailed,
             Self::Injected { code, .. } => *code,
         }
@@ -361,8 +366,23 @@ impl RowErrors {
         RowErrorLengths(self.rows.iter().map(Vec::len).collect())
     }
 
-    /// Drops errors recorded past `lengths` for every row the instruction did not select,
-    /// so a conditional arm cannot leak errors from a branch it did not take.
+    /// Moves every error into `target`, on the row of `target` that `rows` names for each row of
+    /// this channel in turn, so the errors of an instruction narrowed to the rows its arm
+    /// selects land on the rows that selected it.
+    pub(crate) fn scatter_into(self, target: &mut RowErrors, rows: impl Iterator<Item = usize>) {
+        if self.rows.is_empty() {
+            return;
+        }
+        for (errors, row) in self.rows.into_iter().zip(rows) {
+            for error in errors {
+                target.push(row, error);
+            }
+        }
+    }
+
+    /// Drops errors recorded past `lengths` for every row the instruction did not select, so an
+    /// arm that runs a vectorized kernel over the whole batch reports nothing for a row it did
+    /// not select.
     pub fn restore_unselected(
         &mut self,
         lengths: &RowErrorLengths,

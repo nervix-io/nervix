@@ -428,7 +428,8 @@ mod tests {
     /// Builds an expression tree deep enough to exercise every precedence boundary.
     fn gen_expression(g: &mut ByteGen, depth: u8) -> nervix_models::Expression {
         use nervix_models::{
-            BinaryOperator, Expression, FieldName, FieldReference, Literal, UnaryOperator,
+            BinaryOperator, Expression, FieldName, FieldReference, Literal, MembershipOperator,
+            RangeOperator, UnaryOperator,
         };
 
         if depth == 0 {
@@ -447,7 +448,7 @@ mod tests {
             };
         }
 
-        match g.next_u8() % 7 {
+        match g.next_u8() % 9 {
             0..=3 => {
                 let operator = g.choose(&[
                     BinaryOperator::Or,
@@ -458,6 +459,8 @@ mod tests {
                     BinaryOperator::LessThan,
                     BinaryOperator::GreaterThanOrEqual,
                     BinaryOperator::LessThanOrEqual,
+                    BinaryOperator::IsDistinctFrom,
+                    BinaryOperator::IsNotDistinctFrom,
                     BinaryOperator::Add,
                     BinaryOperator::Subtract,
                     BinaryOperator::Multiply,
@@ -483,10 +486,27 @@ mod tests {
                     nervix_models::ParseAsType::Bool,
                 ]),
             },
-            _ => Expression::Array(vec![
+            6 => Expression::Array(vec![
                 gen_expression(g, depth - 1),
                 gen_expression(g, depth - 1),
             ]),
+            7 => {
+                let operator = g.choose(&[MembershipOperator::In, MembershipOperator::NotIn]);
+                let operand = Box::new(gen_expression(g, depth - 1));
+                let size = g.next_u8() % 3;
+                let set = (0..size).map(|_| gen_expression(g, depth - 1)).collect();
+                Expression::Membership {
+                    operator,
+                    operand,
+                    set,
+                }
+            }
+            _ => Expression::Range {
+                operator: g.choose(&[RangeOperator::Between, RangeOperator::NotBetween]),
+                operand: Box::new(gen_expression(g, depth - 1)),
+                low: Box::new(gen_expression(g, depth - 1)),
+                high: Box::new(gen_expression(g, depth - 1)),
+            },
         }
     }
 
@@ -2621,6 +2641,31 @@ mod tests {
         "#,
         None,
         &[]
+    )]
+    #[case::junction_membership_ranges_and_extrema(
+        r#"
+            CREATE JUNCTION route_parcels
+                FROM parcels WHERE input.status NOT IN ('void', 'test'),
+                    archive WHERE input.id IN () OR lower(input.id) IN ('a', 'b')
+                UNBRANCHED
+                TO routed
+                    SET within = input.weight BETWEEN 1.0 AND 50.0,
+                        moved = input.carrier IS DISTINCT FROM input.preferred,
+                        capped = clamp(greatest(input.weight, 0.0), 1.0, least(input.limit, 50.0))
+                    WHERE input.weight NOT BETWEEN 60.0 AND 70.0
+                        AND input.carrier IS NOT DISTINCT FROM 'dhl'
+                    FLUSH IMMEDIATE
+                    ON MESSAGE ERROR LOG;
+        "#,
+        None,
+        &[
+            "input.status NOT IN ('void', 'test')",
+            "input.id IN () OR lower(input.id) IN ('a', 'b')",
+            "within = input.weight BETWEEN 1.0 AND 50.0",
+            "moved = input.carrier IS DISTINCT FROM input.preferred",
+            "capped = clamp(greatest(input.weight, 0.0), 1.0, least(input.limit, 50.0))",
+            "input.weight NOT BETWEEN 60.0 AND 70.0 AND input.carrier IS NOT DISTINCT FROM 'dhl'",
+        ]
     )]
     #[case::correlator_input_collection(
         r#"

@@ -5,22 +5,26 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{
-    error::CompileError,
+    batch::TypedArray,
+    error::{CompileError, SideErrorReason},
     ir::{
         AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
         InstructionKind, InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef,
         RegisterSpace, RegisterType, ScalarValue, SelectArm,
     },
+    membership::MembershipSet,
     program::{
         BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
         Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
     },
     regexp::{PatternSource, RegexpCall, RegexpFunction},
+    runtime::{cast_constant, unary_constant},
     semantics::{
         BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
@@ -176,7 +180,7 @@ struct Compiler {
     layouts: RegisterLayouts,
     expr_cache: HashMap<CachedExpr, RegisterRef>,
     expr_cache_generation: usize,
-    current_error_mask: Option<RegisterRef>,
+    current_selection: Option<RegisterRef>,
     allow_header_reads: bool,
     allow_header_writes: bool,
     udf_signatures: UdfSignatures,
@@ -215,6 +219,15 @@ enum ExprKey {
         operand: Option<Box<ExprKey>>,
         branches: Vec<(ExprKey, ExprKey)>,
         else_result: Option<Box<ExprKey>>,
+    },
+    Membership {
+        operand: Box<ExprKey>,
+        set: Vec<ExprKey>,
+    },
+    Between {
+        operand: Box<ExprKey>,
+        low: Box<ExprKey>,
+        high: Box<ExprKey>,
     },
 }
 
@@ -732,7 +745,7 @@ impl Compiler {
                 layouts,
                 expr_cache: HashMap::new(),
                 expr_cache_generation: 0,
-                current_error_mask: None,
+                current_selection: None,
                 allow_header_reads: false,
                 allow_header_writes: false,
                 udf_signatures: UdfSignatures::default(),
@@ -755,27 +768,40 @@ impl Compiler {
     }
 
     fn emit(&mut self, kind: InstructionKind, span: Span) {
-        let error_mask = if instruction_can_emit_row_errors(&kind) {
-            self.current_error_mask
+        let selection = if instruction_observes_selection(&kind) {
+            self.current_selection
         } else {
             None
         };
         self.instructions.push(Instruction {
             kind,
             span,
-            error_mask,
+            selection,
         });
     }
 
-    fn with_error_mask<T>(
+    /// Whether the register `expr` just compiled to may answer the same expression wherever it
+    /// appears again. A call out of the VM made under a conditional arm's selection answers the
+    /// selected rows only and leaves a null on every other row, so it is reusable only when it
+    /// was made for every row. Every other expression computes every row whatever arm it is in.
+    fn register_is_reusable(&self, expr: &SpannedExpr) -> bool {
+        match self.current_selection {
+            None => true,
+            Some(_) => !expr.inner.calls_out_of_the_vm(),
+        }
+    }
+
+    /// Compiles `compile` with every instruction it emits confined to the rows `selection` holds,
+    /// or to every row when it is `None`.
+    fn with_selection<T>(
         &mut self,
-        mask: Option<RegisterRef>,
+        selection: Option<RegisterRef>,
         compile: impl FnOnce(&mut Self) -> Result<T, CompileError>,
     ) -> Result<T, CompileError> {
-        let previous = self.current_error_mask;
-        self.current_error_mask = mask;
+        let previous = self.current_selection;
+        self.current_selection = selection;
         let result = compile(self);
-        self.current_error_mask = previous;
+        self.current_selection = previous;
         result
     }
 
@@ -838,7 +864,7 @@ impl Compiler {
         dst
     }
 
-    fn combine_with_outer_mask(
+    fn narrow_selection(
         &mut self,
         outer: Option<RegisterRef>,
         mask: RegisterRef,
@@ -1265,6 +1291,63 @@ impl Compiler {
                 }
                 Ok(result_type)
             }
+            Expr::Membership { operand, set } => {
+                let operand_type = self.infer_expr_type(operand)?;
+                let operand_is_scalar = match RegisterType::from_data_type(&operand_type) {
+                    Some(operand_register) => operand_register.is_scalar(),
+                    None => false,
+                };
+                if !operand_is_scalar {
+                    return Err(CompileError {
+                        code: "unsupported_membership",
+                        message: format!("IN is not valid for {operand_type:?}"),
+                        span: expr.span,
+                    });
+                }
+                for (index, element) in set.iter().enumerate() {
+                    if let Some(defect) = SetElementDefect::of_shape(element) {
+                        return Err(defect.into_compile_error(index, element.span));
+                    }
+                    let element_type = self.infer_expr_type(element)?;
+                    if element_type != operand_type {
+                        let position = SetElementDefect::position(index);
+                        return Err(CompileError {
+                            code: "type_mismatch",
+                            message: format!(
+                                "IN set element {position} has type {element_type:?}, but the \
+                                 operand has type {operand_type:?}"
+                            ),
+                            span: element.span,
+                        });
+                    }
+                }
+                Ok(DataType::Boolean)
+            }
+            Expr::Between { operand, low, high } => {
+                let operand_type = self.infer_expr_type(operand)?;
+                let low_type = self.infer_expr_type(low)?;
+                let high_type = self.infer_expr_type(high)?;
+                if low_type != operand_type || high_type != operand_type {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "BETWEEN requires the operand and both bounds to have one exact type, \
+                             found {operand_type:?}, {low_type:?} and {high_type:?}"
+                        ),
+                        span: expr.span,
+                    });
+                }
+                // The range is the conjunction of `>=` and `<=`, so it accepts exactly the types
+                // those comparisons order.
+                if binary_output_type(BinaryOp::GtEq, &operand_type, &operand_type).is_none() {
+                    return Err(CompileError {
+                        code: "unsupported_range",
+                        message: format!("BETWEEN is not valid for {operand_type:?}"),
+                        span: expr.span,
+                    });
+                }
+                Ok(DataType::Boolean)
+            }
         }
     }
 
@@ -1311,9 +1394,22 @@ impl Compiler {
                 Ok(binding.nullable)
             }
             Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => self.expr_may_be_null(expr),
-            Expr::Binary { left, right, .. } => {
+            Expr::Binary { op, left, right } => {
+                if let BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom = op {
+                    return Ok(false);
+                }
                 Ok(self.expr_may_be_null(left)? || self.expr_may_be_null(right)?)
             }
+            Expr::Membership { operand, set } => {
+                // No value is an element of an empty set, a null one included.
+                if set.is_empty() {
+                    return Ok(false);
+                }
+                self.expr_may_be_null(operand)
+            }
+            Expr::Between { operand, low, high } => Ok(self.expr_may_be_null(operand)?
+                || self.expr_may_be_null(low)?
+                || self.expr_may_be_null(high)?),
             Expr::Call { function, args } => {
                 if let FunctionName::LeakSensitive = function {
                     let arg = self.leak_sensitive_arg(args, expr.span)?;
@@ -1363,7 +1459,11 @@ impl Compiler {
                 if let FunctionName::NullIf = function {
                     return Ok(true);
                 }
-                if let FunctionName::Coalesce = function {
+                // `greatest` and `least` skip null arguments like `coalesce` does, so one required
+                // argument makes the result required.
+                if let FunctionName::Coalesce | FunctionName::Greatest | FunctionName::Least =
+                    function
+                {
                     let mut all_nullable = true;
                     for arg in args {
                         all_nullable &= self.expr_may_be_null(arg)?;
@@ -1466,6 +1566,20 @@ impl Compiler {
                 }
                 Ok(false)
             }
+            Expr::Membership { operand, set } => {
+                if self.expr_is_sensitive(operand)? {
+                    return Ok(true);
+                }
+                for element in set {
+                    if self.expr_is_sensitive(element)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::Between { operand, low, high } => Ok(self.expr_is_sensitive(operand)?
+                || self.expr_is_sensitive(low)?
+                || self.expr_is_sensitive(high)?),
         }
     }
 
@@ -1535,7 +1649,9 @@ impl Compiler {
                     return Ok(*reg);
                 }
                 let reg = self.compile_expr_uncached(expr)?;
-                self.expr_cache.insert(cache_key, reg);
+                if self.register_is_reusable(expr) {
+                    self.expr_cache.insert(cache_key, reg);
+                }
                 return Ok(reg);
             }
             return self.compile_expr_uncached(expr);
@@ -1557,7 +1673,7 @@ impl Compiler {
             }
 
             if semantics.supports_constant_folding()
-                && let Some(value) = self.try_fold_constant_expr(expr)?
+                && let Some(value) = fold_constant_expr(expr)?
                 && let FoldedValue::NonNull(_) = value
             {
                 let reg = self.emit_folded_value(value, expr.span);
@@ -1568,7 +1684,9 @@ impl Compiler {
             }
 
             let reg = self.compile_expr_uncached(expr)?;
-            if let Some(cache_key) = cache_key {
+            if let Some(cache_key) = cache_key
+                && self.register_is_reusable(expr)
+            {
                 self.expr_cache.insert(cache_key, reg);
             }
             return Ok(reg);
@@ -1796,6 +1914,46 @@ impl Compiler {
                     expr.span,
                 )
             }
+            // The set's elements are constants, evaluated here once for the program, so a batch
+            // computes only the operand and tests it against the prepared set.
+            Expr::Membership { operand, set } => {
+                self.infer_expr_type(expr)?;
+                let operand_type = RegisterType::from_data_type(&self.infer_expr_type(operand)?)
+                    .verified("type inference above accepted only operands of a scalar type");
+                let mut elements = Vec::with_capacity(set.len());
+                for (index, element) in set.iter().enumerate() {
+                    let value = evaluate_set_element(element)
+                        .map_err(|defect| defect.into_compile_error(index, element.span))?;
+                    elements.push(value);
+                }
+                let prepared = MembershipSet::prepare(operand_type, &elements).verified(
+                    "type inference above accepted only non-null elements of the operand's type",
+                );
+                let input = self.compile_expr(operand)?;
+                let dst = self.alloc_temp(RegisterType::Boolean);
+                self.emit(
+                    InstructionKind::Builtin {
+                        dst,
+                        lowering: BuiltinLowering::Membership(prepared),
+                        inputs: vec![input],
+                    },
+                    expr.span,
+                );
+                Ok(dst)
+            }
+            // The operand is computed once and compared with each bound, so a failure while
+            // computing it is reported once, as it is for the operand of any other comparison.
+            Expr::Between { operand, low, high } => {
+                self.infer_expr_type(expr)?;
+                let operand = self.compile_expr(operand)?;
+                let low = self.compile_expr(low)?;
+                let high = self.compile_expr(high)?;
+                let at_least_low =
+                    self.emit_boolean_binary(BinaryOp::GtEq, operand, low, expr.span);
+                let at_most_high =
+                    self.emit_boolean_binary(BinaryOp::LtEq, operand, high, expr.span);
+                Ok(self.emit_boolean_binary(BinaryOp::And, at_least_low, at_most_high, expr.span))
+            }
         }
     }
 
@@ -1807,7 +1965,7 @@ impl Compiler {
         result_type: &DataType,
         span: Span,
     ) -> Result<RegisterRef, CompileError> {
-        let outer_mask = self.current_error_mask;
+        let outer_selection = self.current_selection;
         let folded_operand = match operand {
             Some(operand) => fold_constant_expr(operand)?,
             None => None,
@@ -1851,7 +2009,7 @@ impl Compiler {
         }
 
         if row_dependent.is_empty() {
-            return self.compile_case_result(otherwise_result, result_type, outer_mask, span);
+            return self.compile_case_result(otherwise_result, result_type, outer_selection, span);
         }
 
         let operand_reg = match operand {
@@ -1865,11 +2023,11 @@ impl Compiler {
             // Rows an earlier branch already answered must not observe this branch at all, so both
             // the condition and the result compile under a mask narrowed to the rows still open.
             let unmatched = matched.map(|matched| self.emit_boolean_not(matched, span));
-            let condition_mask = match unmatched {
-                Some(unmatched) => Some(self.combine_with_outer_mask(outer_mask, unmatched, span)),
-                None => outer_mask,
+            let condition_selection = match unmatched {
+                Some(unmatched) => Some(self.narrow_selection(outer_selection, unmatched, span)),
+                None => outer_selection,
             };
-            let condition = self.with_error_mask(condition_mask, |compiler| {
+            let condition = self.with_selection(condition_selection, |compiler| {
                 let when = compiler.compile_expr(&branch.when)?;
                 let Some(operand) = operand_reg else {
                     return Ok(when);
@@ -1887,7 +2045,7 @@ impl Compiler {
                 }
                 None => branch_match,
             };
-            let selected = self.combine_with_outer_mask(outer_mask, first_match, span);
+            let selected = self.narrow_selection(outer_selection, first_match, span);
             let value = self.compile_case_result(
                 Some(&branch.result),
                 result_type,
@@ -1906,14 +2064,15 @@ impl Compiler {
             };
         }
 
-        let else_mask = match matched {
+        let else_selection = match matched {
             Some(matched) => {
                 let unmatched = self.emit_boolean_not(matched, span);
-                Some(self.combine_with_outer_mask(outer_mask, unmatched, span))
+                Some(self.narrow_selection(outer_selection, unmatched, span))
             }
-            None => outer_mask,
+            None => outer_selection,
         };
-        let otherwise = self.compile_case_result(otherwise_result, result_type, else_mask, span)?;
+        let otherwise =
+            self.compile_case_result(otherwise_result, result_type, else_selection, span)?;
         let output_type = Self::register_type_for_data_type(result_type, span, "CASE result")?;
         let dst = self.alloc_temp(output_type);
         self.emit(
@@ -1931,10 +2090,10 @@ impl Compiler {
         &mut self,
         result: Option<&SpannedExpr>,
         result_type: &DataType,
-        error_mask: Option<RegisterRef>,
+        selection: Option<RegisterRef>,
         span: Span,
     ) -> Result<RegisterRef, CompileError> {
-        self.with_error_mask(error_mask, |compiler| {
+        self.with_selection(selection, |compiler| {
             if let Some(result) = result
                 && !matches!(result.inner, Expr::Literal(Literal::Null))
             {
@@ -1965,13 +2124,6 @@ impl Compiler {
             }
             FoldedValue::Null(_) => unreachable!("null-valued constant folding is not emitted yet"),
         }
-    }
-
-    fn try_fold_constant_expr(
-        &self,
-        expr: &SpannedExpr,
-    ) -> Result<Option<FoldedValue>, CompileError> {
-        fold_constant_expr(expr)
     }
 
     fn compile_builtin_call(
@@ -2006,7 +2158,11 @@ impl Compiler {
             .map(|arg| self.compile_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
-        BuiltinPlan::from_descriptor(descriptor.lowering, compiled_args, output_type, span)
+        Ok(BuiltinPlan {
+            lowering: descriptor.lowering,
+            inputs: compiled_args,
+            output_type,
+        })
     }
 
     /// Compiles a regular-expression call.
@@ -2180,6 +2336,15 @@ impl ExprKey {
                     .as_ref()
                     .map(|result| Box::new(Self::from_expr(result))),
             },
+            Expr::Membership { operand, set } => Self::Membership {
+                operand: Box::new(Self::from_expr(operand)),
+                set: set.iter().map(Self::from_expr).collect(),
+            },
+            Expr::Between { operand, low, high } => Self::Between {
+                operand: Box::new(Self::from_expr(operand)),
+                low: Box::new(Self::from_expr(low)),
+                high: Box::new(Self::from_expr(high)),
+            },
         }
     }
 }
@@ -2215,19 +2380,6 @@ struct BuiltinPlan {
 }
 
 impl BuiltinPlan {
-    fn from_descriptor(
-        lowering: BuiltinLowering,
-        args: Vec<RegisterRef>,
-        output_type: RegisterType,
-        _span: Span,
-    ) -> Result<Self, CompileError> {
-        Ok(Self {
-            lowering,
-            inputs: args,
-            output_type,
-        })
-    }
-
     fn output_type(&self) -> RegisterType {
         self.output_type
     }
@@ -2238,6 +2390,114 @@ impl BuiltinPlan {
             lowering: self.lowering,
             inputs: self.inputs,
         }
+    }
+}
+
+/// Why a written `IN` set element cannot be one of the set's values.
+#[derive(Debug, Clone, PartialEq)]
+enum SetElementDefect {
+    /// The element reads something other than a literal, such as a field or a function call.
+    NotConstant,
+    /// The element is `NULL`, which no value equals.
+    Null,
+    /// Computing the element fails as it would fail for a row, such as a cast out of range.
+    Unevaluable(SideErrorReason),
+}
+
+impl SetElementDefect {
+    /// What the element's shape alone rules out. An element is a literal other than `NULL`,
+    /// optionally negated with `-` or `NOT` and cast with `AS`, any number of times.
+    fn of_shape(element: &SpannedExpr) -> Option<Self> {
+        match &element.inner {
+            Expr::Literal(Literal::Null) => Some(Self::Null),
+            Expr::Literal(_) => None,
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => Self::of_shape(expr),
+            Expr::FieldRef(_)
+            | Expr::InternalFieldRef(_)
+            | Expr::Binary { .. }
+            | Expr::Call { .. }
+            | Expr::Case { .. }
+            | Expr::Membership { .. }
+            | Expr::Between { .. } => Some(Self::NotConstant),
+        }
+    }
+
+    /// The element's position as written, counting from `1`.
+    fn position(index: usize) -> usize {
+        index
+            .checked_add(1)
+            .assured("a set held in memory has fewer than usize::MAX elements")
+    }
+
+    fn into_compile_error(self, index: usize, span: Span) -> CompileError {
+        let position = Self::position(index);
+        match self {
+            Self::NotConstant => CompileError {
+                code: "non_constant_set_element",
+                message: format!(
+                    "IN set element {position} is not a constant; write a literal, optionally \
+                     negated with '-' or NOT and cast with AS"
+                ),
+                span,
+            },
+            Self::Null => CompileError {
+                code: "null_set_element",
+                message: format!(
+                    "IN set element {position} is NULL, which no value equals; test for null with \
+                     is_null(...)"
+                ),
+                span,
+            },
+            Self::Unevaluable(reason) => CompileError {
+                code: "invalid_set_element",
+                message: format!("IN set element {position} cannot be evaluated: {reason}"),
+                span,
+            },
+        }
+    }
+}
+
+/// The value of an `IN` set element, computed once when its program is compiled.
+///
+/// Negation and casts run the kernels execution runs, so the element holds exactly the value the
+/// same expression computes for a row, and an element that would fail for every row fails the
+/// statement instead.
+fn evaluate_set_element(element: &SpannedExpr) -> Result<TypedArray, SetElementDefect> {
+    match &element.inner {
+        Expr::Literal(Literal::Int64(value)) => {
+            Ok(TypedArray::Int64(Int64Array::from_value(*value, 1)))
+        }
+        Expr::Literal(Literal::Float64(value)) => {
+            Ok(TypedArray::Float64(Float64Array::from_value(*value, 1)))
+        }
+        Expr::Literal(Literal::Bool(value)) => {
+            Ok(TypedArray::Boolean(BooleanArray::from(vec![*value])))
+        }
+        Expr::Literal(Literal::String(value)) => {
+            Ok(TypedArray::Utf8(StringArray::from_iter_values([
+                value.as_str()
+            ])))
+        }
+        Expr::Literal(Literal::Null) => Err(SetElementDefect::Null),
+        Expr::Unary { op, expr } => {
+            let value = evaluate_set_element(expr)?;
+            unary_constant(*op, &value)
+                .verified("type inference accepted only operators with a kernel for the element")
+                .map_err(SetElementDefect::Unevaluable)
+        }
+        Expr::Cast { expr, data_type } => {
+            let value = evaluate_set_element(expr)?;
+            let target = RegisterType::from_data_type(data_type)
+                .verified("type inference accepted only casts to a register type");
+            cast_constant(value, target).map_err(SetElementDefect::Unevaluable)
+        }
+        Expr::FieldRef(_)
+        | Expr::InternalFieldRef(_)
+        | Expr::Binary { .. }
+        | Expr::Call { .. }
+        | Expr::Case { .. }
+        | Expr::Membership { .. }
+        | Expr::Between { .. } => Err(SetElementDefect::NotConstant),
     }
 }
 
@@ -2322,6 +2582,7 @@ fn fold_constant_expr(expr: &SpannedExpr) -> Result<Option<FoldedValue>, Compile
                 .transpose()
                 .map(Option::flatten)
         }
+        Expr::Membership { .. } | Expr::Between { .. } => Ok(None),
     }
 }
 
@@ -2666,6 +2927,9 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Trunc
         | FunctionName::ShiftLeft
         | FunctionName::ShiftRight
+        | FunctionName::Greatest
+        | FunctionName::Least
+        | FunctionName::Clamp
         | FunctionName::Datetime(_) => None,
     }
 }
@@ -3241,6 +3505,14 @@ fn expression_contains_udf(expr: &SpannedExpr) -> bool {
                 })
                 || else_result.as_deref().is_some_and(expression_contains_udf)
         }
+        Expr::Membership { operand, set } => {
+            expression_contains_udf(operand) || set.iter().any(expression_contains_udf)
+        }
+        Expr::Between { operand, low, high } => {
+            expression_contains_udf(operand)
+                || expression_contains_udf(low)
+                || expression_contains_udf(high)
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
 }
@@ -3278,6 +3550,17 @@ fn expression_contains_volatile_udf(expr: &SpannedExpr, signatures: &UdfSignatur
                 || else_result
                     .as_deref()
                     .is_some_and(|result| expression_contains_volatile_udf(result, signatures))
+        }
+        Expr::Membership { operand, set } => {
+            expression_contains_volatile_udf(operand, signatures)
+                || set
+                    .iter()
+                    .any(|element| expression_contains_volatile_udf(element, signatures))
+        }
+        Expr::Between { operand, low, high } => {
+            expression_contains_volatile_udf(operand, signatures)
+                || expression_contains_volatile_udf(low, signatures)
+                || expression_contains_volatile_udf(high, signatures)
         }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
@@ -3357,7 +3640,10 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
     }
 }
 
-fn instruction_can_emit_row_errors(kind: &InstructionKind) -> bool {
+/// Whether a conditional arm confines this instruction to the rows it selects. An instruction
+/// that cannot report a per-row error and does not call out of the VM runs over the whole batch:
+/// its result on an unselected row is never observed, and nothing else it does is observable.
+fn instruction_observes_selection(kind: &InstructionKind) -> bool {
     match kind {
         InstructionKind::Unary { op, .. } => unary_descriptor(*op).semantics.can_error,
         InstructionKind::Binary { op, .. } => binary_descriptor(*op).semantics.can_error,
@@ -3382,7 +3668,7 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
     let mut peak = crate::ir::RegisterLayout::default();
 
     for (inst_idx, instruction) in instructions.iter_mut().enumerate() {
-        let logical_error_mask = instruction.error_mask;
+        let logical_selection = instruction.selection;
         let inputs = instruction_inputs(instruction);
         let mut dead_inputs = HashSet::new();
         let mut deferred_dead_inputs = HashSet::new();
@@ -3395,7 +3681,7 @@ fn remap_temp_registers(instructions: &mut [Instruction], layout: &mut crate::ir
                 );
                 rewrite_temp_input(instruction, *input, physical_index);
                 if last_uses.get(input) == Some(&inst_idx) {
-                    if Some(*input) == logical_error_mask {
+                    if Some(*input) == logical_selection {
                         deferred_dead_inputs.insert(*input);
                     } else {
                         dead_inputs.insert(*input);
@@ -3441,12 +3727,12 @@ fn collect_temp_last_uses(instructions: &[Instruction]) -> HashMap<RegisterRef, 
     last_uses
 }
 
-/// The registers an instruction reads: its operands, then the error mask that selects the rows
-/// whose errors it keeps.
+/// The registers an instruction reads: its operands, then the selection that holds the rows it
+/// computes.
 fn instruction_inputs(instruction: &Instruction) -> Vec<RegisterRef> {
     let mut inputs = instruction.kind.operands();
-    if let Some(error_mask) = instruction.error_mask {
-        inputs.push(error_mask);
+    if let Some(selection) = instruction.selection {
+        inputs.push(selection);
     }
     inputs
 }
@@ -3508,8 +3794,8 @@ fn rewrite_temp_input(instruction: &mut Instruction, from: RegisterRef, to_index
             rewrite(otherwise);
         }
     }
-    if let Some(error_mask) = &mut instruction.error_mask {
-        rewrite(error_mask);
+    if let Some(selection) = &mut instruction.selection {
+        rewrite(selection);
     }
 }
 
@@ -4582,7 +4868,7 @@ mod tests {
                     value: ScalarValue::Utf8("ABC".to_string()),
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
             Instruction {
                 kind: InstructionKind::Builtin {
@@ -4591,7 +4877,7 @@ mod tests {
                     inputs: vec![literal],
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
             Instruction {
                 kind: InstructionKind::Move {
@@ -4599,7 +4885,7 @@ mod tests {
                     input: lowered,
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
             Instruction {
                 kind: InstructionKind::Literal {
@@ -4607,7 +4893,7 @@ mod tests {
                     value: ScalarValue::Utf8("unused".to_string()),
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
         ];
 
@@ -4649,7 +4935,7 @@ mod tests {
                 op: BinaryOp::Div,
             },
             span: (0..0).into(),
-            error_mask: None,
+            selection: None,
         }];
 
         optimize_instructions(&mut instructions, &[], None);
@@ -4666,7 +4952,7 @@ mod tests {
     }
 
     #[test]
-    fn temp_remapping_keeps_error_mask_live_through_boolean_output() {
+    fn temp_remapping_keeps_the_selection_live_through_boolean_output() {
         let mask = RegisterRef::new(RegisterSpace::Temp, RegisterType::Boolean, 0);
         let output = RegisterRef::new(RegisterSpace::Temp, RegisterType::Boolean, 1);
         let text = RegisterRef::new(RegisterSpace::Input, RegisterType::Utf8, 0);
@@ -4678,7 +4964,7 @@ mod tests {
                     value: ScalarValue::Boolean(true),
                 },
                 span: (0..0).into(),
-                error_mask: None,
+                selection: None,
             },
             Instruction {
                 kind: InstructionKind::Builtin {
@@ -4689,7 +4975,7 @@ mod tests {
                     inputs: vec![text, pattern],
                 },
                 span: (0..0).into(),
-                error_mask: Some(mask),
+                selection: Some(mask),
             },
         ];
         let mut layout = crate::ir::RegisterLayout {
@@ -4701,13 +4987,13 @@ mod tests {
 
         let Instruction {
             kind: InstructionKind::Builtin { dst, .. },
-            error_mask: Some(error_mask),
+            selection: Some(selection),
             ..
         } = &instructions[1]
         else {
             panic!("masked Boolean instruction must remain");
         };
-        assert_ne!(*dst, *error_mask);
+        assert_ne!(*dst, *selection);
     }
 
     #[test]
@@ -4929,6 +5215,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "compiler_comparison_tests.rs"]
+mod comparison_tests;
 #[cfg(test)]
 #[path = "compiler_numeric_function_tests.rs"]
 mod numeric_function_tests;

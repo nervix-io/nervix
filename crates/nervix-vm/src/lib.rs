@@ -36,8 +36,10 @@ mod compiler;
 mod count;
 mod datetime;
 mod error;
+mod extremum;
 mod frontend;
 mod ir;
+mod membership;
 mod numeric;
 mod operand;
 pub mod program;
@@ -69,6 +71,7 @@ pub use error::{
     IntegerOperation, RowErrorLengths, RowErrorMask, RowErrors, RuntimeError, ShiftOperation,
     SideError, SideErrorReason, TextOperation,
 };
+pub use extremum::{ClampBoundsDefect, Extremum};
 pub use frontend::{
     ArgumentCount, AssignmentTargetSet, CastTargetKind, DatetimeLiteral, FrontendError,
     FrontendErrorKind, FrontendResult, SemanticScopePolicy, lower_branch_construction,
@@ -80,6 +83,7 @@ pub use ir::{
     InvocationBinding, OutputBinding, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace,
     RegisterType, ScalarValue,
 };
+pub use membership::{MembershipSet, SMALL_SET_CAPACITY};
 pub use regexp::{
     COMPILED_PATTERN_SIZE_LIMIT, ConstantPattern, DYNAMIC_PATTERN_CACHE_CAPACITY,
     DynamicPatternStatistics, DynamicPatterns, PatternSource, RegexpCall, RegexpFunction,
@@ -88,7 +92,7 @@ pub use regexp::{
 pub use runtime::{
     ExecutionContext, ExecutionResult, FunctionExecutionPolicy, FunctionInjector,
     FunctionInvocation, InjectedResult, PredicateExecutionResult, RowSelection,
-    SPAWN_BLOCKING_ROW_THRESHOLD, execute_predicate_in_context, execute_program_in_context,
+    SPAWN_BLOCKING_ROW_THRESHOLD, execute_predicate_in_context,
     execute_program_with_selection_in_context,
 };
 pub use semantics::{

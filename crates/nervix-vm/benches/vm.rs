@@ -13,8 +13,8 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
-    SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
-    compile_program_with_options_for_bindings, execute_program_in_context,
+    SMALL_SET_CAPACITY, SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
+    compile_program_with_options_for_bindings, execute_program_with_selection_in_context,
     lower_route_construction,
     program::{Program, SpannedNode},
 };
@@ -40,7 +40,7 @@ async fn execute_benchmark_program(
     batch: &TypedBatch,
 ) -> Result<TypedBatch, RuntimeError> {
     let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
-    execute_program_in_context(program, batch, &context)
+    execute_program_with_selection_in_context(program, batch, &context)
         .await
         .map(|result| result.batch)
 }
@@ -1904,6 +1904,288 @@ fn calendar_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// Rows in every membership benchmark batch. It stays at the blocking threshold so no batch pays
+/// the blocking hop.
+const MEMBERSHIP_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+
+/// Set sizes on both sides of `SMALL_SET_CAPACITY`, where a set stops comparing a value with each
+/// element and looks it up by key instead.
+const MEMBERSHIP_SET_SIZES: [usize; 5] = [4, SMALL_SET_CAPACITY, SMALL_SET_CAPACITY + 1, 64, 1_024];
+
+fn membership_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("code", DataType::Int64, true),
+        Field::new("label", DataType::Utf8, true),
+        Field::new("reading", DataType::Float64, true),
+        Field::new("low", DataType::Float64, true),
+        Field::new("high", DataType::Float64, true),
+    ]))
+}
+
+/// Codes and labels cycle through the smallest set twice over, so every set holds about half of the
+/// rows; one row in ten is null, and readings straddle their bounds.
+fn membership_batch() -> TypedBatch {
+    let rows = 0..MEMBERSHIP_KERNEL_ROWS;
+    let code = Int64Array::from_iter(rows.clone().map(|row| {
+        if row % 10 == 9 {
+            return None;
+        }
+        Some(benchmark_row_i64(row % 8))
+    }));
+    let label = StringArray::from_iter(rows.clone().map(|row| {
+        if row % 10 == 9 {
+            return None;
+        }
+        Some(format!("label-{}", row % 8))
+    }));
+    let reading =
+        Float64Array::from_iter(rows.clone().map(|row| Some(benchmark_row_f64(row % 50))));
+    let low = Float64Array::from_iter(rows.clone().map(|row| Some(benchmark_row_f64(row % 20))));
+    let high = Float64Array::from_iter(rows.map(|row| Some(benchmark_row_f64(row % 40))));
+    TypedBatch::try_new(
+        membership_schema(),
+        vec![
+            TypedArray::Int64(code),
+            TypedArray::Utf8(label),
+            TypedArray::Float64(reading),
+            TypedArray::Float64(low),
+            TypedArray::Float64(high),
+        ],
+    )
+    .expect("membership benchmark batch must build")
+}
+
+/// `IN` over sets of each size, and the range, distinctness and extremum operations over the same
+/// batch.
+fn membership_kernel_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let batch = membership_batch();
+    let mut group = c.benchmark_group("membership_kernels");
+    group.throughput(Throughput::Elements(MEMBERSHIP_KERNEL_ROWS.arch_into()));
+    for size in MEMBERSHIP_SET_SIZES {
+        let codes = (0..size)
+            .map(|code| code.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let labels = (0..size)
+            .map(|code| format!("'label-{code}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let programs = [
+            ("in_i64", format!("SET hit = input.code IN ({codes})")),
+            ("in_utf8", format!("SET hit = input.label IN ({labels})")),
+        ];
+        for (name, source) in programs {
+            let compiled = compile_numeric_program(
+                &source,
+                membership_schema(),
+                &[("hit", DataType::Boolean)],
+            );
+            group.bench_with_input(BenchmarkId::new(name, size), &batch, |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&compiled),
+                        black_box(batch),
+                    ))
+                })
+            });
+        }
+    }
+    let operations = [
+        (
+            "between_f64",
+            "SET hit = input.reading BETWEEN input.low AND input.high",
+            DataType::Boolean,
+        ),
+        (
+            "distinct_utf8",
+            "SET hit = input.label IS DISTINCT FROM 'label-3'",
+            DataType::Boolean,
+        ),
+        (
+            "greatest_f64",
+            "SET hit = greatest(input.reading, input.low, input.high)",
+            DataType::Float64,
+        ),
+        (
+            "clamp_f64",
+            "SET hit = clamp(input.reading, 10.0, 40.0)",
+            DataType::Float64,
+        ),
+    ];
+    for (name, source, output_type) in operations {
+        let compiled =
+            compile_numeric_program(source, membership_schema(), &[("hit", output_type)]);
+        group.bench_with_input(BenchmarkId::new(name, "columns"), &batch, |b, batch| {
+            b.iter(|| {
+                runtime.block_on(execute_benchmark_program(
+                    black_box(&compiled),
+                    black_box(batch),
+                ))
+            })
+        });
+    }
+    group.finish();
+}
+
+/// How many rows of a batch a conditional arm selects.
+#[derive(Debug, Clone, Copy)]
+enum Selectivity {
+    /// No row, so the arm's work is skipped outright.
+    None,
+    /// One row in a hundred.
+    Sparse,
+    /// One row in ten.
+    Tenth,
+    /// Every other row.
+    Half,
+    /// Every row, so the arm runs over the batch as written.
+    All,
+}
+
+impl Selectivity {
+    const ALL: [Self; 5] = [Self::None, Self::Sparse, Self::Tenth, Self::Half, Self::All];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "selects_none",
+            Self::Sparse => "selects_1_in_100",
+            Self::Tenth => "selects_1_in_10",
+            Self::Half => "selects_half",
+            Self::All => "selects_all",
+        }
+    }
+
+    fn selects(self, row: usize) -> bool {
+        match self {
+            Self::None => false,
+            Self::Sparse => row.is_multiple_of(100),
+            Self::Tenth => row.is_multiple_of(10),
+            Self::Half => row.is_multiple_of(2),
+            Self::All => true,
+        }
+    }
+}
+
+/// A program with one conditional arm whose kernel runs over the rows `input.selected` names.
+struct ConditionalProgram {
+    name: &'static str,
+    source: &'static str,
+    output: (&'static str, DataType),
+}
+
+/// One arm per kernel cost class: pattern matching and text parsing are narrowed to the selected
+/// rows, integer arithmetic runs over the batch, and a transcendental function is narrowed.
+const CONDITIONAL_PROGRAMS: [ConditionalProgram; 4] = [
+    ConditionalProgram {
+        name: "regex_arm",
+        source: "SET matched = CASE WHEN input.selected THEN regexp_like(input.text, \
+                 '^prefix-[0-9]+-suffix$') ELSE false END",
+        output: ("matched", DataType::Boolean),
+    },
+    ConditionalProgram {
+        name: "parse_arm",
+        source: "SET parsed = CASE WHEN input.selected THEN (input.number_text AS I64) ELSE 0 END",
+        output: ("parsed", DataType::Int64),
+    },
+    ConditionalProgram {
+        name: "arithmetic_arm",
+        source: "SET total = CASE WHEN input.selected THEN input.left * input.right + input.left \
+                 ELSE 0 END",
+        output: ("total", DataType::Int64),
+    },
+    ConditionalProgram {
+        name: "transcendental_arm",
+        source: "SET grown = CASE WHEN input.selected THEN exp(input.exponent) ELSE 0.0 END",
+        output: ("grown", DataType::Float64),
+    },
+];
+
+fn conditional_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("selected", DataType::Boolean, false),
+        Field::new("text", DataType::Utf8, false),
+        Field::new("number_text", DataType::Utf8, false),
+        Field::new("left", DataType::Int64, false),
+        Field::new("right", DataType::Int64, false),
+        Field::new("exponent", DataType::Float64, false),
+    ]))
+}
+
+fn conditional_batch(row_count: usize, selectivity: Selectivity) -> TypedBatch {
+    let selected =
+        BooleanArray::from_iter((0..row_count).map(|row| Some(selectivity.selects(row))));
+    let text =
+        StringArray::from_iter_values((0..row_count).map(|row| format!("prefix-{row}-suffix")));
+    let number_text = StringArray::from_iter_values((0..row_count).map(|row| row.to_string()));
+    let left = Int64Array::from_iter_values((0..row_count).map(benchmark_row_i64));
+    let right =
+        Int64Array::from_iter_values((0..row_count).map(|row| benchmark_row_i64(row % 7) + 1));
+    let exponent = Float64Array::from_iter_values((0..row_count).map(|row| {
+        let tenths: f64 = (row % 50).approx_into();
+        tenths / 10.0
+    }));
+    TypedBatch::try_new(
+        conditional_schema(),
+        vec![
+            TypedArray::Boolean(selected),
+            TypedArray::Utf8(text),
+            TypedArray::Utf8(number_text),
+            TypedArray::Int64(left),
+            TypedArray::Int64(right),
+            TypedArray::Float64(exponent),
+        ],
+    )
+    .expect("conditional benchmark batch must build")
+}
+
+fn compile_conditional(program: &ConditionalProgram) -> Arc<CompiledProgram> {
+    let parsed = parse_program(program.source).expect("conditional benchmark program must parse");
+    let output_schema =
+        with_output_fields(&conditional_schema(), std::slice::from_ref(&program.output));
+    compile_program_with_options_for_bindings(
+        &parsed,
+        output_schema,
+        [CompileBinding::writable("input", conditional_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .expect("conditional benchmark program must compile")
+}
+
+/// Sweeps how many rows a conditional arm selects, for arms of different kernel cost. An arm
+/// narrowed to the rows it selects should cost in proportion to those rows, an arm no row selects
+/// should cost almost nothing, and an arm over a vectorized kernel should stay flat.
+///
+/// The batch is the largest the VM executes inline, so no hop to the blocking pool blurs what the
+/// arm itself costs; the batch-size sweep above covers the hop.
+fn conditional_arm_benches(c: &mut Criterion) {
+    const ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+
+    let runtime = benchmark_runtime();
+    let mut group = c.benchmark_group("conditional_arm");
+    group.throughput(Throughput::Elements(ROWS.arch_into()));
+    for program in &CONDITIONAL_PROGRAMS {
+        let compiled = compile_conditional(program);
+        for selectivity in Selectivity::ALL {
+            let batch = conditional_batch(ROWS, selectivity);
+            group.bench_with_input(
+                BenchmarkId::new(program.name, selectivity.label()),
+                &selectivity,
+                |b, _| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(&compiled),
+                            black_box(&batch),
+                        ))
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 fn benchmark_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -2182,8 +2464,10 @@ criterion_group!(
     benches,
     execute_benches,
     batch_size_sweep_benches,
+    conditional_arm_benches,
     numeric_kernel_benches,
     datetime_kernel_benches,
-    calendar_kernel_benches
+    calendar_kernel_benches,
+    membership_kernel_benches
 );
 criterion_main!(benches);
