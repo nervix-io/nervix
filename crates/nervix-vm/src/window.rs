@@ -55,10 +55,96 @@ pub struct WindowLinearHistogramConfig {
     pub delay: Duration,
 }
 
+/// The bounded structure and caller-selected precision of one window sketch demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowSketchConfig {
+    Distinct {
+        precision: u8,
+    },
+    Quantile {
+        capacity: NonZeroUsize,
+    },
+    TopK {
+        k: NonZeroUsize,
+        capacity: NonZeroUsize,
+    },
+}
+
+impl WindowSketchConfig {
+    /// Conservative fixed allocation charged for one pane. Variable key bytes and retained Arrow
+    /// rows are charged separately when a branch admits rows.
+    pub fn reserved_bytes(self) -> u128 {
+        match self {
+            Self::Distinct { precision } => (1_u128 << precision) + 128,
+            Self::Quantile { capacity } => {
+                let capacity = u128::try_from(capacity.get())
+                    .assured("a platform addressable capacity fits u128");
+                let centroids = capacity
+                    .checked_mul(32)
+                    .assured("validated centroid capacity is at most 4096");
+                centroids
+                    .checked_add(128)
+                    .assured("validated centroid capacity leaves room for its header")
+            }
+            Self::TopK { capacity, .. } => {
+                let capacity = u128::try_from(capacity.get())
+                    .assured("a platform addressable capacity fits u128");
+                let candidates = capacity
+                    .checked_mul(160)
+                    .assured("validated frequency capacity is at most 4096");
+                candidates
+                    .checked_add(128)
+                    .assured("validated frequency capacity leaves room for its header")
+            }
+        }
+    }
+}
+
+/// Epoch-aligned panes that partition the duration of a window without splitting either WIDTH
+/// or STEP. A boundary timestamp belongs to the pane beginning at that timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowPaneLayout {
+    pub pane_nanos: i64,
+    pub maximum_panes: u64,
+}
+
+impl WindowPaneLayout {
+    pub fn for_width_and_step(width: Duration, step: Duration) -> Option<Self> {
+        let width = i64::try_from(width.as_nanos()).ok()?;
+        let step = i64::try_from(step.as_nanos()).ok()?;
+        if width == 0 || step == 0 || step > width {
+            return None;
+        }
+        let mut left = width;
+        let mut right = step;
+        while right != 0 {
+            let remainder = left % right;
+            left = right;
+            right = remainder;
+        }
+        let complete = width / left;
+        let maximum_panes = u64::try_from(complete).ok()?.checked_add(2)?;
+        Some(Self {
+            pane_nanos: left,
+            maximum_panes,
+        })
+    }
+
+    pub fn pane_of(self, timestamp_nanos: i64) -> i64 {
+        timestamp_nanos.div_euclid(self.pane_nanos)
+    }
+}
+
 /// The shared structure a window keeps for one demand. Functions that can be answered from the
 /// same structure over the same arguments share one demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WindowAggregateStorageKind {
+    /// HyperLogLog registers for approximate distinct counting.
+    DistinctSketch,
+    /// Bounded t-digest quantile centroids.
+    QuantileSketch,
+    /// Bounded Misra-Gries frequency candidates.
+    TopKSketch,
     /// The earliest and latest contributing row by key, for `ARG_MIN` and `ARG_MAX`.
     ArgExtremes,
     /// The count, means and centered co-moments of two arguments, for covariance and correlation.
@@ -132,6 +218,7 @@ pub struct WindowAggregateDemand {
     pub storage: WindowAggregateStorageKind,
     pub arguments: WindowArguments<Expr>,
     pub linear_histogram: Option<WindowLinearHistogramConfig>,
+    pub sketch: Option<WindowSketchConfig>,
 }
 
 #[derive(Debug, Error)]
@@ -159,6 +246,9 @@ impl WindowAggregateFunction {
 
     pub fn storage(self) -> WindowAggregateStorageKind {
         match self {
+            Self::ApproxCountDistinct => WindowAggregateStorageKind::DistinctSketch,
+            Self::ApproxQuantile => WindowAggregateStorageKind::QuantileSketch,
+            Self::ApproxTopK => WindowAggregateStorageKind::TopKSketch,
             Self::ArgMax | Self::ArgMin => WindowAggregateStorageKind::ArgExtremes,
             Self::Avg | Self::StddevPop | Self::StddevSamp | Self::VarPop | Self::VarSamp => {
                 WindowAggregateStorageKind::Moments
@@ -181,7 +271,13 @@ impl WindowAggregateStorageKind {
     /// finite before its row can be admitted.
     pub fn reads_finite_numbers(self) -> bool {
         match self {
-            Self::CoMoments | Self::Histogram | Self::Moments | Self::Sum => true,
+            Self::CoMoments
+            | Self::DistinctSketch
+            | Self::Histogram
+            | Self::Moments
+            | Self::QuantileSketch
+            | Self::Sum
+            | Self::TopKSketch => true,
             Self::ArgExtremes
             | Self::Counter
             | Self::Extremes
@@ -192,6 +288,9 @@ impl WindowAggregateStorageKind {
 
     pub fn nspl_name(self) -> &'static str {
         match self {
+            Self::DistinctSketch => "hll",
+            Self::QuantileSketch => "quantile_sketch",
+            Self::TopKSketch => "frequent_items",
             Self::ArgExtremes => "arg_extremes",
             Self::CoMoments => "co_moments",
             Self::Counter => "counter",
@@ -589,25 +688,112 @@ fn validate_aggregate_call(
     if function == WindowAggregateFunction::PercentileLinearHistogram {
         linear_histogram_config(args)?;
     }
+    if function.is_sketch() {
+        sketch_config(function, args)?;
+    }
     Ok(())
 }
 
 fn percentile_arg(expr: &SpannedExpr) -> WindowAggregateResult<f64> {
+    percentage_arg(expr, WindowAggregateFunction::PercentileLinearHistogram)
+}
+
+fn percentage_arg(
+    expr: &SpannedExpr,
+    function: WindowAggregateFunction,
+) -> WindowAggregateResult<f64> {
     let value = match &expr.inner {
         Expr::Literal(Literal::Int64(value)) => (*value).approx_into(),
         Expr::Literal(Literal::Float64(value)) => *value,
         _ => {
-            return Err(invalid_window_aggregate(
-                "PERCENTILE_LINEAR_HISTOGRAM percentile argument must be a numeric constant",
-            ));
+            return Err(invalid_window_aggregate(format!(
+                "{} percentile argument must be a numeric constant",
+                function.nspl_name()
+            )));
         }
     };
     if !(0.0..=100.0).contains(&value) {
-        return Err(invalid_window_aggregate(
-            "PERCENTILE_LINEAR_HISTOGRAM percentile argument must be between 0 and 100",
-        ));
+        return Err(invalid_window_aggregate(format!(
+            "{} percentile argument must be between 0 and 100",
+            function.nspl_name()
+        )));
     }
     Ok(value)
+}
+
+impl WindowAggregateFunction {
+    pub const fn is_sketch(self) -> bool {
+        matches!(
+            self,
+            Self::ApproxCountDistinct | Self::ApproxQuantile | Self::ApproxTopK
+        )
+    }
+}
+
+fn sketch_integer_arg(
+    expr: &SpannedExpr,
+    function: WindowAggregateFunction,
+    argument: &'static str,
+) -> WindowAggregateResult<usize> {
+    let Expr::Literal(Literal::Int64(value)) = &expr.inner else {
+        return Err(invalid_window_aggregate(format!(
+            "{} {argument} must be an integer constant",
+            function.nspl_name()
+        )));
+    };
+    usize::try_from(*value).map_err(|_| {
+        invalid_window_aggregate(format!(
+            "{} {argument} must be non-negative and fit the platform",
+            function.nspl_name()
+        ))
+    })
+}
+
+fn sketch_config(
+    function: WindowAggregateFunction,
+    args: &[SpannedExpr],
+) -> WindowAggregateResult<WindowSketchConfig> {
+    match function {
+        WindowAggregateFunction::ApproxCountDistinct => {
+            let precision = sketch_integer_arg(&args[1], function, "precision")?;
+            if !(4..=16).contains(&precision) {
+                return Err(invalid_window_aggregate(
+                    "APPROX_COUNT_DISTINCT precision must be between 4 and 16",
+                ));
+            }
+            Ok(WindowSketchConfig::Distinct {
+                precision: u8::try_from(precision).verified("the precision range above fits a u8"),
+            })
+        }
+        WindowAggregateFunction::ApproxQuantile => {
+            percentage_arg(&args[1], function)?;
+            let capacity = sketch_integer_arg(&args[2], function, "capacity")?;
+            if !(32..=4096).contains(&capacity) {
+                return Err(invalid_window_aggregate(
+                    "APPROX_QUANTILE capacity must be between 32 and 4096",
+                ));
+            }
+            Ok(WindowSketchConfig::Quantile {
+                capacity: NonZeroUsize::new(capacity)
+                    .verified("the capacity range above excludes zero"),
+            })
+        }
+        WindowAggregateFunction::ApproxTopK => {
+            let k = sketch_integer_arg(&args[1], function, "k")?;
+            let capacity = sketch_integer_arg(&args[2], function, "capacity")?;
+            if k == 0 || k > capacity || capacity > 4096 {
+                return Err(invalid_window_aggregate(
+                    "APPROX_TOP_K requires 1 <= k <= capacity <= 4096",
+                ));
+            }
+            Ok(WindowSketchConfig::TopK {
+                k: NonZeroUsize::new(k).verified("the k check above excludes zero"),
+                capacity: NonZeroUsize::new(capacity)
+                    .verified("k is positive and no greater than capacity"),
+            })
+        }
+        _ => Err(invalid_window_aggregate("function is not a window sketch")),
+    }
 }
 
 fn linear_histogram_config(
@@ -745,14 +931,17 @@ fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggreg
                 }
                 return;
             };
-            let percentile =
-                if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
-                    Some(percentile_arg(&args[1]).verified(
-                        "aggregate validation checked these same arguments before the demand pass",
-                    ))
-                } else {
-                    None
-                };
+            let percentile = if matches!(
+                aggregate_function,
+                WindowAggregateFunction::PercentileLinearHistogram
+                    | WindowAggregateFunction::ApproxQuantile
+            ) {
+                Some(percentage_arg(&args[1], aggregate_function).verified(
+                    "aggregate validation checked these same arguments before the demand pass",
+                ))
+            } else {
+                None
+            };
             let linear_histogram =
                 if aggregate_function == WindowAggregateFunction::PercentileLinearHistogram {
                     Some(linear_histogram_config(args).verified(
@@ -761,10 +950,18 @@ fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggreg
                 } else {
                     None
                 };
+            let sketch = if aggregate_function.is_sketch() {
+                Some(sketch_config(aggregate_function, args).verified(
+                    "aggregate validation checked these same arguments before the demand pass",
+                ))
+            } else {
+                None
+            };
             let demand = aggregate_demand_for_call(
                 aggregate_function,
                 args,
                 linear_histogram,
+                sketch,
                 demands.len(),
             );
             let demand_id = if let Some(existing) = demands
@@ -819,6 +1016,7 @@ fn aggregate_demand_for_call(
     function: WindowAggregateFunction,
     args: &[SpannedExpr],
     linear_histogram: Option<WindowLinearHistogramConfig>,
+    sketch: Option<WindowSketchConfig>,
     id: WindowAggregateDemandId,
 ) -> WindowAggregateDemand {
     let first = args
@@ -842,6 +1040,7 @@ fn aggregate_demand_for_call(
         storage: function.storage(),
         arguments,
         linear_histogram,
+        sketch,
     }
 }
 
@@ -849,6 +1048,7 @@ fn demand_matches(left: &WindowAggregateDemand, right: &WindowAggregateDemand) -
     left.storage == right.storage
         && left.arguments == right.arguments
         && left.linear_histogram == right.linear_histogram
+        && left.sketch == right.sketch
 }
 
 pub fn referenced_field_refs(expr: &WindowAggregateExpr) -> Vec<&FieldRef> {
@@ -947,6 +1147,87 @@ mod tests {
         assert_eq!(demands[1].storage, WindowAggregateStorageKind::Extremes);
         assert_eq!(demands[2].storage, WindowAggregateStorageKind::Sequence);
         assert_eq!(demands[3].storage, WindowAggregateStorageKind::Histogram);
+    }
+
+    #[test]
+    fn sketch_demands_keep_bounded_configs_and_quantile_percentile() {
+        let parsed = lower_aggregate_program(
+            "distinct_values = APPROX_COUNT_DISTINCT(input.value, 10), median_value = \
+             APPROX_QUANTILE(input.value, 50, 128), frequent_values = APPROX_TOP_K(input.value, \
+             2, 16)",
+        )
+        .assured("the test uses valid bounded sketch configurations");
+        assert_eq!(parsed.demands().len(), 3);
+        assert_eq!(
+            parsed.demands()[0].sketch,
+            Some(WindowSketchConfig::Distinct { precision: 10 })
+        );
+        assert_eq!(
+            parsed.demands()[1].sketch,
+            Some(WindowSketchConfig::Quantile {
+                capacity: nonzero!(128usize)
+            })
+        );
+        assert_eq!(
+            parsed.demands()[2].sketch,
+            Some(WindowSketchConfig::TopK {
+                k: nonzero!(2usize),
+                capacity: nonzero!(16usize)
+            })
+        );
+        let percentile = match &parsed.assignments[1].value.inner {
+            WindowAggregateExpr::Scalar(expr) => match &expr.inner {
+                Expr::Call {
+                    function: FunctionName::WindowAggregate(invocation),
+                    ..
+                } => Some(invocation.percentile),
+                _ => None,
+            },
+            WindowAggregateExpr::Array(_) => None,
+        }
+        .verified("the quantile assignment is one aggregate invocation");
+        assert_eq!(percentile, Some(50.0));
+    }
+
+    #[test]
+    fn sketch_configuration_rejects_unbounded_or_invalid_parameters() {
+        for expression in [
+            "APPROX_COUNT_DISTINCT(input.value, 3)",
+            "APPROX_COUNT_DISTINCT(input.value, 17)",
+            "APPROX_COUNT_DISTINCT(input.value, input.precision)",
+            "APPROX_QUANTILE(input.value, -1, 128)",
+            "APPROX_QUANTILE(input.value, 101, 128)",
+            "APPROX_QUANTILE(input.value, 50, 31)",
+            "APPROX_QUANTILE(input.value, 50, 4097)",
+            "APPROX_TOP_K(input.value, 0, 16)",
+            "APPROX_TOP_K(input.value, 17, 16)",
+            "APPROX_TOP_K(input.value, 1, 4097)",
+        ] {
+            assert!(
+                lower_aggregate_program(&format!("result = {expression}")).is_err(),
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn sketch_panes_are_epoch_aligned_and_bounded_by_width_and_step() {
+        let layout =
+            WindowPaneLayout::for_width_and_step(Duration::from_secs(6), Duration::from_secs(4))
+                .verified("positive duration width and step have a pane layout");
+        assert_eq!(layout.pane_nanos, 2_000_000_000);
+        assert_eq!(layout.maximum_panes, 5);
+        assert_eq!(layout.pane_of(-1), -1);
+        assert_eq!(layout.pane_of(0), 0);
+        assert_eq!(layout.pane_of(2_000_000_000), 1);
+        assert_eq!(
+            WindowPaneLayout::for_width_and_step(Duration::ZERO, Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            WindowPaneLayout::for_width_and_step(Duration::from_secs(1), Duration::from_secs(2)),
+            None
+        );
     }
 
     #[test]

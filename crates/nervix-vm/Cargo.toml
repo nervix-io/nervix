@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 ahash = { workspace = true }
+aho-corasick = { workspace = true }
 arc-swap = { workspace = true }
 arch-into = { workspace = true }
 arrow-arith = { workspace = true }
@@ -40,6 +41,7 @@ strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 triomphe = { workspace = true }
+unicode-normalization = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v7"] }
 xxhash-rust = { workspace = true }

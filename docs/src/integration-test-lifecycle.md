@@ -36,6 +36,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
+| HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
 
 The number of scenarios that run at once is the number of CPUs times the concurrency factor, set by
 `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default. Cucumber's
@@ -99,6 +100,8 @@ second module runs the operation, it is named after the owner.
 | The node startups of one cluster construction | `node_startup.rs`, run by `cluster.rs` | 84 seconds per node, shared by the whole construction | The node that ran out ends the construction |
 | A node a scenario stops itself | `cluster.rs` | The longest of five minutes, the configured shutdown timeout, and the configured drain phases | The task is aborted and joined, and the step fails |
 | Scenario cleanup of a whole cluster | `cluster_teardown.rs` | 60 seconds for every node together | Still-running tasks are aborted and joined and recorded as forced |
+| Stopping a scenario's HTTP receivers | `http_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
+| An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
 | The whole scenario run | `suite_watchdog.rs` | 37 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
@@ -408,7 +411,8 @@ teardown started      release paused health responses, domain-clock progress pau
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
      |
 stopping              drop HTTP load, held uploads, server processes, and observers;
-     |                close the browser and the session; stop the cluster within 60 s;
+     |                stop HTTP receivers within 6 s; close the browser and the session;
+     |                stop the cluster within 60 s;
      |                release proxies, silent peers, permits, and fixture ports
 finished
 ```
@@ -466,7 +470,8 @@ finds a port, a fault, or a proxy taken.
 
 - Background HTTP load, held uploads, and server processes are dropped first. Dropping a server
   process kills it and returns its ports.
-- Broker and syslog observers, the browser, and the session are closed before the cluster stops.
+- Broker and syslog observers, HTTP receivers, the browser, and the session are closed before the
+  cluster stops.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released
   once those nodes have ended.
 - The scenario's concurrency permits are released, and the ZeroMQ and syslog ports it drew for its
@@ -501,6 +506,7 @@ running the same suite, which is why a node startup retries a lost bind on fresh
 | --- | --- | --- |
 | In-process node | 7: gRPC, gRPC over HTTPS, HTTP, HTTPS, observability, web console, and interconnect | After its task has ended: at cluster cleanup, when a scenario stops every node, and when a failed startup attempt moves to fresh ports |
 | Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit | At the end of cleanup |
+| HTTP receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | Server process | 6 | When the process is dropped |
 | A node moved to a new interconnect address | 1 new interconnect port | The port it gave up stays reserved for the rest of the run |
 
@@ -547,6 +553,39 @@ After the run, the suite stops its dependencies within 2 minutes. A stop that do
 abandoned and its containers are left to the runner, because waiting without a bound is how a run
 that already has its result loses it to the job's own timeout. Dropping the runtime then waits at
 most 60 seconds for blocking tasks a scenario left parked in a driver.
+
+## HTTP Receivers
+
+A scenario about a node sending HTTP requests to an external endpoint starts an in-process HTTP/1.1
+receiver in its place, because only a receiver the harness controls can capture exactly what arrived
+and choose exactly how to answer: a status sequence, a delayed, held, or lost response, a stalled
+body, or malformed framing. A receiver can serve TLS with a certificate for chosen names and can
+require the client certificate it issued, whose files a node mounts as a resource.
+
+Everything a receiver holds is bounded, and exceeding a bound is recorded as a fault, not captured.
+
+| Bound | Limit |
+| --- | --- |
+| One request head | 256 KiB and 512 header fields, room for a request at every HTTP emitter limit at once |
+| One request body | 16 MiB |
+| Captured requests | 4,096 per receiver |
+| Kept faults | 256 per receiver; later faults are counted but not kept |
+
+Every await a receiver connection makes also waits for the receiver's stop, so a held response or
+a stalled body ends as soon as cleanup begins. The receivers of a scenario stop together in the
+`stopping` phase, before the cluster, under one 6-second budget: 5 seconds for every connection to
+end on its own, after which the rest are aborted and joined, and 1 second to join the accept loop,
+after which it is aborted and joined too. The derivation asserts that this budget is shorter than
+the cluster's cleanup budget. Each stop is recorded in the scenario log:
+
+```text
+HTTP receiver cleanup: <name>: stopped <n> connection(s) in <elapsed> of a 6s budget, <n> forced, <n> panicked; captured <n> request(s), recorded <n> fault(s)
+scenario cleanup forced: HTTP receiver <name>: <the same record>
+```
+
+The second line appears only when a connection or the accept loop had to be aborted, or panicked.
+A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
+cleanup, once the nodes that dialed it have ended.
 
 ## The Suite Watchdog
 
@@ -730,7 +769,7 @@ Its limits:
 
 ## Qualification Evidence
 
-`just test-harness-liveness` runs the 48 focused regressions that hold this contract in about four
+`just test-harness-liveness` runs the 56 focused regressions that hold this contract in about four
 seconds. They drive stand-in session services on real loopback sockets and stand-in node tasks, most
 of them on a paused clock, and CI runs them before the scenario suite.
 
@@ -743,6 +782,7 @@ of them on a paused clock, and CI runs them before the scenario suite.
 | Diagnostics are concurrent and never keep cleanup from starting | `status_snapshots_keep_a_healthy_node_while_another_node_stalls`, `failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts`, `a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three` |
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
+| An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | The suite watchdog names what was running and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as
