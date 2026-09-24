@@ -591,6 +591,17 @@ build and the existing tests, and nothing in it changes behavior.
 
 ### Integration coverage
 
+- [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) is the authoritative
+  architecture reference for the lifecycle of the Cucumber scenario harness. Any change to how the
+  harness starts, observes, diagnoses, or stops in-process nodes, server processes, scenarios, or
+  the whole run, to a harness budget or the measurement it is derived from, or to the CI job that
+  runs the suite must keep that chapter current in the same change. Its scope includes the
+  separation of product deadlines from harness deadlines, phase deadlines and budget derivation,
+  status requests and waits, node task and readiness outcomes, node startup and retry
+  classification, cluster construction, scenario phases and the active-scenario registry, teardown
+  diagnostics, cluster teardown and forced cleanup, scenario-driven stops, the port pool, server
+  processes and test dependencies, the suite watchdog and its CI reserve, exit statuses, and how
+  failure reaches CI output.
 - Unit tests support but do not replace cucumber coverage for behavior observable through an NSPL
   command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
   executable statement with application or runtime handling is not parser-only. Do not substitute
