@@ -468,4 +468,43 @@ mod tests {
             &models
         ));
     }
+
+    #[test]
+    fn json_extractions_are_as_deterministic_as_their_document() {
+        let models = ModelIndex::new();
+        let path = nervix_models::JsonPath::parse("$.amount").assured("the path is valid");
+        let extractions = |document: Expression| {
+            [
+                Expression::JsonValue {
+                    document: Box::new(document.clone()),
+                    path: path.clone(),
+                    target: ParseAsType::I64,
+                },
+                Expression::TryJsonValue {
+                    document: Box::new(document.clone()),
+                    path: path.clone(),
+                    target: ParseAsType::I64,
+                },
+                Expression::JsonExists {
+                    document: Box::new(document),
+                    path: path.clone(),
+                },
+            ]
+        };
+
+        for extraction in extractions(Expression::Literal(Literal::String(
+            r#"{"amount":42}"#.to_string(),
+        ))) {
+            assert!(!expression_contains_nondeterministic_or_side_effect_call(
+                &extraction,
+                &models
+            ));
+        }
+        for extraction in extractions(generated_uuid()) {
+            assert!(expression_contains_nondeterministic_or_side_effect_call(
+                &extraction,
+                &models
+            ));
+        }
+    }
 }
