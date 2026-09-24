@@ -185,11 +185,11 @@ mod emitter_buffer;
 mod emitter_encoding;
 mod emitter_publishing;
 mod emitter_retry;
+mod emitter_sinks;
 mod emitter_start_plan;
 mod emitter_supervision;
 mod emitter_task;
 mod emitter_values;
-mod emitters;
 mod endpoint;
 mod entity_gate;
 mod error;
@@ -222,6 +222,7 @@ mod node_settings;
 mod observability;
 mod ownership_handoff_error;
 mod planning;
+mod pooled_sink_clients;
 mod processor_branch_task;
 mod processor_output;
 mod processor_template;
@@ -313,6 +314,7 @@ use emitter_retry::{
     EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
     emitter_retry_delay,
 };
+use emitter_sinks::EmitterSinkStarter;
 use emitter_start_plan::*;
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
@@ -323,7 +325,6 @@ use emitter_task::{
     emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
 };
 use emitter_values::{MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit};
-use emitters::EmitterSinkStarter;
 use endpoint::{
     EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint, RoutedEndpointsByDomain,
 };

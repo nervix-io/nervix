@@ -28,11 +28,7 @@ use nervix_connector_sqs::{SqsSink, SqsSinkConfig};
 use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
 use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
 
-use super::*;
-
-mod pooled_clients;
-
-use pooled_clients::PooledSinkClient;
+use super::{pooled_sink_clients::PooledSinkClient, *};
 
 fn mapped_column_names(mappings: &[ClickHouseValueMapping]) -> Vec<String> {
     mappings
