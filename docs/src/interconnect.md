@@ -462,6 +462,15 @@ fan-out neither formats a gossip key nor waits on the gossip mutex. Subscription
 the exact subscriber incarnation to appear in every live node's published index before it reports
 success. A withdrawal disappears from fan-out when the next gossip state snapshot is published.
 
+A node advertises interest in a relay exactly while at least one of its session subscriptions
+holds a lease on it. Every subscription takes one lease before it attaches and releases it exactly
+once, when it is withdrawn, abandoned before it was announced, or ended by its relay, so any
+number of subscriptions from any number of sessions share one advertisement and the last release
+withdraws it. Each write of the advertisement reads the lease count while it holds the gossip lock
+that orders the writes, so the last write always matches the count: a release that finishes late
+cannot withdraw the interest of a subscription that attached after it. The count per relay is
+exported as `nervix_session_subscriptions`.
+
 Consensus separates traffic according to the progress it protects:
 
 - heartbeats, pre-votes, votes, leadership notifications, linearizable runtime-admission reads,

@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** One native gRPC exchange per test session: request identities, reply routing and
 //!   transfer reassembly, the subscriptions the session opened and the display text of their rows,
-//!   the notices it received, and raw frames a scenario sends to probe the server's refusals.
+//!   every frame about a subscription outside the lifetime its replies and events announced, the
+//!   notices it received, and raw frames a scenario sends to probe the server's refusals.
 //! - **Depends on.** The client wire contract and its gRPC codec, the NSPL client statement parser
 //!   to route subscription statements, and the shared TLS and credential fixtures.
 //! - **Must not know.** Server internals; everything it observes arrives through the public
@@ -21,15 +22,15 @@ use std::{
     time::Duration,
 };
 
-use ahash::{HashMap, HashMapExt as _};
+use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use bytes::{BufMut as _, Bytes};
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, AttachTransactionRequest, CancelRequest, ClientMessage,
     ClientRequest, CommandDisposition, CommandOutcome, CommandRequest, Diagnostic, NoticeLevel,
     OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage,
-    SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionHandle,
-    SubscriptionType, TransferAssembly, UnsubscribeDisposition, UnsubscribeRequest, UploadChunk,
-    UploadReply, UploadStart, VerifiedFrame,
+    SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded,
+    SubscriptionHandle, SubscriptionType, TransferAssembly, UnsubscribeDisposition,
+    UnsubscribeRequest, UploadChunk, UploadReply, UploadStart, VerifiedFrame,
     grpc::{
         ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
     },
@@ -131,7 +132,15 @@ pub(crate) struct TestSession {
     replies: BTreeMap<RequestId, ReceivedReply>,
     transfers: BTreeMap<RequestId, TransferAssembly>,
     subscriptions: HashMap<SubscriptionHandle, OpenSubscription>,
+    /// Generations a reply deleted or an event ended. No frame about one of them may follow.
+    closed_subscriptions: HashSet<SubscriptionHandle>,
+    /// Every frame about a subscription that arrived before the reply announcing it, or after the
+    /// reply or event that closed it.
+    frames_outside_lifetime: Vec<String>,
+    /// Every row any subscription of the session delivered, as a client displays it.
+    delivered_payloads: Vec<String>,
     pending_subscriptions: VecDeque<TestSubscriptionEvent>,
+    pending_subscription_ends: VecDeque<SubscriptionEnded>,
     pending_server_errors: VecDeque<TestServerEvent>,
     /// Why the server said it ends the session, once it said so.
     ending: Option<SessionEndReason>,
@@ -234,7 +243,11 @@ pub(crate) async fn open_session_as(
         replies: BTreeMap::new(),
         transfers: BTreeMap::new(),
         subscriptions: HashMap::new(),
+        closed_subscriptions: HashSet::new(),
+        frames_outside_lifetime: Vec::new(),
+        delivered_payloads: Vec::new(),
         pending_subscriptions: VecDeque::new(),
+        pending_subscription_ends: VecDeque::new(),
         pending_server_errors: VecDeque::new(),
         ending: None,
         ended: None,
@@ -470,6 +483,7 @@ impl TestSession {
             ReplyBody::Unsubscribe(outcome) => {
                 if let UnsubscribeDisposition::Deleted(handle) = &outcome.disposition {
                     self.subscriptions.remove(handle);
+                    self.closed_subscriptions.insert(handle.clone());
                 }
             }
             _ => {}
@@ -490,6 +504,7 @@ impl TestSession {
             }
             ServerEvent::SubscriptionRows(rows) => {
                 let Some(subscription) = self.subscriptions.get(rows.subscription()) else {
+                    self.record_outside_lifetime("rows", rows.subscription());
                     return Ok(());
                 };
                 let lines = rows
@@ -497,33 +512,68 @@ impl TestSession {
                     .display_lines(&subscription.schema)
                     .map_err(io::Error::other)?;
                 for payload in lines {
+                    self.delivered_payloads.push(payload.clone());
                     self.pending_subscriptions
                         .push_back(TestSubscriptionEvent { payload });
                 }
             }
             ServerEvent::SubscriptionRowsSkipped(skipped) => {
+                if !self.subscriptions.contains_key(&skipped.subscription) {
+                    self.record_outside_lifetime("a skip report", &skipped.subscription);
+                }
                 self.pending_server_errors.push_back(TestServerEvent {
                     level: NoticeLevel::Error,
                     message: skipped.message,
                 });
             }
             ServerEvent::SubscriptionEnded(ended) => {
-                self.subscriptions.remove(&ended.subscription);
+                if self.subscriptions.remove(&ended.subscription).is_none() {
+                    self.record_outside_lifetime("an end", &ended.subscription);
+                }
+                self.closed_subscriptions.insert(ended.subscription.clone());
                 self.pending_server_errors.push_back(TestServerEvent {
                     level: NoticeLevel::Error,
-                    message: ended.message,
+                    message: ended.message.clone(),
                 });
+                self.pending_subscription_ends.push_back(ended);
             }
             ServerEvent::SessionEnding(ending) => {
                 self.ending = Some(ending.reason);
             }
-            ServerEvent::SubscriptionDeliveryLost(_)
-            | ServerEvent::Leadership(_)
+            ServerEvent::SubscriptionDeliveryLost(lost) => {
+                if !self.subscriptions.contains_key(&lost.subscription) {
+                    self.record_outside_lifetime("a loss report", &lost.subscription);
+                }
+            }
+            ServerEvent::Leadership(_)
             | ServerEvent::Domains(_)
             | ServerEvent::DomainSnapshot(_)
             | ServerEvent::Cluster(_) => {}
         }
         Ok(())
+    }
+
+    /// Records a frame about `subscription` that arrived while the session did not hold it.
+    fn record_outside_lifetime(&mut self, frame: &str, subscription: &SubscriptionHandle) {
+        let when = if self.closed_subscriptions.contains(subscription) {
+            "after it was closed"
+        } else {
+            "before it was announced"
+        };
+        self.frames_outside_lifetime.push(format!(
+            "{frame} for subscription '{}' generation {} {when}",
+            subscription.name, subscription.generation
+        ));
+    }
+
+    /// Every frame about a subscription that arrived outside the lifetime the session was told.
+    pub(crate) fn frames_outside_lifetime(&self) -> &[String] {
+        &self.frames_outside_lifetime
+    }
+
+    /// Every row any subscription of the session delivered so far.
+    pub(crate) fn delivered_payloads(&self) -> &[String] {
+        &self.delivered_payloads
     }
 
     /// Waits for the terminal reply of `request_id`.
@@ -893,6 +943,60 @@ impl TestSession {
                     "the session ended before a subscription event: {:?}",
                     self.ended
                 )));
+            }
+        }
+    }
+
+    /// Sends an unsubscribe request without waiting for its reply, and returns its identity.
+    pub(crate) async fn send_unsubscribe(
+        &mut self,
+        subscription: SubscriptionName,
+    ) -> io::Result<RequestId> {
+        let request = UnsubscribeRequest { subscription };
+        let (request_id, _) = self
+            .send_request(ClientRequest::Unsubscribe(request))
+            .await?;
+        Ok(request_id)
+    }
+
+    /// Waits for the next subscription the server ended.
+    pub(crate) async fn try_next_subscription_end(
+        &mut self,
+        timeout_duration: Duration,
+    ) -> io::Result<Option<SubscriptionEnded>> {
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            tokio::task::consume_budget().await;
+            if let Some(ended) = self.pending_subscription_ends.pop_front() {
+                return Ok(Some(ended));
+            }
+            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let open = match read {
+                Ok(open) => open?,
+                Err(_) => return Ok(None),
+            };
+            if !open {
+                return Err(io::Error::other(format!(
+                    "the session ended before a subscription ended: {:?}",
+                    self.ended
+                )));
+            }
+        }
+    }
+
+    /// Reads and files every frame that arrives within `duration`.
+    pub(crate) async fn read_for(&mut self, duration: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + duration;
+        loop {
+            tokio::task::consume_budget().await;
+            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            match read {
+                Ok(open) => {
+                    if !open? {
+                        return Ok(());
+                    }
+                }
+                Err(_) => return Ok(()),
             }
         }
     }

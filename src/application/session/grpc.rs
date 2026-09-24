@@ -31,8 +31,8 @@ use nervix_client_wire::{
     },
 };
 use nervix_recovery::Discarded as _;
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tonic::{
     Request, Response, Status, Streaming,
     body::Body,
@@ -40,7 +40,7 @@ use tonic::{
     server::{ClientStreamingService, Grpc, NamedService, StreamingService},
 };
 
-use super::{InboundFrame, SESSION_OUTBOUND_CAPACITY, SessionTransport};
+use super::{InboundFrame, SessionTransport, outbound};
 use crate::application::session_service::SessionServiceImpl;
 
 /// The session service a gRPC server hosts.
@@ -126,17 +126,18 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for Exchange {
             let inbound = request
                 .into_inner()
                 .map(move |item| failure_report.inbound_frame(item));
-            let (outbound, frames) = mpsc::channel(SESSION_OUTBOUND_CAPACITY);
+            let (outbound, frames) = outbound::channel(CancellationToken::new());
             let session_service = service.clone();
             service.inner.service_tasks.spawn(async move {
                 session_service
                     .run_session(user, SessionTransport::Grpc, limits, inbound, outbound)
                     .await;
             });
-            // The frames end once the session and every task it started have dropped their
-            // senders, after everything they queued was sent. The status of the transport failure
-            // that ended the session, if one did, closes the call.
-            let responses = ReceiverStream::new(frames)
+            // The frames end once the session wrote its ending, or once it and every task it
+            // started have dropped their lanes after everything they queued was sent. The status
+            // of the transport failure that ended the session, if one did, closes the call.
+            let responses = frames
+                .into_stream()
                 .map(Ok)
                 .chain(stream::once(failure).filter_map(failure_status));
             let responses: ExchangeStream = Box::pin(responses);

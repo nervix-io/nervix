@@ -1493,11 +1493,14 @@ table SubscriptionRowsSkipped {
 }
 
 enum SubscriptionEndReason : ubyte {
-  /// The relay was rebuilt, stopped or removed. Subscribe again against the current schema.
-  RelayClosed
+  /// The relay, or the domain that held it, no longer exists.
+  RelayRemoved,
+  /// The relay was redefined, or removed and declared again, so the schema the subscription
+  /// announced no longer describes its rows. Subscribe again to read them under the current one.
+  RelayChanged
 }
 
-/// The server closed the subscription. No further rows follow for this generation.
+/// The server ended the subscription. It is the last frame about this generation.
 table SubscriptionEnded {
   subscription: SubscriptionHandle (required);
   /// Required.

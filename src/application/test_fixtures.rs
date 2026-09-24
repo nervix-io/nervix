@@ -46,7 +46,7 @@ use super::{
     command_result::{CommandResponse, CommandResult},
     session::admission::RequestAdmission,
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
-    subscription::SessionSubscriptions,
+    subscription::{SessionSubscriptions, SubscriptionInterests},
     tls::HttpsListenerCertificates,
     transaction::{
         DEFAULT_TRANSACTION_IDLE_TIMEOUT, DEFAULT_TRANSACTION_MAX_OPEN,
@@ -261,21 +261,23 @@ fn test_session_service(
         &ConfiguredFaultInjection::default(),
         &cluster,
     );
+    let runtime = Runtime::new();
+    let subscription_interests = SubscriptionInterests::new(cluster.clone(), runtime.metrics());
     SessionServiceImpl {
         inner: Arc::new(SessionServiceInner {
-            cluster,
+            cluster: cluster.clone(),
             consensus: consensus.proposer(),
             consensus_administrator: consensus.administrator(),
             registry,
             resource_store,
             https_certificates,
-            runtime: Runtime::new(),
+            runtime,
             runtime_admission: Arc::new(super::runtime_admission::RuntimeAdmission::new()),
             replica_count: 0,
             admission_shutdown: CancellationToken::new(),
             drain_support_shutdown: CancellationToken::new(),
             events: SessionEvents::new(16),
-            subscription_interest_counts: DashMap::with_hasher(RandomState::new()),
+            subscription_interests,
             interconnect,
             service_tasks: super::service_tasks::ServiceTasks::default(),
             configured_basic_auth: None,

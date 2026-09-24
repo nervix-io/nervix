@@ -2301,7 +2301,7 @@ mod tests {
             output.message
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2519,7 +2519,7 @@ mod tests {
                 .contains("- type=file path=model.onnx size=5 checksum=")
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 }

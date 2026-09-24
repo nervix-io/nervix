@@ -285,7 +285,8 @@ Choose checks relevant to the configured graph:
   unsatisfied preferences a `RELOCATE` with the same clauses would execute, without moving
   anything.
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
-- `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph.
+- `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph. A subscription
+  ends when its relay is redefined or removed; create it again to read the current definition.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

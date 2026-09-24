@@ -71,7 +71,7 @@ pub(super) async fn run_session_events(shared: Arc<SessionShared>) {
         tokio::task::consume_budget().await;
         tokio::select! {
             biased;
-            _ = shared.ended.cancelled() => return,
+            _ = shared.ended() => return,
             notice = notices.recv() => match notice {
                 Ok(notice) => {
                     if !shared.send_notice(notice).await {
@@ -173,7 +173,7 @@ impl SessionShared {
                 Leadership::Unknown => Some(WireLeaderRedirect { leader: None }),
             };
             if let Some(redirect) = redirect {
-                self.end(SessionEndReason::LeaderRedirect(redirect)).await;
+                self.end(SessionEndReason::LeaderRedirect(redirect));
                 return false;
             }
         }
