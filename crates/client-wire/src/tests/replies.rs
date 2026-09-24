@@ -59,6 +59,23 @@ fn a_command_outcome_without_statements_diagnostics_or_transaction_round_trips()
 }
 
 #[test]
+fn a_command_outcome_carries_the_inspection_it_read_beside_its_own_binding() {
+    for operation_number in [None, Some(operation(2))] {
+        let mut outcome = command_outcome(crate::CommandDisposition::Completed {
+            already_existed: false,
+        });
+        outcome.statements.clear();
+        outcome.transaction = Some(transaction(TransactionLifecycle::Open));
+        outcome.inspection = Some(Box::new(TransactionInspection {
+            transaction: transaction(TransactionLifecycle::Committed),
+            operation: operation_number,
+            report: impact_report(),
+        }));
+        assert_round_trips(ReplyBody::Command(Box::new(outcome)));
+    }
+}
+
+#[test]
 fn every_transaction_state_round_trips() {
     for state in transaction_states() {
         let mut outcome = command_outcome(crate::CommandDisposition::Failed);
@@ -455,6 +472,8 @@ fn cancellation_and_rejection_replies_round_trip() {
         RequestRejection::UnsupportedValue,
         RequestRejection::DuplicateRequestId,
         RequestRejection::ReplyTooLarge,
+        RequestRejection::TooManyRequestsInFlight,
+        RequestRejection::ServerBusy,
     ] {
         assert_round_trips(ReplyBody::Rejected(RequestRejected {
             rejection,

@@ -23,25 +23,23 @@ use nervix_models::{
     TransactionOperationNumber,
 };
 use nervix_nspl::client_statement::ClientStatement;
-use tokio::sync::mpsc;
-use tonic::Status;
 use tracing::{error, info, warn};
 
 use super::{
     cluster_status::render_cluster_status,
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
     completion::CompletionError,
     domain_lifecycle::DomainAlterError,
     ownership_handoff::{mark_complete_ownership_transitions, planned_ownership_moves},
     schedule_planning::DomainSchedulePlanningSnapshot,
     scheduling::ScheduleTransition,
     session_service::{SessionServiceImpl, create_registry_error_response, find_identifier_span},
-    subscription::SessionSubscriptions,
     transaction::{
-        TransactionCommitError, TransactionModelStepContext, transaction_planning_error_message,
+        InspectingSession, TransactionCommitError, TransactionModelStepContext,
+        transaction_planning_error_message,
     },
 };
 use crate::{
-    proto::{CommandResult, CommandResultKind, Diagnostic, SessionResponse},
     registry::{EntityGatePlan, RegistryError, RegistryMutation, ScheduleDelta},
     runtime::RuntimeError,
 };
@@ -88,22 +86,6 @@ struct CollectedModelMutations {
     /// that pinned their resource versions; a direct batch pins them before planning.
     mutations: Vec<RegistryMutation<RequestedResourceVersion>>,
     applied: Vec<AppliedModelMutation>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(in crate::application) enum RequestDomainError {
-    Missing,
-    Invalid,
-}
-
-pub(in crate::application) fn parse_request_domain(
-    raw: &str,
-) -> Result<DomainName, RequestDomainError> {
-    if raw.trim().is_empty() {
-        Err(RequestDomainError::Missing)
-    } else {
-        DomainName::parse(raw.trim()).map_err(|_| RequestDomainError::Invalid)
-    }
 }
 
 fn requires_request_domain(statement: &Statement) -> bool {
@@ -187,32 +169,31 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
 }
 
 pub(in crate::application) fn command_ok(message: String) -> CommandResult {
-    command_ok_with_state(message, false)
+    CommandResult::new(
+        CommandDisposition::Completed {
+            already_existed: false,
+        },
+        message,
+    )
 }
 
 pub(in crate::application) fn command_ok_already_existed(message: String) -> CommandResult {
-    command_ok_with_state(message, true)
-}
-
-fn command_ok_with_state(message: String, already_existed: bool) -> CommandResult {
-    CommandResult {
-        success: true,
+    CommandResult::new(
+        CommandDisposition::Completed {
+            already_existed: true,
+        },
         message,
-        diagnostics: Vec::new(),
-        kind: i32::from(CommandResultKind::Ok),
-        already_existed,
-        ..Default::default()
-    }
+    )
 }
 
 pub(in crate::application) fn append_command_result(
     results: &mut Vec<CommandResult>,
     result: CommandResult,
 ) {
-    if result.results.is_empty() {
+    if result.statements.is_empty() {
         results.push(result);
     } else {
-        results.extend(result.results);
+        results.extend(result.statements);
     }
 }
 
@@ -226,34 +207,30 @@ pub(in crate::application) fn command_batch_result(
     }
 
     let transaction = result.transaction.clone();
-    let leader = result.leader.clone();
-    let leader_grpc_uri = result.leader_grpc_uri.clone();
-    let leader_web_console_uri = result.leader_web_console_uri.clone();
     append_command_result(&mut previous_results, result);
-    let success = previous_results.iter().all(|result| result.success);
+    let success = previous_results.iter().all(CommandResult::succeeded);
     let diagnostics = match previous_results.last() {
         Some(result) => result.diagnostics.clone(),
         None => Vec::new(),
     };
-    let failure_kind = match previous_results.last() {
-        Some(result) => result.kind,
-        None => i32::from(CommandResultKind::Error),
+    // A failed batch reports the disposition of the statement that ended it, so a redirect or a
+    // stale preview keeps its meaning when it arrives inside a batch.
+    let disposition = if success {
+        CommandDisposition::Completed {
+            already_existed: false,
+        }
+    } else {
+        match previous_results.last() {
+            Some(result) => result.disposition.clone(),
+            None => CommandDisposition::Failed,
+        }
     };
+    let message = command_results_message(&previous_results);
     CommandResult {
-        success,
-        message: command_results_message(&previous_results),
         diagnostics,
-        kind: if success {
-            i32::from(CommandResultKind::Ok)
-        } else {
-            failure_kind
-        },
-        results: previous_results,
+        statements: previous_results,
         transaction,
-        leader,
-        leader_grpc_uri,
-        leader_web_console_uri,
-        ..Default::default()
+        ..CommandResult::new(disposition, message)
     }
 }
 
@@ -370,13 +347,7 @@ fn model_mutation_success_result(
             }
             first_applied = false;
         }
-        results[mutation.index] = Some(CommandResult {
-            success: true,
-            message,
-            diagnostics: Vec::new(),
-            kind: i32::from(CommandResultKind::Ok),
-            ..Default::default()
-        });
+        results[mutation.index] = Some(command_ok(message));
     }
     let results = results
         .into_iter()
@@ -393,13 +364,10 @@ fn model_mutation_success_result(
             .next()
             .verified("the length check observed the only model mutation result");
     }
+    let message = command_results_message(&results);
     CommandResult {
-        success: true,
-        message: command_results_message(&results),
-        diagnostics: Vec::new(),
-        kind: i32::from(CommandResultKind::Ok),
-        results,
-        ..Default::default()
+        statements: results,
+        ..command_ok(message)
     }
 }
 
@@ -477,16 +445,34 @@ pub(in crate::application) fn rebind_resource_message(
 }
 
 pub(in crate::application) fn command_error(message: String) -> CommandResult {
+    command_failure(message.clone(), message)
+}
+
+/// A definitive failure whose one diagnostic, pointing at no part of the source, says
+/// `diagnostic`.
+pub(in crate::application) fn command_failure(
+    message: String,
+    diagnostic: String,
+) -> CommandResult {
     CommandResult {
-        success: false,
-        diagnostics: vec![Diagnostic {
-            message: message.clone(),
-            span_start: 0,
-            span_end: 0,
-        }],
-        message,
-        kind: i32::from(CommandResultKind::Error),
-        ..Default::default()
+        diagnostics: vec![CommandDiagnostic::unlocated(diagnostic)],
+        ..CommandResult::new(CommandDisposition::Failed, message)
+    }
+}
+
+/// A schedule publication that failed, underlining the whole command that asked for it.
+fn failed_schedule_publication(domain: &DomainName, error: String, query: &str) -> CommandResult {
+    let diagnostic = CommandDiagnostic {
+        message: error,
+        span: Some(0..query.len()),
+    };
+    let message = format!(
+        "failed to publish schedule for domain '{}'",
+        domain.as_str()
+    );
+    CommandResult {
+        diagnostics: vec![diagnostic],
+        ..CommandResult::new(CommandDisposition::Failed, message)
     }
 }
 
@@ -831,7 +817,7 @@ impl SessionServiceImpl {
         &self,
         statements: Vec<Statement>,
         query: &str,
-        request_domain: &str,
+        request_domain: Option<&DomainName>,
     ) -> CommandResult {
         Box::pin(self.process_model_mutation_batch_with_transaction(
             statements,
@@ -846,17 +832,11 @@ impl SessionServiceImpl {
         &self,
         statements: Vec<Statement>,
         query: &str,
-        request_domain: &str,
+        request_domain: Option<&DomainName>,
         transaction_step: Option<TransactionModelStepContext<'_>>,
     ) -> CommandResult {
-        let domain = match parse_request_domain(request_domain) {
-            Ok(domain) => domain,
-            Err(RequestDomainError::Missing) => {
-                return command_error("no active domain selected".to_string());
-            }
-            Err(RequestDomainError::Invalid) => {
-                return command_error("invalid domain".to_string());
-            }
+        let Some(domain) = request_domain.cloned() else {
+            return command_error("no active domain selected".to_string());
         };
         let domain_mutation = transaction_step
             .as_ref()
@@ -1123,20 +1103,7 @@ impl SessionServiceImpl {
                     "injected schedule publication fault for domain '{}'",
                     domain.as_str()
                 );
-                return CommandResult {
-                    success: false,
-                    message: format!(
-                        "failed to publish schedule for domain '{}'",
-                        domain.as_str()
-                    ),
-                    diagnostics: vec![Diagnostic {
-                        message: error,
-                        span_start: 0,
-                        span_end: u32::try_from(query.len()).unwrap_or(0),
-                    }],
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
+                return failed_schedule_publication(&domain, error, query);
             }
             let ScheduleTransition {
                 expected_schedule,
@@ -1331,7 +1298,7 @@ impl SessionServiceImpl {
                             }
                             None => command_error(error.to_string()),
                         };
-                        if response.kind == i32::from(CommandResultKind::NotLeader)
+                        if response.is_not_leader()
                             && let Some(step) = transaction_step.as_ref()
                         {
                             *step.outcome.lock() = Some(Err(error.change_context(
@@ -1733,20 +1700,7 @@ impl SessionServiceImpl {
                             return Box::pin(self.not_leader_response(query, leader_id.clone()))
                                 .await;
                         }
-                        return CommandResult {
-                            success: false,
-                            message: format!(
-                                "failed to publish schedule for domain '{}'",
-                                domain.as_str()
-                            ),
-                            diagnostics: vec![Diagnostic {
-                                message: err,
-                                span_start: 0,
-                                span_end: u32::try_from(query.len()).unwrap_or(0),
-                            }],
-                            kind: i32::from(CommandResultKind::Error),
-                            ..Default::default()
-                        };
+                        return failed_schedule_publication(&domain, err, query);
                     }
                     listener_revision =
                         Some(Box::pin(self.inner.consensus.current_runtime_revision()).await);
@@ -2078,9 +2032,8 @@ impl SessionServiceImpl {
         &self,
         client_statement: ClientStatement,
         query: &str,
-        request_domain: &str,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
-        subscriptions: &mut SessionSubscriptions,
+        request_domain: Option<&DomainName>,
+        session: InspectingSession<'_>,
     ) -> CommandResult {
         let statement = match client_statement {
             ClientStatement::UseDomain(domain) => {
@@ -2091,31 +2044,22 @@ impl SessionServiceImpl {
             }
             ClientStatement::ListDomains => {
                 return command_error(
-                    "LIST DOMAINS is a protobuf-level client command".to_string(),
+                    "LIST DOMAINS is a client-local command; send a list domains request"
+                        .to_string(),
                 );
             }
             ClientStatement::UploadResource(upload) => {
                 return self.upload_resource_command(upload).await;
             }
-            ClientStatement::CreateSubscription(subscription) => {
-                let domain = match parse_request_domain(request_domain) {
-                    Ok(domain) => domain,
-                    Err(RequestDomainError::Missing) => {
-                        return command_error("no active domain selected".to_string());
-                    }
-                    Err(RequestDomainError::Invalid) => {
-                        return command_error("invalid domain".to_string());
-                    }
-                };
-                if self.inner.consensus.current_domain(&domain).await.is_none() {
-                    return command_error(format!("domain '{}' does not exist", domain.as_str()));
-                }
-                return self
-                    .create_subscription(&domain, subscription, tx, subscriptions)
-                    .await;
+            ClientStatement::CreateSubscription(_) => {
+                return command_error(
+                    "CREATE SUBSCRIPTION must be sent as a subscribe request".to_string(),
+                );
             }
-            ClientStatement::DeleteSubscription(subscription) => {
-                return self.delete_subscription(subscription, subscriptions).await;
+            ClientStatement::DeleteSubscription(_) => {
+                return command_error(
+                    "DELETE SUBSCRIPTION must be sent as an unsubscribe request".to_string(),
+                );
             }
             ClientStatement::BeginTransaction
             | ClientStatement::CommitTransaction
@@ -2133,25 +2077,10 @@ impl SessionServiceImpl {
                 .await;
         }
 
-        let domain = if requires_request_domain(&statement) {
-            match parse_request_domain(request_domain) {
-                Ok(domain) => Some(domain),
-                Err(RequestDomainError::Missing) => {
-                    return command_error("no active domain selected".to_string());
-                }
-                Err(RequestDomainError::Invalid) => {
-                    return command_error("invalid domain".to_string());
-                }
-            }
-        } else {
-            match parse_request_domain(request_domain) {
-                Ok(domain) => Some(domain),
-                Err(RequestDomainError::Missing) => None,
-                Err(RequestDomainError::Invalid) => {
-                    return command_error("invalid domain".to_string());
-                }
-            }
-        };
+        if requires_request_domain(&statement) && request_domain.is_none() {
+            return command_error("no active domain selected".to_string());
+        }
+        let domain = request_domain.cloned();
 
         if requires_leader(&statement) {
             let leader = self.inner.consensus.current_leader().await;
@@ -2352,7 +2281,6 @@ impl SessionServiceImpl {
                 let domain = domain
                     .as_ref()
                     .verified("this statement requires a request domain, which was resolved above");
-                let name_span = find_identifier_span(query, &show.name).unwrap_or(0..0);
                 let model = match self
                     .inner
                     .registry
@@ -2360,68 +2288,50 @@ impl SessionServiceImpl {
                 {
                     Ok(Some(model)) => model,
                     Ok(None) => {
-                        return CommandResult {
-                            success: false,
+                        let diagnostic = CommandDiagnostic {
                             message: format!(
-                                "{} '{}' does not exist in domain '{}'",
+                                "{} '{}' not found",
                                 show.kind.as_str(),
-                                show.name.as_str(),
-                                domain.as_str()
+                                show.name.as_str()
                             ),
-                            diagnostics: vec![Diagnostic {
-                                message: format!(
-                                    "{} '{}' not found",
-                                    show.kind.as_str(),
-                                    show.name.as_str()
-                                ),
-                                span_start: u32::try_from(name_span.start).unwrap_or(0),
-                                span_end: u32::try_from(name_span.end).unwrap_or(0),
-                            }],
-                            kind: i32::from(CommandResultKind::Error),
-                            ..Default::default()
+                            span: find_identifier_span(query, &show.name),
+                        };
+                        let message = format!(
+                            "{} '{}' does not exist in domain '{}'",
+                            show.kind.as_str(),
+                            show.name.as_str(),
+                            domain.as_str()
+                        );
+                        return CommandResult {
+                            diagnostics: vec![diagnostic],
+                            ..CommandResult::new(CommandDisposition::Failed, message)
                         };
                     }
                     Err(_) => {
-                        return CommandResult {
-                            success: false,
-                            message: "failed to read stored model for SHOW CREATE".to_string(),
-                            diagnostics: vec![Diagnostic {
-                                message: "failed to read stored model for SHOW CREATE".to_string(),
-                                span_start: 0,
-                                span_end: 0,
-                            }],
-                            kind: i32::from(CommandResultKind::Error),
-                            ..Default::default()
-                        };
+                        return command_error(
+                            "failed to read stored model for SHOW CREATE".to_string(),
+                        );
                     }
                 };
 
                 let canonical = match model.to_canonical_nspl() {
                     Ok(v) => v,
                     Err(_) => {
+                        let diagnostic = CommandDiagnostic::unlocated(
+                            "model contains values that cannot be rendered as canonical NSPL"
+                                .to_string(),
+                        );
                         return CommandResult {
-                            success: false,
-                            message: "failed to render canonical NSPL".to_string(),
-                            diagnostics: vec![Diagnostic {
-                                message: "model contains values that cannot be rendered as \
-                                          canonical NSPL"
-                                    .to_string(),
-                                span_start: 0,
-                                span_end: 0,
-                            }],
-                            kind: i32::from(CommandResultKind::Error),
-                            ..Default::default()
+                            diagnostics: vec![diagnostic],
+                            ..CommandResult::new(
+                                CommandDisposition::Failed,
+                                "failed to render canonical NSPL".to_string(),
+                            )
                         };
                     }
                 };
 
-                CommandResult {
-                    success: true,
-                    message: canonical,
-                    diagnostics: Vec::new(),
-                    kind: i32::from(CommandResultKind::Ok),
-                    ..Default::default()
-                }
+                command_ok(canonical)
             }
             Statement::ShowRelayMaterializedState(show) => {
                 let domain = domain
@@ -2441,17 +2351,12 @@ impl SessionServiceImpl {
                     .verified("this statement requires a request domain, which was resolved above");
                 self.show_placements(domain).await
             }
-            Statement::ShowClusterStatus(_) => CommandResult {
-                success: true,
-                message: render_cluster_status(&self.inner.cluster, &self.inner.consensus).await,
-                diagnostics: Vec::new(),
-                kind: i32::from(CommandResultKind::Ok),
-                ..Default::default()
-            },
+            Statement::ShowClusterStatus(_) => {
+                command_ok(render_cluster_status(&self.inner.cluster, &self.inner.consensus).await)
+            }
             Statement::ShowTransactions(_) => self.show_transactions().await,
             Statement::DescribeTransaction(describe) => {
-                self.describe_transaction(describe, query, subscriptions)
-                    .await
+                self.describe_transaction(describe, query, session).await
             }
         }
     }
@@ -2459,36 +2364,19 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use nervix_client_wire::CommandRequest;
     use nervix_models::{
         AckMode, CreateDeduplicator, CreateEmitter, CreateJunction, CreateRelay, CreateSchema,
-        DomainName, Model, ModelName, Statement,
+        DomainName, Model, ModelName, Statement, TransactionLifecycle,
     };
-    use tokio::sync::mpsc;
 
-    use super::{
-        super::{
-            subscription::SessionSubscriptions,
-            test_fixtures::{
-                TestService, build_test_service, command_transaction_state, create_test_domain,
-                named, test_command_request,
-            },
+    use super::super::{
+        subscription::SessionSubscriptions,
+        test_fixtures::{
+            TestService, build_test_service, command_transaction_state, create_test_domain, named,
+            test_command_request, test_execution_reference,
         },
-        *,
     };
-    use crate::proto::{CommandRequest, TransactionState as ApiTransactionState};
-
-    #[test]
-    fn request_domain_helpers_cover_current_state_and_validation() {
-        assert_eq!(parse_request_domain(""), Err(RequestDomainError::Missing));
-        assert_eq!(
-            parse_request_domain(" tenant_a "),
-            Ok(DomainName::parse("tenant_a").expect("valid domain"))
-        );
-        assert_eq!(
-            parse_request_domain("bad.domain"),
-            Err(RequestDomainError::Invalid)
-        );
-    }
 
     #[tokio::test]
     async fn process_command_create_if_not_exists_returns_already_existed_for_models() {
@@ -2497,34 +2385,31 @@ mod tests {
             registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         let first = service
-            .process_command(
+            .test_command(
                 test_command_request(
                     "CREATE IF NOT EXISTS SCHEMA notification ( user_id U32 );",
                     "default",
                 ),
-                &tx,
                 &mut subscriptions,
             )
             .await;
-        assert!(first.success);
-        assert!(!first.already_existed);
+        assert!(first.succeeded());
+        assert!(!first.found_existing());
 
         let duplicate = service
-            .process_command(
+            .test_command(
                 test_command_request(
                     "CREATE IF NOT EXISTS SCHEMA notification ( user_id U32 );",
                     "default",
                 ),
-                &tx,
                 &mut subscriptions,
             )
             .await;
-        assert!(duplicate.success);
-        assert!(duplicate.already_existed);
+        assert!(duplicate.succeeded());
+        assert!(duplicate.found_existing());
         assert!(duplicate.message.contains("already exists"));
 
         let schema = registry
@@ -2548,25 +2433,22 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
-        let reference = uuid::Uuid::now_v7().to_string();
+        let reference = test_execution_reference();
         let request = CommandRequest {
             execution_reference: reference.clone(),
             ..test_command_request("CREATE SCHEMA retained_result ( user_id U32 );", "default")
         };
 
         let first = service
-            .process_command(request.clone(), &tx, &mut subscriptions)
+            .test_command(request.clone(), &mut subscriptions)
             .await;
-        assert!(first.success, "{first:?}");
-        let replay = service
-            .process_command(request, &tx, &mut subscriptions)
-            .await;
+        assert!(first.succeeded(), "{first:?}");
+        let replay = service.test_command(request, &mut subscriptions).await;
         assert_eq!(replay, first);
 
         let changed = service
-            .process_command(
+            .test_command(
                 CommandRequest {
                     execution_reference: reference,
                     ..test_command_request(
@@ -2574,11 +2456,10 @@ mod tests {
                         "default",
                     )
                 },
-                &tx,
                 &mut subscriptions,
             )
             .await;
-        assert!(!changed.success);
+        assert!(!changed.succeeded());
         assert!(changed.message.contains("conflicts by content"));
         assert_eq!(
             service.inner.consensus.current_transactions().await.len(),
@@ -2596,21 +2477,19 @@ mod tests {
             registry,
             path,
         } = build_test_service(false).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
-            .process_command(
+            .test_command(
                 test_command_request(
                     "CREATE DOMAIN prod; CREATE SCHEMA notification ( user_id U32 )",
                     "prod",
                 ),
-                &tx,
                 &mut subscriptions,
             )
             .await;
 
-        assert!(!result.success);
+        assert!(!result.succeeded());
         assert_eq!(result.message, "multiple commands require BEGIN");
         assert_eq!(command_transaction_state(&result), None);
         assert!(
@@ -2636,25 +2515,23 @@ mod tests {
             path,
         } = build_test_service(false).await;
         create_test_domain(&service.inner.consensus, "prod").await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
-            .process_command(
+            .test_command(
                 test_command_request(
                     "BEGIN; CREATE SCHEMA duplicated ( user_id U32 ); CREATE SCHEMA duplicated ( \
                      user_id U32 ); COMMIT",
                     "prod",
                 ),
-                &tx,
                 &mut subscriptions,
             )
             .await;
 
-        assert!(!result.success);
+        assert!(!result.succeeded());
         assert_eq!(
             command_transaction_state(&result),
-            Some(ApiTransactionState::Open)
+            Some(TransactionLifecycle::Open)
         );
         assert!(result.message.contains("transaction started"));
         assert!(result.message.contains("already exists"));
@@ -2692,26 +2569,24 @@ mod tests {
             path,
         } = build_test_service(false).await;
         create_test_domain(&service.inner.consensus, "prod").await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
-            .process_command(
+            .test_command(
                 test_command_request(
                     "BEGIN; CREATE RELAY notifications SCHEMA missing_schema UNBRANCHED; CREATE \
                      SCHEMA notification ( user_id U32 ); COMMIT",
                     "prod",
                 ),
-                &tx,
                 &mut subscriptions,
             )
             .await;
 
-        assert!(!result.success);
-        assert_eq!(
+        assert!(!result.succeeded());
+        assert!(matches!(
             command_transaction_state(&result),
-            Some(ApiTransactionState::Failed)
-        );
+            Some(TransactionLifecycle::Failed { .. })
+        ));
 
         let domain = DomainName::parse("prod").expect("valid domain");
         let relay = registry
@@ -2737,7 +2612,6 @@ mod tests {
             registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let commands = [
             "CREATE SCHEMA notification ( user_id I64 );",
@@ -2764,14 +2638,10 @@ mod tests {
 
         for command in commands {
             let result = service
-                .process_command(
-                    test_command_request(command, "default"),
-                    &tx,
-                    &mut subscriptions,
-                )
+                .test_command(test_command_request(command, "default"), &mut subscriptions)
                 .await;
             assert!(
-                result.success,
+                result.succeeded(),
                 "command must succeed: {command}: {}",
                 result.message
             );
@@ -2806,7 +2676,6 @@ mod tests {
             registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
             "CREATE SCHEMA notification ( user_id I64 );",
@@ -2831,14 +2700,10 @@ mod tests {
              LOG;",
         ] {
             let result = service
-                .process_command(
-                    test_command_request(command, "default"),
-                    &tx,
-                    &mut subscriptions,
-                )
+                .test_command(test_command_request(command, "default"), &mut subscriptions)
                 .await;
             assert!(
-                result.success,
+                result.succeeded(),
                 "command must succeed: {command}: {}",
                 result.message
             );
@@ -2873,7 +2738,6 @@ mod tests {
             registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         for command in [
             "CREATE SCHEMA transaction ( transaction_id STRING, amount I64 );",
@@ -2894,14 +2758,10 @@ mod tests {
              MESSAGE ERROR LOG;",
         ] {
             let result = service
-                .process_command(
-                    test_command_request(command, "default"),
-                    &tx,
-                    &mut subscriptions,
-                )
+                .test_command(test_command_request(command, "default"), &mut subscriptions)
                 .await;
             assert!(
-                result.success,
+                result.succeeded(),
                 "command must succeed: {command}: {}",
                 result.message
             );

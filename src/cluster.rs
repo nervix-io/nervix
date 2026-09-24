@@ -1235,6 +1235,14 @@ impl ClusterHandle {
         }
     }
 
+    /// One live node as gossip currently describes it, with the endpoints it advertises.
+    pub async fn live_node(&self, node: &ClusterNodeName) -> Option<GossipNode> {
+        let chitchat_handle = self.chitchat.clone();
+        let chitchat = chitchat_handle.lock().await;
+        let mut live_nodes = current_live_nodes(&chitchat);
+        live_nodes.remove(node)
+    }
+
     /// Current topology with only effective application-health unavailability added.
     ///
     /// Membership reconciliation consumes [`Self::gossip_state`] directly. Runtime coordination

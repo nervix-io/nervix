@@ -1125,6 +1125,10 @@ table CommandOutcome {
   transaction: TransactionStatus;
   /// Present when this result accepted one operation into the transaction.
   transaction_admission: TransactionOperationAdmission;
+  /// Present when the command inspected a transaction, whatever format rendered its message. The
+  /// inspected transaction may differ from `transaction`, which keeps describing this session's
+  /// own binding.
+  inspection: TransactionInspected;
 }
 
 table TransactionAttached {
@@ -1327,7 +1331,13 @@ enum RequestRejection : ubyte {
   /// The request_id is already in flight in this session.
   DuplicateRequestId,
   /// The complete reply is larger than the session transfer limit.
-  ReplyTooLarge
+  ReplyTooLarge,
+  /// The session already has as many requests in flight as the server admits. Nothing was
+  /// admitted; send the request again once an earlier one has its terminal reply.
+  TooManyRequestsInFlight,
+  /// The server had no capacity left to prepare the reply of a request that changes nothing.
+  /// Send the request again later.
+  ServerBusy
 }
 
 /// The request was not served.

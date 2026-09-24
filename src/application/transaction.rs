@@ -12,7 +12,6 @@ use std::{
     sync::Arc as StdArc,
 };
 
-use arch_into::ArchInto;
 use error_stack::{Report, ResultExt};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
@@ -30,38 +29,32 @@ use nervix_models::{
     ModelIndex, OwnershipMoveImpact, RequestedResourceVersion, ResourceId, ResourceName,
     ResourceUploads, Statement, TransactionCommitStepKind, TransactionOperationAdmission,
     TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
-    TransactionResolvedDomainStart, UserName,
+    TransactionResolvedDomainStart, TransactionStatus, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use parking_lot::Mutex as ParkingMutex;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::{
-    sync::{OwnedMutexGuard, Semaphore, mpsc},
+    sync::{OwnedMutexGuard, Semaphore},
     time::Duration,
 };
-use tonic::Status;
 use tracing::{info, warn};
 
 use super::{
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
     domain_clock::{current_timestamp, subtract_timestamp_duration},
     domain_lifecycle::DomainAlterError,
     model_mutation::{
-        LatestResolutionReport, RequestDomainError, append_command_output, command_error,
-        command_ok, command_ok_already_existed, parse_request_domain, quiesce_level_message,
-        rebind_resource_message,
+        LatestResolutionReport, append_command_output, command_error, command_ok,
+        command_ok_already_existed, quiesce_level_message, rebind_resource_message,
     },
     ownership_handoff::planned_ownership_moves,
     schedule_planning::DomainSchedulePlanningSnapshot,
     session_service::SessionServiceImpl,
-    subscription::{PendingSessionCommand, SessionSubscriptions},
+    subscription::{PendingSessionCommand, SessionBinding, SessionSubscriptions},
 };
 use crate::{
-    proto,
-    proto::{
-        CommandResult, CommandResultKind, Diagnostic, SessionResponse,
-        TransactionState as ApiTransactionState, TransactionStatus as ApiTransactionStatus,
-    },
     registry::{
         PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind, Registry,
         RegistryMutation, TransactionPlanningError, TransactionPlanningSnapshot,
@@ -77,6 +70,7 @@ mod inspection;
 mod rendering;
 mod request;
 pub(in crate::application) use impact::{QuiescenceAttempt, TransactionStepImpactRecorder};
+use inspection::transaction_inspection_status;
 pub use inspection::{InspectedReportError, InspectingSession, TransactionInspectionOutcome};
 
 pub(in crate::application) const DEFAULT_TRANSACTION_IDLE_TIMEOUT: Duration =
@@ -356,13 +350,38 @@ pub(in crate::application) enum SessionTransactionBindingError {
 
 impl SessionTransactionBindingError {
     pub(in crate::application) fn into_command_result(self) -> CommandResult {
-        let detached = matches!(self, Self::Detached { .. });
         let mut result = command_error(self.to_string());
-        if detached {
-            result.kind = i32::from(CommandResultKind::TransactionDetached);
+        match self {
+            Self::Unbound => {}
+            Self::TakenOver { id } => {
+                result.disposition =
+                    CommandDisposition::TransactionTakenOver { transaction_id: id };
+            }
+            Self::Detached { id } => {
+                result.disposition = CommandDisposition::TransactionDetached { transaction_id: id };
+            }
         }
         result
     }
+}
+
+/// What became of a request to bind an existing transaction to a session.
+#[derive(Debug)]
+pub(in crate::application) enum TransactionAttachment {
+    /// The transaction is bound to the session now.
+    Attached {
+        transaction: TransactionStatus,
+        message: String,
+    },
+    /// The transaction already finished. It stays unattached, and its final status is reported
+    /// with the outcome its commit recorded.
+    AlreadyFinished {
+        transaction: TransactionStatus,
+        message: String,
+        diagnostics: Vec<CommandDiagnostic>,
+    },
+    /// Nothing was attached. The result says why: a definitive failure or a leader redirect.
+    Refused(Box<CommandResult>),
 }
 
 /// Configuration a bound transaction has queued but not yet applied. Completion resolves
@@ -389,86 +408,27 @@ impl QueuedConfiguration {
     }
 }
 
+/// The status of a replicated transaction as a session reports it, counting every operation the
+/// transaction accepted.
 pub(in crate::application) fn transaction_status(
     transaction: &ReplicatedTransaction,
-) -> ApiTransactionStatus {
-    /// How a transaction ended, as the API reports it. Only a failure carries an error and the
-    /// step it failed on; every other state reports neither.
-    struct ReportedOutcome {
-        state: ApiTransactionState,
-        error: String,
-        failing_step: Option<u64>,
-    }
-
-    impl ReportedOutcome {
-        fn without_error(state: ApiTransactionState) -> Self {
-            Self {
-                state,
-                error: String::new(),
-                failing_step: None,
-            }
-        }
-    }
-
-    let ReportedOutcome {
-        state,
-        error,
-        failing_step,
-    } = match &transaction.state {
-        TransactionState::Open(_) => ReportedOutcome::without_error(ApiTransactionState::Open),
-        TransactionState::Committing(_) => {
-            ReportedOutcome::without_error(ApiTransactionState::Committing)
-        }
-        TransactionState::Finished(finished) => match &finished.outcome {
-            TransactionOutcome::Committed => {
-                ReportedOutcome::without_error(ApiTransactionState::Committed)
-            }
-            TransactionOutcome::Failed {
-                failing_step,
-                error,
-            }
-            | TransactionOutcome::PlanningInputsChanged {
-                failing_step,
-                error,
-            } => ReportedOutcome {
-                state: ApiTransactionState::Failed,
-                error: error.clone(),
-                failing_step: failing_step.checked_add(1).map(|step| step.arch_into()),
-            },
-            TransactionOutcome::Reverted => {
-                ReportedOutcome::without_error(ApiTransactionState::Reverted)
-            }
-            TransactionOutcome::Expired => {
-                ReportedOutcome::without_error(ApiTransactionState::Expired)
-            }
-        },
-    };
-    ApiTransactionStatus {
-        id: transaction.id.clone(),
-        domain: transaction.domain.to_string(),
-        state: i32::from(state),
-        pending_count: transaction.pending_statement_count().arch_into(),
-        completed_count: transaction.completed_statement_count().arch_into(),
-        total_count: transaction.statement_count.arch_into(),
-        error,
-        failing_step,
-    }
+) -> TransactionStatus {
+    transaction_inspection_status(
+        transaction,
+        TransactionPosition::new(transaction.statement_count),
+    )
 }
 
 fn replicated_command_result(result: &CommandResult) -> TransactionCommandResult {
     TransactionCommandResult {
-        success: result.success,
+        success: result.succeeded(),
         message: result.message.clone(),
         diagnostics: result
             .diagnostics
             .iter()
-            .map(|diagnostic| TransactionDiagnostic {
-                message: diagnostic.message.clone(),
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
+            .map(TransactionDiagnostic::from)
             .collect(),
-        already_existed: result.already_existed,
+        already_existed: result.found_existing(),
         admission: None,
     }
 }
@@ -477,78 +437,22 @@ pub(in crate::application) fn admitted_command_result(
     admission: &TransactionCommandResult,
     transaction: &ReplicatedTransaction,
 ) -> CommandResult {
-    let mut result = CommandResult {
-        success: admission.success,
-        message: admission.message.clone(),
+    let disposition = if admission.success {
+        CommandDisposition::Completed {
+            already_existed: admission.already_existed,
+        }
+    } else {
+        CommandDisposition::Failed
+    };
+    CommandResult {
         diagnostics: admission
             .diagnostics
             .iter()
-            .map(|diagnostic| Diagnostic {
-                message: diagnostic.message.clone(),
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
+            .map(CommandDiagnostic::from)
             .collect(),
-        kind: if admission.success {
-            i32::from(CommandResultKind::Ok)
-        } else {
-            i32::from(CommandResultKind::Error)
-        },
-        already_existed: admission.already_existed,
-        transaction_admission: admission
-            .admission
-            .as_ref()
-            .map(api_transaction_operation_admission),
-        ..Default::default()
-    };
-    result.transaction = Some(transaction_status(transaction));
-    result
-}
-
-fn api_transaction_operation_admission(
-    admission: &TransactionOperationAdmission,
-) -> proto::TransactionOperationAdmission {
-    proto::TransactionOperationAdmission {
-        operation: admission.operation.get().arch_into(),
-        preview: Some(api_transaction_preview_identity(&admission.preview)),
-    }
-}
-
-/// Why a preview identity a client sent cannot name a transaction revision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-pub(in crate::application) enum TransactionPreviewIdentityError {
-    #[error("an expected preview position exceeds this server's address space")]
-    PositionOutOfRange,
-    #[error("an expected preview planning basis is {actual} bytes, not {expected}")]
-    PlanningBasisLength { expected: usize, actual: usize },
-}
-
-/// The preview identity a request carried.
-pub(in crate::application) fn transaction_preview_identity(
-    preview: proto::TransactionPreviewIdentity,
-) -> Result<TransactionPreviewIdentity, Report<TransactionPreviewIdentityError>> {
-    let position = usize::try_from(preview.position)
-        .map_err(|_| Report::new(TransactionPreviewIdentityError::PositionOutOfRange))?;
-    let planning_basis = <[u8; 32]>::try_from(preview.planning_basis.as_ref()).map_err(|_| {
-        Report::new(TransactionPreviewIdentityError::PlanningBasisLength {
-            expected: 32,
-            actual: preview.planning_basis.len(),
-        })
-    })?;
-    Ok(TransactionPreviewIdentity {
-        transaction_id: preview.transaction_id,
-        position: TransactionPosition::new(position),
-        planning_basis: ImpactPlanningBasis::new(planning_basis),
-    })
-}
-
-pub(in crate::application) fn api_transaction_preview_identity(
-    preview: &TransactionPreviewIdentity,
-) -> proto::TransactionPreviewIdentity {
-    proto::TransactionPreviewIdentity {
-        transaction_id: preview.transaction_id.clone(),
-        position: preview.position.accepted_operations().arch_into(),
-        planning_basis: preview.planning_basis.fingerprint().to_vec().into(),
+        transaction_admission: admission.admission.clone(),
+        transaction: Some(transaction_status(transaction)),
+        ..CommandResult::new(disposition, admission.message.clone())
     }
 }
 
@@ -576,16 +480,13 @@ fn preview_stale_result(
             current.position.accepted_operations()
         )
     };
-    CommandResult {
-        success: false,
+    CommandResult::new(
+        CommandDisposition::PreviewStale {
+            expected: expected.clone(),
+            current: current.clone(),
+        },
         message,
-        kind: i32::from(CommandResultKind::PreviewStale),
-        preview_stale: Some(proto::TransactionPreviewStale {
-            expected: Some(api_transaction_preview_identity(expected)),
-            current: Some(api_transaction_preview_identity(current)),
-        }),
-        ..Default::default()
-    }
+    )
 }
 
 pub(in crate::application) fn transaction_commit_result(
@@ -645,47 +546,46 @@ pub(in crate::application) fn transaction_commit_result(
             .result
             .diagnostics
             .iter()
-            .map(|diagnostic| Diagnostic {
-                message: diagnostic.message.clone(),
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
+            .map(CommandDiagnostic::from)
             .collect(),
         None => Vec::new(),
     };
-    let mut result = CommandResult {
-        success,
-        message,
-        diagnostics,
-        kind: if success {
-            i32::from(CommandResultKind::Ok)
-        } else {
-            i32::from(CommandResultKind::Error)
-        },
-        ..Default::default()
+    let disposition = if success {
+        CommandDisposition::Completed {
+            already_existed: false,
+        }
+    } else {
+        CommandDisposition::Failed
     };
-    result.transaction = Some(transaction_status(transaction));
-    result
+    CommandResult {
+        diagnostics,
+        transaction: Some(transaction_status(transaction)),
+        ..CommandResult::new(disposition, message)
+    }
 }
 
-fn finished_transaction_attach_result(
+/// The attachment a finished transaction answers with: it stays unattached, and its final status
+/// and recorded outcome are reported.
+fn finished_transaction_attachment(
     transaction: &ReplicatedTransaction,
-) -> Option<CommandResult> {
+) -> Option<TransactionAttachment> {
     let TransactionState::Finished(finished) = &transaction.state else {
         return None;
     };
-    let mut recorded = transaction_commit_result(transaction);
-    recorded.transaction = None;
-    let mut result = command_error(format!(
-        "transaction '{}' finished with outcome {}",
-        transaction.id,
-        finished.outcome.as_str()
-    ));
+    let recorded = transaction_commit_result(transaction);
+    let mut diagnostics = Vec::new();
     if !recorded.message.is_empty() {
-        result.results.push(recorded);
+        diagnostics.push(CommandDiagnostic::unlocated(recorded.message));
     }
-    result.transaction = Some(transaction_status(transaction));
-    Some(result)
+    Some(TransactionAttachment::AlreadyFinished {
+        transaction: transaction_status(transaction),
+        message: format!(
+            "transaction '{}' finished with outcome {}",
+            transaction.id,
+            finished.outcome.as_str()
+        ),
+        diagnostics,
+    })
 }
 fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> CommandResult {
     if !matches!(
@@ -703,31 +603,22 @@ fn standalone_transaction_result(transaction: &ReplicatedTransaction) -> Command
             transaction.id
         ));
     };
+    let disposition = if step.result.success {
+        CommandDisposition::Completed {
+            already_existed: step.result.already_existed,
+        }
+    } else {
+        CommandDisposition::Failed
+    };
     CommandResult {
-        success: step.result.success,
-        message: step.result.message.clone(),
         diagnostics: step
             .result
             .diagnostics
             .iter()
-            .map(|diagnostic| Diagnostic {
-                message: diagnostic.message.clone(),
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
+            .map(CommandDiagnostic::from)
             .collect(),
-        kind: if step.result.success {
-            i32::from(CommandResultKind::Ok)
-        } else {
-            i32::from(CommandResultKind::Error)
-        },
-        already_existed: step.result.already_existed,
-        transaction_admission: step
-            .result
-            .admission
-            .as_ref()
-            .map(api_transaction_operation_admission),
-        ..Default::default()
+        transaction_admission: step.result.admission.clone(),
+        ..CommandResult::new(disposition, step.result.message.clone())
     }
 }
 
@@ -792,16 +683,13 @@ impl SessionServiceImpl {
     /// configures another domain all fall back to committed configuration alone.
     pub(in crate::application) async fn queued_configuration(
         &self,
-        subscriptions: &SessionSubscriptions,
+        binding: SessionBinding<'_>,
         domain: Option<&DomainName>,
     ) -> QueuedConfiguration {
-        let (Some(domain), Some(id)) = (domain, subscriptions.transaction_id()) else {
+        let (Some(domain), Some(id)) = (domain, binding.transaction_id) else {
             return QueuedConfiguration::default();
         };
-        if self
-            .validate_session_transaction_binding(subscriptions)
-            .is_err()
-        {
+        if self.validate_session_transaction_binding(binding).is_err() {
             return QueuedConfiguration::default();
         }
         let Some(transaction) = self.inner.consensus.current_transaction(id).await else {
@@ -902,13 +790,13 @@ impl SessionServiceImpl {
 
     pub(in crate::application) fn validate_session_transaction_binding(
         &self,
-        subscriptions: &SessionSubscriptions,
+        session: SessionBinding<'_>,
     ) -> Result<(), SessionTransactionBindingError> {
-        let Some(id) = subscriptions.transaction_id() else {
+        let Some(id) = session.transaction_id else {
             return Err(SessionTransactionBindingError::Unbound);
         };
         match self.inner.transaction_bindings.get(id) {
-            Some(binding) if binding.value() == &subscriptions.session_id => Ok(()),
+            Some(binding) if binding.value() == session.session_id => Ok(()),
             Some(_) => Err(SessionTransactionBindingError::TakenOver { id: id.to_string() }),
             None => Err(SessionTransactionBindingError::Detached { id: id.to_string() }),
         }
@@ -971,70 +859,75 @@ impl SessionServiceImpl {
 
     pub(in crate::application) async fn attach_transaction(
         &self,
-        request: proto::AttachTransactionRequest,
+        transaction_id: String,
         subscriptions: &mut SessionSubscriptions,
-    ) -> CommandResult {
+    ) -> TransactionAttachment {
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            return self
-                .not_leader_response(&format!("ATTACH TRANSACTION {}", request.id), leader)
-                .await;
+            let refusal = self.not_leader_response("", leader).await;
+            return TransactionAttachment::Refused(Box::new(refusal));
         }
-        let Some(transaction) = self.inner.consensus.current_transaction(&request.id).await else {
-            return command_error(format!("transaction '{}' is unknown", request.id));
+        let Some(transaction) = self
+            .inner
+            .consensus
+            .current_transaction(&transaction_id)
+            .await
+        else {
+            return TransactionAttachment::Refused(Box::new(command_error(format!(
+                "transaction '{transaction_id}' is unknown"
+            ))));
         };
         if transaction.owner != subscriptions.user {
-            return command_error(format!(
-                "transaction '{}' belongs to another user",
-                request.id
-            ));
+            return TransactionAttachment::Refused(Box::new(command_error(format!(
+                "transaction '{transaction_id}' belongs to another user"
+            ))));
         }
-        if let Some(result) = finished_transaction_attach_result(&transaction) {
-            return result;
+        if let Some(attachment) = finished_transaction_attachment(&transaction) {
+            return attachment;
         }
 
         let transaction = match self
             .inner
             .consensus
             .touch_transaction(
-                request.id.clone(),
+                transaction_id.clone(),
                 subscriptions.user.clone(),
                 self.transaction_activity(),
             )
             .await
         {
             Ok(transaction) => transaction,
-            Err(error) => return self.transaction_consensus_error_response(error).await,
+            Err(error) => {
+                let refusal = self.transaction_consensus_error_response(error).await;
+                return TransactionAttachment::Refused(Box::new(refusal));
+            }
         };
-        if let Some(result) = finished_transaction_attach_result(&transaction) {
-            self.inner.transaction_bindings.remove(&request.id);
-            if subscriptions.transaction_id() == Some(request.id.as_str()) {
+        if let Some(attachment) = finished_transaction_attachment(&transaction) {
+            self.inner.transaction_bindings.remove(&transaction_id);
+            if subscriptions.transaction_id() == Some(transaction_id.as_str()) {
                 drop(subscriptions.detach_transaction());
             }
-            return result;
+            return attachment;
         }
         self.release_session_transaction_binding(subscriptions);
         self.inner
             .transaction_bindings
-            .insert(request.id.clone(), subscriptions.session_id.clone());
-        subscriptions.bind_transaction(request.id.clone());
-        let mut result = command_ok(format!("attached transaction '{}'", request.id));
-        result.transaction = Some(transaction_status(&transaction));
-        result
+            .insert(transaction_id.clone(), subscriptions.session_id.clone());
+        subscriptions.bind_transaction(transaction_id.clone());
+        TransactionAttachment::Attached {
+            transaction: transaction_status(&transaction),
+            message: format!("attached transaction '{transaction_id}'"),
+        }
     }
 
     /// Resolves the domain a `BEGIN` binds its transaction to. The domain must already exist,
     /// because a transaction can no longer create one and every statement it queues belongs to it.
     pub(in crate::application) async fn resolve_transaction_domain(
         &self,
-        request_domain: &str,
+        request_domain: Option<&DomainName>,
     ) -> Result<DomainName, String> {
-        let domain = match parse_request_domain(request_domain) {
-            Ok(domain) => domain,
-            Err(RequestDomainError::Missing) => {
-                return Err("no active domain selected".to_string());
-            }
-            Err(RequestDomainError::Invalid) => return Err("invalid domain".to_string()),
+        let Some(domain) = request_domain.cloned() else {
+            return Err("no active domain selected".to_string());
         };
         if self.inner.consensus.current_domain(&domain).await.is_none() {
             return Err(format!("domain '{}' does not exist", domain.as_str()));
@@ -1047,7 +940,7 @@ impl SessionServiceImpl {
         command: PendingSessionCommand,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        if let Err(error) = self.validate_session_transaction_binding(subscriptions) {
+        if let Err(error) = self.validate_session_transaction_binding(subscriptions.binding()) {
             return error.into_command_result();
         }
         let Some(id) = subscriptions.transaction_id() else {
@@ -1066,14 +959,8 @@ impl SessionServiceImpl {
                 transaction_statement_label(&statement)
             ));
         }
-        let domain = match parse_request_domain(&command.domain) {
-            Ok(domain) => domain,
-            Err(RequestDomainError::Missing) => {
-                return command_error("no active domain selected".to_string());
-            }
-            Err(RequestDomainError::Invalid) => {
-                return command_error("invalid domain".to_string());
-            }
+        let Some(domain) = command.domain else {
+            return command_error("no active domain selected".to_string());
         };
         let queued = TransactionStatementRequest {
             request_reference: command.request_reference,
@@ -1092,12 +979,10 @@ impl SessionServiceImpl {
                 self.transaction_activity(),
             )
             .await;
-        let transaction_finished = result.transaction.as_ref().is_some_and(|transaction| {
-            !matches!(
-                ApiTransactionState::try_from(transaction.state),
-                Ok(ApiTransactionState::Open | ApiTransactionState::Committing)
-            )
-        });
+        let transaction_finished = result
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| !transaction.lifecycle().is_active());
         if transaction_finished {
             self.release_session_transaction_binding(subscriptions);
         }
@@ -1836,7 +1721,7 @@ impl SessionServiceImpl {
         &self,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
-        if let Err(error) = self.validate_session_transaction_binding(subscriptions) {
+        if let Err(error) = self.validate_session_transaction_binding(subscriptions.binding()) {
             return error.into_command_result();
         }
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
@@ -1849,12 +1734,11 @@ impl SessionServiceImpl {
                 self.transaction_activity(),
             )
             .await;
-        if result.transaction.as_ref().is_some_and(|transaction| {
-            !matches!(
-                ApiTransactionState::try_from(transaction.state),
-                Ok(ApiTransactionState::Open | ApiTransactionState::Committing)
-            )
-        }) {
+        if result
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| !transaction.lifecycle().is_active())
+        {
             self.release_session_transaction_binding(subscriptions);
         }
         result
@@ -1869,11 +1753,10 @@ impl SessionServiceImpl {
     /// transaction's own latest preview describes.
     pub(in crate::application) async fn commit_bound_transaction(
         &self,
-        _tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
         expected_preview: Option<TransactionPreviewIdentity>,
     ) -> CommandResult {
-        if let Err(error) = self.validate_session_transaction_binding(subscriptions) {
+        if let Err(error) = self.validate_session_transaction_binding(subscriptions.binding()) {
             return error.into_command_result();
         }
         let Some(id) = subscriptions.transaction_id().map(ToOwned::to_owned) else {
@@ -1887,12 +1770,11 @@ impl SessionServiceImpl {
                 expected_preview,
             )
             .await;
-        if result.transaction.as_ref().is_some_and(|transaction| {
-            !matches!(
-                ApiTransactionState::try_from(transaction.state),
-                Ok(ApiTransactionState::Open | ApiTransactionState::Committing)
-            )
-        }) {
+        if result
+            .transaction
+            .as_ref()
+            .is_some_and(|transaction| !transaction.lifecycle().is_active())
+        {
             self.release_session_transaction_binding(subscriptions);
         }
         result
@@ -1996,7 +1878,7 @@ impl SessionServiceImpl {
                     .or_else(|| error.downcast_ref::<ConsensusError>());
                 let mut result =
                     if let Some(ConsensusError::LeadershipLost { leader_id }) = proposal_error {
-                        self.not_leader_response("COMMIT", leader_id.clone()).await
+                        self.not_leader_response("", leader_id.clone()).await
                     } else {
                         command_error(format!(
                             "transaction '{id}' commit remains in progress after an execution \
@@ -2209,7 +2091,7 @@ impl SessionServiceImpl {
                 let result = Box::pin(self.process_model_mutation_batch_with_transaction(
                     statements,
                     &sources.join("; "),
-                    domain.as_str(),
+                    Some(&domain),
                     Some(TransactionModelStepContext {
                         transaction: &transaction,
                         first_statement,
@@ -2236,14 +2118,14 @@ impl SessionServiceImpl {
                         }
                         None => return Err(error),
                     },
-                    None if result.kind == i32::from(CommandResultKind::NotLeader) => {
+                    None if result.is_not_leader() => {
                         return Err(Report::new(TransactionCommitError::Proposal(
                             ConsensusTransactionError::Consensus(ConsensusError::LeadershipLost {
                                 leader_id: Box::pin(self.inner.consensus.current_leader()).await,
                             }),
                         )));
                     }
-                    None if !result.success => {
+                    None if !result.succeeded() => {
                         Box::pin(self.record_transaction_step(
                             &transaction,
                             actual.apply_to(planned_impact),
@@ -2397,14 +2279,14 @@ impl SessionServiceImpl {
         let next_statement = first_statement
             .checked_add(statement_count)
             .assured("a recorded commit step counts statements of the transaction it belongs to");
-        let completion = if result.success {
+        let completion = if result.succeeded() {
             (next_statement == transaction.statements.len())
                 .then_some(TransactionOutcome::Committed)
         } else {
             Some(failure.outcome(first_statement, result.message.clone()))
         };
-        let effect = if result.success { effect } else { None };
-        if result.success {
+        let effect = if result.succeeded() { effect } else { None };
+        if result.succeeded() {
             impact.actual_mut().effects = impact.planned().effects.clone();
         }
         impact.actual_mut().outcome = nervix_models::ExecutionStepOutcome::Applying;
@@ -2610,7 +2492,7 @@ impl SessionServiceImpl {
             }
         };
 
-        let succeeded = result.success;
+        let succeeded = result.succeeded();
         let planned_impact = impact.clone();
         if succeeded {
             actual.begin_application(impact.planned().effects.clone());

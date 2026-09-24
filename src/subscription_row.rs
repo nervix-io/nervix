@@ -209,6 +209,13 @@ impl SubscriptionRowOpening {
     }
 }
 
+/// One encoded frame of subscription rows, with the number of rows it carries.
+#[derive(Debug)]
+pub struct SubscriptionRowFrame {
+    pub frame: EncodedFrame<ServerFrame>,
+    pub rows: NonZeroUsize,
+}
+
 /// Encodes selected runtime rows for one opened subscription generation.
 pub struct SubscriptionRowEncoder {
     subscription: SubscriptionHandle,
@@ -228,7 +235,7 @@ impl SubscriptionRowEncoder {
         batch: &RecordBatch,
         branch_keys: &[Option<BranchKey>],
         selection: SubscriptionRowSelection<'_>,
-    ) -> Result<Vec<EncodedFrame<ServerFrame>>, Report<SubscriptionRowEncodingError>> {
+    ) -> Result<Vec<SubscriptionRowFrame>, Report<SubscriptionRowEncodingError>> {
         let columns = ArrowRowBatch::new(&self.schema, batch)?;
         if branch_keys.len() != batch.num_rows() {
             return Err(Report::new(
@@ -273,7 +280,7 @@ impl SubscriptionRowEncoder {
         selection: SubscriptionRowSelection<'_>,
         start: usize,
         end: usize,
-        frames: &mut Vec<EncodedFrame<ServerFrame>>,
+        frames: &mut Vec<SubscriptionRowFrame>,
     ) -> Result<(), Report<SubscriptionRowEncodingError>> {
         let first_row = selection.row(start);
         let mut current = self.start_frame(branch, first_row)?;
@@ -331,10 +338,13 @@ impl SubscriptionRowEncoder {
     fn finish_frame(
         &self,
         frame: SubscriptionRowsEncoder,
-    ) -> Result<EncodedFrame<ServerFrame>, Report<SubscriptionRowEncodingError>> {
-        frame
+    ) -> Result<SubscriptionRowFrame, Report<SubscriptionRowEncodingError>> {
+        let rows = NonZeroUsize::new(frame.rows())
+            .verified("a frame is finished only after at least one of its rows was accepted");
+        let frame = frame
             .finish()
-            .change_context(SubscriptionRowEncodingError::FinishFrame)
+            .change_context(SubscriptionRowEncodingError::FinishFrame)?;
+        Ok(SubscriptionRowFrame { frame, rows })
     }
 
     fn row_error(
@@ -801,7 +811,7 @@ fn write_runtime_value(
     }
 }
 
-/// Reproducible comparison with the current per-record protobuf/keyed-JSON construction.
+/// A reproducible typed Row encoding workload for measuring its CPU, allocations and wire bytes.
 #[cfg(feature = "benchmarks")]
 pub mod benchmark {
     use std::sync::Arc as StdArc;
@@ -810,12 +820,11 @@ pub mod benchmark {
     use arrow_schema::{DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema};
     use nervix_client_wire::{EncodedFrame, RowBranch, ServerFrame};
     use nervix_models::SubscriptionName;
-    use prost::Message as _;
 
     use super::*;
     use crate::runtime_schema::RuntimeRecordBatch;
 
-    /// Fixed Arrow input used to compare typed Row encoding with the outgoing JSON it replaces.
+    /// Fixed Arrow input for the typed Row encoding measurement.
     pub struct SubscriptionRowBenchmark {
         batch: RuntimeRecordBatch,
         keys: Vec<Option<BranchKey>>,
@@ -931,32 +940,9 @@ pub mod benchmark {
                     SubscriptionRowSelection::All,
                 )
                 .assured("the fixed benchmark rows encode")
-        }
-
-        /// Encodes the current keyed JSON subscription response for the same rows.
-        pub fn encode_protobuf_json_rows(&self) -> Vec<Vec<u8>> {
-            let mut encoded = Vec::with_capacity(self.batch.batch().num_rows());
-            for row in 0..self.batch.batch().num_rows() {
-                let payload = self
-                    .batch
-                    .row_to_json_string(row)
-                    .assured("the fixed benchmark row serializes to JSON");
-                let key = self.keys[row]
-                    .as_ref()
-                    .verified("the benchmark gives every row a branch key");
-                let payload = format!("key={} payload={payload}", key.as_str());
-                let response = crate::proto::SessionResponse {
-                    event: Some(crate::proto::session_response::Event::Subscription(
-                        crate::proto::SubscriptionEvent {
-                            subscription: "baseline".to_string(),
-                            relay: "events".to_string(),
-                            payload,
-                        },
-                    )),
-                };
-                encoded.push(response.encode_to_vec());
-            }
-            encoded
+                .into_iter()
+                .map(|frame| frame.frame)
+                .collect()
         }
     }
 
@@ -973,7 +959,7 @@ pub mod benchmark {
         use super::*;
 
         #[test]
-        fn reports_typed_row_and_json_allocation_evidence() {
+        fn reports_typed_row_allocation_evidence() {
             let rows = NonZeroUsize::new(100).assured("the evidence row count is nonzero");
             let detail_bytes =
                 NonZeroUsize::new(1_024).assured("the evidence detail width is nonzero");
@@ -981,50 +967,27 @@ pub mod benchmark {
 
             let (typed_allocations, typed) =
                 alloc_count::alloc_count!({ benchmark.encode_typed_rows() });
-            let (json_allocations, json) =
-                alloc_count::alloc_count!({ benchmark.encode_protobuf_json_rows() });
             let typed_calls = typed_allocations
                 .alloc_calls
                 .checked_add(typed_allocations.realloc_calls)
                 .assured("allocation statistics fit usize");
-            let json_calls = json_allocations
-                .alloc_calls
-                .checked_add(json_allocations.realloc_calls)
-                .assured("allocation statistics fit usize");
             let typed_requested_bytes = typed_allocations
                 .bytes_allocated
                 .checked_add(typed_allocations.bytes_reallocated)
-                .assured("allocation byte statistics fit usize");
-            let json_requested_bytes = json_allocations
-                .bytes_allocated
-                .checked_add(json_allocations.bytes_reallocated)
                 .assured("allocation byte statistics fit usize");
             let typed_bytes = typed.iter().fold(0_usize, |total, frame| {
                 total
                     .checked_add(frame.bytes().len())
                     .assured("the evidence output is bounded by in-memory frame vectors")
             });
-            let json_bytes = json.iter().fold(0_usize, |total, row| {
-                total
-                    .checked_add(row.len())
-                    .assured("the evidence output is bounded by in-memory string vectors")
-            });
 
             eprintln!(
                 "subscription_row_allocations typed_calls={typed_calls} \
-                 typed_requested_bytes={typed_requested_bytes} typed_wire_bytes={typed_bytes} \
-                 json_calls={json_calls} json_requested_bytes={json_requested_bytes} \
-                 json_text_bytes={json_bytes}",
+                 typed_requested_bytes={typed_requested_bytes} typed_wire_bytes={typed_bytes}",
             );
             assert!(typed_calls > 0);
-            assert!(json_calls > 0);
             assert!(typed_requested_bytes > 0);
-            assert!(json_requested_bytes > 0);
-            assert!(
-                typed_requested_bytes < json_requested_bytes,
-                "direct typed encoding should request fewer allocator bytes than protobuf/keyed \
-                 JSON"
-            );
+            assert!(typed_bytes > 0);
         }
     }
 }
@@ -1153,7 +1116,8 @@ mod tests {
 
     use super::{
         SubscriptionBranchSchema, SubscriptionRowEncoder, SubscriptionRowEncodingError,
-        SubscriptionRowOpening, SubscriptionRowSelection, subscription_row_schema,
+        SubscriptionRowFrame, SubscriptionRowOpening, SubscriptionRowSelection,
+        subscription_row_schema,
     };
     use crate::{
         runtime::BranchKey,
@@ -1240,16 +1204,19 @@ mod tests {
         opening(schema, rows_per_frame).open(named("tenant"), named("events"))
     }
 
-    fn rows_from_frame(
-        frame: nervix_client_wire::EncodedFrame<nervix_client_wire::ServerFrame>,
-    ) -> nervix_client_wire::SubscriptionRows {
+    fn rows_from_frame(frame: SubscriptionRowFrame) -> nervix_client_wire::SubscriptionRows {
         rows_from_frame_under(frame, &SessionLimits::DEFAULT)
     }
 
+    /// Decodes an encoded frame, checking that it carries as many rows as the encoder reported.
     fn rows_from_frame_under(
-        frame: nervix_client_wire::EncodedFrame<nervix_client_wire::ServerFrame>,
+        frame: SubscriptionRowFrame,
         limits: &SessionLimits,
     ) -> nervix_client_wire::SubscriptionRows {
+        let SubscriptionRowFrame {
+            frame,
+            rows: reported_rows,
+        } = frame;
         let frame = frame
             .verify(limits)
             .assured("the encoder emits a verified frame");
@@ -1258,6 +1225,7 @@ mod tests {
         else {
             panic!("the encoder emitted a non-row event");
         };
+        assert_eq!(rows.batch().len(), reported_rows.get());
         rows
     }
 
@@ -1635,7 +1603,7 @@ mod tests {
             .assured("the encoder splits rows before overflowing a frame");
 
         assert!(frames.len() > 1);
-        assert!(frames.iter().all(|frame| frame.bytes().len() <= 1024));
+        assert!(frames.iter().all(|frame| frame.frame.bytes().len() <= 1024));
         let decoded_rows = frames
             .into_iter()
             .map(|frame| rows_from_frame_under(frame, &limits).batch().len())
