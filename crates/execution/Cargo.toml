@@ -21,6 +21,7 @@ shuttle = [
   "shuttle-tokio/shuttle",
   "shuttle-tokio-util/shuttle",
 ]
+turmoil = ["dep:turmoil"]
 
 [dependencies]
 arc-swap = { workspace = true }
@@ -41,6 +42,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true, features = ["rt"] }
 triomphe = { workspace = true }
+turmoil = { workspace = true, optional = true }
 ubyte = { workspace = true }
 
 [dev-dependencies]
