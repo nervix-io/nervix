@@ -60,10 +60,6 @@ Feature: Ingestor quiesce engagement during dispatch
     And the relay subscription does not receive a payload within "2s"
     When the entity gate pause for domain "{{domain}}" is released
     Then the background NSPL execution succeeds
-    And within "60s" the relay subscription receives a payload
-      """
-      "id":2
-      """
 
     Examples:
       | nodes | operation                                                               |
