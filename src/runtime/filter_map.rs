@@ -2963,4 +2963,40 @@ mod tests {
             VM_SPAWN_BLOCKING_ROW_THRESHOLD + 1
         );
     }
+
+    #[test]
+    fn negations_and_conversions_read_the_sensitivity_of_their_operand() {
+        let sensitivity = VmSchemaSensitivity::from_sensitive_fields(["secret"]);
+        let field = |name: &str| {
+            nervix_models::Expression::Field(nervix_models::FieldReference::scoped(
+                nervix_models::FieldScope::Input,
+                nervix_models::FieldName::parse(name)
+                    .assured("the test field names use the language name alphabet"),
+            ))
+        };
+        let converted = |name: &str| nervix_models::Expression::TryCast {
+            expression: Box::new(field(name)),
+            target: ParseAsType::F32,
+        };
+        let negated_cast = nervix_models::Expression::Unary {
+            operator: nervix_models::UnaryOperator::Negate,
+            expression: Box::new(nervix_models::Expression::Cast {
+                expression: Box::new(field("secret")),
+                target: ParseAsType::F32,
+            }),
+        };
+
+        assert!(expression_reads_sensitive_source(
+            &converted("secret"),
+            &sensitivity
+        ));
+        assert!(!expression_reads_sensitive_source(
+            &converted("reading"),
+            &sensitivity
+        ));
+        assert!(expression_reads_sensitive_source(
+            &negated_cast,
+            &sensitivity
+        ));
+    }
 }

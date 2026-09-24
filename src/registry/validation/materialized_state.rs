@@ -401,3 +401,50 @@ pub(in crate::registry) fn referenced_materialized_stream_bindings(
 
     Ok(bindings)
 }
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        BuiltinFunctionName, Expression, Literal, ModelIndex, ParseAsType, UnaryOperator,
+    };
+
+    use super::expression_contains_nondeterministic_or_side_effect_call;
+
+    fn generated_uuid() -> Expression {
+        Expression::Call {
+            function: BuiltinFunctionName::parse("uuid_v4")
+                .assured("uuid_v4 is a language-defined built-in function"),
+            arguments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn negations_and_conversions_are_as_deterministic_as_their_operand() {
+        let models = ModelIndex::new();
+        let converted = |expression: Expression| Expression::TryCast {
+            expression: Box::new(expression),
+            target: ParseAsType::I64,
+        };
+
+        let constant = converted(Expression::Literal(Literal::String("42".to_string())));
+        assert!(!expression_contains_nondeterministic_or_side_effect_call(
+            &constant, &models
+        ));
+        assert!(expression_contains_nondeterministic_or_side_effect_call(
+            &converted(generated_uuid()),
+            &models
+        ));
+        let negated_cast = Expression::Unary {
+            operator: UnaryOperator::Negate,
+            expression: Box::new(Expression::Cast {
+                expression: Box::new(generated_uuid()),
+                target: ParseAsType::I64,
+            }),
+        };
+        assert!(expression_contains_nondeterministic_or_side_effect_call(
+            &negated_cast,
+            &models
+        ));
+    }
+}

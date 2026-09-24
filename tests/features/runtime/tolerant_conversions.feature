@@ -306,3 +306,122 @@ Feature: Tolerant conversions
       | 3            | I64 OPTIONAL    | would store sensitive data in a non-sensitive output field      |
       | 1            | STRING OPTIONAL | has expression type Int64, expected declared output type Utf8   |
       | 3            | STRING OPTIONAL | has expression type Int64, expected declared output type Utf8   |
+
+  Scenario Outline: A tolerant conversion prepares an inferencer input tensor
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has ONNX fixture resource directory "onnx_model"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      CREATE RESOURCE inference;
+      UPLOAD RESOURCE inference VERSION '{{onnx_model}}';
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA raw_measurement (
+        id STRING,
+        raw STRING
+      );
+      CREATE SCHEMA inferred_measurement (
+        result F32
+      );
+      CREATE CODEC raw_measurement_batch_codec
+        FROM JSON
+        TO SCHEMA raw_measurement
+        WITH JAQ TRANSFORMATIONS ON INGESTION '.[]';
+      CREATE RELAY raw_measurements SCHEMA raw_measurement UNBRANCHED;
+      CREATE RELAY inferred_measurements SCHEMA inferred_measurement UNBRANCHED;
+      CREATE VHOST edge infer-tolerant-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/measurements' TYPE HTTP;
+      CREATE INGESTOR raw_measurement_source
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING raw_measurement_batch_codec
+        TO raw_measurements
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INFERENCER convert_measurements FROM raw_measurements
+        USING RESOURCE inference VERSION 1
+        FILE 'models/scalar_identity.onnx'
+        INPUTS {
+          "value" <tensor_type>[] = coalesce(TRY_CAST(input.raw AS F32), -1.0 AS F32)
+        }
+        OUTPUT SCHEMA { "result" <tensor_type>[] }
+        UNBRANCHED
+        TO inferred_measurements
+          SET result = result
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION inferred_measurements_subscription TO inferred_measurements;
+      START;
+      """
+    And http payload is posted to node "node-1" with host "infer-tolerant-{{test_id}}.example.com" path "/measurements"
+      """
+      [{"id":"decimal","raw":"3.5"},{"id":"malformed","raw":"3,5"},{"id":"exponent","raw":"2e1"}]
+      """
+    Then within "30s" the relay subscription receives payloads containing all fragments
+      """
+      {"result":3.5}
+      {"result":-1.0}
+      {"result":20.0}
+      """
+
+    Examples:
+      | cluster_size | replica_count | tensor_type       |
+      | 1            | 0             | DENSE TENSOR<F32> |
+      | 3            | 0             | DENSE TENSOR<F32> |
+
+  Scenario Outline: A materialized-state default converts only deterministic values
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA reading (
+        id STRING,
+        amount I64 OPTIONAL
+      );
+      CREATE RELAY readings SCHEMA reading UNBRANCHED;
+      CREATE RELAY latest_readings SCHEMA reading UNBRANCHED WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE RELAY enriched_readings SCHEMA reading UNBRANCHED;
+      CREATE JUNCTION constant_default
+        FROM readings
+        UNBRANCHED
+        USING MATERIALIZED STATE latest_readings DEFAULT {
+          id = 'none',
+          amount = TRY_CAST('42' AS I64)
+        }
+        TO enriched_readings
+          SET id = input.id,
+              amount = relay_state.latest_readings.amount
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+    And these NSPL commands fail with "materialized-state DEFAULT for 'latest_readings' must use deterministic side-effect-free expressions"
+      """
+      CREATE JUNCTION generated_default
+        FROM readings
+        UNBRANCHED
+        USING MATERIALIZED STATE latest_readings DEFAULT {
+          id = 'none',
+          amount = TRY_CAST(uuid_v4() AS I64)
+        }
+        TO enriched_readings
+          SET id = input.id,
+              amount = relay_state.latest_readings.amount
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
