@@ -31,18 +31,18 @@ use crate::{
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeTransaction, DomainPace, DomainStartPoint,
-    EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, Expression, FieldName,
-    FieldScope, FlushPolicy, GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration,
-    InferencerTensorDimension, InferencerTensorMapping, IngestSource, IngestTimestampSource,
-    Inheritance, InputCollectPolicy, InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode,
-    Literal, MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
-    MembershipOperator, MessageErrorPolicy, Model, ModelName, MongoDbConflictAction,
-    MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction, NatsIngestMode, OtelMetricKind,
-    OtelSignal, OutputBranch, ParseAsType, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputWhere, ProcessorInputs, ProcessorOutputs, PulsarIngestMode, QueueName,
-    RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode, RelayBranching, RelayName,
-    RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
-    SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
+    EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterPublishingMode, EndpointIngestMode,
+    Expression, FieldName, FieldScope, FlushPolicy, GeneralErrorPolicy, IcebergCatalog,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
+    IngestTimestampSource, Inheritance, InputCollectPolicy, InspectionFormat, JsonType,
+    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
+    MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
+    MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
+    NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
+    PulsarIngestMode, QueueName, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
+    RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
+    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
     SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
     WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
@@ -1502,9 +1502,14 @@ impl<Version: Display> CreateCodec<Version> {
                     .map(ClientConfigEntry::to_canonical_nspl)
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ");
+                let batch_message = match &config.batch_message {
+                    Some(message) => format!(" BATCH MESSAGE {}", string_literal(message)),
+                    None => String::new(),
+                };
                 (
                     format!(
-                        "PROTOBUF USING RESOURCE {} VERSION {} CONFIG {{{}}} MESSAGE {}",
+                        "PROTOBUF USING RESOURCE {} VERSION {} CONFIG {{{}}} MESSAGE \
+                         {}{batch_message}",
                         config.resource.as_str(),
                         config.resource_version,
                         protobuf_config,
@@ -1606,6 +1611,10 @@ fn codec_jaq_transformations_to_nspl(
     }
     if let Some(program) = transformations.on_emitting.as_deref() {
         rendered.push_str(" ON EMITTING ");
+        rendered.push_str(&string_literal(program));
+    }
+    if let Some(program) = transformations.on_emitting_batch.as_deref() {
+        rendered.push_str(" ON EMITTING BATCH ");
         rendered.push_str(&string_literal(program));
     }
     Ok(rendered)
@@ -2015,6 +2024,9 @@ impl CreateEmitter {
         own_clauses.append(&mut sink_clauses);
         clauses.push(Clause::group(format!("TO {sink_head}"), own_clauses));
         clauses.extend(route_construction_clauses(&self.construction)?);
+        if let Some(batch) = &self.batch {
+            clauses.push(Clause::line(emitter_batch_policy_to_nspl(batch)));
+        }
         clauses.push(Clause::line(flush_policy.trim_start().to_string()));
         clauses.push(Clause::line(message_error_policy_to_nspl(
             &self.error_policies.message,
@@ -2032,6 +2044,11 @@ impl CreateEmitter {
             clauses,
         ))
     }
+}
+
+/// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, with the size in its canonical unit.
+fn emitter_batch_policy_to_nspl(policy: &EmitterBatchPolicy) -> String {
+    format!("BATCH {policy}")
 }
 
 fn window_bound_to_nspl(bound: &WindowBound) -> String {
@@ -2531,6 +2548,10 @@ fn alter_emitter_operation_to_nspl(
         AlterEmitterOperation::SetPublishingMode { mode } => {
             Ok(format!("SET MODE {}", mode.to_canonical_nspl()))
         }
+        AlterEmitterOperation::SetBatch { policy } => {
+            Ok(format!("SET {}", emitter_batch_policy_to_nspl(policy)))
+        }
+        AlterEmitterOperation::DropBatch => Ok("DROP BATCH".to_string()),
         AlterEmitterOperation::SetFlush { flush_policy } => {
             Ok(format!("SET {}", flush_policy.to_canonical_nspl()))
         }
@@ -3160,7 +3181,6 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
             client,
             table,
             values,
-            max_batch,
             ..
         } => MappedSink {
             head: format!(
@@ -3169,14 +3189,13 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
                 table.as_str()
             ),
             values,
-            trailing: vec![Clause::line(format!("WITH MAX BATCH {max_batch}"))],
+            trailing: Vec::new(),
         },
         EmitSink::Postgres {
             client,
             table,
             values,
             conflict_action,
-            max_batch,
             ..
         } => MappedSink {
             head: format!(
@@ -3185,17 +3204,13 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
                 table.as_str()
             ),
             values,
-            trailing: conflict_and_batch_clauses(
-                postgres_conflict_action_to_nspl(conflict_action),
-                *max_batch,
-            ),
+            trailing: conflict_clauses(postgres_conflict_action_to_nspl(conflict_action)),
         },
         EmitSink::MySql {
             client,
             table,
             values,
             conflict_action,
-            max_batch,
             ..
         } => MappedSink {
             head: format!(
@@ -3204,17 +3219,13 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
                 table.as_str()
             ),
             values,
-            trailing: conflict_and_batch_clauses(
-                mysql_conflict_action_to_nspl(conflict_action),
-                *max_batch,
-            ),
+            trailing: conflict_clauses(mysql_conflict_action_to_nspl(conflict_action)),
         },
         EmitSink::MongoDb {
             client,
             collection,
             values,
             conflict_action,
-            max_batch,
             ..
         } => MappedSink {
             head: format!(
@@ -3223,10 +3234,7 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
                 collection.as_str()
             ),
             values,
-            trailing: conflict_and_batch_clauses(
-                mongodb_conflict_action_to_nspl(conflict_action),
-                *max_batch,
-            ),
+            trailing: conflict_clauses(mongodb_conflict_action_to_nspl(conflict_action)),
         },
         EmitSink::Iceberg {
             backend,
@@ -3259,13 +3267,12 @@ fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), Canonical
     Ok((head, clauses))
 }
 
-/// The `ON CONFLICT` and `WITH MAX BATCH` clauses the row-insert sinks share.
-fn conflict_and_batch_clauses(conflict_action: String, max_batch: NonZeroU64) -> Vec<Clause> {
+/// The `ON CONFLICT` clause the row-insert sinks share, absent when the sink declares none.
+fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
     let mut clauses = Vec::new();
     if !conflict_action.trim().is_empty() {
         clauses.push(Clause::line(conflict_action.trim().to_string()));
     }
-    clauses.push(Clause::line(format!("WITH MAX BATCH {max_batch}")));
     clauses
 }
 
@@ -3409,16 +3416,14 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             client,
             table,
             values,
-            max_batch,
             ..
         } => {
             let mappings = value_mappings_to_nspl(values)?;
             Ok(format!(
-                "CLICKHOUSE {} INSERT TO TABLE {} VALUES {{{}}} WITH MAX BATCH {}",
+                "CLICKHOUSE {} INSERT TO TABLE {} VALUES {{{}}}",
                 client.as_str(),
                 table.as_str(),
                 mappings,
-                max_batch
             ))
         }
         EmitSink::Postgres {
@@ -3426,18 +3431,16 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             table,
             values,
             conflict_action,
-            max_batch,
             ..
         } => {
             let mappings = value_mappings_to_nspl(values)?;
             let conflict_action = postgres_conflict_action_to_nspl(conflict_action);
             Ok(format!(
-                "POSTGRES {} INSERT TO TABLE {} VALUES {{{}}}{} WITH MAX BATCH {}",
+                "POSTGRES {} INSERT TO TABLE {} VALUES {{{}}}{}",
                 client.as_str(),
                 table.as_str(),
                 mappings,
                 conflict_action,
-                max_batch
             ))
         }
         EmitSink::MySql {
@@ -3445,18 +3448,16 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             table,
             values,
             conflict_action,
-            max_batch,
             ..
         } => {
             let mappings = value_mappings_to_nspl(values)?;
             let conflict_action = mysql_conflict_action_to_nspl(conflict_action);
             Ok(format!(
-                "MYSQL {} INSERT TO TABLE {} VALUES {{{}}}{} WITH MAX BATCH {}",
+                "MYSQL {} INSERT TO TABLE {} VALUES {{{}}}{}",
                 client.as_str(),
                 table.as_str(),
                 mappings,
                 conflict_action,
-                max_batch
             ))
         }
         EmitSink::MongoDb {
@@ -3464,18 +3465,16 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             collection,
             values,
             conflict_action,
-            max_batch,
             ..
         } => {
             let mappings = value_mappings_to_nspl(values)?;
             let conflict_action = mongodb_conflict_action_to_nspl(conflict_action);
             Ok(format!(
-                "MONGODB {} INSERT TO COLLECTION {} VALUES {{{}}}{} WITH MAX BATCH {}",
+                "MONGODB {} INSERT TO COLLECTION {} VALUES {{{}}}{}",
                 client.as_str(),
                 collection.as_str(),
                 mappings,
                 conflict_action,
-                max_batch
             ))
         }
         EmitSink::Iceberg {
@@ -3724,6 +3723,16 @@ mod tests {
         RetryPolicy {
             backoff: "250ms".to_string(),
             max_backoff: "30s".to_string(),
+        }
+    }
+
+    fn batch_policy(max_messages: u32, max_size: &str) -> crate::EmitterBatchPolicy {
+        crate::EmitterBatchPolicy {
+            max_messages: crate::BatchMessageLimit::try_from(max_messages)
+                .assured("the fixture message limit is within range"),
+            max_size: max_size
+                .parse()
+                .assured("the fixture size is a whole number of bytes"),
         }
     }
 
@@ -4341,6 +4350,7 @@ mod tests {
                 transformations: CodecJaqTransformations {
                     on_ingestion: Some(".payload".to_string()),
                     on_emitting: Some("{payload: .}".to_string()),
+                    on_emitting_batch: None,
                 },
             },
             schema: named("orders"),
@@ -4359,6 +4369,7 @@ mod tests {
                 transformations: CodecJaqTransformations {
                     on_ingestion: Some(".payload".to_string()),
                     on_emitting: None,
+                    on_emitting_batch: None,
                 },
             },
             schema: named("orders"),
@@ -4377,6 +4388,7 @@ mod tests {
                 transformations: CodecJaqTransformations {
                     on_ingestion: Some(".".to_string()),
                     on_emitting: Some(".".to_string()),
+                    on_emitting_batch: None,
                 },
             },
             schema: named("orders"),
@@ -4398,9 +4410,11 @@ mod tests {
                     value: "order.proto".to_string(),
                 }],
                 message: "nervix.test.Order".to_string(),
+                batch_message: None,
                 transformations: CodecJaqTransformations {
                     on_ingestion: Some(".payload".to_string()),
                     on_emitting: Some("{payload: .}".to_string()),
+                    on_emitting_batch: None,
                 },
             }),
             schema: named("orders"),
@@ -4412,6 +4426,33 @@ mod tests {
              CONFIG {\n    'file' = 'order.proto'\n  }\n  MESSAGE 'nervix.test.Order'\n  TO \
              SCHEMA orders\n  WITH JAQ TRANSFORMATIONS ON INGESTION '.payload' ON EMITTING \
              '{payload: .}';"
+        );
+
+        let batching_protobuf_codec: CreateCodec = CreateCodec {
+            name: named("orders_proto"),
+            wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
+                resource: named("proto_bundle"),
+                resource_version: 3,
+                config: Vec::new(),
+                message: "nervix.test.Order".to_string(),
+                batch_message: Some("nervix.test.OrderBatch".to_string()),
+                transformations: CodecJaqTransformations {
+                    on_ingestion: None,
+                    on_emitting: Some("{payload: .}".to_string()),
+                    on_emitting_batch: Some("{orders: .}".to_string()),
+                },
+            }),
+            schema: named("orders"),
+            encoding_rules: Vec::new(),
+        };
+        assert_eq!(
+            batching_protobuf_codec
+                .to_canonical_nspl()
+                .expect("must render"),
+            "CREATE CODEC orders_proto\n  FROM PROTOBUF USING RESOURCE proto_bundle VERSION 3\n  \
+             CONFIG {}\n  MESSAGE 'nervix.test.Order' BATCH MESSAGE 'nervix.test.OrderBatch'\n  \
+             TO SCHEMA orders\n  WITH JAQ TRANSFORMATIONS ON EMITTING '{payload: .}' ON EMITTING \
+             BATCH '{orders: .}';"
         );
 
         let relay = CreateRelay {
@@ -4703,6 +4744,7 @@ mod tests {
                     .with_collect_policy("50ms".to_string(), Some("4MiB".to_string())),
                 encode_using_codec: Some(named("orders_codec")),
                 sink: Box::new(sink),
+                batch: None,
                 flush_policy: FlushPolicy::Each {
                     interval: "100ms".to_string(),
                     max_batch_size: "1MiB".to_string(),
@@ -4721,6 +4763,21 @@ mod tests {
                      MAX BATCH SIZE 4MiB\n  TO {rendered_sink}\n    MODE {rendered_mode}\n    \
                      ENCODE USING orders_codec\n  FLUSH EACH 100ms MAX BATCH SIZE 1MiB\n  ON \
                      MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
+                )
+            );
+
+            let batching = CreateEmitter {
+                batch: Some(batch_policy(500, "1MiB")),
+                ..emitter
+            };
+            assert_eq!(
+                batching.to_canonical_nspl().expect("must render"),
+                format!(
+                    "CREATE ATTACHED EMITTER emit_orders\n  FROM orders_stream COLLECT FOR 50ms \
+                     MAX BATCH SIZE 4MiB\n  TO {rendered_sink}\n    MODE {rendered_mode}\n    \
+                     ENCODE USING orders_codec\n  BATCH MAX MESSAGES 500 MAX SIZE 1MiB\n  FLUSH \
+                     EACH 100ms MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR \
+                     LOG;"
                 )
             );
         }
@@ -4748,8 +4805,8 @@ mod tests {
                 conflict_action: PostgresConflictAction::DoUpdate {
                     target: vec!["postgres_user_id".to_string()],
                 },
-                max_batch: nonzero!(500u64),
             }),
+            batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -4764,7 +4821,7 @@ mod tests {
 
         assert_eq!(
             emitter.to_canonical_nspl().expect("must render"),
-            "CREATE ATTACHED EMITTER emit_notifications\n  FROM notifications\n  TO POSTGRES postgres_main INSERT TO TABLE notification_rows\n    VALUES {\n      'postgres_user_id' = input.user_id,\n      'postgres_action' = lower(input.action)\n    }\n    ON CONFLICT ('postgres_user_id') DO UPDATE\n    WITH MAX BATCH 500\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
+            "CREATE ATTACHED EMITTER emit_notifications\n  FROM notifications\n  TO POSTGRES postgres_main INSERT TO TABLE notification_rows\n    VALUES {\n      'postgres_user_id' = input.user_id,\n      'postgres_action' = lower(input.action)\n    }\n    ON CONFLICT ('postgres_user_id') DO UPDATE\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s\n  BATCH MAX MESSAGES 500 MAX SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
         );
     }
 
@@ -4788,8 +4845,8 @@ mod tests {
                     },
                 ],
                 conflict_action: MySqlConflictAction::DoNothing,
-                max_batch: nonzero!(500u64),
             }),
+            batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -4807,9 +4864,9 @@ mod tests {
             "CREATE ATTACHED EMITTER emit_notifications\n  FROM notifications\n  TO MYSQL \
              mysql_main INSERT TO TABLE notification_rows\n    VALUES {\n      'mysql_user_id' = \
              input.user_id,\n      'mysql_action' = lower(input.action)\n    }\n    ON CONFLICT \
-             DO NOTHING\n    WITH MAX BATCH 500\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX \
-             30s\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL \
-             ERROR LOG;"
+             DO NOTHING\n    MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s\n  BATCH MAX MESSAGES \
+             500 MAX SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  \
+             ON GENERAL ERROR LOG;"
         );
     }
 
@@ -4835,8 +4892,8 @@ mod tests {
                 conflict_action: MongoDbConflictAction::DoUpdate {
                     target: vec!["mongodb_user_id".to_string()],
                 },
-                max_batch: nonzero!(500u64),
             }),
+            batch: Some(batch_policy(500, "8MiB")),
             flush_policy: FlushPolicy::Each {
                 interval: "10s".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -4854,9 +4911,9 @@ mod tests {
             "CREATE ATTACHED EMITTER emit_notifications\n  FROM notifications\n  TO MONGODB \
              mongodb_main INSERT TO COLLECTION notification_rows\n    VALUES {\n      \
              'mongodb_user_id' = input.user_id,\n      'mongodb_action' = lower(input.action)\n    \
-             }\n    ON CONFLICT ('mongodb_user_id') DO UPDATE\n    WITH MAX BATCH 500\n    MODE \
-             ACK RETRY POLICY BACKOFF 250ms MAX 30s\n  FLUSH EACH 10s MAX BATCH SIZE 1MiB\n  ON \
-             MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
+             }\n    ON CONFLICT ('mongodb_user_id') DO UPDATE\n    MODE ACK RETRY POLICY BACKOFF \
+             250ms MAX 30s\n  BATCH MAX MESSAGES 500 MAX SIZE 8MiB\n  FLUSH EACH 10s MAX BATCH \
+             SIZE 1MiB\n  ON MESSAGE ERROR LOG\n  ON GENERAL ERROR LOG;"
         );
     }
 

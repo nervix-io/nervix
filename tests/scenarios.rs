@@ -11440,6 +11440,38 @@ async fn then_last_command_output_contains(world: &mut ScenarioWorld, #[step] st
     );
 }
 
+/// Runs `SHOW CREATE EMITTER` for every emitter the table names and requires its rendering to
+/// contain the clause beside it. The first row names the columns.
+#[then("SHOW CREATE EMITTER on the leader node renders these clauses")]
+async fn then_show_create_emitter_renders_these_clauses(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let table = step
+        .table
+        .as_ref()
+        .expect("the step lists each emitter with the clause it must render");
+    let leader = current_leader_node(world).await;
+    for row in table.rows.iter().skip(1) {
+        let [emitter, clause] = row.as_slice() else {
+            panic!("each row names an emitter and one clause, got {row:?}");
+        };
+        let output = world
+            .cluster()
+            .run_command(
+                &leader,
+                &world.domain,
+                &format!("SHOW CREATE EMITTER {emitter};"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("SHOW CREATE EMITTER {emitter} failed: {error}"));
+        assert!(
+            output.contains(clause.as_str()),
+            "expected SHOW CREATE EMITTER {emitter} to contain {clause:?}, got: {output}"
+        );
+    }
+}
+
 #[then("the last command output is saved as the relocation plan")]
 async fn then_last_command_output_is_saved_as_the_relocation_plan(world: &mut ScenarioWorld) {
     let output = world

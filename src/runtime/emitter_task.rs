@@ -378,6 +378,21 @@ impl EmitterTask {
         } else {
             None
         };
+        if plan.sink.batch().is_some()
+            && let Some(codec) = &codec
+        {
+            codec
+                .check_batch_container()
+                .map_err(|error| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!(
+                        "batching emitter '{}' cannot publish through codec '{}': {}",
+                        emitter.name.as_str(),
+                        codec.name.as_str(),
+                        error.current_context(),
+                    ),
+                })?;
+        }
         let output_compiled_schema = match codec.as_ref() {
             Some(codec) => codec.schema(),
             None => input_schema.clone(),

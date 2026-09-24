@@ -2337,6 +2337,7 @@ mod tests {
                 client: named("kafka_main"),
                 topic: named("notifications_out"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -2459,6 +2460,7 @@ mod tests {
                 queue: "notifications.fifo".to_string(),
                 fifo_group: Some(SqsFifoGroup::Expression(expression(group))),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
                 max_batch_size: "1MiB".to_string(),

@@ -754,6 +754,10 @@ pub(in crate::application) fn format_emitter_describe_output(
             }
         ),
         format!("sink: {}", format_emit_sink(&emitter.sink)),
+        match &emitter.batch {
+            Some(batch) => format!("batch: {batch}"),
+            None => "batch: none".to_string(),
+        },
         format!("flush: {}", emitter.flush_policy.to_canonical_nspl()),
         format!(
             "publishing mode: {}",
@@ -841,22 +845,15 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             };
             format!("OTEL client={} signal={signal}", client.as_str())
         }
-        EmitSink::ClickHouse {
-            client,
-            table,
-            max_batch,
-            ..
-        } => format!(
-            "CLICKHOUSE client={} table={} max_batch={}",
+        EmitSink::ClickHouse { client, table, .. } => format!(
+            "CLICKHOUSE client={} table={}",
             client.as_str(),
             table.as_str(),
-            max_batch
         ),
         EmitSink::Postgres {
             client,
             table,
             conflict_action,
-            max_batch,
             ..
         } => {
             let conflict = match conflict_action {
@@ -879,18 +876,16 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 }
             };
             format!(
-                "POSTGRES client={} table={}{} max_batch={}",
+                "POSTGRES client={} table={}{}",
                 client.as_str(),
                 table.as_str(),
                 conflict,
-                max_batch
             )
         }
         EmitSink::MySql {
             client,
             table,
             conflict_action,
-            max_batch,
             ..
         } => {
             let conflict = match conflict_action {
@@ -899,18 +894,16 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 MySqlConflictAction::DoUpdate => " conflict=ON CONFLICT DO UPDATE".to_string(),
             };
             format!(
-                "MYSQL client={} table={}{} max_batch={}",
+                "MYSQL client={} table={}{}",
                 client.as_str(),
                 table.as_str(),
                 conflict,
-                max_batch
             )
         }
         EmitSink::MongoDb {
             client,
             collection,
             conflict_action,
-            max_batch,
             ..
         } => {
             let conflict = match conflict_action {
@@ -923,11 +916,10 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 }
             };
             format!(
-                "MONGODB client={} collection={}{} max_batch={}",
+                "MONGODB client={} collection={}{}",
                 client.as_str(),
                 collection.as_str(),
                 conflict,
-                max_batch
             )
         }
         EmitSink::Iceberg {
