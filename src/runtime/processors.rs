@@ -1207,3 +1207,52 @@ pub(super) struct FilterMapPlan {
     pub(super) batch: Option<RelayRecordBatch>,
     pub(super) message_errors: Vec<PlannedMessageError>,
 }
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use nervix_models::{
+        Expression, FieldName, FieldReference, FieldScope, ParseAsType, UnaryOperator,
+    };
+    use nervix_vm::SchemaSensitivity as VmSchemaSensitivity;
+
+    use crate::runtime::expression_reads_sensitive_source;
+
+    fn input_field(name: &str) -> Expression {
+        Expression::Field(FieldReference::scoped(
+            FieldScope::Input,
+            FieldName::parse(name).assured("the test field names use the language name alphabet"),
+        ))
+    }
+
+    /// An inferencer tensor mapped through a negation or a conversion is as sensitive as the
+    /// field the mapping reads.
+    #[test]
+    fn tensor_mappings_keep_the_sensitivity_of_negated_and_converted_fields() {
+        let sensitivity = VmSchemaSensitivity::from_sensitive_fields(["secret"]);
+        let converted = |name: &str| Expression::TryCast {
+            expression: Box::new(input_field(name)),
+            target: ParseAsType::F32,
+        };
+        let negated_cast = Expression::Unary {
+            operator: UnaryOperator::Negate,
+            expression: Box::new(Expression::Cast {
+                expression: Box::new(input_field("secret")),
+                target: ParseAsType::F32,
+            }),
+        };
+
+        assert!(expression_reads_sensitive_source(
+            &converted("secret"),
+            &sensitivity
+        ));
+        assert!(!expression_reads_sensitive_source(
+            &converted("reading"),
+            &sensitivity
+        ));
+        assert!(expression_reads_sensitive_source(
+            &negated_cast,
+            &sensitivity
+        ));
+    }
+}
