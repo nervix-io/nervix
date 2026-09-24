@@ -192,6 +192,8 @@ test-turmoil:
     #!/usr/bin/env bash
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    cargo test --package nervix-execution --features turmoil --lib -- --test-threads=1
+    cargo test --package nervix-interconnect --features turmoil --lib wire::simulation_checks -- --test-threads=1
     cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
 
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
@@ -280,7 +282,11 @@ test-coverage: tests-deps
         --package nervix-interconnect \
         --package nervix-wasm
     RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
-        cargo llvm-cov --no-rustc-wrapper --no-report --package nervix-interconnect --features turmoil --test simulation
+        cargo llvm-cov --no-report --package nervix-execution --features turmoil --lib
+    RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
+        cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --lib
+    RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
+        cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --test simulation
     cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
 
@@ -334,8 +340,13 @@ coverage-turmoil output:
     #!/usr/bin/env bash
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
-    cargo llvm-cov --no-rustc-wrapper --no-default-ignore-filename-regex \
-        --package nervix-interconnect --features turmoil --test simulation \
+    cargo llvm-cov --no-report \
+        --package nervix-execution --features turmoil --lib
+    cargo llvm-cov --no-report \
+        --package nervix-interconnect --features turmoil --lib
+    cargo llvm-cov --no-report \
+        --package nervix-interconnect --features turmoil --test simulation
+    cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use

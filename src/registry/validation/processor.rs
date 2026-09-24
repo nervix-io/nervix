@@ -22,9 +22,11 @@ use nervix_vm::{
     infer_set_expr_types_for_bindings_with_udfs, lower_finalized_output_filter,
     lower_generated_route, lower_route_construction, lower_set_only_route,
     lower_transforming_route,
-    window::{lower_window_assignments, referenced_field_refs},
+    window::{WindowSketchConfig, lower_window_assignments, referenced_field_refs},
 };
 use petgraph::{graph::DiGraph, prelude::NodeIndex};
+
+mod sketch;
 
 use crate::registry::{
     error::RegistryError,
@@ -213,9 +215,11 @@ pub(in crate::registry) fn ensure_window_processor_output_schemas(
     branch_schema: Option<&CreateSchema>,
 ) -> Result<(), Report<RegistryError>> {
     ensure_processor_outputs_declared(domain, identifier, &window_processor.output_routes)?;
+    let mut sketch_demands = Vec::new();
+    let mut sketch_route = None;
     for output in window_processor.output_routes.outputs() {
         let output_schema = schema_for_ack_model(domain, identifier, models, &output.relay)?;
-        validate_window_processor_output(
+        let sketches = validate_window_processor_output(
             domain,
             identifier,
             models,
@@ -223,6 +227,20 @@ pub(in crate::registry) fn ensure_window_processor_output_schemas(
             output_schema,
             input_schemas,
             branch_schema,
+        )?;
+        if !sketches.is_empty() && sketch_route.is_none() {
+            sketch_route = Some(output.relay.clone());
+        }
+        sketch_demands.extend(sketches);
+    }
+    if let Some(route) = sketch_route {
+        sketch::validate(
+            domain,
+            identifier,
+            models,
+            window_processor,
+            &route,
+            &sketch_demands,
         )?;
     }
     Ok(())
@@ -369,7 +387,7 @@ fn validate_window_processor_output(
     output_schema: &CreateSchema,
     input_schemas: &[(&RelayName, &CreateSchema)],
     branch_schema: Option<&CreateSchema>,
-) -> Result<(), Report<RegistryError>> {
+) -> Result<Vec<WindowSketchConfig>, Report<RegistryError>> {
     let aggregate = lower_window_assignments(&output.construction).map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -469,7 +487,12 @@ fn validate_window_processor_output(
         output_schema,
         branch_schema,
     )?;
-    Ok(())
+    Ok(aggregate
+        .inner
+        .demands()
+        .iter()
+        .filter_map(|demand| demand.sketch)
+        .collect())
 }
 
 fn validate_window_route_where(

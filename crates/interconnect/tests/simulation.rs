@@ -15,6 +15,7 @@ use std::{
 };
 
 use meticulous::OptionExt as _;
+use nervix_execution::{CpuClass, Executor, MemoryClass};
 use runner::{HostSupervisor, SimulationBounds, SimulationConfig, SimulationError, Topology};
 
 fn config() -> SimulationConfig {
@@ -47,6 +48,54 @@ fn simulation_timer_smoke() {
         });
     });
     assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn bounded_cpu_job_runs_on_the_simulated_scheduler() {
+    for seed in 1..=12 {
+        let mut configuration = config();
+        configuration.seed = seed;
+        let result = configuration.run("bounded CPU worker", |simulation| {
+            simulation.host("worker", || async {
+                HostSupervisor::run(async {
+                    let scheduler_thread = std::thread::current().id();
+                    let executor = Executor::default();
+                    for (cpu, memory) in [
+                        (CpuClass::Control, MemoryClass::Management),
+                        (CpuClass::Data, MemoryClass::Commands),
+                        (CpuClass::Bulk, MemoryClass::Relay),
+                        (CpuClass::Bulk, MemoryClass::Bulk),
+                    ] {
+                        tokio::task::consume_budget().await;
+                        let reservation = executor
+                            .try_reserve(memory, 1024)
+                            .expect("the memory class starts with room");
+                        let job_thread = executor
+                            .run_cpu(cpu, reservation, |_, _| std::thread::current().id())
+                            .await
+                            .expect("the bounded job completes");
+                        assert_eq!(job_thread, scheduler_thread);
+                    }
+                    let snapshot = executor.snapshot();
+                    for workers in [snapshot.control_cpu, snapshot.data_cpu, snapshot.bulk_cpu] {
+                        assert_eq!(workers.running, 0);
+                        assert_eq!(workers.pending, 0);
+                    }
+                    for budget in [
+                        snapshot.management_memory,
+                        snapshot.commands_memory,
+                        snapshot.relay_memory,
+                        snapshot.bulk_memory,
+                    ] {
+                        assert_eq!(budget.reserved_bytes, 0);
+                    }
+                    Ok::<(), std::io::Error>(())
+                })
+                .await
+            });
+        });
+        assert!(result.is_ok(), "seed {seed}: {result:?}");
+    }
 }
 
 #[test]

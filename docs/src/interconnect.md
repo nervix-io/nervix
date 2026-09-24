@@ -21,14 +21,23 @@ a test harness outside product ownership, with a fixed seed, UTC epoch, network 
 duration, step limit, and real wall-clock escape bound. It supervises host tasks so their failures
 fail the scenario.
 
-The initial runner qualifies bounded scheduling and Tokio timers. The production listener,
-outbound TCP connections, and DNS resolution still use Tokio's real network APIs; execution jobs
-still use Tokio's blocking pool. Certificate validity still reads the process wall clock, while
-process-epoch generation uses OS randomness. External connectors, filesystem and database work,
-gossip and consensus randomness, and domain-clock authority are outside this first simulation
-boundary. A simulated host crash tears down its runtime and is not evidence of power-loss or
-SIGKILL durability. A simulation result therefore makes no claim yet about production transport
-faults, authentication, or full-node recovery.
+The runner exercises the interconnect's actual bounded rkyv encode and decode path through
+`nervix-execution`. In this build mode, admitted CPU jobs run as Tokio tasks on the simulated
+scheduler; production and Shuttle builds continue to use the blocking pool. Queue slots, per-class
+worker reservations, memory charges, and cooperative cancellation follow the same policy in both
+modes. A queued caller that leaves releases its slot and charge; a running job keeps its worker and
+charge until it exits, even if its caller leaves. Each synchronous CPU job body is one scheduler
+step. Turmoil can vary task ordering around it, but instruction-level CPU races inside a job need
+Shuttle or real-thread testing. Only bounded executor probes and interconnect codec jobs are
+approved for this suite; storage jobs, external drivers and unbounded CPU work are outside it.
+
+The production listener, outbound TCP connections, and DNS resolution still use Tokio's real
+network APIs. Certificate validity still reads the process wall clock, while process-epoch
+generation uses OS randomness. External connectors, filesystem and database work, gossip and
+consensus randomness, and domain-clock authority are outside this simulation boundary. A simulated
+host crash tears down its runtime and is not evidence of power-loss or SIGKILL durability. A
+simulation result therefore makes no claim yet about production transport faults, authentication,
+or full-node recovery.
 
 ## Listener And Peer Topology
 
