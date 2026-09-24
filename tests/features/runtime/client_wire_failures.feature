@@ -618,7 +618,7 @@ Feature: Client wire failure regressions
       kafka observed partitions: 0,1
       """
 
-  @client_wire_expected_failure @client_wire_subscription_restore
+  @client_wire_subscription_restore
   Scenario: A reconnected native client restores acknowledged subscriptions
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
@@ -652,7 +652,7 @@ Feature: Client wire failure regressions
       """
     Then the current leader node is saved as placeholder "old_leader"
     And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
-    Given client "subscriber" is connected to node "{{old_leader}}"
+    Given client "subscriber" is connected to node "{{old_leader}}" with cluster seeds
     When client "subscriber" executes these NSPL commands
       """
       CREATE SUBSCRIPTION wire_seen TO wire_records;
@@ -672,11 +672,18 @@ Feature: Client wire failure regressions
       DESCRIBE DOMAIN;
       """
     And node "{{old_leader}}" is stopped
-    And http payload is posted to node "{{new_leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
+    Then within "30s" client "subscriber" observes subscription "wire_seen" interrupted
+    When client "subscriber" executes these NSPL commands
+      """
+      DESCRIBE DOMAIN;
+      """
+    Then client "subscriber" subscription "wire_seen" is active
+    When within "30s" client "subscriber" receives a subscription payload from repeated http posts to node "{{new_leader}}" with host "client-wire-{{test_id}}.example.com" path "/records"
       """
       {"tenant":"beta","sequence":2}
       """
-    Then within "3s" client "subscriber" receives a subscription payload
+    Then the last relay subscription payload contains
       """
-      key={"tenant":"beta"} payload={"sequence":2,"tenant":"beta"}
+      key={"tenant":"beta"}
+      payload={"sequence":2,"tenant":"beta"}
       """
