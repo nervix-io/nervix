@@ -885,11 +885,50 @@ impl RelayProcessorNode {
                     }
                     // Rows are admitted in runs that end where the window fills, so every
                     // emission covers exactly the rows admitted before it.
+                    let mut budget_limited = false;
                     while !pending.is_empty() {
                         tokio::task::consume_budget().await;
-                        let run_len =
-                            state.admission_run_len(&pending, *width_messages, *width_duration);
+                        let run_len = if budget_limited {
+                            1
+                        } else {
+                            state.admission_run_len(&pending, *width_messages, *width_duration)
+                        };
                         let run = pending.drain(..run_len).collect::<Vec<_>>();
+                        if let Err(error) = state.check_admission(plan, &evaluated.columns, &run) {
+                            if run.len() > 1 {
+                                // Retry one row at a time so a large batch cannot cause rows
+                                // that individually fit to be refused with the oversized run.
+                                for admission in run.into_iter().rev() {
+                                    pending.push_front(admission);
+                                }
+                                budget_limited = true;
+                                continue;
+                            }
+                            for admission in run {
+                                tokio::task::consume_budget().await;
+                                branch
+                                    .runtime
+                                    .handle_message_error(
+                                        MessageErrorSourceContext {
+                                            domain: &branch.domain,
+                                            node_kind: self.kind,
+                                            node: &self.processor,
+                                            execution_now,
+                                        },
+                                        &self.error_policies,
+                                        admission.message,
+                                        MessageErrorFailure::publish(
+                                            None,
+                                            format!(
+                                                "window processor '{}' cannot admit row: {error:#}",
+                                                self.processor.as_str(),
+                                            ),
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            continue;
+                        }
                         let last_timestamp = run
                             .last()
                             .map(|admission| message_timestamp(&admission.message));

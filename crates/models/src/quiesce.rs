@@ -936,7 +936,10 @@ fn window_processor_change_aspects(
         &mut changes,
         &mut has_dynamic_change,
     );
-    if base.width != candidate.width || base.step != candidate.step {
+    if base.width != candidate.width
+        || base.step != candidate.step
+        || base.state_limit != candidate.state_limit
+    {
         changes.push(ModelChangeAspect::WindowBounds);
     }
     if has_dynamic_change {
@@ -2486,6 +2489,7 @@ mod catch_all_kind_tests {
                 messages: Some(5),
                 duration: None,
             },
+            state_limit: crate::WindowStateLimit::Unbounded,
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),
