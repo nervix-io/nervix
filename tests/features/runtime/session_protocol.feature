@@ -188,3 +188,40 @@ Feature: Session protocol
     Given a 1 node nervix cluster is started
     Then a console WebSocket on the leader node that sends "text" is closed with code 1003
     And a console WebSocket on the leader node that sends "garbage" is closed with code 1007
+
+  Scenario Outline: An upload stream the protocol does not allow is refused with a typed failure and admits nothing
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE blob;
+      """
+    When an upload of resource "blob" with identity "empty-stream" that is empty is sent to the leader node
+    Then the last upload is refused as "InvalidStream" before it names an identity
+    When an upload of resource "blob" with identity "chunk-first" that begins with a chunk is sent to the leader node
+    Then the last upload is refused as "InvalidStream" before it names an identity
+    When an upload of resource "blob" with identity "two-starts" that carries a second start is sent to the leader node
+    Then the last upload is refused as "InvalidStream" for identity "two-starts"
+    When an upload of resource "blob" with identity "oversized-body" that carries more bytes than it declares is sent to the leader node
+    Then the last upload is refused as "SizeMismatch" for identity "oversized-body"
+    And the last command error contains
+      """
+      the upload exceeds its declared size of 1 bytes
+      """
+    When an upload of resource "blob" with identity "oversized-declaration" that declares more bytes than an archive may hold is sent to the leader node
+    Then the last upload is refused as "QuotaExceeded" for identity "oversized-declaration"
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE RESOURCE blob;
+      """
+    Then the last command output contains
+      """
+      latest: (none)
+      versions: (none)
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

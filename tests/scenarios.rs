@@ -8,6 +8,7 @@ use std::{
     fmt,
     fs::{OpenOptions, create_dir_all},
     io::Write,
+    num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
@@ -102,7 +103,7 @@ use crate::common::{
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
     phase_deadline::{BeforeDeadline, PhaseDeadline},
-    raw_session::WireOutcome as _,
+    raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
     scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
     server_process::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
@@ -240,6 +241,8 @@ struct ScenarioWorld {
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
     session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// The reply to the last upload stream a scenario shaped itself.
+    last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
     /// When the message a delivery-delay assertion is about was published. Load moves this
     /// instant and the arrival together, which is what makes such an assertion hold on a
@@ -9477,9 +9480,21 @@ async fn when_incomplete_resource_upload_is_sent(
     let resource = expand_placeholders(world, &resource);
     let identity = expand_placeholders(world, &identity);
     let leader = current_leader_node(world).await;
+    // Declares two bytes and carries one, so the server must refuse it.
+    let upload = TestUpload {
+        domain: &world.domain,
+        resource: &resource,
+        identity: &identity,
+        parts: vec![
+            TestUploadPart::Start {
+                declared_bytes: NonZeroU64::new(2).assured("two is non-zero"),
+            },
+            TestUploadPart::Chunk(vec![0]),
+        ],
+    };
     let result = world
         .cluster()
-        .send_incomplete_resource_upload(&leader, &world.domain, &resource, &identity)
+        .send_shaped_resource_upload(&leader, upload)
         .await
         .unwrap_or_else(|error| panic!("incomplete upload request failed: {error}"));
     let nervix_client_wire::UploadDisposition::Failed {

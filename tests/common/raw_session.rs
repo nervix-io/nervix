@@ -241,13 +241,22 @@ pub(crate) async fn open_session_as(
     }))
 }
 
-/// What an upload stream carries, for uploads a scenario shapes itself.
+/// One frame of an upload stream a scenario shapes itself.
+pub(crate) enum TestUploadPart {
+    /// An upload start for the upload's resource and identity, declaring the archive's size.
+    Start {
+        declared_bytes: NonZeroU64,
+    },
+    Chunk(Vec<u8>),
+}
+
+/// What an upload stream carries, for uploads a scenario shapes itself. The parts are sent in
+/// order, so a scenario can send a stream the protocol does not allow.
 pub(crate) struct TestUpload<'a> {
     pub(crate) domain: &'a str,
     pub(crate) resource: &'a str,
     pub(crate) identity: &'a str,
-    pub(crate) declared_bytes: u64,
-    pub(crate) chunks: Vec<Vec<u8>>,
+    pub(crate) parts: Vec<TestUploadPart>,
 }
 
 /// Streams one upload to `server` and returns the server's reply.
@@ -258,19 +267,26 @@ pub(crate) async fn send_upload(server: &str, upload: TestUpload<'_>) -> io::Res
         .max_decoding_message_size(limits.frame_bytes())
         .max_encoding_message_size(limits.frame_bytes());
     client.ready().await.map_err(io::Error::other)?;
-    let request_id = RequestId::new(NonZeroU64::MIN);
-    let start = UploadStart {
-        request_id,
-        domain: DomainName::parse(upload.domain).map_err(io::Error::other)?,
-        resource: ResourceName::parse(upload.resource).map_err(io::Error::other)?,
-        upload_identity: ResourceUploadIdentity::parse(upload.identity)
-            .map_err(io::Error::other)?,
-        total_bytes: NonZeroU64::new(upload.declared_bytes)
-            .ok_or_else(|| io::Error::other("an upload declares a non-zero size"))?,
-    };
-    let mut frames = vec![start.encode(&limits).map_err(io::Error::other)?];
-    for chunk in &upload.chunks {
-        frames.push(UploadChunk::encode(chunk, &limits).map_err(io::Error::other)?);
+    let domain = DomainName::parse(upload.domain).map_err(io::Error::other)?;
+    let resource = ResourceName::parse(upload.resource).map_err(io::Error::other)?;
+    let upload_identity =
+        ResourceUploadIdentity::parse(upload.identity).map_err(io::Error::other)?;
+    let mut frames = Vec::with_capacity(upload.parts.len());
+    for part in &upload.parts {
+        let frame = match part {
+            TestUploadPart::Start { declared_bytes } => {
+                let start = UploadStart {
+                    request_id: RequestId::new(NonZeroU64::MIN),
+                    domain: domain.clone(),
+                    resource: resource.clone(),
+                    upload_identity: upload_identity.clone(),
+                    total_bytes: *declared_bytes,
+                };
+                start.encode(&limits)
+            }
+            TestUploadPart::Chunk(bytes) => UploadChunk::encode(bytes, &limits),
+        };
+        frames.push(frame.map_err(io::Error::other)?);
     }
     let request = authorized(tokio_stream::iter(frames))?;
     let response = client

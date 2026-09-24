@@ -1774,6 +1774,10 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc as StdArc;
+
+    use arrow_array::{RecordBatch, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
     use nervix_client_wire::{
         RowSchema, ServerEvent, ServerMessage, SubscriptionEndReason, VerifiedFrame,
     };
@@ -1831,6 +1835,147 @@ mod tests {
             },
             opened,
         }
+    }
+
+    /// One frame holding a row for each of `user_ids`, as the subscription's encoder writes it.
+    fn row_frame(encoder: &SubscriptionRowEncoder, user_ids: &[u32]) -> SubscriptionRowFrame {
+        let schema = Schema::new(vec![Field::new("user_id", DataType::UInt32, false)]);
+        let column = UInt32Array::from(user_ids.to_vec());
+        let batch = RecordBatch::try_new(StdArc::new(schema), vec![StdArc::new(column)])
+            .assured("the column matches the one-field schema");
+        let unbranched = vec![None; user_ids.len()];
+        let frames = encoder
+            .encode(&batch, &unbranched, SubscriptionRowSelection::All)
+            .assured("the test rows match the subscription's row schema");
+        let Ok([frame]) = <[SubscriptionRowFrame; 1]>::try_from(frames) else {
+            panic!("a handful of rows fits one frame");
+        };
+        frame
+    }
+
+    /// The next frame the session would send, decoded.
+    async fn next_event(frames: &mut mpsc::Receiver<EncodedFrame<ServerFrame>>) -> ServerEvent {
+        let frame = tokio::time::timeout(Duration::from_secs(1), frames.recv())
+            .await
+            .assured("the sender queues its frames before the test reads them")
+            .assured("the test holds the sender");
+        let frame = VerifiedFrame::verify(frame.into_bytes(), &SessionLimits::DEFAULT)
+            .assured("the server encodes frames the session limits admit");
+        let ServerMessage::Event(event) = ServerMessage::decode(&frame).assured("a frame decodes")
+        else {
+            panic!("a subscription sends only events");
+        };
+        event
+    }
+
+    fn delivered_rows(event: ServerEvent) -> usize {
+        let ServerEvent::SubscriptionRows(rows) = event else {
+            panic!("expected subscription rows, found {event:?}");
+        };
+        rows.batch().len()
+    }
+
+    #[tokio::test]
+    async fn a_dropping_subscription_reports_what_it_dropped_before_its_next_rows() {
+        let mut subscriptions = SessionSubscriptions::new();
+        // Room for two frames, so the third is dropped until the session drains its queue.
+        let (outbound, mut frames) = mpsc::channel(2);
+        let events = crate::runtime::RelayBroadcast::with_capacity(
+            NonZeroUsize::new(4).assured("the test relay capacity is a nonzero literal"),
+        );
+        let SessionSubscriptionTaskConfig {
+            handle,
+            encoder,
+            delivery,
+            ..
+        } = task_config(
+            &mut subscriptions,
+            "sampled_events",
+            events.new_receiver(),
+            outbound,
+        );
+        let mut sender = SubscriptionSender {
+            handle: handle.clone(),
+            delivery,
+            behavior: SubscriptionDeliveryBehavior::Dropping,
+            dropped_rows: 0,
+        };
+
+        assert!(sender.send_rows(row_frame(&encoder, &[1])).await);
+        assert!(sender.send_rows(row_frame(&encoder, &[2, 3])).await);
+        assert!(sender.send_rows(row_frame(&encoder, &[4])).await);
+        assert_eq!(sender.dropped_rows, 1, "a full session drops the frame");
+        // The loss is still unreported and finds no room either, so these rows are dropped too.
+        assert!(sender.send_rows(row_frame(&encoder, &[5, 6])).await);
+        assert_eq!(sender.dropped_rows, 3);
+
+        assert_eq!(delivered_rows(next_event(&mut frames).await), 1);
+        assert_eq!(delivered_rows(next_event(&mut frames).await), 2);
+        assert!(sender.send_rows(row_frame(&encoder, &[7])).await);
+        let ServerEvent::SubscriptionDeliveryLost(lost) = next_event(&mut frames).await else {
+            panic!("the loss is reported before the rows that follow it");
+        };
+        assert_eq!(lost.subscription, handle);
+        assert_eq!(lost.dropped_rows.get(), 3);
+        assert_eq!(sender.dropped_rows, 0, "a reported loss starts a new count");
+        assert_eq!(delivered_rows(next_event(&mut frames).await), 1);
+
+        drop(frames);
+        assert!(
+            !sender.send_rows(row_frame(&encoder, &[8])).await,
+            "rows for a session that is gone end the delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn skipped_rows_are_reported_with_their_cause_and_count() {
+        let mut subscriptions = SessionSubscriptions::new();
+        let (outbound, mut frames) = mpsc::channel(2);
+        let events = crate::runtime::RelayBroadcast::with_capacity(
+            NonZeroUsize::new(4).assured("the test relay capacity is a nonzero literal"),
+        );
+        let SessionSubscriptionTaskConfig {
+            handle, delivery, ..
+        } = task_config(
+            &mut subscriptions,
+            "filtered_events",
+            events.new_receiver(),
+            outbound,
+        );
+        let sender = SubscriptionSender {
+            handle: handle.clone(),
+            delivery,
+            behavior: SubscriptionDeliveryBehavior::Blocking,
+            dropped_rows: 0,
+        };
+        let skipped = SkippedRows {
+            cause: RowsSkippedCause::FilterFailed,
+            rows: NonZeroU64::new(2).assured("two is non-zero"),
+            message: "session subscription predicate failed: division by zero".to_string(),
+        };
+
+        assert!(sender.report_skipped(skipped).await);
+
+        let ServerEvent::SubscriptionRowsSkipped(reported) = next_event(&mut frames).await else {
+            panic!("skipped rows are reported as such");
+        };
+        assert_eq!(reported.subscription, handle);
+        assert_eq!(reported.cause, RowsSkippedCause::FilterFailed);
+        assert_eq!(reported.skipped_rows.get(), 2);
+        assert_eq!(
+            reported.message,
+            "session subscription predicate failed: division by zero"
+        );
+        drop(frames);
+        let gone = SkippedRows {
+            cause: RowsSkippedCause::EncodingFailed,
+            rows: NonZeroU64::MIN,
+            message: "rows could not be encoded".to_string(),
+        };
+        assert!(
+            !sender.report_skipped(gone).await,
+            "a report for a session that is gone ends the delivery"
+        );
     }
 
     #[test]

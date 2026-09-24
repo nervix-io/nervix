@@ -2,7 +2,8 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Requests a scenario names and answers by name, cancellations, altered and malformed
-//!   frames, and the typed dispositions and transport statuses a session reports.
+//!   frames, upload streams shaped the way the protocol does not allow, and the typed dispositions
+//!   and transport statuses a session reports.
 //! - **Depends on.** The harness's own session client and the scenario cluster.
 //! - **Must not know.** How the server correlates, admits or cancels a request.
 
@@ -10,10 +11,11 @@ use cucumber::{then, when};
 use nervix_client_wire::{
     CancelState, CancellationStage, ClientMessage, ClientRequest, CommandDisposition,
     CommandRequest, DomainList, InspectTransactionRequest, InspectionOutcome, ReplyBody, RequestId,
-    RequestRejection, SessionEndReason, SuggestRequest, UnknownOutcomeCause,
+    RequestRejection, SessionEndReason, SuggestRequest, UnknownOutcomeCause, UploadDisposition,
 };
 use nervix_models::{
-    CommandExecutionReference, TransactionInspectionRejection, TransactionInspectionTarget,
+    CommandExecutionReference, ResourceUploadIdentity, TransactionInspectionRejection,
+    TransactionInspectionTarget,
 };
 
 use super::*;
@@ -537,4 +539,108 @@ async fn then_background_command_request_ends_without_an_answer(world: &mut Scen
     if let Ok(outcome) = result {
         panic!("the background command request was answered: {outcome:?}");
     }
+}
+
+/// The frames of an upload stream shaped the way a scenario names it.
+fn shaped_upload_parts(shape: &str) -> Vec<TestUploadPart> {
+    let declaring_one_byte = || TestUploadPart::Start {
+        declared_bytes: NonZeroU64::MIN,
+    };
+    match shape {
+        "is empty" => Vec::new(),
+        "begins with a chunk" => vec![TestUploadPart::Chunk(vec![0])],
+        "carries a second start" => vec![declaring_one_byte(), declaring_one_byte()],
+        "carries more bytes than it declares" => {
+            vec![declaring_one_byte(), TestUploadPart::Chunk(vec![0, 0])]
+        }
+        "declares more bytes than an archive may hold" => vec![TestUploadPart::Start {
+            declared_bytes: NonZeroU64::MAX,
+        }],
+        other => panic!("unsupported upload shape '{other}'"),
+    }
+}
+
+#[when(
+    regex = r#"^an upload of resource "([^"]+)" with identity "([^"]+)" that (is empty|begins with a chunk|carries a second start|carries more bytes than it declares|declares more bytes than an archive may hold) is sent to the leader node$"#
+)]
+async fn when_shaped_upload_is_sent(
+    world: &mut ScenarioWorld,
+    resource: String,
+    identity: String,
+    shape: String,
+) {
+    let resource = expand_placeholders(world, &resource);
+    let identity = expand_placeholders(world, &identity);
+    let leader = current_leader_node(world).await;
+    let upload = TestUpload {
+        domain: &world.domain,
+        resource: &resource,
+        identity: &identity,
+        parts: shaped_upload_parts(&shape),
+    };
+    let reply = world
+        .cluster()
+        .send_shaped_resource_upload(&leader, upload)
+        .await
+        .unwrap_or_else(|error| panic!("the upload that {shape} was not answered: {error}"));
+    world.last_command_error = Some(reply.message.clone());
+    world.last_upload_reply = Some(reply);
+}
+
+/// The failure of the last shaped upload, which a stream the protocol does not allow always
+/// ends with, and which never assigns a version.
+fn last_upload_refusal(world: &ScenarioWorld, expected: &str) -> Option<ResourceUploadIdentity> {
+    let reply = world
+        .last_upload_reply
+        .as_ref()
+        .expect("a shaped upload must have been sent");
+    let UploadDisposition::Failed {
+        upload_identity,
+        failure,
+        assigned_version,
+    } = &reply.disposition
+    else {
+        panic!("the upload was not refused: {reply:?}");
+    };
+    assert_eq!(
+        format!("{failure:?}"),
+        expected,
+        "the upload was refused for another reason: {}",
+        reply.message
+    );
+    assert_eq!(
+        *assigned_version, None,
+        "a refused stream assigns no version"
+    );
+    upload_identity.clone()
+}
+
+#[then(expr = "the last upload is refused as {string} for identity {string}")]
+async fn then_last_upload_is_refused_for_identity(
+    world: &mut ScenarioWorld,
+    failure: String,
+    identity: String,
+) {
+    let identity = expand_placeholders(world, &identity);
+    let Some(refused) = last_upload_refusal(world, &failure) else {
+        panic!("the refusal names no upload identity");
+    };
+    assert_eq!(refused.as_str(), identity);
+}
+
+#[then(expr = "the last upload is refused as {string} before it names an identity")]
+async fn then_last_upload_is_refused_before_it_names_an_identity(
+    world: &mut ScenarioWorld,
+    failure: String,
+) {
+    let refused = last_upload_refusal(world, &failure);
+    assert_eq!(
+        refused, None,
+        "a stream without a valid start names no identity"
+    );
+    let reply = world
+        .last_upload_reply
+        .as_ref()
+        .verified("last_upload_refusal above found the reply");
+    assert_eq!(reply.request_id, None);
 }

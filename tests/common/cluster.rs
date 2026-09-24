@@ -1488,22 +1488,13 @@ impl Cluster {
         Ok(handle.spec.grpc_uri(handle.config.grpc_mode))
     }
 
-    /// Streams an upload that declares two bytes and carries one, so the server must refuse it.
-    pub(crate) async fn send_incomplete_resource_upload(
+    /// Streams an upload whose frames a scenario shaped to `node_id` and returns its reply.
+    pub(crate) async fn send_shaped_resource_upload(
         &self,
         node_id: &str,
-        domain: &str,
-        resource: &str,
-        identity: &str,
+        upload: TestUpload<'_>,
     ) -> io::Result<UploadReply> {
         let server = self.grpc_uri(node_id)?;
-        let upload = TestUpload {
-            domain,
-            resource,
-            identity,
-            declared_bytes: 2,
-            chunks: vec![vec![0]],
-        };
         send_upload(&server, upload).await
     }
 
