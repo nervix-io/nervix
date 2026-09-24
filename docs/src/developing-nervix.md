@@ -181,6 +181,10 @@ integration owns:
   side, `src/runtime/ingestors` starts every ingestor on one path and holds the one mapping from a
   source plan to the connector that runs it, with the host loops each source family runs under.
 
+Keep driver dependencies in their connector crates. The server's production dependencies contain
+the connector contract and integration crates; test-harness driver dependencies belong in its
+`[dev-dependencies]` when scenarios use them to provision or inspect external systems.
+
 The endpoint source is the exception to one crate per integration: it lives in the server, in
 `src/runtime/ingestors/endpoint.rs`, because it has no driver of its own. The node's HTTP and
 HTTPS listener feeds it, and the source only binds an endpoint's routes to the runtime's request
