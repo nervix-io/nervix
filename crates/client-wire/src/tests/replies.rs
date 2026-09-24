@@ -5,7 +5,8 @@ use meticulous::ResultExt as _;
 use nervix_models::{
     DomainClockPeriod, DomainClockSkew, DomainPace, DomainStatus, TransactionInspection,
     TransactionInspectionRejection, TransactionLifecycle, TransactionPosition, TransactionStatus,
-    TransactionStatusError,
+    TransactionStatusError, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
+    WasmStateGeneration, WasmStateInspection,
 };
 
 use super::{
@@ -73,6 +74,41 @@ fn a_command_outcome_carries_the_inspection_it_read_beside_its_own_binding() {
         }));
         assert_round_trips(ReplyBody::Command(Box::new(outcome)));
     }
+}
+
+#[test]
+fn a_wasm_description_carries_the_same_typed_checkpoint_facts_as_its_text() {
+    let mut outcome = command_outcome(crate::CommandDisposition::Completed {
+        already_existed: false,
+    });
+    outcome.wasm_state = Some(Box::new(WasmStateInspection {
+        resource: "guest_bundle"
+            .try_into()
+            .assured("the fixture resource name is valid"),
+        resource_version: 3,
+        file: "processors/guest.wasm".to_string(),
+        default_generation: WasmStateGeneration::FIRST,
+        reset: None,
+        reset_readiness: None,
+        recoveries: Vec::new(),
+        omitted_recoveries: 0,
+        checkpoint_counts: WasmCheckpointCounts {
+            total: 1,
+            replica_confirmed: 1,
+            ..WasmCheckpointCounts::default()
+        },
+        checkpoints: vec![WasmCheckpointInspection {
+            branch: None,
+            generation: WasmStateGeneration::FIRST,
+            committed_revision: Some(std::num::NonZeroU64::MIN),
+            latest_revision: Some(std::num::NonZeroU64::MIN),
+            stage: WasmCheckpointStage::ReplicaConfirmed,
+            required_replicas: Some(1),
+            confirmed_replicas: Some(1),
+        }],
+        omitted_checkpoints: 0,
+    }));
+    assert_round_trips(ReplyBody::Command(Box::new(outcome)));
 }
 
 #[test]

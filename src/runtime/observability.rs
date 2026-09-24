@@ -154,45 +154,6 @@ pub(crate) struct DataflowNodeTransientState {
     pub(crate) reconnect_wait_millis: Option<u64>,
 }
 
-/// How many branches of one WASM processor have their latest guest-state checkpoint at each stage.
-#[derive(Debug, Default)]
-struct WasmCheckpointProgressCounts {
-    branches: usize,
-    awaiting_local_storage: usize,
-    awaiting_replicas: usize,
-    failed: usize,
-}
-
-impl WasmCheckpointProgressCounts {
-    fn count(&mut self, progress: WasmCheckpointProgress) {
-        Self::tally(&mut self.branches);
-        match progress {
-            WasmCheckpointProgress::Committed => {}
-            WasmCheckpointProgress::Captured => Self::tally(&mut self.awaiting_local_storage),
-            WasmCheckpointProgress::LocallyDurable => Self::tally(&mut self.awaiting_replicas),
-            WasmCheckpointProgress::Failed => Self::tally(&mut self.failed),
-        }
-    }
-
-    fn tally(count: &mut usize) {
-        *count = count
-            .checked_add(1)
-            .assured("every counted branch state is held in memory, so the count fits in usize");
-    }
-
-    fn describe(&self) -> Vec<String> {
-        vec![
-            format!("state structures: {}", self.branches),
-            format!(
-                "checkpoints awaiting local storage: {}",
-                self.awaiting_local_storage
-            ),
-            format!("checkpoints awaiting replicas: {}", self.awaiting_replicas),
-            format!("failed checkpoints: {}", self.failed),
-        ]
-    }
-}
-
 impl Runtime {
     pub(in crate::runtime) fn mark_branch_aggregated_metrics_updated(
         &self,
@@ -267,13 +228,25 @@ impl Runtime {
             .describe_global_target(domain, kind, identifier)
     }
 
-    pub(crate) fn describe_wasm_processor_state_for(
+    /// Read the current generation's checkpoints without taking ownership or advancing their
+    /// durability boundary. A prior generation still held during reset or handoff is excluded.
+    pub(crate) fn inspect_wasm_processor_state_for(
         &self,
         domain: &DomainName,
         processor: impl Into<ModelName>,
-    ) -> Vec<String> {
+    ) -> Vec<WasmCheckpointInspection> {
         let processor = processor.into();
-        let mut progress = WasmCheckpointProgressCounts::default();
+        let Some(execution) = self.inner.executions.get(domain) else {
+            return Vec::new();
+        };
+        let entity = NodeRef::new(ModelKind::WasmProcessor, processor.clone());
+        let Some(scheduled) = execution.schedule.nodes.get(&entity) else {
+            return Vec::new();
+        };
+        let Some(generations) = scheduled.wasm_state_generations() else {
+            return Vec::new();
+        };
+        let mut checkpoints = Vec::new();
         for state in self.inner.replicated_wasm_processor_states.iter() {
             let placement = &state.placement;
             if &placement.domain != domain
@@ -282,9 +255,14 @@ impl Runtime {
             {
                 continue;
             }
-            progress.count(state.progress());
+            let branch = placement.branch_key.as_ref().map(BranchKey::fingerprint);
+            if generations.of_branch(branch.as_ref()) != state.generation() {
+                continue;
+            }
+            checkpoints.push(state.inspection());
         }
-        progress.describe()
+        checkpoints.sort_by_key(|checkpoint| checkpoint.branch);
+        checkpoints
     }
 
     pub(crate) fn describe_domain_statistics(&self, domain: &DomainName) -> Vec<String> {

@@ -575,6 +575,15 @@ before accepting state, then synchronize only the new placement. A reset does no
 through an unbounded cluster sweep; generation-addressed reads make them unreachable immediately,
 and the existing bounded state-store retention removes them locally.
 
+The leader forwards coordinated reset requests with a typed reason, so a guest request, operator
+request, transaction effect, and rejected-snapshot recovery keep their provenance across nodes.
+The existing remote describe exchange returns typed checkpoint facts from the execution owner:
+generation, revisions, stage, and required and confirmed replica counts. The receiver combines
+them with its scheduled binding, reset, and recovery facts, accepting only checkpoints of the
+schedule's current generation. This read does not request synchronization, take ownership, or
+change a checkpoint's completion state. A stored checkpoint whose previous replica boundary is
+unknown is reported as such rather than treated as newly confirmed.
+
 A replica acknowledges a branch-state checkpoint — WASM guest state, deduplicator and window state,
 and the branch lifecycle that names the branches — only after it has written the checkpoint to its
 own stable storage and synchronized it, never on receipt. A replica that already holds the announced

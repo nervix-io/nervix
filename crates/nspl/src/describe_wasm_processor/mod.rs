@@ -1,23 +1,55 @@
+//! `DESCRIBE WASM PROCESSOR` grammar and its optional inspection format.
+//!
+//! Layer: language.
+//! - **Owns.** Parsing a WASM processor reference and its text or JSON inspection rendering.
+//! - **Depends on.** Shared NSPL tokens, inspection format grammar and vocabulary Models.
+//! - **Must not know.** Runtime checkpoint state, sessions or output rendering.
+
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::DescribeWasmProcessor;
 
 use crate::{
-    lexer::{Identifier, Token},
+    lexer::{Identifier, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, into_parse_error, kw, lex_input,
-        suggest_from, tok, wasm_processor_ref,
+        LexedInput, ParseError, ParseFromSourceError, inspection_format, into_parse_error, kw,
+        lex_input, suggest_from, tok, wasm_processor_ref,
     },
 };
 
 pub fn describe_wasm_processor_parser<'src>()
 -> impl Parser<'src, &'src [Token], DescribeWasmProcessor, extra::Err<ParseError<'src>>> + Clone {
+    let format = kw(Identifier::Format)
+        .ignore_then(inspection_format())
+        .or_not();
     kw(Identifier::Describe)
         .ignore_then(kw(Identifier::Wasm))
         .ignore_then(kw(Identifier::Processor))
         .ignore_then(wasm_processor_ref())
-        .map(|name| DescribeWasmProcessor { name })
+        .then(format)
+        .map(|(name, format)| DescribeWasmProcessor {
+            name,
+            format: format.unwrap_or_default(),
+        })
         .then_ignore(tok(Token::Semicolon).or_not())
+}
+
+/// The optional format clause is still available after a complete name.
+pub(crate) fn describe_wasm_processor_tail(tokens: &[Token]) -> Vec<String> {
+    let format_written = tokens.iter().any(|token| {
+        matches!(
+            token,
+            Token::Word(Word::KnownWord {
+                iden: Identifier::Format,
+                ..
+            })
+        )
+    });
+    if format_written {
+        vec![";".to_string()]
+    } else {
+        vec![";".to_string(), "FORMAT".to_string()]
+    }
 }
 
 pub fn parse_describe_wasm_processor_tokens(
@@ -53,6 +85,8 @@ pub fn suggest_describe_wasm_processor(input: &str, cursor: usize) -> Vec<String
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::InspectionFormat;
+
     use super::*;
     use crate::lexer::lex;
 
@@ -69,6 +103,10 @@ mod tests {
         let tokens = to_tokens("DESCRIBE WASM PROCESSOR filter_even;");
         let parsed = parse_describe_wasm_processor_tokens(&tokens).expect("parse should succeed");
         assert_eq!(parsed.name.as_str(), "filter_even");
+        assert_eq!(parsed.format, InspectionFormat::Text);
+        let tokens = to_tokens("DESCRIBE WASM PROCESSOR filter_even FORMAT JSON;");
+        let parsed = parse_describe_wasm_processor_tokens(&tokens).expect("parse should succeed");
+        assert_eq!(parsed.format, InspectionFormat::Json);
     }
 
     #[test]

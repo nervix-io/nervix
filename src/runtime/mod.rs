@@ -84,8 +84,8 @@ use nervix_models::{
     RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
     RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
     SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmRejectedStatePolicy,
-    WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
+    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -542,8 +542,7 @@ use wasm_processor::{
 };
 use wasm_state::{
     CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,
-    ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary,
-    WasmCheckpointProgress, WasmGuestState,
+    ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary, WasmGuestState,
 };
 use wasm_state_recovery::RaisedWasmStateRecoveries;
 pub(crate) use wasm_state_recovery::WasmStateRecoveryRequest;
