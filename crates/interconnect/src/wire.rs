@@ -317,3 +317,81 @@ where
     deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
         .map_err(|error| TransportError::Decode(error.to_string()))
 }
+
+#[cfg(all(test, feature = "turmoil"))]
+#[path = "../tests/simulation/runner.rs"]
+mod simulation_runner;
+
+#[cfg(all(test, feature = "turmoil"))]
+mod simulation_checks {
+    use std::{
+        num::NonZeroUsize,
+        time::{Duration, SystemTime},
+    };
+
+    use meticulous::OptionExt as _;
+    use nervix_execution::{CpuClass, Executor, MemoryClass};
+
+    use super::{
+        RelayGrantDisposition, RelayGrantResponse, decode_rkyv, encode_rkyv,
+        simulation_runner::{HostSupervisor, SimulationBounds, SimulationConfig, Topology},
+    };
+
+    #[test]
+    fn seeded_wire_round_trips_use_the_execution_owner() {
+        for seed in 1..=12 {
+            let topology = if seed % 2 == 0 {
+                Topology::Ipv6
+            } else {
+                Topology::Ipv4
+            };
+            let configuration = SimulationConfig {
+                seed,
+                epoch: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                topology,
+                bounds: SimulationBounds {
+                    simulated_duration: Duration::from_secs(1),
+                    tick: Duration::from_millis(1),
+                    max_steps: NonZeroUsize::new(200).assured("200 is nonzero"),
+                    wall_duration: Duration::from_secs(3),
+                },
+            };
+            let result = configuration.run("wire round trip", |simulation| {
+                simulation.host("worker", || async {
+                    HostSupervisor::run(async {
+                        let executor = Executor::default();
+                        let response = RelayGrantResponse {
+                            receiver_epoch: 41,
+                            disposition: RelayGrantDisposition::BodyReceived,
+                        };
+                        let bytes = encode_rkyv(
+                            &executor,
+                            MemoryClass::Management,
+                            CpuClass::Control,
+                            4096,
+                            response.clone(),
+                        )
+                        .await?;
+                        let decoded = decode_rkyv::<RelayGrantResponse>(
+                            &executor,
+                            MemoryClass::Management,
+                            CpuClass::Control,
+                            bytes,
+                        )
+                        .await?;
+                        assert_eq!(decoded.into_value(), response);
+
+                        let snapshot = executor.snapshot();
+                        assert_eq!(snapshot.control_cpu.admitted, 2);
+                        assert_eq!(snapshot.control_cpu.completed, 2);
+                        assert_eq!(snapshot.control_cpu.running, 0);
+                        assert_eq!(snapshot.management_memory.reserved_bytes, 0);
+                        Ok::<(), super::TransportError>(())
+                    })
+                    .await
+                });
+            });
+            assert!(result.is_ok(), "seed {seed}: {result:?}");
+        }
+    }
+}
