@@ -7442,6 +7442,7 @@ name = "nervix-vm"
 version = "0.1.0-dev"
 dependencies = [
  "ahash",
+ "aho-corasick",
  "arc-swap",
  "arch-into",
  "arrow-arith",
@@ -7476,6 +7477,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "triomphe",
+ "unicode-normalization",
  "url",
  "uuid",
  "xxhash-rust",
