@@ -70,7 +70,7 @@ fn ensure_branch_schema_exists(
     models: &ModelIndex,
     branch: &CreateBranch,
 ) -> Result<(), Report<RegistryError>> {
-    let Some(Model::Schema(_)) =
+    let Some(Model::Schema(schema)) =
         models.get(&NodeRef::new(ModelKind::Schema, branch.schema.clone()))
     else {
         return Err(Report::new(RegistryError::MissingReference {
@@ -80,6 +80,16 @@ fn ensure_branch_schema_exists(
             reference: branch.schema.as_str().to_string(),
         }));
     };
+
+    for field in &schema.fields {
+        if field.ty.contains_bytes() {
+            return Err(Report::new(RegistryError::BranchFieldContainsBytes {
+                domain: domain.clone(),
+                branch: identifier.clone(),
+                field: field.name.clone(),
+            }));
+        }
+    }
 
     Ok(())
 }
@@ -1112,6 +1122,35 @@ mod tests {
             with_processor_branching,
         },
     };
+
+    #[test]
+    fn branch_schema_rejects_nested_bytes_with_field_identity() {
+        let domain = named::<DomainName>("binary_domain");
+        let branch = CreateBranch {
+            name: named("by_blob"),
+            schema: named("binary_branch_schema"),
+            ttl: "5m".to_string(),
+            eviction: None,
+        };
+        let models = ModelIndex::from_iter([branch_schema_with_types(
+            "binary_branch_schema",
+            &[(
+                "key",
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Bytes),
+                },
+            )],
+        )]);
+        let result =
+            validate_branch_model(&domain, &ModelName::from(&branch.name), &models, &branch);
+        let Err(error) = result else {
+            panic!("a BYTES element cannot become part of a branch key");
+        };
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::BranchFieldContainsBytes { field, .. } if field.as_str() == "key"
+        ));
+    }
 
     #[test]
     fn assign_stream_branching_preserves_exact_identity_and_schema() {

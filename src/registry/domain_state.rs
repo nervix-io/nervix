@@ -53,14 +53,14 @@ use crate::registry::{
         processor::{
             add_correlation_timeout_action_edges, add_processor_output_edges,
             effective_processor_output_filter_map_schema, ensure_deduplicator_key_compiles,
-            ensure_inferencer_input_mappings, ensure_lookup_key_field_exists,
-            ensure_processor_output_flush_policies, ensure_processor_output_schemas,
-            ensure_wasm_processor_output_schemas, ensure_window_processor_output_schemas,
-            parse_window_bound_duration, processor_input_schemas, validate_correlator,
+            ensure_inferencer_input_mappings, ensure_processor_output_flush_policies,
+            ensure_processor_output_schemas, ensure_wasm_processor_output_schemas,
+            ensure_window_processor_output_schemas, parse_window_bound_duration,
+            processor_input_schemas, validate_correlator,
             validate_correlator_input_sides_do_not_overlap, validate_correlator_output,
             validate_filter_where_for_internal_schemas, validate_from_where_for_internal_schemas,
             validate_generator_output, validate_inferencer_output_filter_map,
-            validate_scoped_from_where_for_internal_schemas,
+            validate_lookup_schema, validate_scoped_from_where_for_internal_schemas,
         },
         schema::{
             ensure_internal_schema_compatibility_with_policy, ensure_schema_has_fields,
@@ -319,6 +319,24 @@ impl DomainState {
                         models,
                         &generator.materialized_relay,
                     )?;
+                    let source_schema = schema_for_ack_model(
+                        domain,
+                        identifier,
+                        models,
+                        &generator.materialized_relay,
+                    )?;
+                    for field in &source_schema.fields {
+                        if field.ty.contains_bytes() {
+                            return Err(Report::new(
+                                RegistryError::GeneratorSourceFieldContainsBytes {
+                                    domain: domain.clone(),
+                                    generator: identifier.clone(),
+                                    relay: generator.materialized_relay.clone(),
+                                    field: field.name.clone(),
+                                },
+                            ));
+                        }
+                    }
                     for output in generator.output_routes.outputs() {
                         validate_generator_output(domain, identifier, models, generator, output)?;
                     }
@@ -860,7 +878,7 @@ impl DomainState {
                         models,
                         &lookup.decode_using_codec,
                     )?;
-                    ensure_lookup_key_field_exists(domain, identifier, lookup, schema)?;
+                    validate_lookup_schema(domain, identifier, lookup, schema)?;
                 }
                 Model::Deduplicator(deduplicator) => {
                     ensure_processor_output_flush_policies(

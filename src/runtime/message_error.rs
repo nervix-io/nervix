@@ -440,6 +440,7 @@ pub(super) fn invalid_output_fields(batch: &VmTypedBatch, row: usize) -> Vec<Fie
             VmTypedArray::Float64(array) => array.is_null(row),
             VmTypedArray::Boolean(array) => array.is_null(row),
             VmTypedArray::Utf8(array) => array.is_null(row),
+            VmTypedArray::Binary(array) => array.is_null(row),
             VmTypedArray::Datetime(array) => array.is_null(row),
             VmTypedArray::Generic(array) => array.is_null(row),
         };

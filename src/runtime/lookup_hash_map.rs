@@ -32,6 +32,13 @@ pub(super) enum LookupHashMapError {
         #[source]
         source: nervix_vm::CompileError,
     },
+    #[error(
+        "LOOKUP_HASH_MAP key for hash map '{lookup}' field '{field}' has unsupported BYTES type"
+    )]
+    BytesKey {
+        lookup: LookupName,
+        field: FieldName,
+    },
     #[error("failed to compile the LOOKUP_HASH_MAP key for hash map '{lookup}' field '{field}'")]
     KeyCompilation {
         lookup: LookupName,
@@ -467,6 +474,18 @@ pub(super) fn compile_lookup_hash_map_calls(
                 source,
             })
         })?;
+        if key_types
+            .iter()
+            .any(|inferred| inferred.data_type == ArrowDataType::Binary)
+        {
+            return Err(Report::new(LookupHashMapError::BytesKey {
+                lookup: call.lookup,
+                field: FieldName::parse(&call.lookup_field).verified(
+                    "the lookup field was matched to a declared schema field before key \
+                     compilation",
+                ),
+            }));
+        }
         let key_output_schema = StdArc::new(arrow_schema::Schema::new(
             key_types
                 .into_iter()
@@ -633,6 +652,38 @@ mod tests {
         .expect("filter-map should compile")
         .expect("program should exist");
         assert_eq!(program.lookup_hash_maps.len(), 2);
+
+        let binary_key = compile_processor_output_filter_map_program(
+            RuntimeCompileTarget {
+                domain: &domain("default"),
+                identifier: &named("project_titles"),
+            },
+            &[named("incoming_logs")],
+            &named("projected_titles"),
+            &construction(
+                "INHERIT ALL EXCEPT title SET title_key = lower(input.title), city = \
+                 LOOKUP_HASH_MAP(\"titles_by_normalized\", bytes_from_utf8(input.title), \
+                 \"city_name\"), region = LOOKUP_HASH_MAP(\"titles_by_normalized\", \
+                 lower(input.title), \"region_name\")",
+            ),
+            RuntimeVmSchemaPair {
+                input: input_schema.arrow_schema(),
+                input_sensitivity: VmSchemaSensitivity::default(),
+                output: output_schema.arrow_schema(),
+                output_sensitivity: VmSchemaSensitivity::default(),
+            },
+            None,
+            RuntimeVmCompileContext {
+                available_materialized_streams: &HashMap::default(),
+                available_lookups: &lookups,
+                current_branching: &ResolvedBranching::unbranched(),
+                udfs: None,
+            },
+        );
+        let Err(error) = binary_key else {
+            panic!("binary lookup keys must fail before a processor starts");
+        };
+        assert!(format!("{error:#}").contains("unsupported BYTES type"));
 
         let (hit_acks, _hit_completion) = AckSet::root();
         let (miss_acks, _miss_completion) = AckSet::root();

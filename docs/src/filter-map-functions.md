@@ -243,6 +243,33 @@ Positions count from 1.
 | `to_hex(value)` | `STRING` | Lowercase hexadecimal digits without a prefix. Integral input only; a negative value is written as its two's complement at the input's width |
 | `md5(text)` | `STRING` | Lowercase hexadecimal digest of the UTF-8 bytes |
 
+## Bytes, Encodings And Hashes
+
+`BYTES` values hold arbitrary octets, including zero and non UTF-8 bytes. These functions accept
+exact types, propagate nulls, and preserve sensitivity. An encoded or hashed sensitive input stays
+sensitive; emitting it still requires explicit leakage.
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `bytes_from_utf8(text)` | `BYTES` | The exact UTF-8 bytes of a `STRING`, with no terminator or normalization |
+| `bytes_to_utf8(bytes)` | `STRING` | Decodes UTF-8; invalid sequences fail that message |
+| `base64_encode(bytes)` | `STRING` | RFC 4648 standard alphabet with required `=` padding |
+| `base64_decode(text)` | `BYTES` | Accepts canonical padded standard base64; invalid alphabet, padding, or whitespace fails that message |
+| `hex_encode(bytes)` | `STRING` | Two lowercase hexadecimal digits per byte, without a prefix |
+| `hex_decode(text)` | `BYTES` | Accepts upper or lowercase hexadecimal pairs; odd length or any other character fails that message |
+| `sha256(bytes)` | `BYTES` | The 32 raw SHA-256 digest bytes |
+| `xxh3_64(bytes)` | `U64` | Stable XXH3 64-bit hash with seed zero |
+
+`xxh3_64` hashes the input octets in their given order and returns the algorithm's unsigned 64-bit
+number. The value is independent of host byte order and stays the same across nodes and restarts;
+if exported as bytes, its canonical byte order is big endian. It is a noncryptographic hash, so use
+`sha256` where collision resistance matters. Encoding uses SIMD-backed native libraries when the
+node's CPU supports them.
+
+Decoding failures enter the route's `ON MESSAGE ERROR` policy with `error.code = evaluation`.
+`error.operation` names the route operation, such as `set`; the diagnostic names the failed
+function without exposing its input.
+
 `lower`, `upper`, and `initcap` use Unicode case mappings, which never depend on the node's locale.
 A mapping can change a value's length: `upper('Grüßen')` is `GRÜSSEN`. A literal, a field, and a
 computed value holding the same text always convert to the same result.

@@ -254,6 +254,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   to validate in the same transaction.
 - Treat JSON, CBOR, and AVRO wire schemas as distinct entity kinds. Their names may coincide, so
   every create, alter, show, drop, and codec reference must include the exact format.
+- Use `BYTES` for arbitrary octets, including `ARRAY` and `VEC` elements. Keep branch key schemas
+  free of `BYTES`. JSON and CBOR wire `BYTES` fields carry padded standard base64 text; AVRO uses
+  native bytes. Convert explicitly with `bytes_from_utf8`, `bytes_to_utf8`, `base64_encode`,
+  `base64_decode`, `hex_encode`, and `hex_decode`; `sha256` returns raw digest bytes and `xxh3_64`
+  returns a deterministic `U64`. Encoding and hashing keep input sensitivity.
 - Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
   STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
   the same format-qualified ALTER form owns field evolution.

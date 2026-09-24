@@ -27,11 +27,13 @@ macro_rules! with_typed_registers {
             Float64 => float64, set_float64, as_float64, Float64Array, DataType::Float64;
             Boolean => boolean, set_boolean, as_boolean, BooleanArray, DataType::Boolean;
             Utf8 => utf8, set_utf8, as_utf8, StringArray, DataType::Utf8;
+            Binary => binary, set_binary, as_binary, BinaryArray, DataType::Binary;
         }
     };
 }
 
 mod batch;
+mod bytes;
 mod compiler;
 mod count;
 mod datetime;

@@ -250,6 +250,7 @@ impl<'a> UnitCounts<'a> {
             | TypedArray::Float64(_)
             | TypedArray::Boolean(_)
             | TypedArray::Utf8(_)
+            | TypedArray::Binary(_)
             | TypedArray::Datetime(_)
             | TypedArray::Generic(_)
             | TypedArray::Uninitialized { .. } => None,

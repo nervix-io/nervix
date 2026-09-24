@@ -22,9 +22,10 @@ use arrow_arith::{
     boolean::{and_kleene, is_null, not, or_kleene},
 };
 use arrow_array::{
-    Array, ArrayRef, ArrowNumericType, BooleanArray, Datum, FixedSizeListArray, Float32Array,
-    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray, PrimitiveArray,
-    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, ArrowNumericType, BinaryArray, BooleanArray, Datum, FixedSizeListArray,
+    Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray,
+    PrimitiveArray, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
     builder::{BooleanBuilder, Int64Builder, PrimitiveBuilder, StringBuilder},
     new_null_array,
     types::{
@@ -57,6 +58,7 @@ use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
 
 use crate::{
     batch::{TypedArray, TypedBatch},
+    bytes,
     count::{CountOperand, SignedCount},
     datetime::{self, FormattedColumn, TextFailure, UnitCounts, UnresolvedLocalTime},
     error::{
@@ -1636,6 +1638,12 @@ impl Instruction {
                 op,
                 "utf8 comparison",
             )?)),
+            (RegisterType::Binary, _) => Ok(TypedArray::Boolean(compare_with_arrow_ord(
+                &registers.operand::<BinaryArray>(left)?,
+                &registers.operand::<BinaryArray>(right)?,
+                op,
+                "binary comparison",
+            )?)),
             (RegisterType::Datetime, _) => Ok(TypedArray::Boolean(compare_with_arrow_ord(
                 &registers.operand::<TimestampNanosecondArray>(left)?,
                 &registers.operand::<TimestampNanosecondArray>(right)?,
@@ -2098,6 +2106,44 @@ fn execute_builtin(
             span,
         ))),
         BuiltinLowering::Md5 => Ok(TypedArray::Utf8(execute_md5(as_utf8(&column(0)?)?))),
+        BuiltinLowering::BytesFromUtf8 => {
+            Ok(TypedArray::Binary(bytes::from_utf8(as_utf8(&column(0)?)?)))
+        }
+        BuiltinLowering::BytesToUtf8 => Ok(TypedArray::Utf8(bytes::to_utf8(
+            registers.column::<BinaryArray>(inputs[0])?,
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::Base64Encode => Ok(TypedArray::Utf8(bytes::encode_base64(
+            registers.column::<BinaryArray>(inputs[0])?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::Base64Decode => Ok(TypedArray::Binary(bytes::decode_base64(
+            as_utf8(&column(0)?)?,
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::HexEncode => Ok(TypedArray::Utf8(bytes::encode_hex(
+            registers.column::<BinaryArray>(inputs[0])?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::HexDecode => Ok(TypedArray::Binary(bytes::decode_hex(
+            as_utf8(&column(0)?)?,
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::Sha256 => Ok(TypedArray::Binary(bytes::sha256(
+            registers.column::<BinaryArray>(inputs[0])?,
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::Xxh3_64 => Ok(TypedArray::UInt64(bytes::xxh3_64(
+            registers.column::<BinaryArray>(inputs[0])?,
+        ))),
         BuiltinLowering::Pow => execute_binary_math(
             &column(0)?,
             &column(1)?,
@@ -2949,6 +2995,7 @@ fn execute_abs_typed(
         ))),
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
@@ -3055,6 +3102,7 @@ fn execute_rounding(
         ))),
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => Err(RuntimeError::InvalidBatch {
@@ -3122,6 +3170,7 @@ fn execute_round_to_digits(
         )),
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
@@ -3182,6 +3231,7 @@ fn execute_sign(input: &TypedArray, row_errors: &mut RowErrors, span: Span) -> O
         }
         TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
@@ -3220,6 +3270,7 @@ fn execute_float_classification(input: &TypedArray, class: FloatClass) -> Option
         | TypedArray::Int64(_)
         | TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
@@ -3279,6 +3330,7 @@ fn execute_bitwise_not(input: &TypedArray) -> Option<TypedArray> {
         | TypedArray::Float64(_)
         | TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
@@ -3301,6 +3353,7 @@ fn execute_bit_count(input: &TypedArray) -> Option<TypedArray> {
         | TypedArray::Float64(_)
         | TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
@@ -3346,6 +3399,7 @@ fn execute_shift(
         | TypedArray::Float64(_)
         | TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => return None,
@@ -3987,6 +4041,7 @@ fn execute_to_hex(input: &TypedArray) -> Result<StringArray, RuntimeError> {
         | TypedArray::Float64(_)
         | TypedArray::Boolean(_)
         | TypedArray::Utf8(_)
+        | TypedArray::Binary(_)
         | TypedArray::Datetime(_)
         | TypedArray::Generic(_)
         | TypedArray::Uninitialized { .. } => {

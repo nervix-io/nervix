@@ -15,7 +15,8 @@ enum ProcessorTypeKind : ubyte {
   F32,
   F64,
   Array,
-  Vec
+  Vec,
+  Bytes
 }
 
 table ProcessorType {
@@ -113,5 +114,5 @@ table Message {
 }
 
 root_type Message;
-file_identifier "NVWX";
-file_extension "nvwx";
+file_identifier "NVWY";
+file_extension "nvwy";

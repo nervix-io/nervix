@@ -191,6 +191,22 @@ fn conformance_error(rows: &SubscriptionRows, schema: &RowSchema) -> RowConforma
 }
 
 #[test]
+fn bytes_cells_round_trip_as_borrowed_binary_values() {
+    let rows = unbranched_rows(&[
+        |cells| cells.push_bytes(&[0, 255]),
+        |cells| cells.push_bytes(&[]),
+    ]);
+    let schema = unbranched_schema(vec![field("raw", ParseAsType::Bytes)]);
+    rows.batch()
+        .conform(&schema)
+        .assured("the binary cells match their schema");
+    let first = rows.batch().row(0).assured("the first row exists");
+    assert_eq!(first.get(0), Some(CellView::Bytes(&[0, 255])));
+    let second = rows.batch().row(1).assured("the second row exists");
+    assert_eq!(second.get(0), Some(CellView::Bytes(&[])));
+}
+
+#[test]
 fn branch_identity_must_match_the_schema() {
     let rows = unbranched_rows(&[|cells| {
         cells.push_u8(1)?;
@@ -541,7 +557,7 @@ fn malformed_cells_are_refused() {
         let inner = wire::Cell::create(
             builder,
             &wire::CellArgs {
-                value_type: wire::CellValue(17),
+                value_type: wire::CellValue(18),
                 value: Some(inner.as_union_value()),
             },
         );
@@ -564,7 +580,7 @@ fn malformed_cells_are_refused() {
         decode_error(ServerMessage::decode(&raw_server(bytes))),
         WireDecodeError::UnknownUnionVariant {
             field: "Cell.value",
-            discriminant: 17,
+            discriminant: 18,
         }
     );
 }
@@ -905,14 +921,14 @@ fn malformed_schemas_are_refused() {
     );
 
     let bytes = schema_reply(
-        |builder| scalar_type(builder, Some(wire::ScalarType(13))),
+        |builder| scalar_type(builder, Some(wire::ScalarType(14))),
         None,
     );
     assert_eq!(
         decode_error(ServerMessage::decode(&raw_server(bytes))),
         WireDecodeError::UnknownEnumValue {
             field: "ScalarFieldType.scalar",
-            value: 13,
+            value: 14,
         }
     );
 

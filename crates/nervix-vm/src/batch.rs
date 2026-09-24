@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
-    Int64Array, RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array, new_null_array,
+    Array, ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array,
+    Int32Array, Int64Array, RecordBatch, RecordBatchOptions, StringArray, TimestampNanosecondArray,
+    UInt8Array, UInt16Array, UInt32Array, UInt64Array, new_null_array,
 };
 use arrow_schema::{DataType, Schema, TimeUnit};
 

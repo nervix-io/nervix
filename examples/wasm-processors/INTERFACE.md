@@ -95,7 +95,7 @@ Clearing the guest's own fields is an ordinary application-state mutation that t
 Each input or output payload is one size-prefixed FlatBuffer whose root is the
 `Message` union in
 [`nervix_wasm.fbs`](../../crates/nervix-wasm-protocol/schema/nervix_wasm.fbs).
-Every buffer carries the `NVWX` file identifier. The ABI function's size
+Every buffer carries the `NVWY` file identifier. The ABI function's size
 argument or return value must agree with the internal FlatBuffers size prefix.
 Arrow IPC values are FlatBuffers byte vectors and are read as borrowed slices
 without deserializing or copying them. Crossing the WebAssembly linear-memory

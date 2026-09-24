@@ -12,9 +12,9 @@
 use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use arrow_array::{
-    Array, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array, Int16Array,
-    Int32Array, Int64Array, ListArray, RecordBatch, StringArray, TimestampNanosecondArray,
-    UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
+    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, StringArray,
+    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow_schema::DataType as ArrowDataType;
 use error_stack::{Report, ResultExt as _};
@@ -440,6 +440,7 @@ enum ArrowColumn<'a> {
     F64(&'a Float64Array),
     Bool(&'a BooleanArray),
     String(&'a StringArray),
+    Bytes(&'a BinaryArray),
     Datetime(&'a TimestampNanosecondArray),
     FixedList {
         array: &'a FixedSizeListArray,
@@ -488,6 +489,7 @@ impl<'a> ArrowColumn<'a> {
             ParseAsType::F64 => Self::F64(downcast(array)),
             ParseAsType::Bool => Self::Bool(downcast(array)),
             ParseAsType::String => Self::String(downcast(array)),
+            ParseAsType::Bytes => Self::Bytes(downcast(array)),
             ParseAsType::Datetime => Self::Datetime(downcast(array)),
             ParseAsType::Array { element, .. } => {
                 let array: &FixedSizeListArray = downcast(array);
@@ -553,6 +555,7 @@ impl<'a> ArrowColumn<'a> {
             Self::F64(array) => array.is_null(index),
             Self::Bool(array) => array.is_null(index),
             Self::String(array) => array.is_null(index),
+            Self::Bytes(array) => array.is_null(index),
             Self::Datetime(array) => array.is_null(index),
             Self::FixedList { array, .. } => array.is_null(index),
             Self::List { array, .. } => array.is_null(index),
@@ -603,6 +606,7 @@ impl<'a> ArrowColumn<'a> {
             Self::F64(array) => writer.push_f64(array.value(index)),
             Self::Bool(array) => writer.push_bool(array.value(index)),
             Self::String(array) => writer.push_string(array.value(index)),
+            Self::Bytes(array) => writer.push_bytes(array.value(index)),
             Self::Datetime(array) => {
                 writer.push_datetime(Timestamp::from_unix_nanos(array.value(index)))
             }
@@ -1152,8 +1156,8 @@ mod tests {
     };
 
     use super::{
-        SubscriptionBranchSchema, SubscriptionRowEncoder, SubscriptionRowEncodingError,
-        SubscriptionRowOpening, SubscriptionRowSelection, subscription_row_schema,
+        SubscriptionBranchSchema, SubscriptionRowEncoder, SubscriptionRowOpening,
+        SubscriptionRowSelection, subscription_row_schema,
     };
     use crate::{
         runtime::BranchKey,
@@ -1721,36 +1725,46 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_arrow_columns_are_rejected_before_encoding() {
-        let arrow_schema = StdArc::new(ArrowSchema::new(vec![ArrowField::new(
-            "payload",
-            ArrowDataType::Binary,
-            false,
-        )]));
-        let binary: ArrayRef = StdArc::new(BinaryArray::from(vec![b"payload".as_slice()]));
-        let record_batch = RecordBatch::try_new(arrow_schema.clone(), vec![binary])
+    fn binary_columns_encode_directly_and_sensitive_values_are_redacted() {
+        let arrow_schema = StdArc::new(ArrowSchema::new(vec![
+            ArrowField::new("payload", ArrowDataType::Binary, false),
+            ArrowField::new("secret", ArrowDataType::Binary, false),
+        ]));
+        let payload: ArrayRef = StdArc::new(BinaryArray::from(vec![&[0, 255][..], &[][..]]));
+        let secret: ArrayRef = StdArc::new(BinaryArray::from(vec![&[1][..], &[2][..]]));
+        let record_batch = RecordBatch::try_new(arrow_schema.clone(), vec![payload, secret])
             .assured("the Arrow column follows its Arrow schema");
         let runtime_batch = RuntimeRecordBatch::from_record_batch(arrow_schema, record_batch)
             .assured("the wrapper accepts an exactly matching Arrow schema");
         let row_schema = nervix_client_wire::RowSchema {
-            fields: vec![field("payload", ParseAsType::String, false, false)],
+            fields: vec![
+                field("payload", ParseAsType::Bytes, false, false),
+                field("secret", ParseAsType::Bytes, false, true),
+            ],
             branch: None,
         };
-        let (_, encoder) = open(row_schema, 8);
-        let error = encoder
+        let (_, encoder) = open(row_schema.clone(), 8);
+        let frames = encoder
             .encode(
                 runtime_batch.batch(),
-                &[None],
+                &[None, None],
                 SubscriptionRowSelection::All,
             )
-            .expect_err("binary is not a current subscription row type");
-
-        assert_eq!(
-            error.current_context(),
-            &SubscriptionRowEncodingError::UnsupportedArrowType {
-                field: named("payload"),
-                data_type: ArrowDataType::Binary,
-            }
+            .assured("binary Arrow columns encode directly");
+        let rows = rows_from_frame(
+            frames
+                .into_iter()
+                .next()
+                .assured("one frame holds two rows"),
         );
+        rows.batch()
+            .conform(&row_schema)
+            .assured("bytes cells match their schema");
+        let first = rows.batch().row(0).assured("the first row exists");
+        assert_eq!(first.get(0), Some(CellView::Bytes(&[0, 255])));
+        assert_eq!(first.get(1), Some(CellView::Redacted));
+        let second = rows.batch().row(1).assured("the second row exists");
+        assert_eq!(second.get(0), Some(CellView::Bytes(&[])));
+        assert_eq!(second.get(1), Some(CellView::Redacted));
     }
 }

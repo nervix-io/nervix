@@ -513,6 +513,7 @@ fn json_type_matches_parse_as(
             *ty == ParseAsType::String
                 || encodes_datetime_as_rfc3339 && *ty == ParseAsType::Datetime
         }
+        JsonType::Bytes => *ty == ParseAsType::Bytes,
         JsonType::Number => *ty == ParseAsType::F32 || *ty == ParseAsType::F64,
         JsonType::Integer => parse_as_is_integer(ty),
         JsonType::Boolean => *ty == ParseAsType::Bool,
@@ -548,13 +549,11 @@ fn avro_type_matches_parse_as(
             *ty == ParseAsType::String
                 || encodes_datetime_as_rfc3339 && *ty == ParseAsType::Datetime
         }
+        AvroType::Bytes => *ty == ParseAsType::Bytes,
         AvroType::Array => parse_as_is_list(ty),
-        AvroType::Null
-        | AvroType::Bytes
-        | AvroType::Record
-        | AvroType::Enum
-        | AvroType::Map
-        | AvroType::Fixed => false,
+        AvroType::Null | AvroType::Record | AvroType::Enum | AvroType::Map | AvroType::Fixed => {
+            false
+        }
     }
 }
 
@@ -951,6 +950,36 @@ mod tests {
             rfc3339_field: None,
         },
         CodecTypeExpectation::Accepted
+    )]
+    #[case::accepts_json_bytes_for_internal_bytes(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Bytes,
+            wire: JsonType::Bytes,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::rejects_json_text_for_internal_bytes(
+        CodecTypeCase::Json {
+            internal: ParseAsType::Bytes,
+            wire: JsonType::String,
+            rfc3339_field: None,
+        },
+        CodecTypeExpectation::IncompatibleSchema
+    )]
+    #[case::accepts_avro_bytes_for_internal_bytes(
+        CodecTypeCase::Avro {
+            internal: ParseAsType::Bytes,
+            wire: nervix_models::AvroType::Bytes,
+        },
+        CodecTypeExpectation::Accepted
+    )]
+    #[case::rejects_avro_bytes_for_internal_text(
+        CodecTypeCase::Avro {
+            internal: ParseAsType::String,
+            wire: nervix_models::AvroType::Bytes,
+        },
+        CodecTypeExpectation::IncompatibleSchema
     )]
     #[case::rejects_avro_long_internal_i32_coercion(
         CodecTypeCase::Avro {

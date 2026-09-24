@@ -824,6 +824,7 @@ fn parse_as_to_dataflow_label(ty: &ParseAsType) -> String {
         ParseAsType::I64 => "I64".to_string(),
         ParseAsType::Bool => "BOOL".to_string(),
         ParseAsType::String => "STRING".to_string(),
+        ParseAsType::Bytes => "BYTES".to_string(),
         ParseAsType::Datetime => "DATETIME".to_string(),
         ParseAsType::F32 => "F32".to_string(),
         ParseAsType::F64 => "F64".to_string(),

@@ -83,6 +83,17 @@ pub(in crate::registry) fn add_materialized_state_dependency_edges(
             ModelKind::Relay,
         )?;
         ensure_stream_is_materialized(domain, identifier, models, &dependency.relay)?;
+        let schema = schema_for_ack_model(domain, identifier, models, &dependency.relay)?;
+        for field in &schema.fields {
+            if field.ty.contains_bytes() {
+                return Err(Report::new(RegistryError::MaterializedFieldContainsBytes {
+                    domain: domain.clone(),
+                    node: identifier.clone(),
+                    relay: dependency.relay.clone(),
+                    field: field.name.clone(),
+                }));
+            }
+        }
         validate_materialized_state_default(domain, identifier, models, dependency)?;
         graph.add_edge(relay, source, EdgeKind::MaterializedState);
     }

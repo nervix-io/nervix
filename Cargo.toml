@@ -74,6 +74,7 @@ arrow-select = { workspace = true }
 async-tar = { workspace = true, features = ["runtime-tokio"] }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+base64-simd = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chitchat = { workspace = true }
@@ -361,6 +362,7 @@ aws-sdk-sqs = { version = "1.76", default-features = false, features = [
 ] }
 aws-smithy-http-client = "1.1.12"
 base64 = "0.22"
+base64-simd = "0.8"
 bb8 = "0.9.1"
 blake3 = "1"
 bolero = "0.13"
@@ -379,6 +381,7 @@ criterion = "0.5"
 cucumber = "0.22"
 dashmap = "6"
 error-stack = "0.5"
+faster-hex = "0.10"
 fastrand = "2.4.1"
 fjall = "3.0.4"
 flatbuffers = "25.12.19"
@@ -555,6 +558,7 @@ sentry-types = "0.48.5"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0.149"
+sha2 = "0.10"
 shuttle = "0.9"
 shuttle-dashmap = { package = "shuttle-dashmap", version = "6" }
 shuttle-parking-lot = { package = "shuttle-parking_lot", version = "0.12" }
@@ -583,6 +587,7 @@ thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tikv-jemallocator = { version = "0.7.0", features = ["stats"] }
 tokio = "1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # 0.14 adds explicit AWS-LC support; the previous 0.13 line depended on Ring.
 tokio-rustls = "0.26"
 tokio-stream = "0.1"

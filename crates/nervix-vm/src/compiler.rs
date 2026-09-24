@@ -2658,6 +2658,14 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Log
         | FunctionName::Lpad
         | FunctionName::Md5
+        | FunctionName::BytesFromUtf8
+        | FunctionName::BytesToUtf8
+        | FunctionName::Base64Encode
+        | FunctionName::Base64Decode
+        | FunctionName::HexEncode
+        | FunctionName::HexDecode
+        | FunctionName::Sha256
+        | FunctionName::Xxh3_64
         | FunctionName::Pow
         | FunctionName::RegexpLike
         | FunctionName::RegexpReplace
@@ -4113,6 +4121,13 @@ mod tests {
         false,
         SensitivityExpectation::Rejected
     )]
+    #[case::rejects_encoded_and_hashed_sensitive_value_in_normal_output(
+        "SET public_value = hex_encode(sha256(bytes_from_utf8(input.secret)))",
+        "public_value",
+        false,
+        false,
+        SensitivityExpectation::Rejected
+    )]
     #[case::accepts_sensitive_value_in_sensitive_output(
         "SET copy = input.secret",
         "copy",
@@ -4780,6 +4795,22 @@ mod tests {
         )]));
 
         let error = compile_program(&program, schema).expect_err("must fail");
+        assert_eq!(error.code, "unsupported_cast");
+    }
+
+    #[test]
+    fn bytes_and_text_require_explicit_conversion_functions() {
+        let program = parse_program("SET raw = input.text AS BYTES")
+            .assured("the cast expression uses valid NSPL syntax");
+        let input = schema(vec![Field::new("text", DataType::Utf8, false)]);
+        let result = compile_program_with_output_fields(
+            &program,
+            input,
+            vec![Field::new("raw", DataType::Binary, false)],
+        );
+        let Err(error) = result else {
+            panic!("implicit text to BYTES conversion must fail");
+        };
         assert_eq!(error.code, "unsupported_cast");
     }
 

@@ -136,6 +136,7 @@ pub(in crate::registry) fn arrow_data_type_for_parse_as(ty: &ParseAsType) -> Arr
         ParseAsType::I64 => ArrowDataType::Int64,
         ParseAsType::Bool => ArrowDataType::Boolean,
         ParseAsType::String => ArrowDataType::Utf8,
+        ParseAsType::Bytes => ArrowDataType::Binary,
         ParseAsType::Datetime => {
             ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into()))
         }

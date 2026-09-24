@@ -163,6 +163,7 @@ pub enum ProcessorType {
     I64,
     Bool,
     String,
+    Bytes,
     Datetime,
     F32,
     F64,
@@ -611,6 +612,11 @@ fn build_processor_type<'a, A: Allocator + 'a>(
             element: None,
             array_len: 0,
         },
+        ProcessorType::Bytes => wire::ProcessorTypeArgs {
+            kind: wire::ProcessorTypeKind::Bytes,
+            element: None,
+            array_len: 0,
+        },
         ProcessorType::Datetime => wire::ProcessorTypeArgs {
             kind: wire::ProcessorTypeKind::Datetime,
             element: None,
@@ -804,6 +810,7 @@ fn decode_processor_type(ty: wire::ProcessorType<'_>) -> Result<ProcessorType, P
         wire::ProcessorTypeKind::I64 => ProcessorType::I64,
         wire::ProcessorTypeKind::Bool => ProcessorType::Bool,
         wire::ProcessorTypeKind::String => ProcessorType::String,
+        wire::ProcessorTypeKind::Bytes => ProcessorType::Bytes,
         wire::ProcessorTypeKind::Datetime => ProcessorType::Datetime,
         wire::ProcessorTypeKind::F32 => ProcessorType::F32,
         wire::ProcessorTypeKind::F64 => ProcessorType::F64,
@@ -1020,6 +1027,25 @@ mod tests {
             },
             output_schemas: Vec::new(),
         }
+    }
+
+    #[test]
+    fn bytes_processor_types_round_trip_in_branch_metadata() {
+        let mut init = branch_init();
+        init.input_schema.fields[0].ty = ProcessorType::Vec {
+            element: Box::new(ProcessorType::Bytes),
+        };
+        init.output_schemas.push(ProcessorSchema {
+            name: "binary_output".to_string(),
+            fields: vec![ProcessorField {
+                name: "payload".to_string(),
+                ty: ProcessorType::Bytes,
+                optional: true,
+            }],
+        });
+        let decoded = BranchInit::decode(&init.encode())
+            .verified("the branch metadata was just encoded with current BYTES types");
+        assert_eq!(decoded, init);
     }
 
     #[test]

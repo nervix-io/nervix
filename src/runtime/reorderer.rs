@@ -86,6 +86,13 @@ pub(super) fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPa
                 ReorderKeyPart::Null
             }
         }
+        VmTypedArray::Binary(array) => {
+            if array.is_valid(row) {
+                ReorderKeyPart::Bytes(array.value(row).to_vec())
+            } else {
+                ReorderKeyPart::Null
+            }
+        }
         VmTypedArray::Datetime(array) => {
             if array.is_valid(row) {
                 ReorderKeyPart::Datetime(array.value(row))
@@ -177,6 +184,7 @@ pub(super) async fn flush_branch_reorderer_output(
 
 #[cfg(test)]
 mod tests {
+    use arrow_array::BinaryArray;
     use nervix_models::{ParseAsType, Timestamp};
     use tokio::time::{Duration, timeout};
     use triomphe::Arc;
@@ -187,6 +195,21 @@ mod tests {
         runtime_ack::{AckOutcome, AckSet},
         runtime_schema::{RuntimeRecordMetadata, RuntimeValue, test_runtime_row},
     };
+
+    #[test]
+    fn binary_sort_keys_use_octet_order_and_keep_null_distinct() {
+        let values = VmTypedArray::Binary(BinaryArray::from(vec![
+            Some(&[0, 255][..]),
+            Some(&[1][..]),
+            None,
+        ]));
+        assert_eq!(
+            reorder_key_part(&values, 0),
+            ReorderKeyPart::Bytes(vec![0, 255])
+        );
+        assert_eq!(reorder_key_part(&values, 2), ReorderKeyPart::Null);
+        assert!(reorder_key_part(&values, 0) < reorder_key_part(&values, 1));
+    }
     #[tokio::test]
     async fn reorderer_buffer_applies_one_columnar_permutation_to_batches_and_sidecars() {
         /// One row fed into the reorderer buffer: the sequence it carries, the watermark it arrived

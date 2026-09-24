@@ -183,6 +183,7 @@ pub(crate) enum ScalarType {
     F64,
     Bool,
     String,
+    Bytes,
     Datetime,
 }
 
@@ -199,6 +200,7 @@ wire_enum!(ALL_SCALAR_TYPES: ScalarType => wire::ScalarType {
     F64,
     Bool,
     String,
+    Bytes,
     Datetime,
 });
 
@@ -229,6 +231,7 @@ fn encode_field_type<'fbb>(
         ParseAsType::F64 => ScalarType::F64.encode(encoder),
         ParseAsType::Bool => ScalarType::Bool.encode(encoder),
         ParseAsType::String => ScalarType::String.encode(encoder),
+        ParseAsType::Bytes => ScalarType::Bytes.encode(encoder),
         ParseAsType::Datetime => ScalarType::Datetime.encode(encoder),
         ParseAsType::Array { element, len } => {
             let element = encode_field_type(encoder, element, element_depth)?;
@@ -292,6 +295,7 @@ fn decode_field_type(
             ScalarType::F64 => ParseAsType::F64,
             ScalarType::Bool => ParseAsType::Bool,
             ScalarType::String => ParseAsType::String,
+            ScalarType::Bytes => ParseAsType::Bytes,
             ScalarType::Datetime => ParseAsType::Datetime,
         };
         return Ok(ty);
@@ -455,6 +459,17 @@ impl<'e, 'fbb> CellWriter<'e, 'fbb> {
             &wire::StringCellArgs { value: Some(value) },
         );
         self.push_cell(wire::CellValue::StringCell, cell);
+        Ok(())
+    }
+
+    pub fn push_bytes(&mut self, value: &[u8]) -> Result<(), Report<WireEncodeError>> {
+        self.admit(value.len())?;
+        let value = self.encoder.bytes("BytesCell.value", value)?;
+        let cell = wire::BytesCell::create(
+            self.encoder.fbb(),
+            &wire::BytesCellArgs { value: Some(value) },
+        );
+        self.push_cell(wire::CellValue::BytesCell, cell);
         Ok(())
     }
 
@@ -678,6 +693,9 @@ impl<'a> CellsView<'a> {
                     let value = checked_variant(cell.value_as_string_cell()).value();
                     decoder.check_text("StringCell.value", value)?;
                 }
+                wire::CellValue::BytesCell => {
+                    let _verified_value = checked_variant(cell.value_as_bytes_cell()).value();
+                }
                 wire::CellValue::ListCell => {
                     let elements = checked_variant(cell.value_as_list_cell()).elements();
                     Self::check(decoder, "ListCell.elements", elements)?;
@@ -763,6 +781,7 @@ pub enum CellView<'a> {
     F64(f64),
     Bool(bool),
     String(&'a str),
+    Bytes(&'a [u8]),
     Datetime(Timestamp),
     List(CellsView<'a>),
 }
@@ -808,6 +827,9 @@ impl<'a> CellView<'a> {
             wire::CellValue::StringCell => {
                 Self::String(checked_variant(cell.value_as_string_cell()).value())
             }
+            wire::CellValue::BytesCell => {
+                Self::Bytes(checked_variant(cell.value_as_bytes_cell()).value().bytes())
+            }
             wire::CellValue::DatetimeCell => Self::Datetime(Timestamp::from_unix_nanos(
                 checked_variant(cell.value_as_datetime_cell()).unix_nanos(),
             )),
@@ -836,6 +858,7 @@ impl<'a> CellView<'a> {
             Self::F64(_) => "F64",
             Self::Bool(_) => "BOOL",
             Self::String(_) => "STRING",
+            Self::Bytes(_) => "BYTES",
             Self::Datetime(_) => "DATETIME",
             Self::List(_) => "LIST",
         }
@@ -893,6 +916,7 @@ impl<'a> CellView<'a> {
             | (ParseAsType::F64, Self::F64(_))
             | (ParseAsType::Bool, Self::Bool(_))
             | (ParseAsType::String, Self::String(_))
+            | (ParseAsType::Bytes, Self::Bytes(_))
             | (ParseAsType::Datetime, Self::Datetime(_)) => return Ok(()),
             (ParseAsType::Array { element, len }, Self::List(elements)) => {
                 let expected = usize::try_from(len.get())
@@ -942,6 +966,7 @@ impl PartialEq for CellView<'_> {
             (Self::F64(left), Self::F64(right)) => left.to_bits() == right.to_bits(),
             (Self::Bool(left), Self::Bool(right)) => left == right,
             (Self::String(left), Self::String(right)) => left == right,
+            (Self::Bytes(left), Self::Bytes(right)) => left == right,
             (Self::Datetime(left), Self::Datetime(right)) => left == right,
             (Self::List(left), Self::List(right)) => left == right,
             _ => false,

@@ -333,6 +333,14 @@ pub enum BuiltinLowering {
     Log,
     Lpad,
     Md5,
+    BytesFromUtf8,
+    BytesToUtf8,
+    Base64Encode,
+    Base64Decode,
+    HexEncode,
+    HexDecode,
+    Sha256,
+    Xxh3_64,
     Pow,
     /// A regular-expression builtin, with the pattern it was lowered with: compiled once when it
     /// was a constant, or read from the pattern argument on every row.
@@ -525,6 +533,17 @@ impl CastDescriptor {
         target_type: &DataType,
         span: impl Into<std::ops::Range<usize>>,
     ) -> Result<(), CompileError> {
+        if (input_type == &DataType::Binary || target_type == &DataType::Binary)
+            && input_type != target_type
+        {
+            return Err(CompileError {
+                code: "unsupported_cast",
+                message: "BYTES conversions require bytes_from_utf8, bytes_to_utf8, base64 or hex \
+                          functions"
+                    .to_string(),
+                span: span.into().into(),
+            });
+        }
         if is_supported_type(input_type) && is_supported_type(target_type) {
             Ok(())
         } else {
@@ -716,6 +735,8 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::Initcap
         | BuiltinLowering::Left
         | BuiltinLowering::Md5
+        | BuiltinLowering::BytesFromUtf8
+        | BuiltinLowering::Xxh3_64
         | BuiltinLowering::Replace
         | BuiltinLowering::Reverse
         | BuiltinLowering::Right
@@ -747,6 +768,12 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         // Transcendental functions, pattern matching and UUID generation cost far more per row
         // than narrowing.
         BuiltinLowering::UuidV7
+        | BuiltinLowering::Base64Encode
+        | BuiltinLowering::HexEncode
+        | BuiltinLowering::Sha256
+        | BuiltinLowering::BytesToUtf8
+        | BuiltinLowering::Base64Decode
+        | BuiltinLowering::HexDecode
         | BuiltinLowering::Acos
         | BuiltinLowering::Asin
         | BuiltinLowering::Atan
@@ -805,6 +832,14 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Log => BuiltinLowering::Log,
         FunctionName::Lpad => BuiltinLowering::Lpad,
         FunctionName::Md5 => BuiltinLowering::Md5,
+        FunctionName::BytesFromUtf8 => BuiltinLowering::BytesFromUtf8,
+        FunctionName::BytesToUtf8 => BuiltinLowering::BytesToUtf8,
+        FunctionName::Base64Encode => BuiltinLowering::Base64Encode,
+        FunctionName::Base64Decode => BuiltinLowering::Base64Decode,
+        FunctionName::HexEncode => BuiltinLowering::HexEncode,
+        FunctionName::HexDecode => BuiltinLowering::HexDecode,
+        FunctionName::Sha256 => BuiltinLowering::Sha256,
+        FunctionName::Xxh3_64 => BuiltinLowering::Xxh3_64,
         FunctionName::Pow => BuiltinLowering::Pow,
         FunctionName::RegexpLike => {
             BuiltinLowering::Regexp(RegexpCall::reading_pattern_argument(RegexpFunction::Like))
@@ -902,6 +937,8 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Initcap
         | BuiltinLowering::Left
         | BuiltinLowering::Md5
+        | BuiltinLowering::BytesFromUtf8
+        | BuiltinLowering::Xxh3_64
         | BuiltinLowering::Replace
         | BuiltinLowering::Reverse
         | BuiltinLowering::Right
@@ -986,6 +1023,18 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: true,
             null_propagation: NullPropagation::Strict,
         },
+        BuiltinLowering::BytesToUtf8
+        | BuiltinLowering::Base64Decode
+        | BuiltinLowering::HexDecode
+        | BuiltinLowering::Base64Encode
+        | BuiltinLowering::HexEncode
+        | BuiltinLowering::Sha256 => OperationSemantics {
+            volatility: Volatility::Immutable,
+            dependency_scope: DependencyScope::Constant,
+            has_side_effects: false,
+            can_error: true,
+            null_propagation: NullPropagation::Strict,
+        },
     }
 }
 
@@ -1019,6 +1068,64 @@ fn builtin_output_type(
     span: std::ops::Range<usize>,
 ) -> Result<DataType, CompileError> {
     match lowering {
+        BuiltinLowering::BytesFromUtf8
+        | BuiltinLowering::Base64Decode
+        | BuiltinLowering::HexDecode => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            require_utf8_arg(
+                function,
+                require_supported_register_type(function, &arg_types[0], span.clone())?,
+                span,
+            )?;
+            Ok(DataType::Binary)
+        }
+        BuiltinLowering::BytesToUtf8
+        | BuiltinLowering::Base64Encode
+        | BuiltinLowering::HexEncode => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            if input != RegisterType::Binary {
+                return Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires BYTES input, found {input}",
+                        function.as_str()
+                    ),
+                    span: span.into(),
+                });
+            }
+            Ok(DataType::Utf8)
+        }
+        BuiltinLowering::Sha256 => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            if input != RegisterType::Binary {
+                return Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires BYTES input, found {input}",
+                        function.as_str()
+                    ),
+                    span: span.into(),
+                });
+            }
+            Ok(DataType::Binary)
+        }
+        BuiltinLowering::Xxh3_64 => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            if input != RegisterType::Binary {
+                return Err(CompileError {
+                    code: "unsupported_function",
+                    message: format!(
+                        "function '{}' requires BYTES input, found {input}",
+                        function.as_str()
+                    ),
+                    span: span.into(),
+                });
+            }
+            Ok(DataType::UInt64)
+        }
         BuiltinLowering::Now => {
             require_builtin_arity_exact(function, arg_types, 0, span)?;
             Ok(DataType::Timestamp(
@@ -1709,11 +1816,15 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
 
 #[cfg(test)]
 mod tests {
+    use arrow_schema::DataType;
+    use meticulous::ResultExt as _;
+
     use super::{
         ArmExecution, BitwiseOperation, BuiltinLowering, DependencyScope, ExpressionSemantics,
         FloatClass, IntegerBits, NullPropagation, Volatility, binary_arm_execution,
-        binary_op_semantics, builtin_arm_execution, builtin_function_semantics, cast_arm_execution,
-        cast_semantics, expr_semantics, unary_arm_execution, unary_op_semantics,
+        binary_op_semantics, builtin_arm_execution, builtin_descriptor, builtin_function_semantics,
+        cast_arm_execution, cast_semantics, expr_semantics, unary_arm_execution,
+        unary_op_semantics,
     };
     use crate::{
         RegisterType,
@@ -1757,6 +1868,43 @@ mod tests {
         }
 
         assert!(builtin_function_semantics(&FunctionName::Unknown("rand".to_string())).is_none());
+    }
+
+    #[test]
+    fn bytes_functions_require_explicit_text_or_binary_inputs() {
+        let cases = [
+            (
+                FunctionName::BytesFromUtf8,
+                DataType::Utf8,
+                DataType::Binary,
+            ),
+            (FunctionName::BytesToUtf8, DataType::Binary, DataType::Utf8),
+            (FunctionName::Base64Encode, DataType::Binary, DataType::Utf8),
+            (FunctionName::Base64Decode, DataType::Utf8, DataType::Binary),
+            (FunctionName::HexEncode, DataType::Binary, DataType::Utf8),
+            (FunctionName::HexDecode, DataType::Utf8, DataType::Binary),
+            (FunctionName::Sha256, DataType::Binary, DataType::Binary),
+            (FunctionName::Xxh3_64, DataType::Binary, DataType::UInt64),
+        ];
+        for (function, required_input, expected_output) in cases {
+            let Some(descriptor) = builtin_descriptor(&function) else {
+                panic!("{function:?} must be registered as a builtin");
+            };
+            let output = descriptor
+                .output_type(&function, std::slice::from_ref(&required_input), 0..1)
+                .assured("the table supplies the builtin's exact one-argument type");
+            assert_eq!(output, expected_output, "{function:?}");
+
+            let wrong_input = if required_input == DataType::Binary {
+                DataType::Utf8
+            } else {
+                DataType::Binary
+            };
+            let Err(error) = descriptor.output_type(&function, &[wrong_input], 0..1) else {
+                panic!("{function:?} must reject the opposite text or BYTES type");
+            };
+            assert_eq!(error.code, "unsupported_function", "{function:?}");
+        }
     }
 
     #[test]

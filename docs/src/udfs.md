@@ -65,8 +65,9 @@ CREATE UDF risk_band
 
 The Roto column names for scalar declarations are `U8Column`, `I8Column`, `U16Column`,
 `I16Column`, `U32Column`, `I32Column`, `U64Column`, `I64Column`, `F32Column`, `F64Column`,
-`BoolColumn`, `StringColumn`, and `DatetimeColumn`. A one-level sequence uses
-`VecU8Column` through `VecDatetimeColumn`; deeper nesting uses `AnyColumn`.
+`BoolColumn`, `StringColumn`, `BytesColumn`, and `DatetimeColumn`. A one-level sequence uses
+`VecU8Column` through `VecDatetimeColumn`, including `VecBytesColumn`; deeper nesting uses
+`AnyColumn`. A bytes column carries Arrow `Binary` values directly.
 
 ## Calling UDFs
 

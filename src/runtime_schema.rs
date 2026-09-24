@@ -19,14 +19,14 @@ use apache_avro::{
 };
 use arch_into::ArchInto as _;
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float64Array, Int8Array,
-    Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, RecordBatchOptions, StringArray,
-    TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, FixedSizeListArray, Float32Array, Float64Array,
+    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, RecordBatch, RecordBatchOptions,
+    StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     builder::{
-        ArrayBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder, Float64Builder,
-        Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder, StringBuilder,
-        TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder, UInt64Builder,
-        make_builder,
+        ArrayBuilder, BinaryBuilder, BooleanBuilder, FixedSizeListBuilder, Float32Builder,
+        Float64Builder, Int8Builder, Int16Builder, Int32Builder, Int64Builder, ListBuilder,
+        StringBuilder, TimestampNanosecondBuilder, UInt8Builder, UInt16Builder, UInt32Builder,
+        UInt64Builder, make_builder,
     },
     make_array, new_empty_array,
 };
@@ -1023,14 +1023,26 @@ impl RuntimeRecordBatch {
         let mut fields = self.schema_ref().fields().iter().collect::<Vec<_>>();
         fields.sort_by(|left, right| left.name().cmp(right.name()));
         for field in fields {
-            if let Some(value) = self.value(row, field.name())? {
-                let value = if sensitivity.is_sensitive(field.name()) {
-                    JsonValue::String("<masked>".to_string())
-                } else {
-                    value.to_json_value()
-                };
-                json.insert(field.name().clone(), value);
+            let column = self
+                .batch
+                .column_by_name(field.name())
+                .verified("the field being visited belongs to this batch's own Arrow schema");
+            if column.is_null(row) {
+                continue;
             }
+            let value = if sensitivity.is_sensitive(field.name()) {
+                JsonValue::String("<masked>".to_string())
+            } else {
+                let ty = parse_as_type_from_arrow(field.data_type())?;
+                if ty.contains_bytes() {
+                    json_value_from_binary_arrow(column.as_ref(), &ty, row, field.name())?
+                } else {
+                    self.value(row, field.name())?
+                        .verified("the checked field is not null")
+                        .to_json_value()
+                }
+            };
+            json.insert(field.name().clone(), value);
         }
         Ok(JsonValue::Object(json).to_string())
     }
@@ -1219,6 +1231,58 @@ impl RuntimeRecordBatch {
         .map_err(|source| RuntimeSchemaError::arrow(RuntimeSchemaOperation::FinishBatch, source))?;
 
         Ok(Self { batch })
+    }
+}
+
+/// The JSON subscription projection of a binary Arrow value, including binary list elements.
+fn json_value_from_binary_arrow(
+    array: &dyn Array,
+    ty: &ParseAsType,
+    row: usize,
+    field: &str,
+) -> error_stack::Result<JsonValue, RuntimeSchemaError> {
+    if array.is_null(row) {
+        return Err(Report::new(RuntimeSchemaError::RequiredFieldNull {
+            field: field.to_string(),
+            row,
+        }));
+    }
+    match ty {
+        ParseAsType::Bytes => {
+            let values = typed_arrow_array::<BinaryArray>(array, ty, field)?;
+            Ok(JsonValue::String(
+                base64_simd::STANDARD.encode_to_string(values.value(row)),
+            ))
+        }
+        ParseAsType::Vec { element } => {
+            let values = typed_arrow_array::<ListArray>(array, ty, field)?.value(row);
+            let mut encoded = Vec::with_capacity(values.len());
+            for index in 0..values.len() {
+                encoded.push(json_value_from_binary_arrow(
+                    values.as_ref(),
+                    element,
+                    index,
+                    field,
+                )?);
+            }
+            Ok(JsonValue::Array(encoded))
+        }
+        ParseAsType::Array { element, .. } => {
+            let values = typed_arrow_array::<FixedSizeListArray>(array, ty, field)?.value(row);
+            let mut encoded = Vec::with_capacity(values.len());
+            for index in 0..values.len() {
+                encoded.push(json_value_from_binary_arrow(
+                    values.as_ref(),
+                    element,
+                    index,
+                    field,
+                )?);
+            }
+            Ok(JsonValue::Array(encoded))
+        }
+        _ => Err(Report::new(RuntimeSchemaError::UnsupportedArrowType {
+            data_type: array.data_type().clone(),
+        })),
     }
 }
 
@@ -1942,6 +2006,8 @@ pub enum RuntimeSchemaError {
         expected: ParseAsType,
         found: JsonValueKind,
     },
+    #[error("{location} holds invalid base64 for BYTES")]
+    InvalidBytesEncoding { location: RuntimeValueLocation },
     #[error("{location} holds an Avro {found:?}, which is incompatible with {expected:?}")]
     AvroValueTypeMismatch {
         location: RuntimeValueLocation,
@@ -2043,6 +2109,7 @@ pub(crate) fn parse_as_type_from_arrow(
         ArrowDataType::Int64 => Ok(ParseAsType::I64),
         ArrowDataType::Boolean => Ok(ParseAsType::Bool),
         ArrowDataType::Utf8 => Ok(ParseAsType::String),
+        ArrowDataType::Binary => Ok(ParseAsType::Bytes),
         ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => Ok(ParseAsType::Datetime),
         ArrowDataType::Float32 => Ok(ParseAsType::F32),
         ArrowDataType::Float64 => Ok(ParseAsType::F64),
@@ -2734,6 +2801,10 @@ impl<'a> ArrowCodecValue<'a> {
             AvroType::Float => self.to_avro_float(),
             AvroType::Double => self.to_avro_double(),
             AvroType::String => self.to_avro_string(),
+            AvroType::Bytes => self
+                .typed::<BinaryArray>()
+                .map(|array| AvroValue::Bytes(array.value(self.row_index).to_vec()))
+                .map_err(|error| self.encode_field_error(error)),
             AvroType::Array => self.to_avro_array(),
             unsupported => {
                 Err(self.encode_field_error(format!("unsupported avro type {unsupported:?}")))
@@ -2910,6 +2981,10 @@ impl<'a> ArrowCodecValue<'a> {
             ParseAsType::F32 => self.to_avro_float(),
             ParseAsType::F64 => self.to_avro_double(),
             ParseAsType::String | ParseAsType::Datetime => self.to_avro_string(),
+            ParseAsType::Bytes => self
+                .typed::<BinaryArray>()
+                .map(|array| AvroValue::Bytes(array.value(self.row_index).to_vec()))
+                .map_err(|error| self.encode_field_error(error)),
             ParseAsType::Array { .. } | ParseAsType::Vec { .. } => self.to_avro_array(),
         }
     }
@@ -2949,6 +3024,14 @@ impl Serialize for ArrowCodecValue<'_> {
                     .typed::<StringArray>()
                     .map_err(serde::ser::Error::custom)?;
                 serializer.serialize_str(array.value(self.row_index))
+            }
+            ParseAsType::Bytes => {
+                let array = self
+                    .typed::<BinaryArray>()
+                    .map_err(serde::ser::Error::custom)?;
+                serializer.serialize_str(
+                    &base64_simd::STANDARD.encode_to_string(array.value(self.row_index)),
+                )
             }
             ParseAsType::Datetime => {
                 let array = self
@@ -3372,6 +3455,19 @@ fn append_json_value_to_arrow(
         ParseAsType::I64 => append_primitive!(Int64Builder, value.as_i64()),
         ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
         ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
+        ParseAsType::Bytes => {
+            let encoded = value.as_str().ok_or_else(&incompatible)?;
+            let decoded = base64_simd::STANDARD
+                .decode_to_vec(encoded.as_bytes())
+                .map_err(|_| {
+                    Report::new(RuntimeSchemaError::InvalidBytesEncoding {
+                        location: location.to_runtime_location(),
+                    })
+                })?;
+            typed_arrow_builder::<BinaryBuilder>(builder, &arrow_data_type(ty), location)?
+                .append_value(decoded);
+            Ok(())
+        }
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
             if let Some(value) = value.as_str()
@@ -3512,6 +3608,14 @@ fn append_avro_value_to_arrow(
                 None
             }
         ),
+        ParseAsType::Bytes => append_primitive!(
+            BinaryBuilder,
+            if let AvroValue::Bytes(value) = value {
+                Some(value.as_slice())
+            } else {
+                None
+            }
+        ),
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
             if let AvroValue::String(value) = value {
@@ -3644,6 +3748,7 @@ pub(crate) fn arrow_data_type(ty: &ParseAsType) -> ArrowDataType {
         ParseAsType::I64 => ArrowDataType::Int64,
         ParseAsType::Bool => ArrowDataType::Boolean,
         ParseAsType::String => ArrowDataType::Utf8,
+        ParseAsType::Bytes => ArrowDataType::Binary,
         ParseAsType::Datetime => {
             ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, Some("+00:00".into()))
         }
@@ -3685,43 +3790,63 @@ fn close_partial_fixed_size_list(
         builder.values().len().checked_sub(closed).assured(
             "a fixed-size list builder holds `len` child values for every value it closed",
         );
-    let placeholder = placeholder_value(element);
     let location = RuntimeValueLocationRef::AbandonedFixedSizeList;
     for _ in written..len {
-        append_runtime_value_to_arrow(
-            builder.values().as_mut(),
-            element,
-            Some(&placeholder),
-            &location,
-        )
-        .assured("a placeholder of the element's own type fits the builder made from that type");
+        append_placeholder_to_arrow(builder.values().as_mut(), element, &location).assured(
+            "a placeholder of the element's own type fits the builder made from that type",
+        );
     }
     builder.append(true);
 }
 
-/// A throwaway value of `ty`, used to complete a value a failed append left half-written.
-fn placeholder_value(ty: &ParseAsType) -> RuntimeValue {
-    match ty {
-        ParseAsType::U8 => RuntimeValue::U8(0),
-        ParseAsType::I8 => RuntimeValue::I8(0),
-        ParseAsType::U16 => RuntimeValue::U16(0),
-        ParseAsType::I16 => RuntimeValue::I16(0),
-        ParseAsType::U32 => RuntimeValue::U32(0),
-        ParseAsType::I32 => RuntimeValue::I32(0),
-        ParseAsType::U64 => RuntimeValue::U64(0),
-        ParseAsType::I64 => RuntimeValue::I64(0),
-        ParseAsType::Bool => RuntimeValue::Bool(false),
-        ParseAsType::String => RuntimeValue::String(String::new()),
-        ParseAsType::Datetime => {
-            RuntimeValue::Datetime(DateTime::<chrono::Utc>::UNIX_EPOCH.fixed_offset())
-        }
-        ParseAsType::F32 => RuntimeValue::F32(OrderedFloat(0.0)),
-        ParseAsType::F64 => RuntimeValue::F64(OrderedFloat(0.0)),
-        ParseAsType::Array { element, len } => {
-            RuntimeValue::Array(vec![placeholder_value(element); len.get().arch_into()])
-        }
-        ParseAsType::Vec { .. } => RuntimeValue::Vec(Vec::new()),
+/// Completes a failed fixed-size list append in the owning Arrow builder.
+fn append_placeholder_to_arrow(
+    builder: &mut dyn ArrayBuilder,
+    ty: &ParseAsType,
+    location: &RuntimeValueLocationRef<'_>,
+) -> error_stack::Result<(), RuntimeSchemaError> {
+    macro_rules! append {
+        ($builder:ty, $value:expr) => {{
+            typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?
+                .append_value($value);
+        }};
     }
+    match ty {
+        ParseAsType::U8 => append!(UInt8Builder, 0),
+        ParseAsType::I8 => append!(Int8Builder, 0),
+        ParseAsType::U16 => append!(UInt16Builder, 0),
+        ParseAsType::I16 => append!(Int16Builder, 0),
+        ParseAsType::U32 => append!(UInt32Builder, 0),
+        ParseAsType::I32 => append!(Int32Builder, 0),
+        ParseAsType::U64 => append!(UInt64Builder, 0),
+        ParseAsType::I64 => append!(Int64Builder, 0),
+        ParseAsType::Bool => append!(BooleanBuilder, false),
+        ParseAsType::String => append!(StringBuilder, ""),
+        ParseAsType::Bytes => append!(BinaryBuilder, []),
+        ParseAsType::Datetime => append!(TimestampNanosecondBuilder, 0),
+        ParseAsType::F32 => append!(Float32Builder, 0.0),
+        ParseAsType::F64 => append!(Float64Builder, 0.0),
+        ParseAsType::Array { element, len } => {
+            let list = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
+                builder,
+                &arrow_data_type(ty),
+                location,
+            )?;
+            for _ in 0..len.get() {
+                append_placeholder_to_arrow(list.values().as_mut(), element, location)?;
+            }
+            list.append(true);
+        }
+        ParseAsType::Vec { .. } => {
+            typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
+                builder,
+                &arrow_data_type(ty),
+                location,
+            )?
+            .append(true);
+        }
+    }
+    Ok(())
 }
 
 fn append_runtime_value_to_arrow(
@@ -3787,6 +3912,16 @@ fn append_runtime_value_to_arrow(
             append_primitive!(StringBuilder, RuntimeValue::String, |value: &String| Some(
                 value.clone()
             ))
+        }
+        ParseAsType::Bytes => {
+            if value.is_some() {
+                return Err(Report::new(RuntimeSchemaError::UnsupportedArrowType {
+                    data_type: ArrowDataType::Binary,
+                }));
+            }
+            typed_arrow_builder::<BinaryBuilder>(builder, &arrow_data_type(ty), location)?
+                .append_null();
+            Ok(())
         }
         ParseAsType::Datetime => append_primitive!(
             TimestampNanosecondBuilder,
@@ -3982,6 +4117,9 @@ pub(crate) fn runtime_value_from_arrow_array(
                 .value(row_index)
                 .to_string(),
         ))),
+        ParseAsType::Bytes => Err(Report::new(RuntimeSchemaError::UnsupportedArrowType {
+            data_type: ArrowDataType::Binary,
+        })),
         ParseAsType::Datetime => Ok(Some(RuntimeValue::Datetime(
             DateTime::from_timestamp_nanos(
                 typed_arrow_array::<TimestampNanosecondArray>(array, ty, field)?.value(row_index),
@@ -4066,7 +4204,7 @@ fn json_value_kind(value: &JsonValue) -> JsonValueKind {
 
 fn json_value_matches_wire_type(value: &JsonValue, ty: JsonType) -> bool {
     match ty {
-        JsonType::String => value.is_string(),
+        JsonType::String | JsonType::Bytes => value.is_string(),
         JsonType::Number => value.is_number(),
         JsonType::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
         JsonType::Object => value.is_object(),
@@ -4164,6 +4302,7 @@ fn parse_as_avro_type_json(ty: &ParseAsType) -> String {
         ParseAsType::F32 => r#""float""#.to_string(),
         ParseAsType::F64 => r#""double""#.to_string(),
         ParseAsType::String | ParseAsType::Datetime => r#""string""#.to_string(),
+        ParseAsType::Bytes => r#""bytes""#.to_string(),
         ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => format!(
             r#"{{"type":"array","items":{}}}"#,
             parse_as_avro_type_json(element)
@@ -5881,6 +6020,245 @@ mod tests {
         assert_eq!(
             single_batch_value(&decoded, "tenant"),
             Some(RuntimeValue::String("acme".to_string()))
+        );
+    }
+
+    #[test]
+    fn bytes_round_trip_through_json_and_avro_codecs() {
+        let schema = CreateSchema {
+            name: named("binary_payload"),
+            fields: vec![SchemaField {
+                name: named("payload"),
+                ty: ParseAsType::Bytes,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let compiled_schema = Arc::new(compile_schema(&schema));
+        let json_wire = CreateWireSchema {
+            name: named("binary_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("payload"),
+                ty: JsonType::Bytes,
+                optional: false,
+            }],
+        };
+        let json_model = CreateCodec {
+            name: named("binary_json"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: json_wire.name.clone(),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let json_codec = compile_codec(
+            &json_model,
+            compiled_schema.clone(),
+            ResolvedCodecWireFormat::Json(&json_wire),
+        )
+        .assured("the BYTES wire field matches the internal BYTES field");
+        let decoded =
+            decode_one(&json_codec, br#"{"payload":"AP8="}"#).assured("padded base64 decodes");
+        let bytes = decoded
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .verified("the compiled BYTES schema owns a Binary Arrow column");
+        assert_eq!(bytes.value(0), &[0, 255]);
+        assert_eq!(
+            decoded
+                .row_to_json_string(0)
+                .assured("a BYTES field has a canonical JSON projection"),
+            r#"{"payload":"AP8="}"#
+        );
+        let json_output = json_codec
+            .batch_encoder(&decoded)
+            .assured("the decoded batch follows the codec schema");
+        let mut payload = Vec::new();
+        json_output
+            .encode_row_into(0, &mut payload)
+            .assured("the binary row has a canonical base64 encoding");
+        assert_eq!(payload, br#"{"payload":"AP8="}"#);
+
+        let avro_wire = CreateWireSchema {
+            name: named("binary_avro_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("payload"),
+                ty: AvroType::Bytes,
+                optional: false,
+            }],
+        };
+        let avro_model = CreateCodec {
+            name: named("binary_avro"),
+            wire_format: CodecWireFormat::Avro {
+                wire_schema: avro_wire.name.clone(),
+            },
+            schema: schema.name,
+            encoding_rules: Vec::new(),
+        };
+        let avro_codec = compile_codec(
+            &avro_model,
+            compiled_schema,
+            ResolvedCodecWireFormat::Avro(&avro_wire),
+        )
+        .assured("the AVRO BYTES field matches the internal BYTES field");
+        let avro_output = avro_codec
+            .batch_encoder(&decoded)
+            .assured("the decoded binary batch follows the Avro codec schema");
+        payload.clear();
+        avro_output
+            .encode_row_into(0, &mut payload)
+            .assured("the Avro encoder writes native bytes");
+        let avro_decoded = decode_one(&avro_codec, &payload)
+            .verified("the payload was just encoded from the same Avro schema");
+        let bytes = avro_decoded
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .verified("the compiled BYTES schema owns a Binary Arrow column");
+        assert_eq!(bytes.value(0), &[0, 255]);
+    }
+
+    #[test]
+    fn json_bytes_reject_malformed_base64_without_exposing_payload() {
+        let schema = CreateSchema {
+            name: named("binary_payload"),
+            fields: vec![SchemaField {
+                name: named("payload"),
+                ty: ParseAsType::Bytes,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let wire = CreateWireSchema {
+            name: named("binary_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("payload"),
+                ty: JsonType::Bytes,
+                optional: false,
+            }],
+        };
+        let model = CreateCodec {
+            name: named("binary_json"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: wire.name.clone(),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let codec = compile_codec(
+            &model,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Json(&wire),
+        )
+        .assured("the BYTES schemas are compatible");
+        let Err(error) = decode_one(&codec, br#"{"payload":"AP8!"}"#) else {
+            panic!("invalid base64 must fail decoding");
+        };
+        let display = error.to_string();
+        assert!(display.contains("payload"));
+        assert!(!display.contains("AP8!"));
+    }
+
+    #[test]
+    fn bytes_list_elements_round_trip_through_cbor_codec() {
+        let schema = CreateSchema {
+            name: named("binary_list"),
+            fields: vec![SchemaField {
+                name: named("payload"),
+                ty: ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Bytes),
+                },
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let wire = CreateWireSchema {
+            name: named("binary_list_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("payload"),
+                ty: JsonType::Array,
+                optional: false,
+            }],
+        };
+        let model = CreateCodec {
+            name: named("binary_list_cbor"),
+            wire_format: CodecWireFormat::Cbor {
+                wire_schema: wire.name.clone(),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let codec = compile_codec(
+            &model,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Cbor(&wire),
+        )
+        .assured("the CBOR array wire field matches a VEC of BYTES");
+        let mut payload = Vec::new();
+        ciborium::into_writer(&serde_json::json!({"payload": ["AP8=", ""]}), &mut payload)
+            .assured("the constructed CBOR value is encodable");
+        let decoded =
+            decode_one(&codec, &payload).assured("each CBOR list element is canonical base64 text");
+        let list = decoded
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .verified("the compiled VEC schema owns a List Arrow column");
+        let values = list.value(0);
+        let binary = values
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .verified("the compiled BYTES element type owns a Binary Arrow column");
+        assert_eq!(binary.value(0), &[0, 255]);
+        assert!(binary.value(1).is_empty());
+        assert_eq!(
+            decoded
+                .row_to_json_string(0)
+                .assured("VEC byte elements have canonical JSON projections"),
+            r#"{"payload":["AP8=",""]}"#
+        );
+
+        let encoder = codec
+            .batch_encoder(&decoded)
+            .assured("the decoded batch follows the CBOR codec schema");
+        let mut output = Vec::new();
+        encoder
+            .encode_row_into(0, &mut output)
+            .assured("the byte elements have CBOR base64 representations");
+        let restored = decode_one(&codec, &output)
+            .verified("the CBOR output was just encoded from this schema");
+        assert_eq!(restored.batch(), decoded.batch());
+    }
+
+    #[test]
+    fn fixed_binary_array_projects_canonical_base64_elements() {
+        let values: ArrayRef = StdArc::new(BinaryArray::from(vec![&[0, 255][..], &[][..]]));
+        let element = StdArc::new(ArrowField::new("item", ArrowDataType::Binary, false));
+        let list = FixedSizeListArray::try_new(element, 2, values, None)
+            .assured("two byte values fill one two-element fixed array");
+        let array: ArrayRef = StdArc::new(list);
+        let schema = StdArc::new(ArrowSchema::new(vec![ArrowField::new(
+            "payload",
+            array.data_type().clone(),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![array])
+            .assured("the fixed byte array matches its Arrow schema");
+        let runtime = RuntimeRecordBatch::from_record_batch(schema, batch)
+            .assured("the runtime wrapper accepts the exact Arrow schema");
+        assert_eq!(
+            runtime
+                .row_to_json_string(0)
+                .assured("the fixed byte array has a JSON projection"),
+            r#"{"payload":["AP8=",""]}"#
         );
     }
 
