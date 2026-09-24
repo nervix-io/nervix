@@ -2976,15 +2976,15 @@ fn build_ingestor_logic_commands(
 
       CREATE SCHEMA logic_notification_list_operations (
         tenant STRING,
-        total I64,
-        first_value I64,
-        last_value I64,
-        second_value I64,
+        total I64 OPTIONAL,
+        first_value I64 OPTIONAL,
+        last_value I64 OPTIONAL,
+        second_value I64 OPTIONAL,
         value_count I64,
-        fixed_first I64,
-        fixed_last I64,
-        first_label STRING,
-        last_label STRING
+        fixed_first I64 OPTIONAL,
+        fixed_last I64 OPTIONAL,
+        first_label STRING OPTIONAL,
+        last_label STRING OPTIONAL
       );
 
       CREATE WIRE JSON SCHEMA logic_notification_ingest_wire MODE STRICT (
