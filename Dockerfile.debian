@@ -102,7 +102,7 @@ RUN curl -L --proto '=https' --tlsv1.2 -sSf \
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY benches/relay_interaction.rs ./benches/relay_interaction.rs
+COPY benches/*.rs ./benches/
 COPY src ./src
 COPY crates ./crates
 COPY tests/scenarios.rs ./tests/scenarios.rs
