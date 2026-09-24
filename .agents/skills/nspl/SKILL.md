@@ -200,6 +200,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
   aggregates over retained input rows.
+- For text, use `octet_length` for UTF-8 bytes and `length` for Unicode scalar values;
+  `normalize_nfc` for canonical composition; `split` and `join` for string vectors;
+  `like`/`ilike` for wildcards, `contains_any` for literal substring sets, and
+  `regexp_extract` for numbered captures. Read `Filter-Map Functions` → `String Functions`,
+  `String Predicates`, and `Regular Expressions` for their exact Unicode, null, and size rules.
 - Pass counts and positions as any integer type; they are read at full value. `repeat`, `lpad`,
   and `rpad` fail only the message whose result would not fit the text one `STRING` column holds,
   and `uuid_v7()` fails every message while domain time is before the Unix epoch. Give routes that

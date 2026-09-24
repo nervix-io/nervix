@@ -26,6 +26,7 @@ use crate::{
     membership::MembershipSet,
     program::{BinaryOp, CastFailure, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
+    text_search::ContainsAnyCall,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -313,6 +314,7 @@ pub enum BuiltinLowering {
     Length,
     CharLength,
     BitLength,
+    OctetLength,
     Ascii,
     Coalesce,
     IsNull,
@@ -323,6 +325,13 @@ pub enum BuiltinLowering {
     Atan,
     Ceil,
     Concat,
+    ConcatWs,
+    Split,
+    Join,
+    Like,
+    ILike,
+    ContainsAny(ContainsAnyCall),
+    NormalizeNfc,
     ArrayConstruct,
     VecConstruct,
     EmptyVec(DataType),
@@ -467,7 +476,7 @@ impl RegexpFunction {
     pub const fn arity(self) -> usize {
         match self {
             Self::Like | Self::Substr => 2,
-            Self::Replace => 3,
+            Self::Replace | Self::Extract => 3,
         }
     }
 
@@ -475,7 +484,7 @@ impl RegexpFunction {
     pub fn output_type(self) -> DataType {
         match self {
             Self::Like => DataType::Boolean,
-            Self::Replace | Self::Substr => DataType::Utf8,
+            Self::Replace | Self::Substr | Self::Extract => DataType::Utf8,
         }
     }
 }
@@ -844,6 +853,7 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::BitLength
         | BuiltinLowering::Ascii
         | BuiltinLowering::Coalesce
+        | BuiltinLowering::OctetLength
         | BuiltinLowering::IsNull
         | BuiltinLowering::NullIf
         | BuiltinLowering::Abs
@@ -931,7 +941,14 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::Log
         | BuiltinLowering::Log2
         | BuiltinLowering::Pow
-        | BuiltinLowering::Regexp(_) => ArmExecution::SelectedRows,
+        | BuiltinLowering::Regexp(_)
+        | BuiltinLowering::Like
+        | BuiltinLowering::ILike
+        | BuiltinLowering::Split
+        | BuiltinLowering::Join
+        | BuiltinLowering::ConcatWs
+        | BuiltinLowering::ContainsAny(_)
+        | BuiltinLowering::NormalizeNfc => ArmExecution::SelectedRows,
         // Reading and writing address and network text, and parsing URLs, walk each row's text.
         // A URL component is text as long as its URL, so it spends the column's size limit too.
         BuiltinLowering::IpFromString
@@ -964,6 +981,7 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Length => BuiltinLowering::Length,
         FunctionName::CharLength => BuiltinLowering::CharLength,
         FunctionName::BitLength => BuiltinLowering::BitLength,
+        FunctionName::OctetLength => BuiltinLowering::OctetLength,
         FunctionName::Ascii => BuiltinLowering::Ascii,
         FunctionName::Coalesce => BuiltinLowering::Coalesce,
         FunctionName::IsNull => BuiltinLowering::IsNull,
@@ -974,6 +992,13 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::Atan => BuiltinLowering::Atan,
         FunctionName::Ceil => BuiltinLowering::Ceil,
         FunctionName::Concat => BuiltinLowering::Concat,
+        FunctionName::ConcatWs => BuiltinLowering::ConcatWs,
+        FunctionName::Split => BuiltinLowering::Split,
+        FunctionName::Join => BuiltinLowering::Join,
+        FunctionName::Like => BuiltinLowering::Like,
+        FunctionName::ILike => BuiltinLowering::ILike,
+        FunctionName::ContainsAny => BuiltinLowering::ContainsAny(ContainsAnyCall::Dynamic),
+        FunctionName::NormalizeNfc => BuiltinLowering::NormalizeNfc,
         FunctionName::Array => BuiltinLowering::ArrayConstruct,
         FunctionName::Vec => BuiltinLowering::VecConstruct,
         FunctionName::Overlap => BuiltinLowering::Overlap,
@@ -1035,6 +1060,9 @@ pub fn builtin_descriptor(function: &FunctionName) -> Option<BuiltinDescriptor> 
         FunctionName::RegexpSubstr => {
             BuiltinLowering::Regexp(RegexpCall::reading_pattern_argument(RegexpFunction::Substr))
         }
+        FunctionName::RegexpExtract => BuiltinLowering::Regexp(
+            RegexpCall::reading_pattern_argument(RegexpFunction::Extract),
+        ),
         FunctionName::Repeat => BuiltinLowering::Repeat,
         FunctionName::Replace => BuiltinLowering::Replace,
         FunctionName::Reverse => BuiltinLowering::Reverse,
@@ -1118,6 +1146,7 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Length
         | BuiltinLowering::CharLength
         | BuiltinLowering::BitLength
+        | BuiltinLowering::OctetLength
         | BuiltinLowering::Ascii
         | BuiltinLowering::Contains
         | BuiltinLowering::StartsWith
@@ -1180,6 +1209,13 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: false,
             null_propagation: NullPropagation::Custom,
         },
+        BuiltinLowering::ConcatWs => OperationSemantics {
+            volatility: Volatility::Immutable,
+            dependency_scope: DependencyScope::Constant,
+            has_side_effects: false,
+            can_error: true,
+            null_propagation: NullPropagation::Custom,
+        },
         BuiltinLowering::Membership(_) => membership_semantics(),
         BuiltinLowering::IsNull => OperationSemantics {
             volatility: Volatility::Immutable,
@@ -1200,6 +1236,12 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Log
         | BuiltinLowering::Pow
         | BuiltinLowering::Regexp(_)
+        | BuiltinLowering::Like
+        | BuiltinLowering::ILike
+        | BuiltinLowering::Split
+        | BuiltinLowering::Join
+        | BuiltinLowering::ContainsAny(_)
+        | BuiltinLowering::NormalizeNfc
         | BuiltinLowering::Round
         | BuiltinLowering::Sqrt
         | BuiltinLowering::Sum
@@ -1425,6 +1467,7 @@ fn builtin_output_type(
         BuiltinLowering::Length
         | BuiltinLowering::CharLength
         | BuiltinLowering::BitLength
+        | BuiltinLowering::OctetLength
         | BuiltinLowering::Ascii => {
             require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
             require_utf8_arg(
@@ -1663,6 +1706,68 @@ fn builtin_output_type(
             }
             Ok(DataType::Utf8)
         }
+        BuiltinLowering::ConcatWs => {
+            require_builtin_min_arity(function, arg_types, 2, span.clone())?;
+            for arg_type in arg_types {
+                let input = require_supported_register_type(function, arg_type, span.clone())?;
+                require_utf8_arg(function, input, span.clone())?;
+            }
+            Ok(DataType::Utf8)
+        }
+        BuiltinLowering::Split => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            for arg_type in arg_types {
+                let input = require_supported_register_type(function, arg_type, span.clone())?;
+                require_utf8_arg(function, input, span.clone())?;
+            }
+            Ok(DataType::List(
+                Field::new("item", DataType::Utf8, false).into(),
+            ))
+        }
+        BuiltinLowering::Join => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[0], ListElements::Any, span.clone())?;
+            if element != DataType::Utf8 {
+                return Err(CompileError {
+                    code: "type_mismatch",
+                    message: format!("function '{}' requires a STRING list", function.as_str()),
+                    span: span.into(),
+                });
+            }
+            let separator = require_supported_register_type(function, &arg_types[1], span.clone())?;
+            require_utf8_arg(function, separator, span)?;
+            Ok(DataType::Utf8)
+        }
+        BuiltinLowering::Like | BuiltinLowering::ILike => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            for arg_type in arg_types {
+                let input = require_supported_register_type(function, arg_type, span.clone())?;
+                require_utf8_arg(function, input, span.clone())?;
+            }
+            Ok(DataType::Boolean)
+        }
+        BuiltinLowering::ContainsAny(_) => {
+            require_builtin_arity_exact(function, arg_types, 2, span.clone())?;
+            let text = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_utf8_arg(function, text, span.clone())?;
+            let element =
+                list_element_type(function, &arg_types[1], ListElements::Any, span.clone())?;
+            if element != DataType::Utf8 {
+                return Err(CompileError {
+                    code: "type_mismatch",
+                    message: format!("function '{}' requires a STRING list", function.as_str()),
+                    span: span.into(),
+                });
+            }
+            Ok(DataType::Boolean)
+        }
+        BuiltinLowering::NormalizeNfc => {
+            require_builtin_arity_exact(function, arg_types, 1, span.clone())?;
+            let input = require_supported_register_type(function, &arg_types[0], span.clone())?;
+            require_utf8_arg(function, input, span)?;
+            Ok(DataType::Utf8)
+        }
         BuiltinLowering::ArrayConstruct | BuiltinLowering::VecConstruct => {
             require_builtin_min_arity(function, arg_types, 1, span.clone())?;
             let element = &arg_types[0];
@@ -1784,9 +1889,18 @@ fn builtin_output_type(
         }
         BuiltinLowering::Regexp(call) => {
             require_builtin_arity_exact(function, arg_types, call.function.arity(), span.clone())?;
-            for arg_type in arg_types {
+            let text_args = if let RegexpFunction::Extract = call.function {
+                &arg_types[..2]
+            } else {
+                arg_types
+            };
+            for arg_type in text_args {
                 let input = require_supported_register_type(function, arg_type, span.clone())?;
                 require_utf8_arg(function, input, span.clone())?;
+            }
+            if let RegexpFunction::Extract = call.function {
+                let index = require_supported_register_type(function, &arg_types[2], span.clone())?;
+                require_integral_arg(function, index, span.clone())?;
             }
             Ok(call.function.output_type())
         }

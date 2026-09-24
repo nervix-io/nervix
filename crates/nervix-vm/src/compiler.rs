@@ -32,6 +32,7 @@ use crate::{
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
         builtin_signature, cast_arm_execution, cast_descriptor, expr_semantics, unary_descriptor,
     },
+    text_search::ContainsAnyCall,
     url_component,
 };
 
@@ -2231,6 +2232,34 @@ impl Compiler {
         if let BuiltinLowering::Regexp(call) = descriptor.lowering {
             return self.compile_regexp_call(call.function, args, output_type);
         }
+        if let BuiltinLowering::ContainsAny(_) = descriptor.lowering
+            && let [text, set] = args
+            && let Expr::Call {
+                function: FunctionName::Vec | FunctionName::Array,
+                args: elements,
+            } = &set.inner
+        {
+            let mut patterns = Vec::with_capacity(elements.len());
+            let mut all_constant = true;
+            for element in elements {
+                match fold_constant_expr(element)? {
+                    Some(FoldedValue::NonNull(ScalarValue::Utf8(pattern))) => {
+                        patterns.push(pattern);
+                    }
+                    _ => {
+                        all_constant = false;
+                        break;
+                    }
+                }
+            }
+            if all_constant {
+                return Ok(BuiltinPlan {
+                    lowering: BuiltinLowering::ContainsAny(ContainsAnyCall::constant(patterns)),
+                    inputs: vec![self.compile_expr(text)?],
+                    output_type,
+                });
+            }
+        }
         // A network that folds to a constant is parsed here, once for the program, and the call
         // reads only its address. A constant that is no network rejects the program.
         if let BuiltinLowering::IpInNetwork(_) = descriptor.lowering
@@ -3019,12 +3048,20 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Rtrim
         | FunctionName::CharLength
         | FunctionName::BitLength
+        | FunctionName::OctetLength
         | FunctionName::Ascii
         | FunctionName::Acos
         | FunctionName::Asin
         | FunctionName::Atan
         | FunctionName::Ceil
         | FunctionName::Concat
+        | FunctionName::ConcatWs
+        | FunctionName::Split
+        | FunctionName::Join
+        | FunctionName::Like
+        | FunctionName::ILike
+        | FunctionName::ContainsAny
+        | FunctionName::NormalizeNfc
         | FunctionName::Sum
         | FunctionName::Last
         | FunctionName::First
@@ -3066,6 +3103,7 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::RegexpLike
         | FunctionName::RegexpReplace
         | FunctionName::RegexpSubstr
+        | FunctionName::RegexpExtract
         | FunctionName::Repeat
         | FunctionName::Replace
         | FunctionName::Reverse
@@ -5431,3 +5469,7 @@ mod numeric_function_tests;
 #[cfg(test)]
 #[path = "compiler_collection_function_tests.rs"]
 mod collection_function_tests;
+
+#[cfg(test)]
+#[path = "compiler_text_search_tests.rs"]
+mod text_search_tests;
