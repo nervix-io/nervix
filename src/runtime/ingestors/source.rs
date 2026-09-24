@@ -1,11 +1,13 @@
-//! The host-owned broker source loop, the launcher that starts its instances, and its runtime
-//! intake adapter.
+//! The host side of every source: the one registration a composed source goes through, the loop
+//! of each source family, and the runtime intake adapter those loops drive.
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Source task lifecycle, instance startup and registration, the acknowledgement
-//!   policy a declared delivery mode parses into, quiesce and readiness, grouping policy, runtime
-//!   decoding and dispatch, acknowledgement waiting, retry cadence, and connector error reporting.
+//! - **Owns.** Opening broker and paced instances, registering a composed source with its branch
+//!   runtimes, readiness and tasks, the acknowledgement policy a declared delivery mode parses
+//!   into, the broker, paced and request-scoped loops with their quiesce and readiness handling,
+//!   grouping policy, runtime decoding and dispatch, acknowledgement waiting, retry cadence, and
+//!   connector error reporting.
 //! - **Depends on.** The connector source contract, declared delivery modes, and pre-resolved
 //!   runtime execution handles.
 //! - **Must not know.** A broker driver, connector-specific configuration, NSPL parsing, registry
@@ -18,13 +20,13 @@ use error_stack::{FrameKind, Report, ResultExt as _};
 use nervix_connector::{
     BrokerSourceConnector, ClientResourceMounts, IngestMetadataRow, PacedSourceConnector,
     ParsedRetryPolicy, RetainedIngestHeaders, SourceAckPolicy, SourceAcknowledgement,
-    SourceAcknowledgementOutcome, SourceAcknowledgementServices, SourceBatch, SourceBatchRequest,
-    SourceCapabilities, SourceConnector, SourceError, SourceHost, SourceHostServices,
-    SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage, SourceIntakeMode,
-    SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourcePlan, SourcePoll, SourceResume,
-    next_retry_delay, physical_time::actual_utc_now,
+    SourceAcknowledgementOutcome, SourceAcknowledgementServices, SourceAcknowledgementSupport,
+    SourceBatch, SourceBatchRequest, SourceCapabilities, SourceConnector, SourceError, SourceHost,
+    SourceHostServices, SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage,
+    SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourcePlan,
+    SourcePoll, SourceResume, next_retry_delay, physical_time::actual_utc_now,
 };
-use nervix_models::{NatsIngestMode, RedisPubSubIngestMode, ZeroMqIngestMode};
+use nervix_models::{DomainClockPeriod, IngestAcknowledgement};
 use tokio_util::sync::CancellationToken;
 
 use super::super::{domain_clock::DomainCadence, *};
@@ -38,53 +40,12 @@ pub(super) const SOURCE_RECONNECT_POLICY: ParsedRetryPolicy = ParsedRetryPolicy 
     max_backoff: Duration::from_secs(30),
 };
 
-/// The acknowledgement a source's delivery mode declares, with its durations still as written.
-///
-/// The launcher parses it into the policy the source loop runs, so a mode that fails to parse
-/// fails the start before any instance opens.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum DeclaredSourceAcknowledgement<'a> {
-    Unacknowledged,
-    Sequential {
-        timeout: &'a str,
-        retry: &'a RetryPolicy,
-    },
-    Parallel {
-        max: NonZeroU64,
-        batch_timeout: &'a str,
-        timeout: &'a str,
-        retry: &'a RetryPolicy,
-    },
-}
-
-/// Kafka and Pulsar declare their delivery modes through the same `KafkaIngestMode`.
-impl<'a> From<&'a KafkaIngestMode> for DeclaredSourceAcknowledgement<'a> {
-    fn from(mode: &'a KafkaIngestMode) -> Self {
-        match mode {
-            KafkaIngestMode::AckParallel {
-                max,
-                batch_timeout,
-                timeout,
-                retry_policy,
-            } => Self::Parallel {
-                max: *max,
-                batch_timeout,
-                timeout,
-                retry: retry_policy,
-            },
-            KafkaIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            } => Self::Sequential {
-                timeout,
-                retry: retry_policy,
-            },
-            KafkaIngestMode::NoAckParallel => Self::Unacknowledged,
-        }
-    }
-}
-
 impl IngestorSpec {
+    /// The identity this ingestor's running source is registered under.
+    pub(super) fn runtime_key(&self) -> DomainNodeRef {
+        DomainNodeRef::node_in(self.domain.clone(), ModelKind::Ingestor, self.name.clone())
+    }
+
     /// The start failure this ingestor reports, naming why it could not start.
     pub(super) fn start_failure(&self, reason: impl Into<String>) -> RuntimeError {
         RuntimeError::StartIngestor {
@@ -93,94 +54,50 @@ impl IngestorSpec {
             reason: reason.into(),
         }
     }
-}
 
-impl<'a> From<&'a MqttIngestMode> for DeclaredSourceAcknowledgement<'a> {
-    fn from(mode: &'a MqttIngestMode) -> Self {
-        match mode {
-            MqttIngestMode::AckParallel {
-                max,
-                batch_timeout,
-                timeout,
-                retry_policy,
-            } => Self::Parallel {
-                max: *max,
-                batch_timeout,
-                timeout,
-                retry: retry_policy,
-            },
-            MqttIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            } => Self::Sequential {
-                timeout,
-                retry: retry_policy,
-            },
-            MqttIngestMode::NoAckSequential { .. } | MqttIngestMode::NoAckParallel { .. } => {
-                Self::Unacknowledged
-            }
-        }
+    /// The capabilities this ingestor's source runs with, derived from the source vocabulary.
+    pub(super) fn source_capabilities(
+        &self,
+        instances: NonZeroU64,
+        acknowledgement: SourceAcknowledgementSupport,
+    ) -> SourceCapabilities {
+        SourceCapabilities::new(
+            self.allow_header_reads,
+            self.metadata_kind.source_scope(),
+            self.quiesce.supports(self.quiesce.mode()),
+            instances,
+            acknowledgement,
+        )
     }
 }
 
-impl<'a> From<&'a RabbitMqIngestMode> for DeclaredSourceAcknowledgement<'a> {
-    fn from(mode: &'a RabbitMqIngestMode) -> Self {
-        match mode {
-            RabbitMqIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            } => Self::Sequential {
-                timeout,
-                retry: retry_policy,
-            },
-        }
-    }
+/// One opened source instance, which the host starts under the loop of its source family.
+pub(super) trait SourceInstance: Send + 'static {
+    /// Attaches the instance to its host and returns the loop that runs it until shutdown.
+    ///
+    /// The host calls this before the ingestor's start returns, so whatever the instance attaches
+    /// here is in place by the time the ingestor counts as started.
+    fn start(
+        self: Box<Self>,
+        host: RuntimeSourceHost,
+        shutdown: watch::Receiver<bool>,
+    ) -> BoxFuture<'static, ()>;
 }
 
-impl<'a> From<&'a SqsIngestMode> for DeclaredSourceAcknowledgement<'a> {
-    fn from(mode: &'a SqsIngestMode) -> Self {
-        match mode {
-            SqsIngestMode::AckSequential {
-                timeout,
-                retry_policy,
-            } => Self::Sequential {
-                timeout,
-                retry: retry_policy,
-            },
-        }
-    }
+/// A task a source runs beside its instances for as long as the source runs.
+pub(super) trait SourceCompanion: Send + 'static {
+    /// Returns the task, which ends at shutdown.
+    fn start(self: Box<Self>, shutdown: watch::Receiver<bool>) -> BoxFuture<'static, ()>;
 }
 
-impl From<&NatsIngestMode> for DeclaredSourceAcknowledgement<'_> {
-    fn from(mode: &NatsIngestMode) -> Self {
-        match mode {
-            NatsIngestMode::NoAckSequential => Self::Unacknowledged,
-        }
-    }
-}
-
-impl From<&RedisPubSubIngestMode> for DeclaredSourceAcknowledgement<'_> {
-    fn from(mode: &RedisPubSubIngestMode) -> Self {
-        match mode {
-            RedisPubSubIngestMode::NoAckSequential => Self::Unacknowledged,
-        }
-    }
-}
-
-impl From<&ZeroMqIngestMode> for DeclaredSourceAcknowledgement<'_> {
-    fn from(mode: &ZeroMqIngestMode) -> Self {
-        match mode {
-            ZeroMqIngestMode::NoAckSequential => Self::Unacknowledged,
-        }
-    }
-}
-
-/// One broker source ready to start: its connector plan and the host settings it runs under.
-pub(super) struct BrokerSourceStart<'a, P> {
-    pub(super) ingestor: &'a IngestorSpec,
-    pub(super) connector: P,
-    pub(super) instances: NonZeroU64,
-    pub(super) acknowledgement: DeclaredSourceAcknowledgement<'a>,
+/// One source composed from its plan: the instances its connector opened and how the host runs
+/// them.
+pub(super) struct SourceStart {
+    /// Every opened instance, in instance order.
+    pub(super) instances: Vec<Box<dyn SourceInstance>>,
+    /// Tasks the source runs beside its instances, such as the watch that tells domain-offset
+    /// Kafka instances their topic's partitions changed.
+    pub(super) companions: Vec<Box<dyn SourceCompanion>>,
     /// Whether what the source reads while quiesced passes through the quiesce control, which may
     /// buffer or drop it.
     pub(super) buffered_intake: bool,
@@ -193,20 +110,27 @@ pub(super) struct BrokerSourceStart<'a, P> {
     pub(super) connector_label: &'static str,
 }
 
-impl Runtime {
-    /// Starts every instance of one broker source under the host source loop.
+/// One broker source ready to open: its connector plan and the host settings it runs under.
+pub(super) struct BrokerSourceStart<'a, P> {
+    pub(super) connector: P,
+    pub(super) instances: NonZeroU64,
+    pub(super) acknowledgement: IngestAcknowledgement<'a>,
+    pub(super) buffered_intake: bool,
+    pub(super) flush_each_intake: bool,
+    pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
+    pub(super) connector_label: &'static str,
+}
+
+impl<P> BrokerSourceStart<'_, P> {
+    /// Parses the declared delivery mode and opens every instance to run under the broker loop.
     ///
-    /// The delivery mode parses and every instance opens before anything is registered, so a
-    /// source that cannot start leaves no running ingestor behind.
-    pub(super) async fn start_broker_source<C>(
-        &self,
-        start: BrokerSourceStart<'_, C::Plan>,
-    ) -> Result<(), RuntimeError>
+    /// Nothing is registered here, so a mode that fails to parse or an instance that fails to open
+    /// leaves no running ingestor behind.
+    pub(super) async fn open<C>(self, ingestor: &IngestorSpec) -> Result<SourceStart, RuntimeError>
     where
-        C: BrokerSourceConnector,
+        C: BrokerSourceConnector<Plan = P>,
     {
-        let BrokerSourceStart {
-            ingestor,
+        let Self {
             connector,
             instances,
             acknowledgement,
@@ -214,41 +138,12 @@ impl Runtime {
             flush_each_intake,
             client_mounts,
             connector_label,
-        } = start;
-        let domain = &ingestor.domain;
-        let key =
-            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
-        if self.inner.ingestors.contains_key(&key) {
-            return Err(RuntimeError::IngestorAlreadyRunning {
-                domain: domain.as_str().to_string(),
-                ingestor: ingestor.name.as_str().to_string(),
-            });
-        }
-        let acknowledgement = match acknowledgement {
-            DeclaredSourceAcknowledgement::Unacknowledged => SourceAckPolicy::None,
-            DeclaredSourceAcknowledgement::Sequential { timeout, retry } => {
-                SourceAckPolicy::Sequential {
-                    timeout: Self::parse_ack_timeout(domain, &ingestor.name, timeout)?,
-                    retry: Self::parse_retry_policy(domain, &ingestor.name, retry)?,
-                }
-            }
-            DeclaredSourceAcknowledgement::Parallel {
-                max,
-                batch_timeout,
-                timeout,
-                retry,
-            } => SourceAckPolicy::Parallel {
-                max_in_flight: addressable_count(max),
-                batch_timeout: Self::parse_duration_setting(
-                    domain,
-                    &ingestor.name,
-                    "batch timeout",
-                    batch_timeout,
-                )?,
-                timeout: Self::parse_ack_timeout(domain, &ingestor.name, timeout)?,
-                retry: Self::parse_retry_policy(domain, &ingestor.name, retry)?,
-            },
-        };
+        } = self;
+        let acknowledgement = Runtime::parse_ingest_acknowledgement(
+            &ingestor.domain,
+            &ingestor.name,
+            acknowledgement,
+        )?;
         // An acknowledged mode retries by its declared policy; a source without one reopens on
         // the host's reconnect cadence.
         let retry = match acknowledgement {
@@ -259,48 +154,188 @@ impl Runtime {
         };
         let plan = SourcePlan {
             connector,
-            capabilities: SourceCapabilities::new(
-                ingestor.allow_header_reads,
-                ingestor.metadata_kind.source_scope(),
-                ingestor.quiesce.supports(ingestor.quiesce.mode()),
-                instances,
-                acknowledgement.support(),
-            ),
+            capabilities: ingestor.source_capabilities(instances, acknowledgement.support()),
             acknowledgement,
         };
-        let dependencies = self.ingestor_dependencies(domain, ingestor).await?;
-        let mut sources = Vec::with_capacity(instances.get().arch_into());
-        for instance_index in 0..instances.get() {
+        let mut opened: Vec<Box<dyn SourceInstance>> =
+            Vec::with_capacity(plan.capabilities.instances().get().arch_into());
+        for instance_index in 0..plan.capabilities.instances().get() {
             tokio::task::consume_budget().await;
             let source = C::open(&plan.connector, instance_index)
                 .await
                 .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
-            sources.push(source);
+            opened.push(Box::new(BrokerSourceInstance {
+                source,
+                acknowledgement: plan.acknowledgement,
+                retry,
+            }));
         }
+        Ok(SourceStart {
+            instances: opened,
+            companions: Vec::new(),
+            buffered_intake,
+            flush_each_intake,
+            client_mounts,
+            connector_label,
+        })
+    }
+}
 
-        let branched_runtime = self.start_branched_ingestor_runtime(
-            domain,
-            &ingestor.name,
-            dependencies.branched_templates,
+/// One broker source instance, which the host runs under the broker loop.
+pub(super) struct BrokerSourceInstance<C> {
+    pub(super) source: C,
+    pub(super) acknowledgement: SourceAckPolicy,
+    pub(super) retry: ParsedRetryPolicy,
+}
+
+impl<C> SourceInstance for BrokerSourceInstance<C>
+where
+    C: BrokerSourceConnector,
+{
+    fn start(
+        self: Box<Self>,
+        host: RuntimeSourceHost,
+        shutdown: watch::Receiver<bool>,
+    ) -> BoxFuture<'static, ()> {
+        let Self {
+            source,
+            acknowledgement,
+            retry,
+        } = *self;
+        Box::pin(run_source_instance_with_retry(
+            source,
+            SourceHost::new(host),
+            acknowledgement,
+            retry,
+            shutdown,
+        ))
+    }
+}
+
+/// One paced source ready to open: its connector plan and the domain cadence the host polls it on.
+pub(super) struct PacedSourceStart<P> {
+    pub(super) connector: P,
+    pub(super) every: DomainClockPeriod,
+    /// Whether the first poll is due as soon as the cadence binds or one period later.
+    pub(super) cadence_start: DomainCadenceStart,
+    pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
+    pub(super) connector_label: &'static str,
+}
+
+impl<P> PacedSourceStart<P> {
+    /// Opens the source's one instance and binds the domain cadence the host polls it on.
+    pub(super) async fn open<C>(
+        self,
+        runtime: &Runtime,
+        ingestor: &IngestorSpec,
+    ) -> Result<SourceStart, RuntimeError>
+    where
+        C: PacedSourceConnector<Plan = P>,
+    {
+        let Self {
+            connector,
+            every,
+            cadence_start,
+            client_mounts,
+            connector_label,
+        } = self;
+        let acknowledgement = SourceAckPolicy::None;
+        let plan = SourcePlan {
+            connector,
+            capabilities: ingestor.source_capabilities(NonZeroU64::MIN, acknowledgement.support()),
+            acknowledgement,
+        };
+        let source = C::open(&plan.connector, 0)
+            .await
+            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+        let cadence = runtime
+            .bind_domain_cadence(&ingestor.domain, every, cadence_start)
+            .map_err(|error| ingestor.start_failure(error.to_string()))?;
+        let instance: Box<dyn SourceInstance> = Box::new(PacedSourceInstance { source, cadence });
+        Ok(SourceStart {
+            instances: vec![instance],
+            companions: Vec::new(),
+            buffered_intake: false,
+            flush_each_intake: false,
+            client_mounts,
+            connector_label,
+        })
+    }
+}
+
+/// One paced source instance, which the host polls on its bound domain cadence.
+struct PacedSourceInstance<C> {
+    source: C,
+    cadence: DomainCadence,
+}
+
+impl<C> SourceInstance for PacedSourceInstance<C>
+where
+    C: PacedSourceConnector,
+{
+    fn start(
+        self: Box<Self>,
+        host: RuntimeSourceHost,
+        shutdown: watch::Receiver<bool>,
+    ) -> BoxFuture<'static, ()> {
+        let Self { source, cadence } = *self;
+        Box::pin(run_paced_source(source, host, cadence, shutdown))
+    }
+}
+
+impl Runtime {
+    /// Registers a composed source and starts it: the branch runtimes its routes feed, its
+    /// readiness, a task for every companion and every instance, and the running ingestor that
+    /// stopping it removes.
+    ///
+    /// Nothing here can fail, so a source is registered only once everything that could stop it
+    /// from starting has succeeded.
+    pub(super) fn host_source(
+        &self,
+        ingestor: &IngestorSpec,
+        quiesce: Arc<IngestorQuiesceControl>,
+        dependencies: IngestorDependencies,
+        source: SourceStart,
+    ) {
+        let SourceStart {
+            instances,
+            companions,
+            buffered_intake,
+            flush_each_intake,
+            client_mounts,
+            connector_label,
+        } = source;
+        let IngestorDependencies {
+            output_routes,
+            filter_where,
+            codec,
+            branched_templates,
+            metrics,
+        } = dependencies;
+        let domain = &ingestor.domain;
+        let branched_runtime =
+            self.start_branched_ingestor_runtime(domain, &ingestor.name, branched_templates);
+        let instance_count: u64 = instances.len().arch_into();
+        let expected_instances = NonZeroU64::new(instance_count).assured(
+            "every source composition opens the non-zero instance count its source declares",
         );
-        let quiesce = self
-            .ingestor_quiesce_control(domain, &ingestor.name)
-            .verified(
-                "the runtime registers quiesce control for an ingestor before it starts the task",
-            );
+        self.prepare_ingestor_readiness(domain, &ingestor.name, expected_instances);
+
         let (shutdown_tx, _) = watch::channel(false);
-        self.prepare_ingestor_readiness(domain, &ingestor.name, plan.capabilities.instances());
-        let mut tasks = Vec::with_capacity(sources.len());
-        for (instance_index, source) in (0_u64..).zip(sources) {
-            let host = RuntimeSourceHost::build(RuntimeSourceHostSpec {
+        let mut tasks = Vec::with_capacity(instances.len());
+        for companion in companions {
+            tasks.push(tokio::spawn(companion.start(shutdown_tx.subscribe())));
+        }
+        for (instance_index, instance) in (0_u64..).zip(instances) {
+            let host = RuntimeSourceHost::new(RuntimeSourceHostSpec {
                 runtime: self.clone(),
                 domain: domain.clone(),
                 ingestor: ingestor.name.clone(),
                 timestamp_source: ingestor.timestamp_source.clone(),
-                output_routes: dependencies.output_routes.clone(),
-                filter_where: dependencies.filter_where.clone(),
-                codec: dependencies.codec.clone(),
-                metrics: dependencies.metrics.clone(),
+                output_routes: output_routes.clone(),
+                filter_where: filter_where.clone(),
+                codec: codec.clone(),
+                metrics: metrics.clone(),
                 branched_senders: branched_runtime.senders.clone(),
                 quiesce: quiesce.clone(),
                 shutdown: shutdown_tx.subscribe(),
@@ -309,11 +344,10 @@ impl Runtime {
                 buffered_intake,
                 flush_each_intake,
             });
-            let shutdown = shutdown_tx.subscribe();
+            let run = instance.start(host, shutdown_tx.subscribe());
             let task_domain = domain.clone();
             let task_ingestor = ingestor.name.clone();
             let task_client_mounts = client_mounts.clone();
-            let acknowledgement = plan.acknowledgement;
             tasks.push(tokio::spawn(async move {
                 let _client_mounts = task_client_mounts;
                 info!(
@@ -323,8 +357,7 @@ impl Runtime {
                     instance = instance_index,
                     "started source ingestor instance"
                 );
-                run_source_instance_with_retry(source, host, acknowledgement, retry, shutdown)
-                    .await;
+                run.await;
                 info!(
                     domain = task_domain.as_str(),
                     ingestor = task_ingestor.as_str(),
@@ -336,14 +369,13 @@ impl Runtime {
         }
 
         self.inner.ingestors.insert(
-            key,
-            IngestorRuntime::Background {
+            ingestor.runtime_key(),
+            IngestorRuntime {
                 shutdown: shutdown_tx,
                 branched: branched_runtime.runtimes,
                 tasks,
             },
         );
-        Ok(())
     }
 }
 
@@ -403,10 +435,6 @@ pub(super) struct RuntimeSourceHost {
 }
 
 impl RuntimeSourceHost {
-    pub(super) fn build(spec: RuntimeSourceHostSpec) -> SourceHost {
-        SourceHost::new(Self::new(spec))
-    }
-
     pub(super) fn new(spec: RuntimeSourceHostSpec) -> Self {
         let ack_root_trackers = spec
             .runtime
@@ -498,6 +526,30 @@ impl RuntimeSourceHost {
 
     fn should_skip_poll(&self) -> bool {
         self.quiesce.should_skip_poll()
+    }
+
+    /// The intake a request-scoped source binds its routes to.
+    ///
+    /// Every request that arrives on those routes is admitted through this host's quiesce control
+    /// and dispatched as its own ingest group through the same outputs, codec and branch senders
+    /// the host holds, on the request path rather than in the source loop.
+    pub(super) fn request_intake(&self) -> EndpointIngestBinding {
+        EndpointIngestBinding {
+            runtime_key: DomainNodeRef::node_in(
+                self.domain.clone(),
+                ModelKind::Ingestor,
+                self.ingestor.clone(),
+            ),
+            quiesce: self.quiesce.clone(),
+            domain: self.domain.clone(),
+            ingestor: self.ingestor.clone(),
+            timestamp_source: self.timestamp_source.clone(),
+            output_routes: self.output_routes.clone(),
+            filter_where: self.filter_where.clone(),
+            codec: self.codec.clone(),
+            metrics: self.metrics.clone(),
+            branched_senders: self.branched_senders.clone(),
+        }
     }
 
     fn record_poll_error(&self, reason: String) {
@@ -1065,28 +1117,49 @@ where
     }
 }
 
+/// Runs a request-scoped source until shutdown.
+///
+/// Its requests are admitted and dispatched on the request path through the intake the source
+/// bound, so the loop reads nothing from the source. It replays what a quiesce buffer retained for
+/// those requests once the buffer is released, and closes the source at shutdown so its routes stop
+/// receiving requests.
+pub(super) async fn run_request_source<C>(
+    mut source: C,
+    mut host: SourceHost,
+    mut shutdown: watch::Receiver<bool>,
+) where
+    C: SourceConnector,
+{
+    loop {
+        tokio::task::consume_budget().await;
+        match host.replay_buffered().await {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                host.report_error(format!("{error:#}"));
+                continue;
+            }
+        }
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = host.wait_for_quiesce_change() => {}
+        }
+    }
+
+    if let Err(error) = source.close().await {
+        host.report_error(format!("{error:#}"));
+    }
+    host.mark_unready();
+}
+
 enum BatchDisposition {
     Accepted,
     Retry,
     Shutdown,
-}
-
-pub(super) async fn run_source_instance<C>(
-    source: C,
-    host: SourceHost,
-    acknowledgement: SourceAckPolicy,
-    shutdown: watch::Receiver<bool>,
-) where
-    C: BrokerSourceConnector,
-{
-    run_source_instance_with_retry(
-        source,
-        host,
-        acknowledgement,
-        acknowledgement.retry(),
-        shutdown,
-    )
-    .await;
 }
 
 pub(super) async fn run_source_instance_with_retry<C>(
@@ -1396,6 +1469,7 @@ mod tests {
         ack_waits: usize,
         resumes: usize,
         suspends: usize,
+        closes: usize,
         flushes: usize,
         quiesce_waits: usize,
         suspension_waits: usize,
@@ -1467,6 +1541,11 @@ mod tests {
 
         async fn suspend(&mut self) -> SourceResult<()> {
             self.observations.lock().suspends += 1;
+            Ok(())
+        }
+
+        async fn close(&mut self) -> SourceResult<()> {
+            self.observations.lock().closes += 1;
             Ok(())
         }
     }
@@ -1665,7 +1744,7 @@ mod tests {
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        run_source_instance(source, host, policy, shutdown_rx).await;
+        run_source_instance_with_retry(source, host, policy, policy.retry(), shutdown_rx).await;
         drop(shutdown_tx);
         observations
     }
@@ -1703,7 +1782,14 @@ mod tests {
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        run_source_instance(source, host, SourceAckPolicy::None, shutdown_rx).await;
+        run_source_instance_with_retry(
+            source,
+            host,
+            SourceAckPolicy::None,
+            SourceAckPolicy::None.retry(),
+            shutdown_rx,
+        )
+        .await;
         drop(shutdown_tx);
 
         let observations = observations.lock();
@@ -1720,6 +1806,28 @@ mod tests {
             ]
         );
         assert_eq!(observations.pending_replays, 0);
+    }
+
+    #[tokio::test]
+    async fn request_source_loop_replays_retained_requests_and_closes_the_source_at_shutdown() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        observations.lock().pending_replays = 2;
+        let source = empty_source(observations.clone());
+        let host = SourceHost::new(FakeHost::running(observations.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        shutdown_tx.send_replace(true);
+
+        run_request_source(source, host, shutdown_rx).await;
+
+        // Requests dispatch on the request path, so the loop never reads from the source: it only
+        // replays what the buffer retained before it observes the shutdown.
+        let observations = observations.lock();
+        assert_eq!(observations.sequence, vec!["replay", "replay"]);
+        assert_eq!(observations.pending_replays, 0);
+        assert!(observations.requests.is_empty());
+        assert_eq!(observations.resumes, 0);
+        assert_eq!(observations.closes, 1);
+        assert_eq!(observations.unready, 1);
     }
 
     #[tokio::test]

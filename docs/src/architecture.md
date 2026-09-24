@@ -77,8 +77,25 @@ a position means for its broker, together with its own header semantics. The run
 instance loop for every broker source: it parses the declared delivery mode into the acknowledgement
 policy, opens each instance, decodes and dispatches what the connector reads, waits on the
 acknowledgement roots it attached, acknowledges or rejects positions through the connector, and
-paces retries, quiesce, readiness, and transient status. No connector redeclares which quiesce
-modes it honors; that stays with the source vocabulary the registry validates.
+paces retries, quiesce, readiness, and transient status. The HTTP and Prometheus sources are paced
+instead: the runtime polls them on the domain cadence their `EVERY` declares.
+
+The endpoint source is the one source that stays in the server. It has no driver, because the
+node's own HTTP and HTTPS listener feeds it, but it implements the same source contract as a
+request-scoped source: starting it binds the endpoint's routes to the runtime's request intake, and
+closing it unbinds them. The runtime keeps request admission, the endpoint buffer, and rejection
+with a `Retry-After` delay on the request path, where each request is admitted and dispatched as
+its own ingest group; the endpoint's source loop only replays what the endpoint buffer retained once
+a quiesce releases it.
+
+Every ingestor starts on one path, whatever its source. The runtime compiles the ingestor's filter
+and output routes and resolves its codec; the composition root, the one place in the server that
+maps a source plan to the connector running it, resolves the client configuration and opens the
+connector's instances; and only then does the runtime register the ingestor and start each
+instance under the loop of its source family. An ingestor whose source cannot start therefore
+leaves nothing running. Which quiesce modes a source honors, whether its messages carry readable
+headers, and what acknowledgement its delivery mode declares all come from the source vocabulary;
+no connector and no runtime table redeclares them.
 
 A row sink writes values rather than encoded payloads, so the runtime evaluates its `VALUES`
 mapping itself. The mapping compiles once when the emitter starts and runs once per batch,
@@ -104,6 +121,13 @@ acknowledgements and reports what it published, so nothing counts as sent before
 The pooled sinks keep the same split. A crate owns its driver's pool and the connection it hands
 out, and the runtime owns the lease on the node's one instance of a named client, the wait a graph
 node reports while it holds no connection, and the bounds the client declared.
+
+The runtime names every sink crate in one place, its composition root. Each variant of an
+emitter's sink plan maps to that crate's constructor, and the connector it opens is paired with the
+input the runtime prepares for its contract: the emitter's codec for a record sink, the compiled
+`VALUES` projection for a row sink. The emitter task holds that pairing as one boxed connector, so
+its batching, retry, commit, and drain are written once for every sink, and no connector is ever
+called once per row.
 
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and

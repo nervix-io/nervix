@@ -14,23 +14,21 @@ use nervix_connector_mqtt::{MqttSource, MqttSourcePlan, MqttSourceSettings};
 
 use super::{
     super::*,
-    source::{BrokerSourceStart, DeclaredSourceAcknowledgement},
+    source::{BrokerSourceStart, SourceStart},
 };
 
-pub(in crate::runtime) struct MqttIngestor;
-
-impl MqttIngestor {
-    pub(in crate::runtime) async fn start(
+impl MqttIngestorStartPlan {
+    pub(super) async fn compose(
+        self,
         runtime: &Runtime,
-        plan: MqttIngestorStartPlan,
-    ) -> Result<(), RuntimeError> {
+        ingestor: &IngestorSpec,
+    ) -> Result<SourceStart, RuntimeError> {
         let MqttIngestorStartPlan {
-            ingestor,
             client,
             topic,
             instances,
             mode,
-        } = plan;
+        } = self;
         let mut instance_configs = Vec::with_capacity(instances.get().arch_into());
         let mut client_mounts = Vec::new();
         for instance_index in 0..instances.get() {
@@ -57,17 +55,16 @@ impl MqttIngestor {
             qos: mode.qos(),
             manual_acks: mode.is_ack(),
         });
-        runtime
-            .start_broker_source::<MqttSource>(BrokerSourceStart {
-                ingestor: &ingestor,
-                connector,
-                instances,
-                acknowledgement: DeclaredSourceAcknowledgement::from(&mode),
-                buffered_intake: true,
-                flush_each_intake: mode.is_ack(),
-                client_mounts,
-                connector_label: "mqtt",
-            })
-            .await
+        BrokerSourceStart {
+            connector,
+            instances,
+            acknowledgement: mode.acknowledgement(),
+            buffered_intake: true,
+            flush_each_intake: mode.is_ack(),
+            client_mounts,
+            connector_label: "mqtt",
+        }
+        .open::<MqttSource>(ingestor)
+        .await
     }
 }

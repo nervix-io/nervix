@@ -77,13 +77,13 @@ use nervix_models::{
     IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
     MessageErrorOperation, MessageErrorPolicy, Model, ModelIndex, ModelKind, ModelName,
-    MongoDbValueMapping, MqttIngestMode, MqttQos, MqttSession, MySqlValueMapping, NodeRef,
-    OtelValueMapping, OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome,
-    OwnershipStateReset, OwnershipStateResetCause, ParseAsType, PostgresValueMapping,
-    ProcessorOutput, PulsarIngestMode, RabbitMqIngestMode, RelayName, RemoteAckOutcome,
-    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, ResolvedBranching, ResourceId,
-    ResourceName, RetryPolicy, RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes,
-    SchemaFingerprint, SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
+    MongoDbValueMapping, MqttIngestMode, MySqlValueMapping, NodeRef, OtelValueMapping,
+    OutputBranch, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    OwnershipStateResetCause, ParseAsType, PostgresValueMapping, ProcessorOutput, PulsarIngestMode,
+    RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
+    RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
+    RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
+    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
     StructuredMessageError, SubscriptionName, Timestamp, WasmRejectedStatePolicy,
     WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
@@ -181,9 +181,15 @@ mod domain_clock;
 mod domain_execution;
 mod domain_rebuild;
 mod domain_wire_schemas;
+mod emitter_buffer;
+mod emitter_encoding;
+mod emitter_publishing;
+mod emitter_retry;
+mod emitter_sinks;
 mod emitter_start_plan;
 mod emitter_supervision;
-mod emitters;
+mod emitter_task;
+mod emitter_values;
 mod endpoint;
 mod entity_gate;
 mod error;
@@ -216,6 +222,7 @@ mod node_settings;
 mod observability;
 mod ownership_handoff_error;
 mod planning;
+mod pooled_sink_clients;
 mod processor_branch_task;
 mod processor_output;
 mod processor_template;
@@ -293,11 +300,31 @@ use domain_execution::{
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::branch_relays_from_branched_specs;
 use domain_wire_schemas::DomainWireSchemas;
+use emitter_buffer::{
+    DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublishBatch,
+    PublishReport,
+};
+use emitter_encoding::EncodedRecordSink;
+use emitter_publishing::{
+    EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterSink,
+    EmitterSinkState, RejectedEmitterRecord, await_emitter_confirmation,
+    emitter_unavailable_reason, finish_record_sink_publish, finish_rejected_records,
+};
+use emitter_retry::{
+    EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,
+    emitter_retry_delay,
+};
+use emitter_sinks::EmitterSinkStarter;
 use emitter_start_plan::*;
 use emitter_supervision::{
     EmitterRetryKind, EmitterRetryStatus, EmitterTaskCommand, ScheduledEmitterTask,
     clear_emitter_stop_signal,
 };
+use emitter_task::{
+    EmitterRuntimeError, EmitterRuntimeResult, EmitterSinkContext, emitter_error_message,
+    emitter_init_error, emitter_publish_error_is_retryable, emitter_report,
+};
+use emitter_values::{MappedRowSink, MappedValuesProjection, MappedValuesProjectionInit};
 use endpoint::{
     EndpointIngestBinding, EndpointRoute, HttpRouteKey, RoutedEndpoint, RoutedEndpointsByDomain,
 };
@@ -331,16 +358,16 @@ use ingest_group::{
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
 use ingest_metadata::{
     BRANCH_NAMESPACE, INGEST_METADATA_NAMESPACE, IngestHeaderFunctionInjector,
-    IngestMetadataBuilders, emit_sink_supports_headers, ingest_source_supports_headers,
+    IngestMetadataBuilders, emit_sink_supports_headers,
 };
 pub(in crate::runtime) use ingestor_quiesce::{
     BufferedIngestMetadata, BufferedIngestPayload, IngestorQuiesceCause, IngestorQuiesceControl,
     IngestorQuiesceIntake,
 };
 use ingestor_quiesce::{
-    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, IngestorRuntime,
-    RuntimeReconnectStatus,
+    DEFAULT_KAFKA_PARTITION_WATCH_INTERVAL, IngestorReadiness, RuntimeReconnectStatus,
 };
+use ingestor_start::IngestorRuntime;
 use ingestor_start_plan::*;
 use kafka_offset_state::{
     KafkaOffsetSnapshotInstaller, KafkaOffsetStateAssignment, KafkaOffsetStateOriginator,

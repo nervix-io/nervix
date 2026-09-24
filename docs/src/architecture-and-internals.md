@@ -10,6 +10,7 @@ Use it for:
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)
 - [resource versions, pinned bindings, `LATEST` resolution, rebinding, and the HTTPS listener refresh](./resource-versions.md)
 - shutdown phases, drain guarantees, and crash recovery
+- [integration-test lifecycle: harness deadlines, node startup, teardown, and the suite watchdog](./integration-test-lifecycle.md)
 - runtime semantics that are easier to understand from the implementation side
 - relay/state internals
 

@@ -110,15 +110,6 @@ pub(super) enum IngestMetadataError {
 }
 
 impl IngestMetadataKind {
-    #[cfg(test)]
-    pub(super) fn for_source(source: &IngestSource) -> Self {
-        match source {
-            IngestSource::Kafka { .. } => Self::Kafka,
-            IngestSource::Syslog { .. } => Self::Syslog,
-            _ => Self::Headers,
-        }
-    }
-
     /// The `metadata` namespace this source kind exposes to programs, or `None` when it
     /// exposes transport headers only.
     pub(super) fn integration_arrow_schema(self) -> Option<StdArc<arrow_schema::Schema>> {
@@ -446,11 +437,14 @@ impl IngestHeaderFunctionInjector {
 }
 
 impl VmFunctionInjector for IngestHeaderFunctionInjector {
+    /// Reads the headers of the messages the selected rows were decoded from. A conditional arm
+    /// calls this for the rows it selects only, so each row's headers are looked up by the row's
+    /// identity in the batch, which the selection names.
     fn inject_with_context(
         &self,
         function: &FunctionName,
         arguments: &[VmTypedArray],
-        row_count: usize,
+        rows: &nervix_vm::RowSelection,
         _span: nervix_vm::program::Span,
         _now: Timestamp,
         _prior_error_rows: nervix_vm::RowErrorMask<'_>,
@@ -467,18 +461,20 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
             Some(metadata) => metadata.len(),
             None => self.row_count,
         };
-        if metadata_row_count != row_count || names.len() != row_count {
+        if !rows.fits(metadata_row_count) || names.len() != rows.len() {
             return Err(nervix_vm::RuntimeError::InvalidBatch {
                 message: format!(
-                    "function '{}' header context has {} rows for a {row_count}-row batch",
+                    "function '{}' header context has {} rows for a call over {} rows of a batch \
+                     selected as {rows:?}",
                     function.as_str(),
-                    metadata_row_count
+                    metadata_row_count,
+                    names.len()
                 ),
             });
         }
         if let FunctionName::ReadHeader = function {
             let mut values = Vec::with_capacity(names.len());
-            for (row, name) in names.iter().enumerate() {
+            for (row, name) in rows.iter().zip(names.iter()) {
                 let value = if let Some(name) = name
                     && let Some(metadata) = self.metadata.as_ref()
                 {
@@ -495,7 +491,7 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
         if let FunctionName::ReadHeaders = function {
             let field = StdArc::new(arrow_schema::Field::new("item", ArrowDataType::Utf8, false));
             let mut builder = ListBuilder::new(StringBuilder::new()).with_field(field);
-            for (row, name) in names.iter().enumerate() {
+            for (row, name) in rows.iter().zip(names.iter()) {
                 if let Some(name) = name
                     && let Some(metadata) = self.metadata.as_ref()
                 {
@@ -513,19 +509,6 @@ impl VmFunctionInjector for IngestHeaderFunctionInjector {
             message: format!("function '{}' is not injectable", function.as_str()),
         })
     }
-}
-
-pub(super) fn ingest_source_supports_headers(source: &IngestSource) -> bool {
-    matches!(
-        source,
-        IngestSource::Endpoint { .. }
-            | IngestSource::Http { .. }
-            | IngestSource::Kafka { .. }
-            | IngestSource::Nats { .. }
-            | IngestSource::Pulsar { .. }
-            | IngestSource::RabbitMq { .. }
-            | IngestSource::Sqs { .. }
-    )
 }
 
 pub(super) fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
@@ -878,6 +861,69 @@ mod tests {
         assert_eq!(selected_offset.values(), &[43]);
     }
 
+    #[test]
+    fn header_functions_read_the_selected_rows_by_identity() {
+        let first_headers = TestIngestHeaders(&[("route", "primary")]);
+        let second_headers = TestIngestHeaders(&[("route", "secondary")]);
+        let metadata = ingest_metadata_for_test(
+            IngestMetadataKind::Headers,
+            &[
+                IngestMetadataRow::Headers {
+                    headers: &first_headers,
+                },
+                IngestMetadataRow::Headers {
+                    headers: &second_headers,
+                },
+            ],
+        );
+        let injector = IngestHeaderFunctionInjector::from_metadata(Some(&metadata), 2);
+        let span: nervix_vm::program::Span = (0..0).into();
+        let names = [VmTypedArray::Utf8(arrow_array::StringArray::from(vec![
+            Some("route"),
+        ]))];
+
+        let second_only = injector
+            .inject_with_context(
+                &FunctionName::ReadHeader,
+                &names,
+                &nervix_vm::RowSelection::Selected(vec![1]),
+                span,
+                Timestamp::from_unix_nanos(0),
+                nervix_vm::RowErrorMask::none(1),
+            )
+            .expect("a selected row reads its own headers");
+        assert_eq!(
+            second_only.output,
+            VmTypedArray::Utf8(arrow_array::StringArray::from(vec![Some("secondary")])),
+            "the header comes from the message the selected row was decoded from"
+        );
+
+        let beyond = injector.inject_with_context(
+            &FunctionName::ReadHeader,
+            &names,
+            &nervix_vm::RowSelection::Selected(vec![2]),
+            span,
+            Timestamp::from_unix_nanos(0),
+            nervix_vm::RowErrorMask::none(1),
+        );
+        assert!(
+            matches!(beyond, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            "a row past the header context is refused"
+        );
+        let short = injector.inject_with_context(
+            &FunctionName::ReadHeader,
+            &names,
+            &nervix_vm::RowSelection::All(1),
+            span,
+            Timestamp::from_unix_nanos(0),
+            nervix_vm::RowErrorMask::none(1),
+        );
+        assert!(
+            matches!(short, Err(nervix_vm::RuntimeError::InvalidBatch { .. })),
+            "a batch of another size than the header context is refused"
+        );
+    }
+
     #[tokio::test]
     async fn ingestor_header_functions_preserve_order_and_missing_value_semantics() {
         let input_schema = test_schema(&[
@@ -925,8 +971,8 @@ mod tests {
         let program = compile_ingestor_filter_map_program(
             &domain("default"),
             named::<ModelName>("header_ingestor"),
-            IngestMetadataKind::for_source(&source),
-            ingest_source_supports_headers(&source),
+            IngestMetadataKind::Kafka,
+            source.reads_headers(),
             &construction(
                 "INHERIT tenant SET first = read_header(lower(input.header_name)), total = \
                  count(read_headers(lower(input.header_name))) WHERE read_header(\"tenant\") = \

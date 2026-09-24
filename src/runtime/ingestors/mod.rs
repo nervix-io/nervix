@@ -1,3 +1,14 @@
+//! The source composition root, and the one start path every ingestor takes.
+//!
+//! Layer: data plane.
+//!
+//! - **Owns.** Starting an ingestor: preparing its quiescence, refusing a second start, compiling
+//!   its dependencies, and mapping its source plan to the connector that runs it, which is the only
+//!   place a source plan's kind selects anything.
+//! - **Depends on.** Ingestor start plans, the host source launcher, every source connector, and
+//!   the endpoint source the server keeps.
+//! - **Must not know.** NSPL parsing, registry validation, or placement computation.
+
 use super::*;
 
 pub(in crate::runtime) mod endpoint;
@@ -15,100 +26,44 @@ pub(in crate::runtime) mod syslog;
 pub(in crate::runtime) mod websockets;
 pub(in crate::runtime) mod zeromq;
 
-use endpoint::EndpointIngestor;
-use http::HttpIngestor;
-use kafka::KafkaIngestor;
-use mqtt::MqttIngestor;
-use nats::NatsIngestor;
-use prometheus::PrometheusIngestor;
-use pulsar::PulsarIngestor;
-use rabbitmq::RabbitMqIngestor;
-use redis_pubsub::RedisPubSubIngestor;
-use sqs::SqsIngestor;
-use syslog::SyslogIngestor;
-use websockets::WebsocketsIngestor;
-use zeromq::ZeroMqIngestor;
-
-pub(in crate::runtime) struct IngestorStarter;
-
-impl IngestorStarter {
-    pub(in crate::runtime) async fn start(
-        runtime: &Runtime,
+impl Runtime {
+    /// Starts one ingestor. Every source takes this path.
+    ///
+    /// Everything that can fail comes first: the ingestor's dependencies compile and its source
+    /// plan composes into opened connector instances. Only then does the host register the source
+    /// and start its tasks, so an ingestor that cannot start leaves nothing running behind it.
+    pub(in crate::runtime) async fn start_ingestor(
+        &self,
         plan: IngestorStartPlan,
     ) -> Result<(), RuntimeError> {
-        runtime.prepare_ingestor_quiescence(&plan.ingestor().domain, plan.ingestor());
-        match plan {
-            IngestorStartPlan::Http(plan) => HttpIngestor::start(runtime, plan).await,
-            IngestorStartPlan::Kafka(plan) => {
-                let dispatcher = runtime.inner.remote_dispatcher.load_full();
-                let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
-                let kafka_offset_state = plan.offset_state_placement.as_ref().and_then(|planned| {
-                    local_node_id
-                        .is_some_and(|local| Some(local) == planned.primary_node.as_ref())
-                        .then(|| {
-                            runtime
-                                .inner
-                                .replicated_kafka_offset_states
-                                .get(&planned.placement)
-                                .and_then(|state| {
-                                    ReplicatedKafkaOffsetState::current_originator(state.value())
-                                })
-                        })
-                        .flatten()
-                });
-                KafkaIngestor::start(runtime, plan, kafka_offset_state).await
-            }
-            IngestorStartPlan::Pulsar(plan) => PulsarIngestor::start(runtime, plan).await,
-            IngestorStartPlan::Prometheus(plan) => PrometheusIngestor::start(runtime, plan).await,
-            IngestorStartPlan::RabbitMq(plan) => RabbitMqIngestor::start(runtime, plan).await,
-            IngestorStartPlan::RedisPubSub(plan) => RedisPubSubIngestor::start(runtime, plan).await,
-            IngestorStartPlan::Mqtt(plan) => MqttIngestor::start(runtime, plan).await,
-            IngestorStartPlan::Nats(plan) => NatsIngestor::start(runtime, plan).await,
-            IngestorStartPlan::ZeroMq(plan) => ZeroMqIngestor::start(runtime, plan).await,
-            IngestorStartPlan::Sqs(plan) => SqsIngestor::start(runtime, plan).await,
-            IngestorStartPlan::Websockets(plan) => WebsocketsIngestor::start(runtime, plan).await,
-            IngestorStartPlan::Syslog(plan) => SyslogIngestor::start(runtime, plan).await,
-            IngestorStartPlan::Endpoint(plan) => EndpointIngestor::start(runtime, plan).await,
+        let IngestorStartPlan { ingestor, source } = plan;
+        let quiesce = self.prepare_ingestor_quiescence(&ingestor.domain, &ingestor);
+        if self.inner.ingestors.contains_key(&ingestor.runtime_key()) {
+            return Err(RuntimeError::IngestorAlreadyRunning {
+                domain: ingestor.domain.as_str().to_string(),
+                ingestor: ingestor.name.as_str().to_string(),
+            });
         }
-    }
-}
 
-#[cfg(test)]
-mod tests {
-    use nervix_models::{ClientConfigEntry, CreateClientWebsockets};
-
-    use super::*;
-
-    #[test]
-    fn client_config_extractors_handle_defaults_and_missing_keys() {
-        let websocket = CreateClientWebsockets::<u64> {
-            name: named("ws"),
-            mount: None,
-            signaling_protocol: None,
-            config: vec![ClientConfigEntry {
-                key: "endpoint".to_string(),
-                value: "wss://example.com/socket".to_string(),
-            }],
+        let dependencies = self
+            .ingestor_dependencies(&ingestor.domain, &ingestor)
+            .await?;
+        let source = match source {
+            SourceStartPlan::Http(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::Kafka(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::Pulsar(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::Mqtt(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::Nats(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::RabbitMq(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::RedisPubSub(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::Prometheus(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::ZeroMq(plan) => plan.compose(&ingestor).await?,
+            SourceStartPlan::Sqs(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::Endpoint(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::Websockets(plan) => plan.compose(self, &ingestor).await?,
+            SourceStartPlan::Syslog(plan) => plan.compose(self, &ingestor).await?,
         };
-        assert_eq!(
-            ingestors::websockets::WebsocketsIngestor::endpoint_from_config(&websocket.config)
-                .expect("endpoint"),
-            "wss://example.com/socket"
-        );
-
-        assert!(
-            ingestors::websockets::WebsocketsIngestor::endpoint_from_config(
-                &CreateClientWebsockets::<u64> {
-                    name: named("ws"),
-                    mount: None,
-                    signaling_protocol: None,
-                    config: vec![],
-                }
-                .config,
-            )
-            .expect_err("missing websocket endpoint")
-            .to_string()
-            .contains("missing WebSockets client config key 'endpoint'")
-        );
+        self.host_source(&ingestor, quiesce, dependencies, source);
+        Ok(())
     }
 }

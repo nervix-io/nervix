@@ -72,6 +72,14 @@ pub enum SideErrorReason {
     /// A `parse_datetime` input naming a local time that its zone repeats.
     #[error("parse_datetime local time is ambiguous in {zone}")]
     RepeatedLocalTime { zone: Zone },
+    /// A text builtin whose result, sized by its count, does not fit in the text its STRING column
+    /// has left.
+    #[error("{0} result exceeds the text one STRING column holds")]
+    TextTooLong(TextOperation),
+    /// A `uuid_v7` whose execution time is before the Unix epoch, where a version 7 UUID's
+    /// millisecond field has no value for it.
+    #[error("uuid_v7 execution time is before the Unix epoch")]
+    UuidTimeBeforeEpoch,
     /// A failure an injected function reported, with the code and text that function chose.
     #[error("{message}")]
     Injected { code: ErrorCode, message: String },
@@ -80,9 +88,11 @@ pub enum SideErrorReason {
 impl SideErrorReason {
     pub fn code(&self) -> ErrorCode {
         match self {
-            Self::IntegerOverflow(_) | Self::DatetimeOutOfRange(_) | Self::DateDiffOverflow => {
-                ErrorCode::Overflow
-            }
+            Self::IntegerOverflow(_)
+            | Self::DatetimeOutOfRange(_)
+            | Self::DateDiffOverflow
+            | Self::TextTooLong(_)
+            | Self::UuidTimeBeforeEpoch => ErrorCode::Overflow,
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
             Self::NegativeShiftCount(_)
             | Self::NonFiniteResult(_)
@@ -150,6 +160,17 @@ pub enum DatetimeOperation {
     FromUnix,
     #[strum(to_string = "parse_datetime")]
     ParseDatetime,
+}
+
+/// A text builtin whose count chooses the length of its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum TextOperation {
+    #[strum(to_string = "repeat")]
+    Repeat,
+    #[strum(to_string = "lpad")]
+    Lpad,
+    #[strum(to_string = "rpad")]
+    Rpad,
 }
 
 /// A floating-point operation whose result has to be finite.
@@ -340,8 +361,23 @@ impl RowErrors {
         RowErrorLengths(self.rows.iter().map(Vec::len).collect())
     }
 
-    /// Drops errors recorded past `lengths` for every row the instruction did not select,
-    /// so a conditional arm cannot leak errors from a branch it did not take.
+    /// Moves every error into `target`, on the row of `target` that `rows` names for each row of
+    /// this channel in turn, so the errors of an instruction narrowed to the rows its arm
+    /// selects land on the rows that selected it.
+    pub(crate) fn scatter_into(self, target: &mut RowErrors, rows: impl Iterator<Item = usize>) {
+        if self.rows.is_empty() {
+            return;
+        }
+        for (errors, row) in self.rows.into_iter().zip(rows) {
+            for error in errors {
+                target.push(row, error);
+            }
+        }
+    }
+
+    /// Drops errors recorded past `lengths` for every row the instruction did not select, so an
+    /// arm that runs a vectorized kernel over the whole batch reports nothing for a row it did
+    /// not select.
     pub fn restore_unselected(
         &mut self,
         lengths: &RowErrorLengths,
@@ -454,7 +490,7 @@ pub enum RuntimeError {
 mod tests {
     use super::{
         DatetimeOperation, DivisionOperation, ErrorCode, FloatOperation, IntegerOperation,
-        RowErrors, ShiftOperation, SideError, SideErrorReason,
+        RowErrors, ShiftOperation, SideError, SideErrorReason, TextOperation,
     };
     use crate::ir::RegisterType;
 
@@ -595,6 +631,34 @@ mod tests {
         );
         assert_eq!(
             SideErrorReason::DateDiffOverflow.code(),
+            ErrorCode::Overflow
+        );
+
+        let text_lengths = [
+            (
+                TextOperation::Repeat,
+                "repeat result exceeds the text one STRING column holds",
+            ),
+            (
+                TextOperation::Lpad,
+                "lpad result exceeds the text one STRING column holds",
+            ),
+            (
+                TextOperation::Rpad,
+                "rpad result exceeds the text one STRING column holds",
+            ),
+        ];
+        for (operation, message) in text_lengths {
+            let reason = SideErrorReason::TextTooLong(operation);
+            assert_eq!(reason.to_string(), message);
+            assert_eq!(reason.code(), ErrorCode::Overflow);
+        }
+        assert_eq!(
+            SideErrorReason::UuidTimeBeforeEpoch.to_string(),
+            "uuid_v7 execution time is before the Unix epoch"
+        );
+        assert_eq!(
+            SideErrorReason::UuidTimeBeforeEpoch.code(),
             ErrorCode::Overflow
         );
 

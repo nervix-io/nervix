@@ -641,7 +641,7 @@ pub(in crate::registry) fn validate_ingestor_filter_where_for_internal_schemas(
             reason: format!("FILTER WHERE is invalid: {reason}"),
         })
     })?;
-    if program_uses_header_reads(&parsed.inner) && !ingest_source_supports_headers(source) {
+    if program_uses_header_reads(&parsed.inner) && !source.reads_headers() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -691,8 +691,7 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
             reason: format!("ingestor output route is invalid: {reason}"),
         })
     })?;
-    if program_uses_header_reads(&parsed.inner) && !ingest_source_supports_headers(&ingestor.source)
-    {
+    if program_uses_header_reads(&parsed.inner) && !ingestor.source.reads_headers() {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
@@ -756,19 +755,6 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
     })?;
 
     Ok(output_schema.clone())
-}
-
-pub(in crate::registry) fn ingest_source_supports_headers(source: &IngestSource) -> bool {
-    matches!(
-        source,
-        IngestSource::Endpoint { .. }
-            | IngestSource::Http { .. }
-            | IngestSource::Kafka { .. }
-            | IngestSource::Nats { .. }
-            | IngestSource::Pulsar { .. }
-            | IngestSource::RabbitMq { .. }
-            | IngestSource::Sqs { .. }
-    )
 }
 
 fn ingestor_filter_map_metadata_schema(source: &IngestSource) -> Option<CreateSchema> {

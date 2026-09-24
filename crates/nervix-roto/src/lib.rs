@@ -35,7 +35,7 @@ use nervix_models::{CreateUdf, ParseAsType, Timestamp};
 use nervix_recovery::Discarded as _;
 use nervix_vm::{
     ErrorCode, FunctionExecutionPolicy, FunctionInjector, InjectedResult, RowErrorMask,
-    RuntimeError, SideError, SideErrorReason, TypedArray, UdfParameter, UdfSignature,
+    RowSelection, RuntimeError, SideError, SideErrorReason, TypedArray, UdfParameter, UdfSignature,
     UdfSignatures,
     program::{FunctionName, Span},
 };
@@ -937,14 +937,17 @@ impl fmt::Debug for CompiledUdf {
 }
 
 impl CompiledUdf {
+    /// Runs the function over the rows `rows` names. A UDF is pure, so it reads the rows' values
+    /// and never their identities.
     fn execute(
         &self,
         arguments: &[TypedArray],
-        row_count: usize,
+        rows: &RowSelection,
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
     ) -> Result<InjectedResult, RuntimeError> {
+        let row_count = rows.len();
         if arguments.len() != self.model.arguments.len() {
             return Err(RuntimeError::InjectedFunctionFailed {
                 function: self.model.name.to_string(),
@@ -1164,7 +1167,7 @@ impl FunctionInjector for UdfExecutor {
         &self,
         function: &FunctionName,
         arguments: &[TypedArray],
-        row_count: usize,
+        rows: &RowSelection,
         span: Span,
         now: Timestamp,
         prior_error_rows: RowErrorMask<'_>,
@@ -1179,7 +1182,7 @@ impl FunctionInjector for UdfExecutor {
                 function: function.as_str().to_string(),
             });
         };
-        compiled.execute(arguments, row_count, span, now, prior_error_rows)
+        compiled.execute(arguments, rows, span, now, prior_error_rows)
     }
 }
 
@@ -1503,7 +1506,7 @@ mod tests {
                     None,
                     Some(41),
                 ]))],
-                3,
+                &RowSelection::All(3),
                 (0..7).into(),
                 Timestamp::from_unix_nanos(123),
                 RowErrorMask::none(3),

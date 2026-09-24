@@ -156,8 +156,9 @@ jobs:
     name: tests
     runs-on: blacksmith-16vcpu-ubuntu-2404
     # The emergency guard outside the scenario suite's own budget, not the mechanism that ends a
-    # wedged run: a job this kills uploads nothing. The suite bounds itself well inside this limit
-    # and leaves the reserve the upload below needs. Keep it in step with WORKFLOW_JOB_LIMIT in
+    # wedged run: a job this cancels is killed mid-scenario, and the logs it uploads end without the
+    # suite's own diagnostic. The suite bounds itself well inside this limit and leaves the reserve
+    # the upload below needs. Keep it in step with WORKFLOW_JOB_LIMIT in
     # tests/common/suite_watchdog.rs, which derives that budget from this number.
     timeout-minutes: 60
     permissions:

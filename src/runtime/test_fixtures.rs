@@ -5,7 +5,11 @@
 //! test needs before it can exercise anything. A fixture used by one module belongs in
 //! that module's own test module instead.
 
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc as StdArc};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroUsize,
+    sync::{Arc as StdArc, OnceLock},
+};
 
 pub(in crate::runtime) const STUPID_CHANNEL_CAPACITY_REMOVE_ME: NonZeroUsize = NonZeroUsize::MIN;
 
@@ -825,4 +829,59 @@ pub(super) async fn wait_for_persisted_runtime_state_lsm(
     })
     .await
     .expect("dirty state should persist within the snapshot interval");
+}
+
+pub(super) fn input_schema() -> Arc<CompiledSchema> {
+    static SCHEMA: OnceLock<Arc<CompiledSchema>> = OnceLock::new();
+    let value = FieldName::parse("value").expect("valid field name");
+    SCHEMA
+        .get_or_init(|| {
+            Arc::new(compile_schema(&CreateSchema {
+                name: SchemaName::from(
+                    &ModelName::parse("emitter_input").expect("valid schema name"),
+                ),
+                fields: vec![nervix_models::SchemaField {
+                    name: value,
+                    ty: ParseAsType::I64,
+                    optional: false,
+                    sensitive: false,
+                }],
+            }))
+        })
+        .clone()
+}
+
+pub(super) fn input_batch_with(value: i64, timestamp: i64, acks: AckSet) -> RelayRecordBatch {
+    RelayRecordBatch::single(
+        input_schema(),
+        None,
+        test_runtime_row([("value".to_string(), RuntimeValue::I64(value))])
+            .with_ingested_at_watermarks(Timestamp::from_unix_nanos(timestamp)),
+        acks,
+    )
+    .expect("valid emitter input batch")
+}
+
+pub(super) fn input_batch() -> RelayRecordBatch {
+    input_batch_with(1, 0, AckSet::empty())
+}
+
+pub(super) fn input_value(batch: &RelayRecordBatch) -> i64 {
+    let record = batch.runtime_row(0).expect("batch must contain one row");
+    let Ok(Some(RuntimeValue::I64(value))) = record.value("value") else {
+        panic!("test batch must contain an I64 value")
+    };
+    value
+}
+
+pub(super) fn sink_context() -> EmitterSinkContext {
+    let domain = DomainName::parse("emitter_tests").expect("valid domain");
+    EmitterSinkContext {
+        runtime: Runtime::default(),
+        clock: test_domain_clock(&domain),
+        domain,
+        emitter: EmitterName::parse("output").expect("valid emitter name"),
+        error_policies: ErrorPolicies::handled_by_log(),
+        udfs: None,
+    }
 }
