@@ -69,6 +69,7 @@ use crate::{
         RowErrors, RuntimeError, SideError, SideErrorReason, TextOperation,
     },
     extremum::{self, ClampBoundsDefect},
+    ip_address::{self, NetworkSource},
     ir::{
         AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
         InstructionKind, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType,
@@ -88,6 +89,7 @@ use crate::{
         cast_arm_execution, unary_arm_execution,
     },
     text_column::TextColumnBuilder,
+    url_component::{self, UrlComponent},
 };
 
 pub const SPAWN_BLOCKING_ROW_THRESHOLD: usize = 1_024;
@@ -2302,6 +2304,122 @@ fn execute_builtin(
         BuiltinLowering::Xxh3_64 => Ok(TypedArray::UInt64(bytes::xxh3_64(
             registers.column::<BinaryArray>(inputs[0])?,
         ))),
+        BuiltinLowering::IpFromString => Ok(TypedArray::Binary(ip_address::from_string(
+            as_utf8(&column(0)?)?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::IsIpAddress => Ok(TypedArray::Boolean(ip_address::is_address(as_utf8(
+            &column(0)?,
+        )?))),
+        BuiltinLowering::IpToString => Ok(TypedArray::Utf8(ip_address::to_string(
+            registers.column::<BinaryArray>(inputs[0])?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::IpFamily => Ok(TypedArray::Int64(ip_address::family(
+            registers.column::<BinaryArray>(inputs[0])?,
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::IpTrunc => Ok(TypedArray::Binary(ip_address::truncate(
+            registers.column::<BinaryArray>(inputs[0])?,
+            count(1)?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::IpInNetwork(NetworkSource::Constant(network)) => {
+            Ok(TypedArray::Boolean(ip_address::in_constant_network(
+                registers.column::<BinaryArray>(inputs[0])?,
+                *network,
+                row_errors,
+                span,
+            )))
+        }
+        BuiltinLowering::IpInNetwork(NetworkSource::Argument) => {
+            Ok(TypedArray::Boolean(ip_address::in_argument_networks(
+                registers.column::<BinaryArray>(inputs[0])?,
+                text(1)?,
+                row_errors,
+                span,
+            )))
+        }
+        BuiltinLowering::IpUnmap => Ok(TypedArray::Binary(ip_address::unmap(
+            registers.column::<BinaryArray>(inputs[0])?,
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::UrlScheme => Ok(TypedArray::Utf8(url_component::component(
+            as_utf8(&column(0)?)?,
+            UrlComponent::Scheme,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::UrlHost => Ok(TypedArray::Utf8(url_component::component(
+            as_utf8(&column(0)?)?,
+            UrlComponent::Host,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::UrlPath => Ok(TypedArray::Utf8(url_component::component(
+            as_utf8(&column(0)?)?,
+            UrlComponent::Path,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::UrlQuery => Ok(TypedArray::Utf8(url_component::component(
+            as_utf8(&column(0)?)?,
+            UrlComponent::Query,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::UrlFragment => Ok(TypedArray::Utf8(url_component::component(
+            as_utf8(&column(0)?)?,
+            UrlComponent::Fragment,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::UrlPort => Ok(TypedArray::Int64(url_component::port(
+            as_utf8(&column(0)?)?,
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::UrlQueryValue => Ok(TypedArray::Utf8(url_component::query_value(
+            text(0)?,
+            text(1)?,
+            row_count,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::UrlQueryValues => {
+            let values = url_component::query_values(
+                text(0)?,
+                text(1)?,
+                row_count,
+                extent.rows_per_value(),
+                row_errors,
+                span,
+            );
+            Ok(TypedArray::Generic(StdArc::new(values)))
+        }
+        BuiltinLowering::UrlDecode => Ok(TypedArray::Utf8(url_component::decode(
+            as_utf8(&column(0)?)?,
+            extent.rows_per_value(),
+            row_errors,
+            span,
+        ))),
+        BuiltinLowering::IsUrl => Ok(TypedArray::Boolean(url_component::is_url(as_utf8(
+            &column(0)?,
+        )?))),
         BuiltinLowering::Pow => execute_binary_math(
             &column(0)?,
             &column(1)?,
@@ -4796,7 +4914,7 @@ fn execute_repeat(
         let text = input.value(row);
         // A length that does not fit `usize` fits no column.
         let appended = match text.len().checked_mul(times) {
-            Some(bytes) if column.fits(bytes) => column.append_value(&text.repeat(times)),
+            Some(bytes) if column.fits(bytes) => column.append_value(text.repeat(times)),
             Some(_) | None => false,
         };
         if !appended {
@@ -9180,6 +9298,9 @@ mod conversion_tests;
 #[cfg(test)]
 #[path = "runtime_datetime_tests.rs"]
 mod datetime_tests;
+#[cfg(test)]
+#[path = "runtime_network_tests.rs"]
+mod network_tests;
 #[cfg(test)]
 #[path = "runtime_numeric_tests.rs"]
 mod numeric_tests;
