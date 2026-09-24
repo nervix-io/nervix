@@ -781,7 +781,8 @@ enum ScalarType : ubyte {
   F64,
   Bool,
   String,
-  Datetime
+  Datetime,
+  Bytes
 }
 
 table ScalarFieldType {
@@ -891,6 +892,10 @@ table StringCell {
   value: string (required);
 }
 
+table BytesCell {
+  value: [ubyte] (required);
+}
+
 /// A DATETIME value as signed nanoseconds since the Unix epoch in UTC.
 table DatetimeCell {
   unix_nanos: long;
@@ -917,7 +922,8 @@ union CellValue {
   BoolCell,
   StringCell,
   DatetimeCell,
-  ListCell
+  ListCell,
+  BytesCell
 }
 
 table Cell {

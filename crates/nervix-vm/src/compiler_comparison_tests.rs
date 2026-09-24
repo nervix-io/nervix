@@ -24,6 +24,7 @@ fn operand_schema() -> Arc<Schema> {
         Field::new("weight", DataType::Float64, false),
         Field::new("optional_weight", DataType::Float64, true),
         Field::new("active", DataType::Boolean, false),
+        Field::new("raw", DataType::Binary, false),
         Field::new(
             "tags",
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
@@ -85,6 +86,7 @@ fn every_test_is_boolean_and_every_extremum_keeps_its_operand_type() {
         ("input.status NOT BETWEEN 'a' AND 'm'", DataType::Boolean),
         ("input.region IS DISTINCT FROM 'eu'", DataType::Boolean),
         ("input.active IS NOT DISTINCT FROM FALSE", DataType::Boolean),
+        ("input.raw IS DISTINCT FROM input.raw", DataType::Boolean),
         (
             "greatest(input.weight, 1.5, input.optional_weight)",
             DataType::Float64,
@@ -195,6 +197,11 @@ fn operands_outside_each_signature_are_rejected_when_the_program_is_compiled() {
             "input.tags IN ()",
             "unsupported_membership",
             "IN is not valid for List",
+        ),
+        (
+            "input.raw IN ()",
+            "unsupported_membership",
+            "IN is not valid for Binary",
         ),
         (
             "input.active BETWEEN FALSE AND TRUE",

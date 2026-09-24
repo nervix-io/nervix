@@ -372,6 +372,7 @@ pub enum JsonType {
     Datetime,
     F32,
     F64,
+    Bytes,
 }
 
 pub type CborType = JsonType;
@@ -438,6 +439,17 @@ pub enum ParseAsType {
         #[rkyv(omit_bounds)]
         element: Box<ParseAsType>,
     },
+    Bytes,
+}
+
+impl ParseAsType {
+    pub fn contains_bytes(&self) -> bool {
+        match self {
+            Self::Bytes => true,
+            Self::Array { element, .. } | Self::Vec { element } => element.contains_bytes(),
+            _ => false,
+        }
+    }
 }
 
 impl std::fmt::Display for ParseAsType {
@@ -455,6 +467,7 @@ impl std::fmt::Display for ParseAsType {
             Self::F64 => formatter.write_str("F64"),
             Self::Bool => formatter.write_str("BOOL"),
             Self::String => formatter.write_str("STRING"),
+            Self::Bytes => formatter.write_str("BYTES"),
             Self::Datetime => formatter.write_str("DATETIME"),
             Self::Vec { element } => write!(formatter, "VEC<{element}>"),
             Self::Array { element, len } => write!(formatter, "ARRAY<{element}, {len}>"),
@@ -464,7 +477,36 @@ impl std::fmt::Display for ParseAsType {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
+
     use super::*;
+
+    #[test]
+    fn bytes_schema_survives_persisted_and_json_round_trips() {
+        let schema = CreateSchema {
+            name: schema_name("payload"),
+            fields: vec![SchemaField {
+                name: field("chunks"),
+                ty: ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Bytes),
+                },
+                optional: true,
+                sensitive: true,
+            }],
+        };
+        let persisted = rkyv::to_bytes::<rkyv::rancor::Error>(&schema)
+            .assured("the constructed schema has valid serializable fields");
+        let restored: CreateSchema =
+            rkyv::from_bytes::<CreateSchema, rkyv::rancor::Error>(&persisted)
+                .verified("these bytes were just serialized from this schema");
+        assert_eq!(restored, schema);
+
+        let json = serde_json::to_vec(&schema)
+            .assured("the constructed schema has valid JSON-serializable fields");
+        let restored: CreateSchema = serde_json::from_slice(&json)
+            .verified("this JSON was just serialized from this schema");
+        assert_eq!(restored, schema);
+    }
 
     fn field(raw: &str) -> FieldName {
         FieldName::try_from(raw).expect("valid field name")

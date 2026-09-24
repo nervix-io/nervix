@@ -22,7 +22,14 @@ Schemas must declare at least one field.
 Field names used in expressions are subject to the
 [conditional reserved-word rule](filter-map-functions.md#conditional-expressions).
 
-These types are the values Nervix stores in runtime records and uses for branch grouping, subscription matching, and processor logic.
+These types are the values Nervix stores in runtime records and uses for subscription matching and processor logic. `BYTES` may be a deduplication or reordering key, ordered lexicographically by octet, but branch key schemas cannot contain `BYTES`, including nested `ARRAY` or `VEC` elements.
+
+`BYTES` holds arbitrary octets in an Arrow `Binary` column. It is distinct from `STRING`. Use
+`bytes_from_utf8` and `bytes_to_utf8` for explicit text conversion, or `hex_decode` and
+`base64_decode` for encoded text. A `CAST` never converts between `BYTES` and text.
+Lookup schemas, materialized-state dependencies, generator source relays, and window aggregate
+arguments cannot contain `BYTES`; their declarations fail validation. `LOOKUP_HASH_MAP` key
+expressions also cannot produce `BYTES`.
 
 `ARRAY<T, D1, ..., Dn>` is a fixed rectangular array. Each dimension maps to one
 nested Arrow `FixedSizeList` level, so `ARRAY<F32, 2, 3>` maps to
@@ -201,6 +208,11 @@ CREATE IF NOT EXISTS CODEC notification_codec
 
 `created_at` is the internal schema field name. The matching wire field must be a
 string, and the internal field must be `DATETIME`.
+
+For an internal `BYTES` field, declare `BYTES` in the JSON or CBOR wire schema. Its wire value is
+a canonical RFC 4648 standard base64 string with padding; malformed or unpadded text is a decode
+error. AVRO `BYTES` fields use Avro's native byte sequence. A wire `STRING` field cannot bind an
+internal `BYTES` field. Nested `ARRAY` and `VEC` byte elements use the same representation.
 
 JAQ-native codecs parse a transport payload in a jaq-supported format and run explicitly directed
 JAQ transformations. An ingestion transformation turns every value the payload holds into zero

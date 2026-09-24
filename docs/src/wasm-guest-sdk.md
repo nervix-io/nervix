@@ -167,7 +167,7 @@ with a reason, and rows for the processor's `ON MESSAGE ERROR` policy in
 
 `ProcessorTypeArrow::arrow_data_type` maps ABI schema types to the exact Arrow
 types Nervix compares, including `Datetime` as
-`Timestamp(Nanosecond, "+00:00")`. Use it when constructing generated arrays
+`Timestamp(Nanosecond, "+00:00")` and `Bytes` as Arrow `Binary`. Use it when constructing generated arrays
 for non-trivial destination fields.
 
 ## Error Handling

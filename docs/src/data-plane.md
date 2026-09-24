@@ -91,9 +91,11 @@ The VM now executes over the full Nervix internal schema type set:
 
 - `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
 - `F32`, `F64`
-- `BOOL`, `STRING`, `DATETIME`
+- `BOOL`, `STRING`, `BYTES`, `DATETIME`
 
 `DATETIME` is stored internally as an Arrow `Timestamp(Nanosecond, "+00:00")`. RFC3339 remains a wire-level string representation rather than an internal schema type.
+`BYTES` is stored as an Arrow `Binary` column. Its values may be empty or contain any octets; they
+are never interpreted as UTF-8 without an explicit conversion function.
 
 Examples of replicated runtime state:
 

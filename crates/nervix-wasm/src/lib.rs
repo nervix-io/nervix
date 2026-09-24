@@ -648,6 +648,7 @@ pub enum WasmProcessorType {
     I64,
     Bool,
     String,
+    Bytes,
     Datetime,
     F32,
     F64,
@@ -692,6 +693,7 @@ impl From<&ParseAsType> for WasmProcessorType {
             ParseAsType::I64 => Self::I64,
             ParseAsType::Bool => Self::Bool,
             ParseAsType::String => Self::String,
+            ParseAsType::Bytes => Self::Bytes,
             ParseAsType::Datetime => Self::Datetime,
             ParseAsType::F32 => Self::F32,
             ParseAsType::F64 => Self::F64,
@@ -845,6 +847,7 @@ impl WasmProcessorType {
             Self::I64 => protocol::ProcessorType::I64,
             Self::Bool => protocol::ProcessorType::Bool,
             Self::String => protocol::ProcessorType::String,
+            Self::Bytes => protocol::ProcessorType::Bytes,
             Self::Datetime => protocol::ProcessorType::Datetime,
             Self::F32 => protocol::ProcessorType::F32,
             Self::F64 => protocol::ProcessorType::F64,
@@ -2336,6 +2339,19 @@ mod tests {
     use nonzero_ext::nonzero;
 
     use super::*;
+
+    #[test]
+    fn bytes_schema_type_reaches_wasm_protocol_without_text_conversion() {
+        let ty = WasmProcessorType::from(&ParseAsType::Vec {
+            element: Box::new(ParseAsType::Bytes),
+        });
+        assert_eq!(
+            ty.to_protocol(),
+            protocol::ProcessorType::Vec {
+                element: Box::new(protocol::ProcessorType::Bytes),
+            }
+        );
+    }
 
     fn test_execution_context() -> WasmExecutionContext {
         WasmExecutionContext::new(Timestamp::from_unix_nanos(1_234))

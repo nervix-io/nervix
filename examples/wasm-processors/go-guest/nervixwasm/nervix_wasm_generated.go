@@ -25,6 +25,7 @@ const (
 	ProcessorTypeKindF64      ProcessorTypeKind = 12
 	ProcessorTypeKindArray    ProcessorTypeKind = 13
 	ProcessorTypeKindVec      ProcessorTypeKind = 14
+	ProcessorTypeKindBytes    ProcessorTypeKind = 15
 )
 
 var EnumNamesProcessorTypeKind = map[ProcessorTypeKind]string{
@@ -43,6 +44,7 @@ var EnumNamesProcessorTypeKind = map[ProcessorTypeKind]string{
 	ProcessorTypeKindF64:      "F64",
 	ProcessorTypeKindArray:    "Array",
 	ProcessorTypeKindVec:      "Vec",
+	ProcessorTypeKindBytes:    "Bytes",
 }
 
 var EnumValuesProcessorTypeKind = map[string]ProcessorTypeKind{
@@ -61,6 +63,7 @@ var EnumValuesProcessorTypeKind = map[string]ProcessorTypeKind{
 	"F64":      ProcessorTypeKindF64,
 	"Array":    ProcessorTypeKindArray,
 	"Vec":      ProcessorTypeKindVec,
+	"Bytes":    ProcessorTypeKindBytes,
 }
 
 func (v ProcessorTypeKind) String() string {
@@ -1507,7 +1510,7 @@ type Message struct {
 	_tab flatbuffers.Table
 }
 
-const MessageIdentifier = "NVWX"
+const MessageIdentifier = "NVWY"
 
 func GetRootAsMessage(buf []byte, offset flatbuffers.UOffsetT) *Message {
 	n := flatbuffers.GetUOffsetT(buf[offset:])

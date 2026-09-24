@@ -1885,6 +1885,7 @@ fn scalar_data_type(target: &ParseAsType, span: Span) -> FrontendResult<DataType
         ParseAsType::I64 => Ok(DataType::Int64),
         ParseAsType::Bool => Ok(DataType::Boolean),
         ParseAsType::String => Ok(DataType::Utf8),
+        ParseAsType::Bytes => Ok(DataType::Binary),
         ParseAsType::Datetime => Ok(DataType::Timestamp(
             TimeUnit::Nanosecond,
             Some("+00:00".into()),

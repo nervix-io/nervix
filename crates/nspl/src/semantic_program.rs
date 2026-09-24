@@ -131,6 +131,7 @@ where
             "INT64" | "I64" => ParseAsType::I64,
             "BOOLEAN" | "BOOL" => ParseAsType::Bool,
             "UTF8" | "STRING" => ParseAsType::String,
+            "BYTES" => ParseAsType::Bytes,
             "DATETIME" => ParseAsType::Datetime,
             "FLOAT32" | "F32" => ParseAsType::F32,
             "FLOAT64" | "F64" => ParseAsType::F64,

@@ -1614,12 +1614,21 @@ impl InferencerRegistrySchema for CreateInferencer {
     }
 }
 
-pub(in crate::registry) fn ensure_lookup_key_field_exists(
+pub(in crate::registry) fn validate_lookup_schema(
     domain: &DomainName,
     identifier: &ModelName,
     lookup: &CreateLookup,
     schema: &CreateSchema,
 ) -> Result<(), Report<RegistryError>> {
+    for field in &schema.fields {
+        if field.ty.contains_bytes() {
+            return Err(Report::new(RegistryError::LookupFieldContainsBytes {
+                domain: domain.clone(),
+                lookup: identifier.clone(),
+                field: field.name.clone(),
+            }));
+        }
+    }
     if schema
         .fields
         .iter()
@@ -1711,6 +1720,10 @@ pub(in crate::registry) fn validate_generator_output(
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "processor/bytes_tests.rs"]
+mod bytes_tests;
 
 #[cfg(test)]
 mod tests {

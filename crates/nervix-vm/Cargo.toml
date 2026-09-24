@@ -20,8 +20,10 @@ arrow-ord = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
 arrow-string = { workspace = true }
+base64-simd = { workspace = true }
 chrono = { workspace = true }
 error-stack = { workspace = true }
+faster-hex = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }
 jiff = { workspace = true }
@@ -32,12 +34,14 @@ nervix-approx-into = { workspace = true }
 nervix-models = { workspace = true }
 regex = { workspace = true }
 regex-automata = { workspace = true }
+sha2 = { workspace = true }
 sorted-vec = { workspace = true }
 strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 triomphe = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v7"] }
+xxhash-rust = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

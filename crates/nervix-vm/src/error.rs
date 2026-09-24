@@ -80,6 +80,12 @@ pub enum SideErrorReason {
     /// has left.
     #[error("{0} result exceeds the text one STRING column holds")]
     TextTooLong(TextOperation),
+    #[error("{0} input is not valid encoded bytes")]
+    InvalidBytesEncoding(BytesOperation),
+    #[error("bytes_to_utf8 input is not valid UTF-8")]
+    InvalidUtf8Bytes,
+    #[error("{0} result exceeds the bytes one column holds")]
+    BytesTooLong(BytesOperation),
     /// A `uuid_v7` whose execution time is before the Unix epoch, where a version 7 UUID's
     /// millisecond field has no value for it.
     #[error("uuid_v7 execution time is before the Unix epoch")]
@@ -96,6 +102,7 @@ impl SideErrorReason {
             | Self::DatetimeOutOfRange(_)
             | Self::DateDiffOverflow
             | Self::TextTooLong(_)
+            | Self::BytesTooLong(_)
             | Self::UuidTimeBeforeEpoch => ErrorCode::Overflow,
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
             Self::NegativeShiftCount(_)
@@ -104,7 +111,10 @@ impl SideErrorReason {
             | Self::SkippedLocalTime { .. }
             | Self::RepeatedLocalTime { .. }
             | Self::InvalidClampBounds(_) => ErrorCode::InvalidArgument,
-            Self::CastFailed { .. } | Self::UnreadableDatetime(_) => ErrorCode::CastFailed,
+            Self::InvalidBytesEncoding(_)
+            | Self::InvalidUtf8Bytes
+            | Self::CastFailed { .. }
+            | Self::UnreadableDatetime(_) => ErrorCode::CastFailed,
             Self::Injected { code, .. } => *code,
         }
     }
@@ -176,6 +186,20 @@ pub enum TextOperation {
     Lpad,
     #[strum(to_string = "rpad")]
     Rpad,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum BytesOperation {
+    #[strum(to_string = "base64_decode")]
+    Base64Decode,
+    #[strum(to_string = "hex_decode")]
+    HexDecode,
+    #[strum(to_string = "base64_encode")]
+    Base64Encode,
+    #[strum(to_string = "hex_encode")]
+    HexEncode,
+    #[strum(to_string = "sha256")]
+    Sha256,
 }
 
 /// A floating-point operation whose result has to be finite.

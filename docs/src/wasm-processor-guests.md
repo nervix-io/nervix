@@ -170,7 +170,7 @@ key.
 
 ```text
 "U8" | "I8" | "U16" | "I16" | "U32" | "I32" | "U64" | "I64"
-| "Bool" | "String" | "Datetime" | "F32" | "F64"
+| "Bool" | "String" | "Bytes" | "Datetime" | "F32" | "F64"
 ```
 
 Container variants use the nested `ProcessorType.element` table; arrays also
@@ -182,6 +182,7 @@ ProcessorType { kind: Vec, element: ProcessorType }
 ```
 
 `Datetime` values are Arrow `Timestamp(Nanosecond)` values at the wire boundary.
+`Bytes` values are Arrow `Binary` arrays and retain arbitrary octets without UTF-8 conversion.
 Treat nanosecond integers as a boundary format and convert them to your guest's
 typed timestamp representation immediately after decoding.
 
@@ -190,7 +191,7 @@ Treat this as configuration for the branch instance. Store what you need in gues
 ## Batch Envelope
 
 Every input, output, init, or bundled guest-state payload is one size-prefixed
-FlatBuffer. Its root is the `Message` union and its file identifier is `NVWX`.
+FlatBuffer. Its root is the `Message` union and its file identifier is `NVWY`.
 The ABI size and internal size prefix must agree exactly. Arrow IPC payloads
 are FlatBuffers byte vectors. Generated Rust and Go accessors return slices
 into the FlatBuffer, avoiding a deserialization copy. Crossing WebAssembly

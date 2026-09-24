@@ -184,7 +184,10 @@ pub(crate) fn clamp(
                 nan_bound: BooleanBuffer::new_unset(rows),
             }
         }
-        TypedArray::Boolean(_) | TypedArray::Generic(_) | TypedArray::Uninitialized { .. } => {
+        TypedArray::Boolean(_)
+        | TypedArray::Binary(_)
+        | TypedArray::Generic(_)
+        | TypedArray::Uninitialized { .. } => {
             return Err(ArrowError::InvalidArgumentError(format!(
                 "clamp does not order values of type {}",
                 value.data_type()

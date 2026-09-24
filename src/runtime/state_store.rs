@@ -623,6 +623,8 @@ pub(crate) enum RuntimePersistenceError {
     EncodeState(String),
     #[error("failed to decode runtime state: {0}")]
     DecodeState(String),
+    #[error("deduplicator snapshot has an invalid format header")]
+    InvalidDeduplicatorSnapshotHeader,
     #[error("prepared ownership handoff state is unavailable")]
     MissingHandoffPreparation,
     #[error("prepared ownership handoff state does not match the acknowledged checkpoint")]

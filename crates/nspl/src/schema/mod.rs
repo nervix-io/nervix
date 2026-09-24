@@ -28,6 +28,7 @@ fn json_type<'src>()
         kw(Identifier::Array).to(JsonType::Array),
         kw(Identifier::Boolean).to(JsonType::Boolean),
         kw(Identifier::Null).to(JsonType::Null),
+        kw(Identifier::Bytes).to(JsonType::Bytes),
     )
 }
 
@@ -69,6 +70,7 @@ pub(crate) fn nervix_type<'src>()
             kw(Identifier::I64).to(ParseAsType::I64),
             kw(Identifier::Bool).to(ParseAsType::Bool),
             kw(Identifier::String).to(ParseAsType::String),
+            kw(Identifier::Bytes).to(ParseAsType::Bytes),
             kw(Identifier::Datetime).to(ParseAsType::Datetime),
             kw(Identifier::F32).to(ParseAsType::F32),
             kw(Identifier::F64).to(ParseAsType::F64),
@@ -550,6 +552,7 @@ pub fn suggest_alter_wire_schema(input: &str, cursor: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use meticulous::ResultExt as _;
     use nonzero_ext::nonzero;
 
     use super::*;
@@ -578,6 +581,27 @@ mod tests {
         assert_eq!(parsed.name.as_str(), "notification");
         assert_eq!(parsed.fields.len(), 3);
         assert_eq!(parsed.fields[0].ty, ParseAsType::U32);
+    }
+
+    #[test]
+    fn bytes_schema_parses_and_completes_as_one_type() {
+        let parsed = parse_create_schema(
+            "CREATE SCHEMA payload (raw BYTES, pieces VEC<BYTES>, fixed ARRAY<BYTES, 2>);",
+        )
+        .assured("the BYTES fields follow the internal schema grammar");
+        assert_eq!(parsed.body.fields[0].ty, ParseAsType::Bytes);
+        assert_eq!(
+            parsed.body.fields[1].ty,
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::Bytes)
+            }
+        );
+
+        let input = "CREATE SCHEMA payload (raw ";
+        let suggestions = crate::statement::suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"BYTES".to_string()));
+
+        assert!(parse_create_schema("CREATE SCHEMA payload (raw BYTES<STRING>);").is_err());
     }
 
     #[test]

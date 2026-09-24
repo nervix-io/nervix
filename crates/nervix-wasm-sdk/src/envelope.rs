@@ -171,6 +171,7 @@ impl ProcessorTypeArrow for ProcessorType {
             Self::I64 => DataType::Int64,
             Self::Bool => DataType::Boolean,
             Self::String => DataType::Utf8,
+            Self::Bytes => DataType::Binary,
             Self::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
             Self::F32 => DataType::Float32,
             Self::F64 => DataType::Float64,
@@ -193,6 +194,24 @@ mod tests {
     use nervix_wasm_protocol::{AckToken, OutputRow};
 
     use super::*;
+
+    #[test]
+    fn bytes_processor_type_maps_to_arrow_binary() {
+        assert_eq!(
+            ProcessorType::Bytes
+                .arrow_data_type()
+                .assured("BYTES has one exact Arrow type"),
+            DataType::Binary
+        );
+        assert_eq!(
+            ProcessorType::Vec {
+                element: Box::new(ProcessorType::Bytes),
+            }
+            .arrow_data_type()
+            .assured("a VEC of BYTES has one exact Arrow type"),
+            DataType::List(Arc::new(Field::new("item", DataType::Binary, false)))
+        );
+    }
 
     fn sample_arrow_ipc(values: &[i32]) -> Vec<u8> {
         let schema = Arc::new(Schema::new(vec![Field::new(

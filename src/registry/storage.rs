@@ -1559,15 +1559,29 @@ fn encode_key(
 }
 
 fn serialize_value(model: &Model) -> Result<Vec<u8>, Report<RegistryError>> {
-    rkyv::to_bytes::<rkyv::rancor::Error>(model)
-        .map(|bytes| bytes.to_vec())
-        .change_context(RegistryError::SerializeValue)
+    let archive = rkyv::to_bytes::<rkyv::rancor::Error>(model)
+        .change_context(RegistryError::SerializeValue)?;
+    let capacity = MODEL_ARCHIVE_HEADER
+        .len()
+        .checked_add(archive.len())
+        .assured("a Vec archive is bounded by isize::MAX, and its 16-byte header fits in usize");
+    let mut payload = Vec::with_capacity(capacity);
+    payload.extend_from_slice(MODEL_ARCHIVE_HEADER);
+    payload.extend_from_slice(&archive);
+    Ok(payload)
 }
 
 fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
-    rkyv::from_bytes::<Model, rkyv::rancor::Error>(bytes)
+    let archive = bytes
+        .strip_prefix(MODEL_ARCHIVE_HEADER)
+        .ok_or_else(|| Report::new(RegistryError::InvalidModelArchive))?;
+    rkyv::from_bytes::<Model, rkyv::rancor::Error>(archive)
         .change_context(RegistryError::DeserializeValue)
 }
+
+// The header identifies the current persisted Model shape before archive decoding. Its length
+// preserves rkyv's alignment when the archive is restored.
+const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL BIN";
 
 fn runtime_changes_for_domain(
     domain: &DomainName,
@@ -1646,6 +1660,7 @@ fn runtime_changes_for_domain(
 mod tests {
     use std::{collections::BTreeSet, fs};
 
+    use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, AlterEmitter, AlterJunction, AlterProcessorOperation, AlterRelay,
         AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
@@ -1843,6 +1858,43 @@ mod tests {
         assert_eq!(loaded, model);
 
         let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn bytes_schema_reloads_from_current_model_archive() {
+        let path = temp_db_path();
+        let domain = named::<DomainName>("binary_domain");
+        let schema = CreateSchema {
+            name: named::<SchemaName>("binary_payload"),
+            fields: vec![SchemaField {
+                name: named("payload"),
+                ty: ParseAsType::Bytes,
+                optional: true,
+                sensitive: true,
+            }],
+        };
+        {
+            let registry =
+                Registry::open(&path).assured("the test database path can hold a new registry");
+            registry
+                .storage
+                .put(
+                    &domain,
+                    ModelKind::Schema,
+                    &ModelName::from(&schema.name),
+                    &Model::Schema(schema.clone()),
+                )
+                .assured("a current BYTES schema serializes into the model store");
+        }
+
+        let reopened =
+            Registry::open(&path).verified("the registry just closed with a valid BYTES schema");
+        let loaded = reopened
+            .get::<CreateSchema>(&domain, ModelName::from(&schema.name))
+            .verified("the model store contains a current schema archive")
+            .verified("the BYTES schema was stored under its own name");
+        assert_eq!(loaded, schema);
+        fs::remove_dir_all(path).assured("the test registry path is disposable");
     }
 
     #[test]

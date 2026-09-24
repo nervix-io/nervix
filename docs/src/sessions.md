@@ -41,6 +41,10 @@ Current session behavior:
 
 Sessions are runtime-facing protocol interactions, not part of the persisted namespace model.
 
+Typed Row subscription frames carry a `BYTES` field as raw octets in a `BytesCell`; clients read
+the value as borrowed bytes, including empty and non-UTF-8 sequences. JSON subscription views
+render that field as padded standard base64 text. Sensitive byte fields are redacted in both views.
+
 Persistent administrative commands carry a stable execution reference. The cluster binds that
 reference to the authenticated owner, selected domain, and semantic command, continues admitted
 work after the session disconnects, and retains one terminal result for the command retry

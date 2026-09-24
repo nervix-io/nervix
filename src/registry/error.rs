@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use nervix_models::{DomainName, ModelName};
+use nervix_models::{DomainName, FieldName, ModelName, RelayName};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -108,6 +108,51 @@ pub(crate) enum RegistryError {
     ReadValue,
     #[error("failed to deserialize model")]
     DeserializeValue,
+    #[error("stored model has an invalid archive header; recreate the stored data")]
+    InvalidModelArchive,
+    #[error("branch '{branch}' in domain '{domain}' uses BYTES in field '{field}'")]
+    BranchFieldContainsBytes {
+        domain: DomainName,
+        branch: ModelName,
+        field: FieldName,
+    },
+    #[error("lookup '{lookup}' in domain '{domain}' cannot read BYTES field '{field}'")]
+    LookupFieldContainsBytes {
+        domain: DomainName,
+        lookup: ModelName,
+        field: FieldName,
+    },
+    #[error(
+        "node '{node}' in domain '{domain}' cannot read BYTES field '{field}' from materialized \
+         relay '{relay}'"
+    )]
+    MaterializedFieldContainsBytes {
+        domain: DomainName,
+        node: ModelName,
+        relay: RelayName,
+        field: FieldName,
+    },
+    #[error(
+        "generator '{generator}' in domain '{domain}' cannot read BYTES field '{field}' from \
+         materialized relay '{relay}'"
+    )]
+    GeneratorSourceFieldContainsBytes {
+        domain: DomainName,
+        generator: ModelName,
+        relay: RelayName,
+        field: FieldName,
+    },
+    #[error(
+        "window processor '{processor}' in domain '{domain}' route '{route}' cannot retain BYTES \
+         in aggregate demand {demand} argument {argument}"
+    )]
+    WindowArgumentContainsBytes {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+        demand: usize,
+        argument: usize,
+    },
     #[error("failed to decode key")]
     DecodeKey,
     #[error("failed to persist model batch")]

@@ -1,6 +1,7 @@
 use std::{sync::Arc as StdArc, time::Duration};
 
 use error_stack::{Report, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_expiry_map::ExpiryMap;
 use nervix_models::{Expression, ModelName, RelayName, Timestamp};
 use nervix_vm::CompiledProgram as VmCompiledProgram;
@@ -80,8 +81,13 @@ enum DeduplicatorKeyPartSnapshot {
     UInt64(u64),
     Float64(u64),
     Utf8(String),
+    Bytes(Vec<u8>),
     Datetime(i64),
 }
+
+// The header identifies this persisted shape before rkyv interprets its contents. Its length
+// preserves the archive's alignment when the header is stripped on restore.
+const SNAPSHOT_HEADER: &[u8; 16] = b"NERVIX DEDUP KEY";
 
 impl From<&DeduplicatorKey> for DeduplicatorKeySnapshot {
     fn from(key: &DeduplicatorKey) -> Self {
@@ -97,6 +103,9 @@ impl From<&DeduplicatorKey> for DeduplicatorKeySnapshot {
                         DeduplicatorKeyPartSnapshot::Float64(value.into_inner().to_bits())
                     }
                     ReorderKeyPart::Utf8(value) => DeduplicatorKeyPartSnapshot::Utf8(value.clone()),
+                    ReorderKeyPart::Bytes(value) => {
+                        DeduplicatorKeyPartSnapshot::Bytes(value.clone())
+                    }
                     ReorderKeyPart::Datetime(value) => {
                         DeduplicatorKeyPartSnapshot::Datetime(*value)
                     }
@@ -120,6 +129,7 @@ impl From<DeduplicatorKeySnapshot> for DeduplicatorKey {
                         ReorderKeyPart::Float64(OrderedFloat(f64::from_bits(value)))
                     }
                     DeduplicatorKeyPartSnapshot::Utf8(value) => ReorderKeyPart::Utf8(value),
+                    DeduplicatorKeyPartSnapshot::Bytes(value) => ReorderKeyPart::Bytes(value),
                     DeduplicatorKeyPartSnapshot::Datetime(value) => ReorderKeyPart::Datetime(value),
                 })
                 .collect(),
@@ -300,13 +310,23 @@ fn encode_deduplicator_snapshot(
     }
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&DeduplicatorSnapshot { entries })
         .map_err(|error| RuntimePersistenceError::EncodeState(error.to_string()))?;
-    Ok(bytes.to_vec())
+    let capacity = SNAPSHOT_HEADER
+        .len()
+        .checked_add(bytes.len())
+        .assured("a Vec snapshot is bounded by isize::MAX, and its 16-byte header fits in usize");
+    let mut payload = Vec::with_capacity(capacity);
+    payload.extend_from_slice(SNAPSHOT_HEADER);
+    payload.extend_from_slice(&bytes);
+    Ok(payload)
 }
 
 fn decode_deduplicator_snapshot(
     payload: &[u8],
 ) -> Result<ExpiryMap<DeduplicatorKey, Timestamp>, RuntimePersistenceError> {
-    let snapshot = rkyv::from_bytes::<DeduplicatorSnapshot, rkyv::rancor::Error>(payload)
+    let archive = payload
+        .strip_prefix(SNAPSHOT_HEADER)
+        .ok_or(RuntimePersistenceError::InvalidDeduplicatorSnapshotHeader)?;
+    let snapshot = rkyv::from_bytes::<DeduplicatorSnapshot, rkyv::rancor::Error>(archive)
         .map_err(|error| RuntimePersistenceError::DecodeState(error.to_string()))?;
     let mut recent_keys = ExpiryMap::new();
     for entry in snapshot.entries {
@@ -369,19 +389,24 @@ mod tests {
             ReorderKeyPart::Float64(OrderedFloat(1.5)),
             ReorderKeyPart::Null,
         ]);
+        let binary = DeduplicatorKey::new(vec![ReorderKeyPart::Bytes(vec![0, 255])]);
         assert_ne!(numeric, text);
+        assert_ne!(text, binary);
 
         let mut keys = ExpiryMap::new();
         keys.insert(numeric.clone(), Timestamp::from_unix_nanos(10));
         keys.insert(text.clone(), Timestamp::from_unix_nanos(20));
+        keys.insert(binary.clone(), Timestamp::from_unix_nanos(30));
 
         let encoded =
             encode_deduplicator_snapshot(&ReplicatedDeduplicatorState::published_keys(&keys))
-                .expect("snapshot must encode");
-        let decoded = decode_deduplicator_snapshot(&encoded).expect("snapshot must decode");
+                .assured("the current key variants serialize into a snapshot");
+        let decoded = decode_deduplicator_snapshot(&encoded)
+            .assured("the snapshot just encoded has the current header and archive shape");
 
         assert_eq!(decoded.get(&numeric), Some(&Timestamp::from_unix_nanos(10)));
         assert_eq!(decoded.get(&text), Some(&Timestamp::from_unix_nanos(20)));
+        assert_eq!(decoded.get(&binary), Some(&Timestamp::from_unix_nanos(30)));
     }
 
     #[test]

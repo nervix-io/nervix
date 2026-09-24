@@ -11,8 +11,8 @@
 use std::iter;
 
 use arrow_array::{
-    Array, ArrayRef, ArrowPrimitiveType, BooleanArray, Datum, PrimitiveArray, StringArray,
-    UInt32Array,
+    Array, ArrayRef, ArrowPrimitiveType, BinaryArray, BooleanArray, Datum, PrimitiveArray,
+    StringArray, UInt32Array,
 };
 use arrow_buffer::BooleanBuffer;
 use arrow_select::take::take;
@@ -159,6 +159,15 @@ impl Broadcast for BooleanArray {
 }
 
 impl Broadcast for StringArray {
+    fn broadcast(&self, rows: usize) -> Self {
+        if self.is_null(0) {
+            return Self::new_null(rows);
+        }
+        Self::from_iter_values(iter::repeat_n(self.value(0), rows))
+    }
+}
+
+impl Broadcast for BinaryArray {
     fn broadcast(&self, rows: usize) -> Self {
         if self.is_null(0) {
             return Self::new_null(rows);

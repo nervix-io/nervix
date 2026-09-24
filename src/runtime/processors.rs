@@ -1078,6 +1078,7 @@ pub(super) enum ReorderKeyPart {
     UInt64(u64),
     Float64(OrderedFloat<f64>),
     Utf8(String),
+    Bytes(Vec<u8>),
     Datetime(i64),
 }
 

@@ -191,6 +191,7 @@ impl MembershipSet {
                     element_values(elements, |array: &StringArray| Box::from(array.value(0)))?;
                 Elements::Utf8(Members::keyed(values))
             }
+            RegisterType::Binary => return None,
             RegisterType::Datetime => {
                 let values =
                     element_values(elements, |array: &TimestampNanosecondArray| array.value(0))?;

@@ -8,6 +8,7 @@
 //! - **Must not know.** How a window executes, emits or keeps its state.
 
 use ahash::HashSet;
+use arrow_schema::DataType;
 use error_stack::Report;
 use nervix_models::{CreateSchema, ProcessorOutput};
 use nervix_vm::{
@@ -71,7 +72,7 @@ pub(in crate::registry) fn validate_window_route_types(
     let input_sensitivity = schema_sensitivity_for_internal_schema(input_schema);
     let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
     let output_sensitivity = schema_sensitivity_for_internal_schema(output_schema);
-    CompiledWindowRoute::compile(
+    let compiled = CompiledWindowRoute::compile(
         aggregate,
         WindowRouteSchemas {
             input: &input_arrow_schema,
@@ -89,7 +90,30 @@ pub(in crate::registry) fn validate_window_route_types(
             reason: format!("window output '{}' compile failed: {error:#}", output.relay),
         })
     })?;
+    for (demand_index, demand) in compiled.demands.iter().enumerate() {
+        for (argument_index, argument) in demand.arguments.iter().enumerate() {
+            if contains_bytes(&argument.data_type) {
+                return Err(Report::new(RegistryError::WindowArgumentContainsBytes {
+                    domain: domain.clone(),
+                    processor: identifier.clone(),
+                    route: output.relay.clone(),
+                    demand: demand_index,
+                    argument: argument_index,
+                }));
+            }
+        }
+    }
     Ok(())
+}
+
+fn contains_bytes(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::Binary => true,
+        DataType::List(field) | DataType::FixedSizeList(field, _) => {
+            contains_bytes(field.data_type())
+        }
+        _ => false,
+    }
 }
 
 /// Every scalar value a window route assigns, as one program whose references can be walked.

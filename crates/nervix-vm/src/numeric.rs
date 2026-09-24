@@ -838,6 +838,7 @@ impl F64Operand {
             TypedArray::Float64(array) => Some(Self::new(array)),
             TypedArray::Boolean(_)
             | TypedArray::Utf8(_)
+            | TypedArray::Binary(_)
             | TypedArray::Datetime(_)
             | TypedArray::Generic(_)
             | TypedArray::Uninitialized { .. } => None,

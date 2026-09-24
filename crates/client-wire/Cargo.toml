@@ -15,6 +15,7 @@ default = []
 grpc = ["dep:tonic"]
 
 [dependencies]
+base64-simd = { workspace = true }
 bytes = { workspace = true }
 error-stack = { workspace = true }
 flatbuffers = { workspace = true }

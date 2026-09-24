@@ -19,8 +19,8 @@ use ahash::{HashMap, HashMapExt};
 use arch_into::ArchInto as _;
 use arrow_arith::boolean;
 use arrow_array::{
-    Array, ArrayRef, BooleanArray, Datum, FixedSizeListArray, Float32Array, Float64Array,
-    Int8Array, Int16Array, Int32Array, Int64Array, ListArray, StringArray,
+    Array, ArrayRef, BinaryArray, BooleanArray, Datum, FixedSizeListArray, Float32Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray, StringArray,
     TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array, new_null_array,
     types::{
         ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
@@ -107,6 +107,7 @@ column_type!(F32Column);
 column_type!(F64Column);
 column_type!(BoolColumn);
 column_type!(StringColumn);
+column_type!(BytesColumn);
 column_type!(DatetimeColumn);
 column_type!(VecU8Column);
 column_type!(VecI8Column);
@@ -120,6 +121,7 @@ column_type!(VecF32Column);
 column_type!(VecF64Column);
 column_type!(VecBoolColumn);
 column_type!(VecStringColumn);
+column_type!(VecBytesColumn);
 column_type!(VecDatetimeColumn);
 column_type!(AnyColumn);
 
@@ -516,6 +518,7 @@ fn base_library() -> impl roto::Registerable {
         #[clone] type F64Column = Val<F64Column>;
         #[clone] type BoolColumn = Val<BoolColumn>;
         #[clone] type StringColumn = Val<StringColumn>;
+        #[clone] type BytesColumn = Val<BytesColumn>;
         #[clone] type DatetimeColumn = Val<DatetimeColumn>;
         #[clone] type VecU8Column = Val<VecU8Column>;
         #[clone] type VecI8Column = Val<VecI8Column>;
@@ -529,6 +532,7 @@ fn base_library() -> impl roto::Registerable {
         #[clone] type VecF64Column = Val<VecF64Column>;
         #[clone] type VecBoolColumn = Val<VecBoolColumn>;
         #[clone] type VecStringColumn = Val<VecStringColumn>;
+        #[clone] type VecBytesColumn = Val<VecBytesColumn>;
         #[clone] type VecDatetimeColumn = Val<VecDatetimeColumn>;
 
         impl Val<UdfArgs> {
@@ -544,6 +548,7 @@ fn base_library() -> impl roto::Registerable {
             fn f64(args: Val<UdfArgs>, index: u64) -> Val<F64Column> { Val(F64Column(column_arg(args, index, &DataType::Float64))) }
             fn bool(args: Val<UdfArgs>, index: u64) -> Val<BoolColumn> { Val(BoolColumn(column_arg(args, index, &DataType::Boolean))) }
             fn string(args: Val<UdfArgs>, index: u64) -> Val<StringColumn> { Val(StringColumn(column_arg(args, index, &DataType::Utf8))) }
+            fn bytes(args: Val<UdfArgs>, index: u64) -> Val<BytesColumn> { Val(BytesColumn(column_arg(args, index, &DataType::Binary))) }
             fn datetime(args: Val<UdfArgs>, index: u64) -> Val<DatetimeColumn> {
                 Val(DatetimeColumn(column_arg(args, index, &DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())))))
             }
@@ -559,6 +564,7 @@ fn base_library() -> impl roto::Registerable {
             fn vec_f64(args: Val<UdfArgs>, index: u64) -> Val<VecF64Column> { Val(VecF64Column(untyped_column_arg(args, index))) }
             fn vec_bool(args: Val<UdfArgs>, index: u64) -> Val<VecBoolColumn> { Val(VecBoolColumn(untyped_column_arg(args, index))) }
             fn vec_string(args: Val<UdfArgs>, index: u64) -> Val<VecStringColumn> { Val(VecStringColumn(untyped_column_arg(args, index))) }
+            fn vec_bytes(args: Val<UdfArgs>, index: u64) -> Val<VecBytesColumn> { Val(VecBytesColumn(untyped_column_arg(args, index))) }
             fn vec_datetime(args: Val<UdfArgs>, index: u64) -> Val<VecDatetimeColumn> { Val(VecDatetimeColumn(untyped_column_arg(args, index))) }
             fn any(args: Val<UdfArgs>, index: u64) -> Val<AnyColumn> { Val(AnyColumn(untyped_column_arg(args, index))) }
         }
@@ -576,6 +582,7 @@ fn base_library() -> impl roto::Registerable {
             fn from_f64(value: Val<F64Column>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_bool(value: Val<BoolColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_string(value: Val<StringColumn>) -> Self { Val(AnyColumn(value.0.0)) }
+            fn from_bytes(value: Val<BytesColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_datetime(value: Val<DatetimeColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_u8(value: Val<VecU8Column>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_i8(value: Val<VecI8Column>) -> Self { Val(AnyColumn(value.0.0)) }
@@ -589,6 +596,7 @@ fn base_library() -> impl roto::Registerable {
             fn from_vec_f64(value: Val<VecF64Column>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_bool(value: Val<VecBoolColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_string(value: Val<VecStringColumn>) -> Self { Val(AnyColumn(value.0.0)) }
+            fn from_vec_bytes(value: Val<VecBytesColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_vec_datetime(value: Val<VecDatetimeColumn>) -> Self { Val(AnyColumn(value.0.0)) }
             fn from_any(value: Val<AnyColumn>) -> Self { value }
         }
@@ -1297,6 +1305,7 @@ fn bridge_accessor(ty: &ParseAsType) -> &'static str {
         ParseAsType::F64 => "f64",
         ParseAsType::Bool => "bool",
         ParseAsType::String => "string",
+        ParseAsType::Bytes => "bytes",
         ParseAsType::Datetime => "datetime",
         ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => {
             list_bridge_accessor(element)
@@ -1318,6 +1327,7 @@ fn bridge_conversion(ty: &ParseAsType) -> &'static str {
         ParseAsType::F64 => "from_f64",
         ParseAsType::Bool => "from_bool",
         ParseAsType::String => "from_string",
+        ParseAsType::Bytes => "from_bytes",
         ParseAsType::Datetime => "from_datetime",
         ParseAsType::Array { element, .. } | ParseAsType::Vec { element } => {
             list_bridge_conversion(element)
@@ -1339,6 +1349,7 @@ fn list_bridge_accessor(element: &ParseAsType) -> &'static str {
         ParseAsType::F64 => "vec_f64",
         ParseAsType::Bool => "vec_bool",
         ParseAsType::String => "vec_string",
+        ParseAsType::Bytes => "vec_bytes",
         ParseAsType::Datetime => "vec_datetime",
         ParseAsType::Array { .. } | ParseAsType::Vec { .. } => "any",
     }
@@ -1358,6 +1369,7 @@ fn list_bridge_conversion(element: &ParseAsType) -> &'static str {
         ParseAsType::F64 => "from_vec_f64",
         ParseAsType::Bool => "from_vec_bool",
         ParseAsType::String => "from_vec_string",
+        ParseAsType::Bytes => "from_vec_bytes",
         ParseAsType::Datetime => "from_vec_datetime",
         ParseAsType::Array { .. } | ParseAsType::Vec { .. } => "from_any",
     }
@@ -1377,6 +1389,7 @@ pub fn arrow_data_type(ty: &ParseAsType) -> DataType {
         ParseAsType::F64 => DataType::Float64,
         ParseAsType::Bool => DataType::Boolean,
         ParseAsType::String => DataType::Utf8,
+        ParseAsType::Bytes => DataType::Binary,
         ParseAsType::Datetime => DataType::Timestamp(TimeUnit::Nanosecond, Some("+00:00".into())),
         ParseAsType::Array { element, len } => DataType::FixedSizeList(
             StdArc::new(Field::new("item", arrow_data_type(element), false)),
@@ -1420,6 +1433,7 @@ fn typed_array_from_ref(array: ArrayRef) -> Result<TypedArray, RuntimeError> {
         DataType::Float64 => downcast!(Float64Array, Float64),
         DataType::Boolean => downcast!(BooleanArray, Boolean),
         DataType::Utf8 => downcast!(StringArray, Utf8),
+        DataType::Binary => downcast!(BinaryArray, Binary),
         DataType::Timestamp(TimeUnit::Nanosecond, Some(timezone))
             if timezone.as_ref() == "+00:00" || timezone.as_ref() == "UTC" =>
         {
@@ -1517,6 +1531,46 @@ mod tests {
             TypedArray::Int64(Int64Array::from(vec![Some(2), None, Some(42)]))
         );
         assert!(result.side_errors.is_empty());
+    }
+
+    #[test]
+    fn bytes_bridge_preserves_binary_columns_and_list_eligibility() {
+        let executor = UdfExecutor::compile_sync([model(
+            "copy_bytes",
+            [TestArgument {
+                name: "value",
+                ty: ParseAsType::Bytes,
+                optional: false,
+            }],
+            ParseAsType::Bytes,
+            false,
+            "fn copy_bytes(value: BytesColumn) -> BytesColumn { value }",
+        )])
+        .assured("the BYTES bridge registers a Roto column type");
+        let input = BinaryArray::from(vec![Some(&[0, 255][..]), Some(&[][..]), None]);
+        let result = executor
+            .inject_with_context(
+                &FunctionName::Udf("copy_bytes".to_string()),
+                &[TypedArray::Binary(input.clone())],
+                &RowSelection::All(3),
+                (0..7).into(),
+                Timestamp::from_unix_nanos(123),
+                RowErrorMask::none(3),
+            )
+            .assured("a BYTES UDF returns the supplied Arrow binary column");
+        assert_eq!(result.output, TypedArray::Binary(input));
+        assert_eq!(
+            bridge_accessor(&ParseAsType::Vec {
+                element: Box::new(ParseAsType::Bytes),
+            }),
+            "vec_bytes"
+        );
+        assert_eq!(
+            bridge_conversion(&ParseAsType::Vec {
+                element: Box::new(ParseAsType::Bytes),
+            }),
+            "from_vec_bytes"
+        );
     }
 
     #[test]
