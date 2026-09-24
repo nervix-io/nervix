@@ -419,6 +419,15 @@ impl fmt::Debug for ScenarioWorld {
 }
 
 impl ScenarioWorld {
+    fn ingestor_dispatch_ref(&self, ingestor: &str) -> nervix_models::DomainNodeRef {
+        let ingestor = expand_placeholders(self, ingestor);
+        let domain = nervix_models::DomainName::try_from(self.domain.as_str())
+            .assured("the scenario domain is an identifier-shaped name");
+        let ingestor = nervix_models::ModelName::try_from(ingestor.as_str())
+            .assured("the scenario ingestor is an identifier-shaped name");
+        nervix_models::DomainNodeRef::node_in(domain, nervix_models::ModelKind::Ingestor, ingestor)
+    }
+
     /// Which scenario this world belongs to, as every registry that groups work by scenario names
     /// it.
     fn scenario_identity(&self) -> ScenarioIdentity {
@@ -7069,6 +7078,36 @@ async fn given_transaction_commit_pause(
 async fn given_entity_gate_pause(world: &mut ScenarioWorld, domain: String) {
     let domain = expand_placeholders(world, &domain);
     world.fault_injection.pause_entity_gate(domain);
+}
+
+#[given(expr = "ingestor {string} pauses inside dispatch")]
+async fn given_ingestor_dispatch_pause(world: &mut ScenarioWorld, ingestor: String) {
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    world.fault_injection.pause_ingestor_dispatch(ingestor);
+}
+
+#[then(expr = "ingestor {string} reaches the dispatch pause")]
+async fn then_ingestor_dispatch_pause_is_reached(world: &mut ScenarioWorld, ingestor: String) {
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    let reached = tokio::time::timeout(
+        Duration::from_secs(10),
+        world
+            .fault_injection
+            .wait_for_ingestor_dispatch_pause(&ingestor),
+    )
+    .await;
+    assert!(
+        reached.is_ok(),
+        "the scenario's ingestor did not reach its armed dispatch pause within ten seconds"
+    );
+}
+
+#[when(expr = "ingestor {string} leaves the dispatch pause")]
+async fn when_ingestor_dispatch_pause_is_released(world: &mut ScenarioWorld, ingestor: String) {
+    let ingestor = world.ingestor_dispatch_ref(&ingestor);
+    world
+        .fault_injection
+        .release_ingestor_dispatch_pause(&ingestor);
 }
 
 #[given(

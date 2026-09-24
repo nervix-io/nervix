@@ -492,6 +492,13 @@ pub(in crate::runtime) struct IngestorQuiesceControl {
     pub(super) metric_labels: IngestorQuiesceMetricLabels,
 }
 
+/// The exact publication a source host last observed before it awaited dispatch or a new batch.
+/// Keeping the Arc alive also prevents a later publication from reusing its address.
+#[derive(Debug, Clone)]
+pub(in crate::runtime) struct IngestorQuiesceObservation {
+    publication: StdArc<IngestorQuiescePublication>,
+}
+
 impl IngestorQuiesceControl {
     pub(super) fn new(
         mode: IngestQuiesceMode,
@@ -581,21 +588,42 @@ impl IngestorQuiesceControl {
         self.decision().skips_poll()
     }
 
-    pub(in crate::runtime) async fn wait_until_not_suspended(&self) {
-        loop {
-            if !self.should_suspend_intake() {
-                return;
-            }
-            let changed = self.changed.notified();
-            if !self.should_suspend_intake() {
-                return;
-            }
-            changed.await;
+    pub(in crate::runtime) fn observation(&self) -> IngestorQuiesceObservation {
+        IngestorQuiesceObservation {
+            publication: self.published.load_full(),
         }
     }
 
-    pub(in crate::runtime) async fn wait_for_change(&self) {
-        self.changed.notified().await;
+    pub(in crate::runtime) async fn wait_until_not_suspended(&self) {
+        let mut observation = self.observation();
+        loop {
+            tokio::task::consume_budget().await;
+            if !observation.publication.decision.suspends_intake() {
+                return;
+            }
+            self.wait_for_change_since(&mut observation).await;
+        }
+    }
+
+    /// Waits for a publication newer than the decision a source host already acted on.
+    ///
+    /// `notify_waiters` does not retain a permit. Register before comparing publications so a
+    /// change between that decision and this wait is observed immediately, including one that
+    /// lands while the host is awaiting dispatch.
+    pub(in crate::runtime) async fn wait_for_change_since(
+        &self,
+        observation: &mut IngestorQuiesceObservation,
+    ) {
+        let changed = self.changed.notified();
+        let mut changed = std::pin::pin!(changed);
+        changed.as_mut().enable();
+        let current = self.published.load_full();
+        if !StdArc::ptr_eq(&observation.publication, &current) {
+            observation.publication = current;
+            return;
+        }
+        changed.await;
+        observation.publication = self.published.load_full();
     }
 
     pub(in crate::runtime) fn intake(

@@ -189,6 +189,10 @@ the ingestor will run again. Shutdown and ownership handoff are not resumable, s
 endpoint admission simply stop, and no `SUSPEND`, `BUFFER`, `DROP`, or `REJECT` policy is applied on
 behalf of the stop. An endpoint refuses new requests outright, without offering a retry delay.
 Payloads already admitted continue through their routes.
+Each source host retains the quiesce publication it observed before awaiting dispatch. Its next
+change wait compares against that publication after registering the waiter, so a shutdown or
+ownership-handoff engagement during dispatch is observed on the next loop turn even when the
+notification arrived before the wait began.
 
 A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode retained during an
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded
