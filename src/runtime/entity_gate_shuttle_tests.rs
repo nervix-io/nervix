@@ -74,16 +74,19 @@ const RELEASING_TASKS: usize = 2;
 const FREEZE_WAITERS: usize = 2;
 
 /// Explores `invariant` under Shuttle's random scheduler and then under its PCT scheduler.
-fn explore(invariant: fn()) {
-    check_random(invariant, RANDOM_ITERATIONS);
+fn explore<F>(invariant: F)
+where
+    F: Fn() + Clone + Send + Sync + 'static,
+{
+    check_random(invariant.clone(), RANDOM_ITERATIONS);
     check_pct(invariant, PCT_ITERATIONS, PCT_DEPTH);
 }
 
 /// A fence deadline no check outlives, so only a release ends an engagement.
-fn far_future_deadline() -> Instant {
-    Instant::now()
+fn far_future_deadline(anchor: Instant) -> Instant {
+    anchor
         .checked_add(Duration::from_secs(86_400))
-        .assured("the monotonic clock represents one day past its current reading")
+        .assured("the monotonic clock represents one day past the check's anchor")
 }
 
 fn relay_gates(count: usize) -> Vec<Arc<RelayDispatchGate>> {
@@ -93,11 +96,11 @@ fn relay_gates(count: usize) -> Vec<Arc<RelayDispatchGate>> {
 }
 
 /// Engages one hold over every relay gate, with no branch-scoped gate of its own.
-fn engage(gates: &[Arc<RelayDispatchGate>], reason: &str) -> EntityGateHold {
+fn engage(gates: &[Arc<RelayDispatchGate>], reason: &str, deadline: Instant) -> EntityGateHold {
     EntityGateHold {
         gates: gates
             .iter()
-            .map(|gate| RelayDispatchGateLease::engage(gate.clone(), far_future_deadline(), reason))
+            .map(|gate| RelayDispatchGateLease::engage(gate.clone(), deadline, reason))
             .collect(),
         branch_gates: Vec::new(),
     }
@@ -159,8 +162,9 @@ async fn hold_twice(
     records: StdArc<HoldRecords>,
     quiescent: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
+    deadline: Instant,
 ) {
-    let mut first = engage(&gates, "shuttle entity hold");
+    let mut first = engage(&gates, "shuttle entity hold", deadline);
     assert!(
         first.wait_quiescent().await,
         "a far-future fence completes once every earlier dispatch drops its permit"
@@ -175,7 +179,7 @@ async fn hold_twice(
     records.releasing();
     first.release();
 
-    let mut second = engage(&gates, "shuttle entity re-engagement");
+    let mut second = engage(&gates, "shuttle entity re-engagement", deadline);
     assert!(
         second.wait_quiescent().await,
         "a hold re-engaged after a release fences the same relays again"
@@ -185,7 +189,7 @@ async fn hold_twice(
     drop(second);
 }
 
-fn a_hold_fences_every_relay_it_names() {
+fn a_hold_fences_every_relay_it_names(deadline: Instant) {
     shuttle::future::block_on(async {
         let gates = relay_gates(FENCED_RELAYS);
         let counters = Arc::new(NodeQuiesceCounters::default());
@@ -209,6 +213,7 @@ fn a_hold_fences_every_relay_it_names() {
             records.clone(),
             quiescent,
             first_hold_is_released,
+            deadline,
         ));
 
         first_hold_is_quiescent
@@ -275,7 +280,8 @@ fn a_hold_fences_every_relay_it_names() {
 
 #[test]
 fn shuttle_an_entity_gate_hold_fences_every_relay_and_admits_no_work_until_it_is_released() {
-    explore(a_hold_fences_every_relay_it_names);
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || a_hold_fences_every_relay_it_names(deadline));
 }
 
 /// Holds one work item across a park and resume for as long as the drain observer is reading.
@@ -519,7 +525,7 @@ async fn take_and_release(operation: Arc<EntityGateOperation>, records: StdArc<O
     hold.gates.release();
 }
 
-fn one_engagement_wakes_every_waiter_and_is_taken_once() {
+fn one_engagement_wakes_every_waiter_and_is_taken_once(deadline: Instant) {
     shuttle::future::block_on(async {
         let domain = DomainName::parse("default").assured("the check names a valid domain");
         let relay = RelayName::parse("events").assured("the check names a valid relay");
@@ -540,7 +546,11 @@ fn one_engagement_wakes_every_waiter_and_is_taken_once() {
             tokio::task::yield_now().await;
             engaging.complete(EntityAlterHold {
                 coordination: coordination(),
-                gates: engage(std::slice::from_ref(&engaged_gate), "shuttle engagement"),
+                gates: engage(
+                    std::slice::from_ref(&engaged_gate),
+                    "shuttle engagement",
+                    deadline,
+                ),
                 affected_entities: Vec::new(),
                 purpose: EntityGatePurpose::ModelAlteration,
                 quiesced_ingestors: Vec::new(),
@@ -583,7 +593,8 @@ fn one_engagement_wakes_every_waiter_and_is_taken_once() {
 
 #[test]
 fn shuttle_every_engagement_waiter_wakes_and_exactly_one_release_takes_the_hold() {
-    explore(one_engagement_wakes_every_waiter_and_is_taken_once);
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || one_engagement_wakes_every_waiter_and_is_taken_once(deadline));
 }
 
 /// Acquires and drops one dispatch permit, which the engaged hold parks until it is dropped.
@@ -594,7 +605,7 @@ async fn dispatch_once(gate: Arc<RelayDispatchGate>) {
     drop(permit);
 }
 
-fn a_hold_dropped_before_its_fence_completes_reopens_every_relay() {
+fn a_hold_dropped_before_its_fence_completes_reopens_every_relay(deadline: Instant) {
     shuttle::future::block_on(async {
         let gates = relay_gates(FENCED_RELAYS);
         let dispatchers = gates
@@ -604,7 +615,7 @@ fn a_hold_dropped_before_its_fence_completes_reopens_every_relay() {
 
         let dropping = gates.clone();
         let holder = tokio::spawn(async move {
-            let hold = engage(&dropping, "shuttle abandoned hold");
+            let hold = engage(&dropping, "shuttle abandoned hold", deadline);
             tokio::task::yield_now().await;
             drop(hold);
         });
@@ -631,7 +642,8 @@ fn a_hold_dropped_before_its_fence_completes_reopens_every_relay() {
 
 #[test]
 fn shuttle_a_hold_dropped_before_its_fence_completes_reopens_every_relay_it_engaged() {
-    explore(a_hold_dropped_before_its_fence_completes_reopens_every_relay);
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || a_hold_dropped_before_its_fence_completes_reopens_every_relay(deadline));
 }
 
 fn one_failed_engagement_wakes_every_waiter_with_its_failure() {
@@ -720,7 +732,7 @@ async fn wait_until_thawed(watch: Arc<OwnershipHandoffFreezeWatch>) {
     }
 }
 
-fn releasing_an_ownership_handoff_wakes_every_frozen_waiter() {
+fn releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline: Instant) {
     shuttle::future::block_on(async {
         let domain = DomainName::parse("default").assured("the check names a valid domain");
         let relay = RelayName::parse("events").assured("the check names a valid relay");
@@ -731,7 +743,7 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter() {
         let key = DomainNodeRef::node_in(domain.clone(), entity.kind, entity.identifier.clone());
         let frozen_entities: Arc<
             DashMap<DomainNodeRef, BTreeSet<CoordinationIdentity>, RandomState>,
-        > = Arc::new(DashMap::default());
+        > = Arc::new(DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0)));
         let changed = Arc::new(Notify::new());
         frozen_entities
             .entry(key.clone())
@@ -753,8 +765,8 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter() {
         let releasing_domain = domain.clone();
         let released_gate = gate.clone();
         let release = tokio::spawn(async move {
-            let ingestors = DashMap::default();
-            let ingestor_quiescence = DashMap::default();
+            let ingestors = DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0));
+            let ingestor_quiescence = DashMap::with_hasher(RandomState::with_seeds(0, 0, 0, 0));
             Runtime::release_entity_alter_hold(
                 &ingestors,
                 &ingestor_quiescence,
@@ -766,6 +778,7 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter() {
                     gates: engage(
                         std::slice::from_ref(&released_gate),
                         "shuttle ownership handoff",
+                        deadline,
                     ),
                     affected_entities: vec![entity],
                     purpose: EntityGatePurpose::OwnershipHandoff,
@@ -794,5 +807,6 @@ fn releasing_an_ownership_handoff_wakes_every_frozen_waiter() {
 
 #[test]
 fn shuttle_releasing_an_ownership_handoff_wakes_every_waiter_frozen_by_it() {
-    explore(releasing_an_ownership_handoff_wakes_every_frozen_waiter);
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || releasing_an_ownership_handoff_wakes_every_frozen_waiter(deadline));
 }

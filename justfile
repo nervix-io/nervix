@@ -121,7 +121,8 @@ test-package-bins package *args:
 test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
 
-# Explore the filtered execution, interconnect and server invariants under Shuttle. The former Loom
+# Explore the filtered execution, interconnect and server invariants under Shuttle, then replay
+# randomized schedules to detect uncontrolled nondeterminism in every check. The former Loom
 # recipe is retired: acknowledgement races, the relay dispatch gate and the relay fan-out exercise
 # production types. A non-empty `filter` runs only the checks whose full names contain it.
 test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
@@ -130,6 +131,8 @@ test-shuttle filter="": build-web-console wasm-processor-guests download-onnxrun
     shuttle_packages=(nervix-execution nervix-interconnect nervix-server)
     for shuttle_package in "${shuttle_packages[@]}"; do
         just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
+        SHUTTLE_CHECK_NONDETERMINISM=1 \
+            just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
     done
 
 # Explore one package's filtered invariants under Shuttle. Each test gets its own process so a
@@ -293,6 +296,22 @@ test-coverage-feature feature additional_feature="": tests-deps
 # a change to those packages without the scenario suite that `test-coverage` runs.
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
+
+# Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
+# The same checks run under ordinary and nondeterminism-detection schedules, with one test thread
+# so Shuttle's scheduler state is not shared between tests.
+coverage-shuttle output: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    for shuttle_package in nervix-execution nervix-interconnect nervix-server; do
+        SHUTTLE_REPORT_STEPS=1 cargo llvm-cov test --no-report \
+            --package "${shuttle_package}" --features shuttle --lib shuttle_ -- --test-threads=1
+        SHUTTLE_CHECK_NONDETERMINISM=1 cargo llvm-cov test --no-report \
+            --package "${shuttle_package}" --features shuttle --lib shuttle_ -- --test-threads=1
+    done
+    cargo llvm-cov report --lcov --output-path {{ quote(output) }}
 
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
 # `just bench --test` to execute each benchmark body once without recording runner timings.
