@@ -54,6 +54,7 @@ impl RuntimeReconnectBackoff {
         delay
     }
 
+    #[cfg(test)]
     pub(in crate::runtime) async fn wait(
         &mut self,
         shutdown_rx: &mut watch::Receiver<bool>,
@@ -66,6 +67,7 @@ impl RuntimeReconnectBackoff {
             _ = sleep(delay) => true,
         }
     }
+
     pub(in crate::runtime) async fn wait_with_ack_alive(
         &mut self,
         shutdown_rx: &mut watch::Receiver<bool>,

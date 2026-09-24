@@ -1,5 +1,5 @@
 [package]
-description = "The NATS sink connector for Nervix"
+description = "The NATS source and sink connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-nats"
@@ -30,4 +30,8 @@ shuttle-tokio = { workspace = true, features = [
   "rt",
   "time",
 ], optional = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
+
+[dev-dependencies]
+bytes = { workspace = true }

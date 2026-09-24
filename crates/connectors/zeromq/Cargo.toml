@@ -1,5 +1,5 @@
 [package]
-description = "The ZeroMQ sink connector for Nervix"
+description = "The ZeroMQ source and sink connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-zeromq"
@@ -22,5 +22,6 @@ error-stack = { workspace = true }
 nervix-connector = { workspace = true }
 nervix-models = { workspace = true }
 shuttle-tokio = { workspace = true, features = ["rt"], optional = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 zeromq = { workspace = true }

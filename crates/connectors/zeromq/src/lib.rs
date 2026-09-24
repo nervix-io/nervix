@@ -1,9 +1,10 @@
-//! ZeroMQ sink connector.
+//! ZeroMQ source and sink connector.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** ZeroMQ push-socket configuration, whether the socket binds or connects, and
-//!   per-record publication through it.
+//! - **Owns.** ZeroMQ push- and pull-socket configuration, whether a socket binds or
+//!   connects, reading the first frame of each received message, and per-record
+//!   publication.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio, and
 //!   `zeromq`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -12,6 +13,8 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
+mod source;
+
 use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
@@ -19,6 +22,7 @@ use nervix_connector::{
     SinkStartError, SinkStartResult, client_config_value, optional_client_config_value,
 };
 use nervix_models::ClientConfigEntry;
+pub use source::{ZeroMqSource, ZeroMqSourceError, ZeroMqSourceMessage, ZeroMqSourcePlan};
 use zeromq::{PushSocket, Socket, SocketSend};
 
 const ZEROMQ: &str = "zeromq";

@@ -1,5 +1,5 @@
 [package]
-description = "The Pulsar sink connector for Nervix"
+description = "The Pulsar source and sink connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-pulsar"
@@ -30,7 +30,9 @@ shuttle-tokio = { workspace = true, features = [
   "rt",
   "time",
 ], optional = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -294,6 +294,7 @@ impl TryFrom<Args> for Application {
             })
             .transaction_idle_timeout(args.transaction_idle_timeout)
             .transaction_tombstone_retention(args.transaction_tombstone_retention)
+            .command_execution(args.command_execution)
             .transaction_max_statements(args.transaction_max_statements)
             .transaction_max_source_bytes(args.transaction_max_source_bytes)
             .transaction_max_open(args.transaction_max_open)

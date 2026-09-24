@@ -52,7 +52,10 @@ pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
 }
 use nervix_server::{
     FaultInjection, SchedulerMode,
-    application::{Application, InternalTransportMode, ShutdownCoordinator, init_tracing_to_file},
+    application::{
+        Application, CommandExecutionPolicy, InternalTransportMode, ShutdownCoordinator,
+        init_tracing_to_file,
+    },
     memory_pressure::MemoryPressureConfig,
     runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
 };
@@ -721,6 +724,8 @@ pub(crate) struct TestClusterConfig {
     pub state_snapshot_interval: Duration,
     pub transaction_idle_timeout: Duration,
     pub transaction_tombstone_retention: Duration,
+    pub command_retry_validity: Duration,
+    pub command_execution_capacity: usize,
     pub transaction_max_statements: usize,
     pub transaction_max_source_bytes: u64,
     pub transaction_max_open: usize,
@@ -745,6 +750,8 @@ impl Default for TestClusterConfig {
             state_snapshot_interval: TEST_STATE_SNAPSHOT_INTERVAL,
             transaction_idle_timeout: Duration::from_secs(15 * 60),
             transaction_tombstone_retention: Duration::from_secs(15 * 60),
+            command_retry_validity: Duration::from_secs(15 * 60),
+            command_execution_capacity: 65_536,
             transaction_max_statements: 256,
             transaction_max_source_bytes: 1024 * 1024,
             transaction_max_open: 1024,
@@ -2711,6 +2718,10 @@ impl NodeHandle {
             .state_snapshot_interval(self.config.state_snapshot_interval)
             .transaction_idle_timeout(self.config.transaction_idle_timeout)
             .transaction_tombstone_retention(self.config.transaction_tombstone_retention)
+            .command_execution(CommandExecutionPolicy::new(
+                self.config.command_retry_validity,
+                self.config.command_execution_capacity,
+            ))
             .transaction_max_statements(self.config.transaction_max_statements)
             .transaction_max_source_bytes(self.config.transaction_max_source_bytes)
             .transaction_max_open(self.config.transaction_max_open)

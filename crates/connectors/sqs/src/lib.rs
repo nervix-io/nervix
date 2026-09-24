@@ -1,10 +1,10 @@
-//! SQS sink connector.
+//! SQS source and sink connector.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The SQS client a configuration declares, queue-URL lookup, protocol validation of
-//!   each message body, attribute and FIFO group, request batching, and per-entry response
-//!   classification.
+//! - **Owns.** The SQS client a configuration declares, queue-URL lookup, long polling and
+//!   message deletion on the source side, protocol validation of each message body,
+//!   attribute and FIFO group, request batching, and per-entry response classification.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and the AWS
 //!   SQS SDK.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -13,6 +13,8 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
+
+mod source;
 
 use std::time::Duration;
 
@@ -32,6 +34,10 @@ use nervix_connector::{
     client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, Timestamp};
+pub use source::{
+    SqsMessageAttributes, SqsSource, SqsSourceError, SqsSourceMessage, SqsSourcePlan,
+    SqsSourcePosition,
+};
 use thiserror::Error;
 
 const SQS: &str = "sqs";

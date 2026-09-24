@@ -1,30 +1,369 @@
-//! The host-owned broker source loop and its runtime intake adapter.
+//! The host-owned broker source loop, the launcher that starts its instances, and its runtime
+//! intake adapter.
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Source task lifecycle, quiesce and readiness, grouping policy, runtime decoding and
-//!   dispatch, acknowledgement waiting, retry cadence, and connector error reporting.
-//! - **Depends on.** The connector source contract and pre-resolved runtime execution handles.
+//! - **Owns.** Source task lifecycle, instance startup and registration, the acknowledgement
+//!   policy a declared delivery mode parses into, quiesce and readiness, grouping policy, runtime
+//!   decoding and dispatch, acknowledgement waiting, retry cadence, and connector error reporting.
+//! - **Depends on.** The connector source contract, declared delivery modes, and pre-resolved
+//!   runtime execution handles.
 //! - **Must not know.** A broker driver, connector-specific configuration, NSPL parsing, registry
 //!   validation, or placement computation.
 
 use std::{future, time::Duration};
 
 use async_trait::async_trait;
-use error_stack::{Report, ResultExt as _};
+use error_stack::{FrameKind, Report, ResultExt as _};
 use nervix_connector::{
-    BrokerSourceConnector, IngestMetadataRow, PacedSourceConnector, ParsedRetryPolicy,
-    RetainedIngestHeaders, SourceAckPolicy, SourceAcknowledgement, SourceAcknowledgementOutcome,
-    SourceAcknowledgementServices, SourceBatch, SourceBatchRequest, SourceConnector, SourceHost,
-    SourceHostServices, SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage,
-    SourceIntakeMode, SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourcePoll,
-    SourceResume, next_retry_delay, physical_time::actual_utc_now,
+    BrokerSourceConnector, ClientResourceMounts, IngestMetadataRow, PacedSourceConnector,
+    ParsedRetryPolicy, RetainedIngestHeaders, SourceAckPolicy, SourceAcknowledgement,
+    SourceAcknowledgementOutcome, SourceAcknowledgementServices, SourceBatch, SourceBatchRequest,
+    SourceCapabilities, SourceConnector, SourceError, SourceHost, SourceHostServices,
+    SourceIntakeBatch, SourceIntakeError, SourceIntakeMessage, SourceIntakeMode,
+    SourceIntakeOutcome, SourceIntakeResult, SourceMessage, SourcePlan, SourcePoll, SourceResume,
+    next_retry_delay, physical_time::actual_utc_now,
 };
+use nervix_models::{NatsIngestMode, RedisPubSubIngestMode, ZeroMqIngestMode};
 use tokio_util::sync::CancellationToken;
 
 use super::super::{domain_clock::DomainCadence, *};
 
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
+
+/// How a source whose delivery mode declares no retry policy reopens after a failure: the delay
+/// starts here and doubles up to the ceiling.
+pub(super) const SOURCE_RECONNECT_POLICY: ParsedRetryPolicy = ParsedRetryPolicy {
+    backoff: Duration::from_millis(250),
+    max_backoff: Duration::from_secs(30),
+};
+
+/// The acknowledgement a source's delivery mode declares, with its durations still as written.
+///
+/// The launcher parses it into the policy the source loop runs, so a mode that fails to parse
+/// fails the start before any instance opens.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum DeclaredSourceAcknowledgement<'a> {
+    Unacknowledged,
+    Sequential {
+        timeout: &'a str,
+        retry: &'a RetryPolicy,
+    },
+    Parallel {
+        max: NonZeroU64,
+        batch_timeout: &'a str,
+        timeout: &'a str,
+        retry: &'a RetryPolicy,
+    },
+}
+
+/// Kafka and Pulsar declare their delivery modes through the same `KafkaIngestMode`.
+impl<'a> From<&'a KafkaIngestMode> for DeclaredSourceAcknowledgement<'a> {
+    fn from(mode: &'a KafkaIngestMode) -> Self {
+        match mode {
+            KafkaIngestMode::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => Self::Parallel {
+                max: *max,
+                batch_timeout,
+                timeout,
+                retry: retry_policy,
+            },
+            KafkaIngestMode::AckSequential {
+                timeout,
+                retry_policy,
+            } => Self::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+            KafkaIngestMode::NoAckParallel => Self::Unacknowledged,
+        }
+    }
+}
+
+impl IngestorSpec {
+    /// The start failure this ingestor reports, naming why it could not start.
+    pub(super) fn start_failure(&self, reason: impl Into<String>) -> RuntimeError {
+        RuntimeError::StartIngestor {
+            domain: self.domain.as_str().to_string(),
+            ingestor: self.name.as_str().to_string(),
+            reason: reason.into(),
+        }
+    }
+}
+
+impl<'a> From<&'a MqttIngestMode> for DeclaredSourceAcknowledgement<'a> {
+    fn from(mode: &'a MqttIngestMode) -> Self {
+        match mode {
+            MqttIngestMode::AckParallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry_policy,
+            } => Self::Parallel {
+                max: *max,
+                batch_timeout,
+                timeout,
+                retry: retry_policy,
+            },
+            MqttIngestMode::AckSequential {
+                timeout,
+                retry_policy,
+            } => Self::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+            MqttIngestMode::NoAckSequential { .. } | MqttIngestMode::NoAckParallel { .. } => {
+                Self::Unacknowledged
+            }
+        }
+    }
+}
+
+impl<'a> From<&'a RabbitMqIngestMode> for DeclaredSourceAcknowledgement<'a> {
+    fn from(mode: &'a RabbitMqIngestMode) -> Self {
+        match mode {
+            RabbitMqIngestMode::AckSequential {
+                timeout,
+                retry_policy,
+            } => Self::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+        }
+    }
+}
+
+impl<'a> From<&'a SqsIngestMode> for DeclaredSourceAcknowledgement<'a> {
+    fn from(mode: &'a SqsIngestMode) -> Self {
+        match mode {
+            SqsIngestMode::AckSequential {
+                timeout,
+                retry_policy,
+            } => Self::Sequential {
+                timeout,
+                retry: retry_policy,
+            },
+        }
+    }
+}
+
+impl From<&NatsIngestMode> for DeclaredSourceAcknowledgement<'_> {
+    fn from(mode: &NatsIngestMode) -> Self {
+        match mode {
+            NatsIngestMode::NoAckSequential => Self::Unacknowledged,
+        }
+    }
+}
+
+impl From<&RedisPubSubIngestMode> for DeclaredSourceAcknowledgement<'_> {
+    fn from(mode: &RedisPubSubIngestMode) -> Self {
+        match mode {
+            RedisPubSubIngestMode::NoAckSequential => Self::Unacknowledged,
+        }
+    }
+}
+
+impl From<&ZeroMqIngestMode> for DeclaredSourceAcknowledgement<'_> {
+    fn from(mode: &ZeroMqIngestMode) -> Self {
+        match mode {
+            ZeroMqIngestMode::NoAckSequential => Self::Unacknowledged,
+        }
+    }
+}
+
+/// One broker source ready to start: its connector plan and the host settings it runs under.
+pub(super) struct BrokerSourceStart<'a, P> {
+    pub(super) ingestor: &'a IngestorSpec,
+    pub(super) connector: P,
+    pub(super) instances: NonZeroU64,
+    pub(super) acknowledgement: DeclaredSourceAcknowledgement<'a>,
+    /// Whether what the source reads while quiesced passes through the quiesce control, which may
+    /// buffer or drop it.
+    pub(super) buffered_intake: bool,
+    /// Whether every accepted batch flushes its ingest group at once.
+    pub(super) flush_each_intake: bool,
+    /// The resource mounts the connector's resolved configuration reads its files from, held for
+    /// as long as an instance runs.
+    pub(super) client_mounts: Vec<Arc<ClientResourceMounts>>,
+    /// The connector's name in the instance lifecycle log.
+    pub(super) connector_label: &'static str,
+}
+
+impl Runtime {
+    /// Starts every instance of one broker source under the host source loop.
+    ///
+    /// The delivery mode parses and every instance opens before anything is registered, so a
+    /// source that cannot start leaves no running ingestor behind.
+    pub(super) async fn start_broker_source<C>(
+        &self,
+        start: BrokerSourceStart<'_, C::Plan>,
+    ) -> Result<(), RuntimeError>
+    where
+        C: BrokerSourceConnector,
+    {
+        let BrokerSourceStart {
+            ingestor,
+            connector,
+            instances,
+            acknowledgement,
+            buffered_intake,
+            flush_each_intake,
+            client_mounts,
+            connector_label,
+        } = start;
+        let domain = &ingestor.domain;
+        let key =
+            DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
+        if self.inner.ingestors.contains_key(&key) {
+            return Err(RuntimeError::IngestorAlreadyRunning {
+                domain: domain.as_str().to_string(),
+                ingestor: ingestor.name.as_str().to_string(),
+            });
+        }
+        let acknowledgement = match acknowledgement {
+            DeclaredSourceAcknowledgement::Unacknowledged => SourceAckPolicy::None,
+            DeclaredSourceAcknowledgement::Sequential { timeout, retry } => {
+                SourceAckPolicy::Sequential {
+                    timeout: Self::parse_ack_timeout(domain, &ingestor.name, timeout)?,
+                    retry: Self::parse_retry_policy(domain, &ingestor.name, retry)?,
+                }
+            }
+            DeclaredSourceAcknowledgement::Parallel {
+                max,
+                batch_timeout,
+                timeout,
+                retry,
+            } => SourceAckPolicy::Parallel {
+                max_in_flight: addressable_count(max),
+                batch_timeout: Self::parse_duration_setting(
+                    domain,
+                    &ingestor.name,
+                    "batch timeout",
+                    batch_timeout,
+                )?,
+                timeout: Self::parse_ack_timeout(domain, &ingestor.name, timeout)?,
+                retry: Self::parse_retry_policy(domain, &ingestor.name, retry)?,
+            },
+        };
+        // An acknowledged mode retries by its declared policy; a source without one reopens on
+        // the host's reconnect cadence.
+        let retry = match acknowledgement {
+            SourceAckPolicy::None => SOURCE_RECONNECT_POLICY,
+            SourceAckPolicy::Sequential { retry, .. } | SourceAckPolicy::Parallel { retry, .. } => {
+                retry
+            }
+        };
+        let plan = SourcePlan {
+            connector,
+            capabilities: SourceCapabilities::new(
+                ingestor.allow_header_reads,
+                ingestor.metadata_kind.source_scope(),
+                ingestor.quiesce.supports(ingestor.quiesce.mode()),
+                instances,
+                acknowledgement.support(),
+            ),
+            acknowledgement,
+        };
+        let dependencies = self.ingestor_dependencies(domain, ingestor).await?;
+        let mut sources = Vec::with_capacity(instances.get().arch_into());
+        for instance_index in 0..instances.get() {
+            tokio::task::consume_budget().await;
+            let source = C::open(&plan.connector, instance_index)
+                .await
+                .map_err(|error| ingestor.start_failure(format!("{error:#}")))?;
+            sources.push(source);
+        }
+
+        let branched_runtime = self.start_branched_ingestor_runtime(
+            domain,
+            &ingestor.name,
+            dependencies.branched_templates,
+        );
+        let quiesce = self
+            .ingestor_quiesce_control(domain, &ingestor.name)
+            .verified(
+                "the runtime registers quiesce control for an ingestor before it starts the task",
+            );
+        let (shutdown_tx, _) = watch::channel(false);
+        self.prepare_ingestor_readiness(domain, &ingestor.name, plan.capabilities.instances());
+        let mut tasks = Vec::with_capacity(sources.len());
+        for (instance_index, source) in (0_u64..).zip(sources) {
+            let host = RuntimeSourceHost::build(RuntimeSourceHostSpec {
+                runtime: self.clone(),
+                domain: domain.clone(),
+                ingestor: ingestor.name.clone(),
+                timestamp_source: ingestor.timestamp_source.clone(),
+                output_routes: dependencies.output_routes.clone(),
+                filter_where: dependencies.filter_where.clone(),
+                codec: dependencies.codec.clone(),
+                metrics: dependencies.metrics.clone(),
+                branched_senders: branched_runtime.senders.clone(),
+                quiesce: quiesce.clone(),
+                shutdown: shutdown_tx.subscribe(),
+                instance_index,
+                metadata_kind: ingestor.metadata_kind,
+                buffered_intake,
+                flush_each_intake,
+            });
+            let shutdown = shutdown_tx.subscribe();
+            let task_domain = domain.clone();
+            let task_ingestor = ingestor.name.clone();
+            let task_client_mounts = client_mounts.clone();
+            let acknowledgement = plan.acknowledgement;
+            tasks.push(tokio::spawn(async move {
+                let _client_mounts = task_client_mounts;
+                info!(
+                    domain = task_domain.as_str(),
+                    ingestor = task_ingestor.as_str(),
+                    connector = connector_label,
+                    instance = instance_index,
+                    "started source ingestor instance"
+                );
+                run_source_instance_with_retry(source, host, acknowledgement, retry, shutdown)
+                    .await;
+                info!(
+                    domain = task_domain.as_str(),
+                    ingestor = task_ingestor.as_str(),
+                    connector = connector_label,
+                    instance = instance_index,
+                    "stopped source ingestor instance"
+                );
+            }));
+        }
+
+        self.inner.ingestors.insert(
+            key,
+            IngestorRuntime::Background {
+                shutdown: shutdown_tx,
+                branched: branched_runtime.runtimes,
+                tasks,
+            },
+        );
+        Ok(())
+    }
+}
+
+/// What a source failure says to an operator: the most specific cause beneath it.
+///
+/// The contract's own context names only the operation that failed, such as a resume. The cause a
+/// connector reports beneath it, such as a refused connection or a conflicting client identity, is
+/// what the ingestor's transient status shows.
+fn source_failure_reason(error: &Report<SourceError>) -> String {
+    let mut cause = None;
+    for frame in error.frames() {
+        if let FrameKind::Context(context) = frame.kind() {
+            cause = Some(context);
+        }
+    }
+    match cause {
+        Some(cause) => cause.to_string(),
+        None => error.to_string(),
+    }
+}
 
 pub(super) struct RuntimeSourceHostSpec {
     pub(super) runtime: Runtime,
@@ -184,46 +523,131 @@ impl SourceAcknowledgementServices for RuntimeSourceAcknowledgement {
     }
 }
 
+/// What the quiesce control decided about one acknowledged message read while quiesced.
+enum QuiescedIntake {
+    /// The message dispatches with its own acknowledgement root, as it would unquiesced.
+    Admitted,
+    /// A buffer or the drop policy took the message over, so nothing downstream acknowledges it.
+    TakenOver,
+}
+
+/// The acknowledgement of a message a quiesce buffer or drop policy took over from the source.
+///
+/// The source is told the message is done with at once: what a buffer retains is replayed without
+/// it, and what the policy dropped was dropped deliberately.
+struct QuiescedSourceAcknowledgement;
+
 #[async_trait]
-impl SourceHostServices for RuntimeSourceHost {
-    async fn intake(
+impl SourceAcknowledgementServices for QuiescedSourceAcknowledgement {
+    async fn wait(self: Box<Self>, _timeout: Duration) -> SourceAcknowledgementOutcome {
+        SourceAcknowledgementOutcome::Ack
+    }
+}
+
+impl RuntimeSourceHost {
+    /// The metadata a quiesce buffer keeps for a message after the source message is gone.
+    fn retained_metadata(
+        metadata: &IngestMetadataRow<'_>,
+    ) -> SourceIntakeResult<BufferedIngestMetadata> {
+        match metadata {
+            IngestMetadataRow::Syslog { peer_addr } => Ok(BufferedIngestMetadata::Syslog {
+                peer_addr: *peer_addr,
+            }),
+            IngestMetadataRow::Headers { headers } => Ok(BufferedIngestMetadata::Headers(
+                RetainedIngestHeaders::capture(*headers),
+            )),
+            IngestMetadataRow::Kafka { .. } => Err(Report::new(SourceIntakeError::Retain)
+                .attach_printable(
+                    "Kafka source input supports suspension instead of quiesce buffering",
+                )),
+        }
+    }
+
+    /// Unacknowledged input read while the ingestor is quiesced enters the quiesce control as one
+    /// payload, which buffers it, drops it, or admits it for dispatch.
+    async fn retain_unacknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+        let mut entries = Vec::with_capacity(messages.len());
+        for message in messages {
+            tokio::task::consume_budget().await;
+            let metadata = Self::retained_metadata(&message.metadata)?;
+            entries.push((message.payload.to_vec(), metadata));
+        }
+        let payload = BufferedIngestPayload::batch(entries, actual_utc_now());
+        if let IngestorQuiesceIntake::Dispatch(payload) =
+            self.quiesce.intake(self.instance_index, payload, false)
+        {
+            self.dispatch_buffered_payload(&payload).await?;
+        }
+        Ok(SourceIntakeOutcome {
+            acknowledgements: Vec::new(),
+        })
+    }
+
+    /// Acknowledged input read while the ingestor is quiesced.
+    ///
+    /// The quiesce control decides each message on its own. A message it admits is dispatched
+    /// with its acknowledgement root as it would be unquiesced; one it buffers or drops is
+    /// acknowledged at once, because the buffer or the drop policy has taken it over from the
+    /// source. The acknowledgements keep the batch's order.
+    async fn retain_acknowledged(
+        &mut self,
+        messages: Vec<SourceIntakeMessage<'_>>,
+    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+        let mut admitted = Vec::with_capacity(messages.len());
+        let mut decisions = Vec::with_capacity(messages.len());
+        for message in messages {
+            tokio::task::consume_budget().await;
+            let metadata = Self::retained_metadata(&message.metadata)?;
+            let retained = BufferedIngestPayload::new(message.payload, metadata, actual_utc_now());
+            match self.quiesce.intake(self.instance_index, retained, false) {
+                IngestorQuiesceIntake::Dispatch(_) => {
+                    admitted.push(message);
+                    decisions.push(QuiescedIntake::Admitted);
+                }
+                IngestorQuiesceIntake::Buffered
+                | IngestorQuiesceIntake::Dropped
+                | IngestorQuiesceIntake::Rejected { .. } => {
+                    decisions.push(QuiescedIntake::TakenOver);
+                }
+            }
+        }
+        let mut dispatched = Vec::new();
+        if !admitted.is_empty() {
+            let outcome = self
+                .dispatch_batch(SourceIntakeBatch {
+                    messages: admitted,
+                    mode: SourceIntakeMode::Acknowledged,
+                })
+                .await?;
+            dispatched = outcome.acknowledgements;
+        }
+        let mut dispatched = dispatched.into_iter();
+        let mut acknowledgements = Vec::with_capacity(decisions.len());
+        for decision in decisions {
+            tokio::task::consume_budget().await;
+            let acknowledgement = match decision {
+                QuiescedIntake::Admitted => dispatched.next().verified(
+                    "an acknowledged dispatch returns one acknowledgement per admitted message",
+                ),
+                QuiescedIntake::TakenOver => {
+                    SourceAcknowledgement::new(QuiescedSourceAcknowledgement)
+                }
+            };
+            acknowledgements.push(acknowledgement);
+        }
+        Ok(SourceIntakeOutcome { acknowledgements })
+    }
+
+    /// Decodes a batch into its ingest group and dispatches it, returning one acknowledgement per
+    /// message for an acknowledged batch.
+    async fn dispatch_batch(
         &mut self,
         batch: SourceIntakeBatch<'_>,
     ) -> SourceIntakeResult<SourceIntakeOutcome> {
         let acknowledged = batch.mode == SourceIntakeMode::Acknowledged;
-        if self.buffered_intake && self.quiesce.is_quiesced() {
-            if acknowledged {
-                return Err(Report::new(SourceIntakeError::Retain)
-                    .attach_printable("acknowledged source input cannot enter a quiesce buffer"));
-            }
-            let mut entries = Vec::with_capacity(batch.messages.len());
-            for message in batch.messages {
-                tokio::task::consume_budget().await;
-                let metadata = match message.metadata {
-                    IngestMetadataRow::Syslog { peer_addr } => {
-                        BufferedIngestMetadata::Syslog { peer_addr }
-                    }
-                    IngestMetadataRow::Headers { headers } => {
-                        BufferedIngestMetadata::Headers(RetainedIngestHeaders::capture(headers))
-                    }
-                    IngestMetadataRow::Kafka { .. } => {
-                        return Err(Report::new(SourceIntakeError::Retain).attach_printable(
-                            "Kafka source input supports suspension instead of quiesce buffering",
-                        ));
-                    }
-                };
-                entries.push((message.payload.to_vec(), metadata));
-            }
-            let payload = BufferedIngestPayload::batch(entries, actual_utc_now());
-            if let IngestorQuiesceIntake::Dispatch(payload) =
-                self.quiesce.intake(self.instance_index, payload, false)
-            {
-                self.dispatch_buffered_payload(&payload).await?;
-            }
-            return Ok(SourceIntakeOutcome {
-                acknowledgements: Vec::new(),
-            });
-        }
         let row_bound = if acknowledged {
             batch.messages.len().max(1)
         } else {
@@ -312,6 +736,24 @@ impl SourceHostServices for RuntimeSourceHost {
             })
             .collect();
         Ok(SourceIntakeOutcome { acknowledgements })
+    }
+}
+
+#[async_trait]
+impl SourceHostServices for RuntimeSourceHost {
+    async fn intake(
+        &mut self,
+        batch: SourceIntakeBatch<'_>,
+    ) -> SourceIntakeResult<SourceIntakeOutcome> {
+        if self.buffered_intake && self.quiesce.is_quiesced() {
+            return match batch.mode {
+                SourceIntakeMode::Unacknowledged => {
+                    self.retain_unacknowledged(batch.messages).await
+                }
+                SourceIntakeMode::Acknowledged => self.retain_acknowledged(batch.messages).await,
+            };
+        }
+        self.dispatch_batch(batch).await
     }
 
     async fn flush(&mut self) -> SourceIntakeResult<()> {
@@ -667,13 +1109,13 @@ pub(super) async fn run_source_instance_with_retry<C>(
         match host.replay_buffered().await {
             Ok(true) => continue,
             Ok(false) => {}
-            Err(error) => host.report_error(error.to_string()),
+            Err(error) => host.report_error(format!("{error:#}")),
         }
         if host.should_suspend_intake() {
             flush_for_lifecycle(&mut host).await;
             if ready {
                 if let Err(error) = source.suspend().await {
-                    host.report_error(error.to_string());
+                    host.report_error(format!("{error:#}"));
                 }
                 ready = false;
                 host.mark_unready();
@@ -697,6 +1139,10 @@ pub(super) async fn run_source_instance_with_retry<C>(
                     retry_delay = retry_policy.backoff;
                     host.mark_ready();
                     host.clear_transient_error();
+                    // A quiesce released while the source was resuming was not waited on by
+                    // anything, so the iteration starts over and replays what it buffered
+                    // before the loop blocks on the next batch.
+                    continue;
                 }
                 Ok(SourceResume::Waiting { retry_after }) => {
                     ready = false;
@@ -710,8 +1156,8 @@ pub(super) async fn run_source_instance_with_retry<C>(
                     ready = false;
                     host.mark_unready();
                     let delay = source_retry_delay(retry_delay);
-                    host.record_transient_error(error.to_string(), delay);
-                    host.report_error(error.to_string());
+                    host.record_transient_error(source_failure_reason(&error), delay);
+                    host.report_error(format!("{error:#}"));
                     if !wait_for_retry(&mut host, &mut shutdown, delay).await {
                         break;
                     }
@@ -749,8 +1195,8 @@ pub(super) async fn run_source_instance_with_retry<C>(
             }
             Ok(SourceBatch::Closed) => break,
             Err(error) => {
-                host.record_transient_error(error.to_string(), SOURCE_ERROR_RETRY);
-                host.report_error(error.to_string());
+                host.record_transient_error(source_failure_reason(&error), SOURCE_ERROR_RETRY);
+                host.report_error(format!("{error:#}"));
                 if !wait_for_retry(&mut host, &mut shutdown, SOURCE_ERROR_RETRY).await {
                     break;
                 }
@@ -780,7 +1226,7 @@ pub(super) async fn run_source_instance_with_retry<C>(
 
     flush_for_lifecycle(&mut host).await;
     if let Err(error) = source.close().await {
-        host.report_error(error.to_string());
+        host.report_error(format!("{error:#}"));
     }
     host.mark_unready();
 }
@@ -837,7 +1283,7 @@ where
     let outcome = match intake {
         Ok(outcome) => outcome,
         Err(error) => {
-            host.report_error(error.to_string());
+            host.report_error(format!("{error:#}"));
             if mode == SourceIntakeMode::Acknowledged {
                 reject_batch(source, host, &positions).await;
                 return BatchDisposition::Retry;
@@ -879,7 +1325,7 @@ where
     }
 
     if let Err(error) = source.acknowledge(&positions).await {
-        host.report_error(error.to_string());
+        host.report_error(format!("{error:#}"));
         reject_batch(source, host, &positions).await;
         return BatchDisposition::Retry;
     }
@@ -891,13 +1337,13 @@ where
     C: BrokerSourceConnector,
 {
     if let Err(error) = source.reject(positions).await {
-        host.report_error(error.to_string());
+        host.report_error(format!("{error:#}"));
     }
 }
 
 async fn flush_for_lifecycle(host: &mut SourceHost) {
     if let Err(error) = host.flush().await {
-        host.report_error(error.to_string());
+        host.report_error(format!("{error:#}"));
     }
 }
 
@@ -937,6 +1383,10 @@ mod tests {
 
     #[derive(Default)]
     struct SourceLoopObservations {
+        /// Every resume, replay and poll in the order the loop performed them.
+        sequence: Vec<&'static str>,
+        /// Replays the host still has to deliver, as a quiesce buffer would.
+        pending_replays: usize,
         requests: Vec<SourceBatchRequest>,
         intake: Vec<(SourceIntakeMode, usize)>,
         acknowledged: Vec<Vec<u64>>,
@@ -987,6 +1437,8 @@ mod tests {
         messages: VecDeque<FakeMessage>,
         resume_required: bool,
         resume_results: VecDeque<SourceResult<SourceResume>>,
+        /// Replays each resume leaves pending, as a quiesce released during it would.
+        replays_pending_after_resume: usize,
         observations: Arc<Mutex<SourceLoopObservations>>,
     }
 
@@ -999,7 +1451,14 @@ mod tests {
         }
 
         async fn resume(&mut self) -> SourceResult<SourceResume> {
-            self.observations.lock().resumes += 1;
+            let mut observations = self.observations.lock();
+            observations.resumes += 1;
+            observations.sequence.push("resume");
+            observations.pending_replays = observations
+                .pending_replays
+                .checked_add(self.replays_pending_after_resume)
+                .verified("the test leaves at most a few replays pending");
+            drop(observations);
             match self.resume_results.pop_front() {
                 Some(result) => result,
                 None => Ok(SourceResume::Ready),
@@ -1021,7 +1480,10 @@ mod tests {
             &mut self,
             request: SourceBatchRequest,
         ) -> SourceResult<SourceBatch<Self::Message>> {
-            self.observations.lock().requests.push(request);
+            let mut observations = self.observations.lock();
+            observations.requests.push(request);
+            observations.sequence.push("next_batch");
+            drop(observations);
             if self.resume_required {
                 self.resume_required = false;
                 return Ok(SourceBatch::ResumeRequired);
@@ -1114,7 +1576,13 @@ mod tests {
         }
 
         async fn replay_buffered(&mut self) -> SourceIntakeResult<bool> {
-            Ok(false)
+            let mut observations = self.observations.lock();
+            let Some(remaining) = observations.pending_replays.checked_sub(1) else {
+                return Ok(false);
+            };
+            observations.pending_replays = remaining;
+            observations.sequence.push("replay");
+            Ok(true)
         }
 
         fn next_flush(&self) -> Option<Instant> {
@@ -1172,22 +1640,27 @@ mod tests {
         }
     }
 
+    fn three_messages() -> VecDeque<FakeMessage> {
+        (0..3)
+            .map(|position| FakeMessage {
+                position,
+                payload: vec![
+                    u8::try_from(position).verified("the test positions are all below 256"),
+                ],
+            })
+            .collect()
+    }
+
     async fn run_policy_with_refresh(
         policy: SourceAckPolicy,
         resume_required: bool,
     ) -> Arc<Mutex<SourceLoopObservations>> {
         let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
         let source = FakeSource {
-            messages: (0..3)
-                .map(|position| FakeMessage {
-                    position,
-                    payload: vec![
-                        u8::try_from(position).verified("the test positions are all below 256"),
-                    ],
-                })
-                .collect(),
+            messages: three_messages(),
             resume_required,
             resume_results: VecDeque::new(),
+            replays_pending_after_resume: 0,
             observations: observations.clone(),
         };
         let host = SourceHost::new(FakeHost::running(observations.clone()));
@@ -1213,8 +1686,40 @@ mod tests {
             messages: VecDeque::new(),
             resume_required: false,
             resume_results: VecDeque::new(),
+            replays_pending_after_resume: 0,
             observations,
         }
+    }
+
+    #[tokio::test]
+    async fn source_loop_replays_a_buffer_released_during_resume_before_polling() {
+        let observations = Arc::new(Mutex::new(SourceLoopObservations::default()));
+        let source = FakeSource {
+            messages: three_messages(),
+            resume_required: false,
+            resume_results: VecDeque::new(),
+            replays_pending_after_resume: 2,
+            observations: observations.clone(),
+        };
+        let host = SourceHost::new(FakeHost::running(observations.clone()));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        run_source_instance(source, host, SourceAckPolicy::None, shutdown_rx).await;
+        drop(shutdown_tx);
+
+        let observations = observations.lock();
+        assert_eq!(
+            observations.sequence,
+            vec![
+                "resume",
+                "replay",
+                "replay",
+                "next_batch",
+                "next_batch",
+                "next_batch",
+                "next_batch",
+            ]
+        );
+        assert_eq!(observations.pending_replays, 0);
     }
 
     #[tokio::test]

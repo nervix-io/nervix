@@ -9,15 +9,40 @@ timer-driven work continue asynchronously under their own contracts.
 A command can therefore remain pending while Nervix validates configuration, replicates control
 state, distributes resources, prepares runtimes, starts sources, drains old ownership, releases
 entity gates, and makes the final outcome visible. Transport loss only detaches the waiter after
-admission. The cluster continues the work and retains its terminal result for at least 15 minutes.
+admission. The cluster continues the work and retains its terminal result for the command retry
+validity, 15 minutes by default.
 
 ## Lifecycle and ownership
 
-Every persistent ordinary command carries an execution reference. The reference is scoped to its
-authenticated owner and selected domain and is permanently bound to one semantic request while its
-record remains present. Reusing it with changed content, credentials, owner, or domain fails.
-Repeating the same request joins the applying execution or returns the retained terminal result.
-An expired reference remains a tombstone and cannot start a new effect.
+Every persistent ordinary command carries an execution reference. The reference is a UUIDv7, and
+its embedded creation time bounds how long the request may be retried. The reference is scoped to
+its authenticated owner and selected domain and is bound to one semantic request while its record
+remains present. Reusing it with changed content, credentials, owner, or domain fails. Repeating
+the same request joins the applying execution or returns the retained terminal result.
+
+A new reference is admitted only when its creation time lies after the cluster's retry fence and
+no more than five minutes ahead of the leader's clock. The fence trails the leader's clock by the
+retry validity. It is part of the replicated state and never moves back, so restart, leader change,
+and snapshot installation all preserve it. A reference without a UUIDv7 creation time, one created
+at or before the fence, and one created too far ahead are refused before any effect.
+
+An applying execution never expires. A terminal result is retained for the retry validity after the
+command finishes. The record then shrinks to a tombstone holding only the reference, and the
+tombstone is removed once the fence passes the reference's creation time. From then on the fence
+refuses the reference by itself, so a reclaimed reference reports that it has expired and never
+starts its effect again. Report retention is a separate contract: a transaction's report follows
+the transaction tombstone retention, so inspection can still read it after its command reference
+has expired, and a report that inspection no longer knows does not make its reference executable.
+
+The retained history is bounded. Once it holds as many applying, finished, and expired executions as
+its capacity allows, a new reference is refused with an explicit capacity error. Admitted work is
+never evicted to make room, and repeating an admitted request still joins it or returns its
+retained result.
+
+| Setting | Environment variable | Default |
+| --- | --- | --- |
+| `--command-retry-validity` | `NERVIX_COMMAND_RETRY_VALIDITY` | `15m` |
+| `--command-execution-capacity` | `NERVIX_COMMAND_EXECUTION_CAPACITY` | `65536` |
 
 An ordinary configuration command applies through a frozen internal transaction attempt. If its
 captured planning inputs change before the effect is recorded, the command retains that failed
@@ -37,9 +62,11 @@ stateDiagram-v2
     Applying --> Applying: durable effect progress / retryable attempt
     Applying --> Completed: all required application and visibility complete
     Applying --> Failed: definitive failure recorded
-    Completed --> Expired: retention period elapsed
-    Failed --> Expired: retention period elapsed
+    Completed --> Expired: retry validity elapsed
+    Failed --> Expired: retry validity elapsed
     Expired --> Expired: replay reports expired
+    Expired --> Reclaimed: retry fence passes the creation time
+    Reclaimed --> Reclaimed: retry fence refuses the replay
 ```
 
 The control plane owns command identity, durable effect progress, terminal outcomes, and recovery.

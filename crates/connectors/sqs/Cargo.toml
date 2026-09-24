@@ -1,5 +1,5 @@
 [package]
-description = "The SQS sink connector for Nervix"
+description = "The SQS source and sink connector for Nervix"
 edition.workspace = true
 license-file.workspace = true
 name = "nervix-connector-sqs"
