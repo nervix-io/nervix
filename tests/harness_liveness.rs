@@ -6,8 +6,8 @@
 //!   status-request, port-pool, cluster-teardown, scenario-phase and suite-watchdog regressions
 //!   with Rust's test runner, and the stand-in nodes those regressions talk to.
 //! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase and suite-watchdog harness modules, and the generated
-//!   session service they send status requests to.
+//!   cluster-teardown, scenario-phase and suite-watchdog harness modules, and the client wire
+//!   session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
@@ -43,16 +43,13 @@ mod tests {
     use clap::Parser as _;
     use error_stack::Report;
     use meticulous::{OptionExt as _, ResultExt as _};
-    use nervix_client_core::{
-        CommandOutcomeKind,
-        proto::{
-            CommandResult, CommandResultKind, Diagnostic, SessionRequest, SessionResponse,
-            UploadResourceRequest, UploadResourceResponse,
-            session_response::Event,
-            session_service_server::{SessionService, SessionServiceServer},
-        },
+    use nervix_client_wire::{
+        ClientFrame, ClientMessage, CommandDisposition, CommandOutcome, Diagnostic, EncodedFrame,
+        LeaderRedirect, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, ReplyDelivery, ServerFrame,
+        ServerNotice, SessionLimits, VerifiedFrame,
+        grpc::{EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec},
     };
-    use nervix_models::ClusterNodeName;
+    use nervix_models::{ClusterNodeName, CommandExecutionReference};
     use nervix_recovery::NoReceiver as _;
     use nervix_server::application::AppError;
     use parking_lot::Mutex;
@@ -66,7 +63,13 @@ mod tests {
     };
     use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tokio_util::sync::CancellationToken;
-    use tonic::{Request, Response, Status, Streaming, transport::Server};
+    use tonic::{
+        Request, Response, Status, Streaming,
+        body::Body,
+        codegen::{BoxFuture, Service, http},
+        server::{Grpc, NamedService, StreamingService},
+        transport::Server,
+    };
     use triomphe::Arc;
 
     use crate::{
@@ -74,6 +77,7 @@ mod tests {
         node_liveness::{
             LastReadinessOutcome, NodeStartupError, NodeStartupFailure, NodeTaskState,
             NodeTaskTerminalOutcome, NodeTaskWaitOutcome, OwnedNodeTask, ReadinessProbeOutcome,
+            ResponseKind,
         },
         node_startup::{
             ATTEMPT_READINESS_BUDGET, AttemptCleanup, AttemptFailure, FULL_LENGTH_ATTEMPTS,
@@ -154,11 +158,11 @@ mod tests {
     /// How a stand-in node answers the status sessions these regressions open against it.
     #[derive(Clone)]
     enum StandInBehavior {
-        /// Answers the session's command with this result.
-        Answer(CommandResult),
+        /// Answers the session's command with this outcome.
+        Answer(CommandOutcome),
         /// Answers the session's command once `gate` opens.
         AnswerAfter {
-            result: CommandResult,
+            result: CommandOutcome,
             gate: Arc<Notify>,
         },
         /// Never returns from session establishment.
@@ -175,20 +179,25 @@ mod tests {
         EndSession,
     }
 
+    type StandInResponses = mpsc::Sender<Result<EncodedFrame<ServerFrame>, Status>>;
+
     impl StandInBehavior {
         async fn answer(
             self,
-            mut commands: Streaming<SessionRequest>,
-            responses: mpsc::Sender<Result<SessionResponse, Status>>,
+            mut commands: Streaming<VerifiedFrame<ClientFrame>>,
+            responses: StandInResponses,
         ) {
-            let Ok(Some(_command)) = commands.message().await else {
+            let Ok(Some(command)) = commands.message().await else {
                 return;
             };
+            let request_id = ClientMessage::decode(&command)
+                .assured("the status request under test sends a valid request")
+                .request_id;
             match self {
-                Self::Answer(result) => Self::send_result(&responses, result).await,
+                Self::Answer(result) => Self::send_result(&responses, request_id, result).await,
                 Self::AnswerAfter { result, gate } => {
                     gate.notified().await;
-                    Self::send_result(&responses, result).await;
+                    Self::send_result(&responses, request_id, result).await;
                 }
                 Self::WithholdResponse { received } => {
                     received.notify_one();
@@ -196,8 +205,13 @@ mod tests {
                 }
                 Self::FloodResponses => loop {
                     tokio::task::consume_budget().await;
-                    let response = SessionResponse { event: None };
-                    if responses.send(Ok(response)).await.is_err() {
+                    let notice = ServerNotice {
+                        level: NoticeLevel::Info,
+                        message: "an event unrelated to the status request".to_string(),
+                    }
+                    .encode(&SessionLimits::DEFAULT)
+                    .assured("a short notice fits a frame");
+                    if responses.send(Ok(notice)).await.is_err() {
                         return;
                     }
                 },
@@ -210,60 +224,96 @@ mod tests {
         }
 
         async fn send_result(
-            responses: &mpsc::Sender<Result<SessionResponse, Status>>,
-            result: CommandResult,
+            responses: &StandInResponses,
+            request_id: nervix_client_wire::RequestId,
+            result: CommandOutcome,
         ) {
-            let response = SessionResponse {
-                event: Some(Event::Result(Box::new(result))),
+            let reply = Reply {
+                request_id,
+                body: ReplyBody::Command(Box::new(result)),
+            };
+            let ReplyDelivery::Frame(frame) = reply
+                .encode(&SessionLimits::DEFAULT)
+                .assured("a stand-in reply fits the session limits")
+            else {
+                panic!("a stand-in reply fits one frame");
             };
             responses
-                .send(Ok(response))
+                .send(Ok(frame))
                 .await
                 .means_peer_left("the status request under test");
         }
     }
 
+    /// A session service that serves the exchange method the way the stand-in behaves.
     #[derive(Clone)]
     struct StandInService {
         behavior: StandInBehavior,
     }
 
-    #[tonic::async_trait]
-    impl SessionService for StandInService {
-        type SessionStream = ReceiverStream<Result<SessionResponse, Status>>;
+    impl NamedService for StandInService {
+        const NAME: &'static str = SERVICE_NAME;
+    }
 
-        async fn session(
-            &self,
-            request: Request<Streaming<SessionRequest>>,
-        ) -> Result<Response<Self::SessionStream>, Status> {
-            match &self.behavior {
-                StandInBehavior::WithholdSession => future::pending::<()>().await,
-                StandInBehavior::RejectSession => {
-                    return Err(Status::unauthenticated(
-                        "the stand-in refuses every session",
-                    ));
-                }
-                StandInBehavior::Answer(_)
-                | StandInBehavior::AnswerAfter { .. }
-                | StandInBehavior::WithholdResponse { .. }
-                | StandInBehavior::FloodResponses
-                | StandInBehavior::FailResponse
-                | StandInBehavior::EndSession => {}
-            }
-            let (response_tx, response_rx) = mpsc::channel(4);
-            tokio::spawn(
-                self.behavior
-                    .clone()
-                    .answer(request.into_inner(), response_tx),
-            );
-            Ok(Response::new(ReceiverStream::new(response_rx)))
+    impl Service<http::Request<Body>> for StandInService {
+        type Response = http::Response<Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
         }
 
-        async fn upload_resource(
-            &self,
-            _request: Request<Streaming<UploadResourceRequest>>,
-        ) -> Result<Response<UploadResourceResponse>, Status> {
-            Err(Status::unimplemented("stand-in nodes accept no uploads"))
+        fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+            let behavior = self.behavior.clone();
+            if request.uri().path() != EXCHANGE_PATH {
+                return Box::pin(async move {
+                    Ok(Status::unimplemented("stand-in nodes serve only the exchange").into_http())
+                });
+            }
+            Box::pin(async move {
+                let mut grpc = Grpc::new(ServerExchangeCodec::new(SessionLimits::DEFAULT));
+                Ok(grpc.streaming(StandInExchange { behavior }, request).await)
+            })
+        }
+    }
+
+    struct StandInExchange {
+        behavior: StandInBehavior,
+    }
+
+    impl StreamingService<VerifiedFrame<ClientFrame>> for StandInExchange {
+        type Response = EncodedFrame<ServerFrame>;
+        type ResponseStream = ReceiverStream<Result<EncodedFrame<ServerFrame>, Status>>;
+        type Future = BoxFuture<Response<Self::ResponseStream>, Status>;
+
+        fn call(
+            &mut self,
+            request: Request<Streaming<VerifiedFrame<ClientFrame>>>,
+        ) -> Self::Future {
+            let behavior = self.behavior.clone();
+            Box::pin(async move {
+                match &behavior {
+                    StandInBehavior::WithholdSession => future::pending::<()>().await,
+                    StandInBehavior::RejectSession => {
+                        return Err(Status::unauthenticated(
+                            "the stand-in refuses every session",
+                        ));
+                    }
+                    StandInBehavior::Answer(_)
+                    | StandInBehavior::AnswerAfter { .. }
+                    | StandInBehavior::WithholdResponse { .. }
+                    | StandInBehavior::FloodResponses
+                    | StandInBehavior::FailResponse
+                    | StandInBehavior::EndSession => {}
+                }
+                let (response_tx, response_rx) = mpsc::channel(4);
+                tokio::spawn(behavior.answer(request.into_inner(), response_tx));
+                Ok(Response::new(ReceiverStream::new(response_rx)))
+            })
         }
     }
 
@@ -281,7 +331,7 @@ mod tests {
             let address = listener
                 .local_addr()
                 .assured("a bound listener has an address");
-            let service = SessionServiceServer::new(StandInService { behavior });
+            let service = StandInService { behavior };
             let server = tokio::spawn(async move {
                 Server::builder()
                     .add_service(service)
@@ -412,7 +462,7 @@ mod tests {
                     move |_| {
                         future::ready(if answers {
                             ReadinessProbeOutcome::Ready {
-                                response_kind: CommandOutcomeKind::Ok,
+                                response_kind: ResponseKind::Completed,
                             }
                         } else {
                             ReadinessProbeOutcome::RequestFailed(Report::new(
@@ -446,13 +496,30 @@ mod tests {
         )
     }
 
-    fn command_result(kind: CommandResultKind, message: &str) -> CommandResult {
-        CommandResult {
-            success: kind == CommandResultKind::Ok,
-            kind: i32::from(kind),
+    /// A status command outcome with `disposition` and `message`.
+    fn command_result(disposition: CommandDisposition, message: &str) -> CommandOutcome {
+        CommandOutcome {
+            execution_reference: CommandExecutionReference::parse("stand-in-status")
+                .assured("a literal execution reference"),
+            origin: OutcomeOrigin::Executed,
+            disposition,
             message: message.to_string(),
-            ..CommandResult::default()
+            diagnostics: Vec::new(),
+            statements: Vec::new(),
+            transaction: None,
+            transaction_admission: None,
+            inspection: None,
         }
+    }
+
+    fn completed() -> CommandDisposition {
+        CommandDisposition::Completed {
+            already_existed: false,
+        }
+    }
+
+    fn not_leader() -> CommandDisposition {
+        CommandDisposition::NotLeader(LeaderRedirect { leader: None })
     }
 
     /// A loopback address nothing listens on, so connecting to it is refused.
@@ -480,7 +547,7 @@ mod tests {
 
     fn non_ready_response(message: &str) -> ReadinessProbeOutcome {
         ReadinessProbeOutcome::UnsuccessfulResponse {
-            response_kind: CommandOutcomeKind::Error,
+            response_kind: ResponseKind::Failed,
             message: message.to_string(),
             diagnostics: Vec::new(),
         }
@@ -693,21 +760,20 @@ mod tests {
     #[tokio::test]
     async fn readiness_and_status_outcomes_retain_their_typed_cause() {
         let ready = StandInNode::serve(StandInBehavior::Answer(command_result(
-            CommandResultKind::Ok,
+            completed(),
             HEALTHY_STATUS,
         )))
         .await;
         let not_leader = StandInNode::serve(StandInBehavior::Answer(command_result(
-            CommandResultKind::NotLeader,
+            not_leader(),
             "not the leader",
         )))
         .await;
         let mut unavailable_result =
-            command_result(CommandResultKind::Error, "cluster status unavailable");
+            command_result(CommandDisposition::Failed, "cluster status unavailable");
         unavailable_result.diagnostics = vec![Diagnostic {
             message: "consensus is starting".to_string(),
-            span_start: 0,
-            span_end: 0,
+            span: None,
         }];
         let unavailable = StandInNode::serve(StandInBehavior::Answer(unavailable_result)).await;
         let rejecting = StandInNode::serve(StandInBehavior::RejectSession).await;
@@ -719,20 +785,20 @@ mod tests {
         assert!(matches!(
             ReadinessProbeOutcome::probe(&ready.endpoint(), phase).await,
             ReadinessProbeOutcome::Ready {
-                response_kind: CommandOutcomeKind::Ok
+                response_kind: ResponseKind::Completed
             }
         ));
         assert!(matches!(
             ReadinessProbeOutcome::probe(&not_leader.endpoint(), phase).await,
             ReadinessProbeOutcome::Ready {
-                response_kind: CommandOutcomeKind::NotLeader
+                response_kind: ResponseKind::NotLeader
             }
         ));
         let unsuccessful = ReadinessProbeOutcome::probe(&unavailable.endpoint(), phase).await;
         assert!(matches!(
             unsuccessful,
             ReadinessProbeOutcome::UnsuccessfulResponse {
-                response_kind: CommandOutcomeKind::Error,
+                response_kind: ResponseKind::Failed,
                 ref message,
                 ref diagnostics,
             } if message == "cluster status unavailable"
@@ -788,7 +854,7 @@ mod tests {
         assert!(matches!(
             status_error.current_context(),
             StatusRequestError::Unsuccessful {
-                kind: CommandOutcomeKind::Error,
+                disposition: CommandDisposition::Failed,
                 message,
                 diagnostics,
             } if message == "cluster status unavailable" && diagnostics.len() == 1
@@ -1000,7 +1066,7 @@ mod tests {
         })
         .await;
         let healthy = StandInNode::serve(StandInBehavior::AnswerAfter {
-            result: command_result(CommandResultKind::Ok, HEALTHY_STATUS),
+            result: command_result(completed(), HEALTHY_STATUS),
             gate: stalled_received,
         })
         .await;
@@ -1036,7 +1102,7 @@ mod tests {
     async fn failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts() {
         let stalled = StandInNode::serve(StandInBehavior::WithholdSession).await;
         let healthy = StandInNode::serve(StandInBehavior::Answer(command_result(
-            CommandResultKind::Ok,
+            completed(),
             HEALTHY_STATUS,
         )))
         .await;
@@ -1493,7 +1559,7 @@ mod tests {
     async fn a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three() {
         let stalled = StandInNode::serve(StandInBehavior::WithholdSession).await;
         let healthy = StandInNode::serve(StandInBehavior::Answer(command_result(
-            CommandResultKind::Ok,
+            completed(),
             HEALTHY_STATUS,
         )))
         .await;

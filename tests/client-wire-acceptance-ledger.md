@@ -26,11 +26,11 @@ not make that claim.
 | CW-F03 | Retrying `BEGIN` after its response is lost creates a second transaction instead of recovering the original outcome. | [03](https://app.clickup.com/t/86bc1ahmh) | `Replaying a BEGIN whose response was lost returns the original transaction` (`@client_wire_lost_begin`, one and three nodes) |
 | CW-F04 | The global transaction reconciler awaits one applying commit inline, preventing an unrelated orphan from reaching expiry and blocking cleanup/recovery behind it. | [06](https://app.clickup.com/t/86bc1ahnh) | `A stalled commit cannot block expiry, another domain, or tombstone cleanup` (`@client_wire_stalled_commit`) |
 | CW-F05 | `RELOCATE` plans from schedule S1, rereads S2 as its expected compare-and-swap value, and can publish the candidate derived from S1 over S2. | [05](https://app.clickup.com/t/86bc1ahn6) | `A relocation planned before a schedule revision cannot overwrite that revision` (`@client_wire_stale_relocation`) |
-| CW-F06 | Native client replies consume a FIFO waiter. Concurrent registration and send order can differ, so one response can complete another request. | [11](https://app.clickup.com/t/86bc1ahw3) | `nervix_client_core::tests::response_reordering_cannot_take_another_requests_waiter` |
+| CW-F06 | Native client replies consume a FIFO waiter. Concurrent registration and send order can differ, so one response can complete another request. | [11](https://app.clickup.com/t/86bc1ahw3); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `nervix_client_core::tests::response_reordering_cannot_take_another_requests_waiter` |
 | CW-F07 | The native session response reader awaits bounded event queues inline. An unread subscription/server event can prevent an unrelated command reply from being routed. | [11](https://app.clickup.com/t/86bc1ahw3), with server lifecycle separation in [10](https://app.clickup.com/t/86bapbpt3) | `nervix_client_core::tests::saturated_event_consumer_cannot_block_a_command_reply` |
 | CW-F08 | Every same-relay subscription increments interest, but deletion unregisters only when the final local subscription disappears, leaving the count positive. | [10](https://app.clickup.com/t/86bapbpt3) | `application::subscription::tests::deleting_two_same_relay_subscriptions_clears_interest` |
 | CW-F09 | The native client does not own acknowledged desired subscriptions as generation-fenced state, so reconnect/leader movement loses the subscription. | [12](https://app.clickup.com/t/86bc1ahwj) | `A reconnected native client restores acknowledged subscriptions` (`@client_wire_subscription_restore`, three nodes and concrete `acme`/`beta` branches) |
-| CW-F10 | The console dispatcher lets an unsolicited domain-list response take the first pending user request. | [13](https://app.clickup.com/t/86bc1ahym) | `tests::untracked_domain_push_cannot_discard_a_pending_websocket_request` in the `nervix-web-console` binary |
+| CW-F10 | The console dispatcher lets an unsolicited domain-list response take the first pending user request. | [13](https://app.clickup.com/t/86bc1ahym); resolved by request-identity correlation in [09](https://app.clickup.com/t/86bc1ahv3) | `tests::untracked_domain_push_cannot_discard_a_pending_websocket_request` in the `nervix-web-console` binary |
 
 The schema and verified codec belong to [02](https://app.clickup.com/t/86bc1ahm4); persisted domain
 mutation ownership to [04](https://app.clickup.com/t/86bc1ahmy); retained request-history bounds to
@@ -67,7 +67,7 @@ Scenario teardown releases every armed command pause. Fault controls are compile
 | Transaction identity and false success | Native gRPC, one and three nodes; fixed execution references; separate owner/finisher sessions where relevant |
 | Relocation publication | Native gRPC, three nodes; two replicas; a Kafka domain-owned partition schedule changes from `0` to `0,1` between plan and publication |
 | Subscription restoration | Native Rust client over gRPC, three nodes; leader transfer; interleaved `acme` and `beta` concrete branch records |
-| Console dispatch | Console WebSocket protobuf dispatcher, direct desired-behavior probe |
+| Console dispatch | Console WebSocket dispatcher, direct desired-behavior probe |
 | Crash/restart | One real `nervix-server` process; `SIGKILL`; same durable store and listening addresses |
 | Baseline | One release `nervix-server` process; native gRPC command/subscription/upload traffic, HTTP record admission, and console WebSocket graph snapshots |
 
@@ -87,13 +87,15 @@ just test-scenarios --input tests/features/runtime/client_wire_failures.feature 
 The ignored dispatch/accounting probes run independently:
 
 ```console
-cargo test -p nervix-client-core --lib tests::response_reordering_cannot_take_another_requests_waiter -- --ignored --exact
 cargo test -p nervix-client-core --lib tests::saturated_event_consumer_cannot_block_a_command_reply -- --ignored --exact
-cargo test -p nervix-web-console --bin nervix-web-console tests::untracked_domain_push_cannot_discard_a_pending_websocket_request -- --ignored --exact
 cargo test --features testing --lib application::subscription::tests::deleting_two_same_relay_subscriptions_clears_interest -- --ignored --exact
 ```
 
-## Protobuf performance baseline
+The session transport cutover in [09](https://app.clickup.com/t/86bc1ahv3) correlates every reply
+with the request identity it names, on both transports, so the CW-F06 and CW-F10 probes pass and
+run with the ordinary suite.
+
+## Performance baseline
 
 `just client-wire-baseline` builds the web console and a normal release server binary, launches
 that binary from the debug-only scenario harness, configures a fixed two-branch graph, warms the
@@ -112,22 +114,24 @@ payload above 16 MiB.
 The fixed workload contains:
 
 * `DESCRIBE DOMAIN` over one native gRPC bidirectional session;
-* strict typed JSON HTTP input and native gRPC subscription delivery, alternating concrete branch
-  keys `acme` and `beta` and validating the current `key=<json> payload=<json>` construction;
-* `SetActiveDomain` graph snapshots over an authenticated console WebSocket;
+* strict typed JSON HTTP input and native gRPC Row subscription delivery, alternating concrete
+  branch keys `acme` and `beta` and validating each row's `key=<json> payload=<json>` display text;
+* domain-selection graph snapshots over an authenticated console WebSocket;
 * deterministic one-file resource archives over the native gRPC client-streaming upload;
 * one MiB ingestor quiesce capacity and the current client/server/WebSocket queue capacities.
 
-`client-wire-protobuf-baseline.json` records every raw observation plus p50/p90/p99/min/max/total
-latency, exact protobuf or public request and response bytes, client and server user/system CPU
+`client-wire-baseline.json` records every raw observation plus p50/p90/p99/min/max/total
+latency, the exact frame or public request and response bytes, client and server user/system CPU
 ticks, per-workload process counter snapshots, client jemalloc and server-exported jemalloc phase
 snapshots, `/proc` resident and peak resident bytes, per-workload relay queue occupancy series,
 workload parameters, queue limits, git revision and worktree state, release/debug profile, complete
 `rustc -Vv`, kernel, architecture, CPU model/count, physical memory, and clock-tick rate. The raw
-final Prometheus scrape is retained as `metrics.prom` beside it. Raw protobuf encoding and
-WebSocket access exist only in this benchmark harness.
+final Prometheus scrape is retained as `metrics.prom` beside it. Raw frame and WebSocket access
+exist only in this benchmark harness.
 
-Task 16 must compare identical semantic work and bounds with this artifact. A debug smoke run is a
+Since the transport cutover in [09](https://app.clickup.com/t/86bc1ahv3) the recipe measures the
+FlatBuffers session protocol with the same workload. The recorded protobuf run below is the fixed
+reference: task 16 must compare identical semantic work and bounds with it. A debug smoke run is a
 harness check, not a performance result.
 
 ### Recorded protobuf run

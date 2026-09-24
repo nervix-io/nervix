@@ -78,19 +78,6 @@ impl BranchKey {
         self.0.json.as_str()
     }
 
-    pub(crate) fn to_json_string_masking(&self, sensitivity: &VmSchemaSensitivity) -> String {
-        let mut object = serde_json::Map::new();
-        for (field, value) in &self.0.fields {
-            let value = if sensitivity.is_sensitive(field.as_str()) {
-                serde_json::Value::String("<masked>".to_string())
-            } else {
-                value.to_json_value()
-            };
-            object.insert(field.as_str().to_string(), value);
-        }
-        serde_json::Value::Object(object).to_string()
-    }
-
     /// The non-sensitive identity the control plane names this concrete branch by.
     pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
         Self::fingerprint_of_canonical_text(self.as_str())

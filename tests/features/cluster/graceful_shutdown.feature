@@ -775,10 +775,11 @@ Feature: Graceful shutdown
     And node "node-1" is started
     Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
 
-  Scenario: A command held inside its session does not keep a stopping node past its shutdown deadline
+  Scenario: A command still waiting for admission is cancelled without an effect when its node stops
     Given graceful shutdown drain is enabled
     And shutdown timeout is configured as "5s"
     And a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -790,9 +791,17 @@ Feature: Graceful shutdown
       """
     Then the command admission pause on node "node-1" is reached
     When node "node-1" is stopped while timing shutdown
-    Then the last cluster operation takes at least "5s"
-    And the last cluster operation completes within "60s"
-    And node "node-1" reports that its last shutdown passed its deadline
+    Then the last cluster operation completes within "60s"
+    And node "node-1" reports that its last shutdown finished before its deadline
+    And the background command request ends without an answer
     When the command admission pause on node "node-1" is released
     And node "node-1" is started
     Then node "node-1" eventually observes a stable leader
+    When this NSPL command request is executed on the leader node
+      """
+      SHOW CREATE SCHEMA held_admission_event;
+      """
+    Then the last command error contains
+      """
+      schema 'held_admission_event' does not exist in domain '{{domain}}'
+      """

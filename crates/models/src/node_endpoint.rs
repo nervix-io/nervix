@@ -9,6 +9,7 @@
 use std::{fmt, net::SocketAddr, str::FromStr};
 
 use error_stack::Report;
+use meticulous::ResultExt as _;
 use thiserror::Error;
 use url::Url;
 
@@ -128,6 +129,12 @@ impl NodeServiceUrl {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The advertisement as a parsed URL.
+    pub fn to_url(&self) -> Url {
+        Url::parse(&self.0)
+            .assured("every node service URL is parsed as a URL when it is constructed")
     }
 }
 

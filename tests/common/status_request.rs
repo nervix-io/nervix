@@ -5,8 +5,7 @@
 //! - **Owns.** The status-specific raw session command path, the four operations of one status
 //!   request and the deadline that bounds each of them, their typed failures, requesting several
 //!   nodes at once, and the harness status timing policy.
-//! - **Depends on.** The generated session gRPC client, the command outcome vocabulary of the
-//!   session client, and the phase deadline.
+//! - **Depends on.** The client wire contract and its gRPC codec, and the phase deadline.
 //! - **Must not know.** Ordinary scenario commands, scenario state, or the production session
 //!   client's request, redirect and reconnect policy.
 
@@ -14,18 +13,18 @@ use std::{collections::BTreeMap, future::Future, io, net::SocketAddr, path::Path
 
 use error_stack::Report;
 use futures_util::future::join_all;
-use nervix_client_core::{
-    CommandOutcome, CommandOutcomeKind, Diagnostic,
-    proto::{
-        CommandRequest, SessionRequest, session_request, session_response::Event,
-        session_service_client::SessionServiceClient,
-    },
+use nervix_client_wire::{
+    ClientFrame, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome, CommandRequest,
+    Diagnostic, EncodedFrame, ReplyBody, RequestId, ServerMessage, SessionLimits,
+    grpc::{ClientExchangeCodec, EXCHANGE_PATH},
 };
+use nervix_models::CommandExecutionReference;
 use thiserror::Error;
 use tokio::{sync::mpsc, time::Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
     Request,
+    codegen::http,
     metadata::{AsciiMetadataValue, errors::InvalidMetadataValue},
     transport::{Certificate, ClientTlsConfig, Endpoint},
 };
@@ -137,12 +136,18 @@ pub(crate) enum StatusRequestError {
     ReceiveResponse(#[source] tonic::Status),
     #[error("the status session ended before the command result arrived")]
     SessionEnded,
+    #[error("the status session sent a frame that does not decode")]
+    UndecodableFrame,
+    #[error("the status request could not be encoded")]
+    EncodeRequest,
+    #[error("the status command was answered with {body:?}")]
+    UnexpectedReply { body: Box<ReplyBody> },
     #[error(
-        "the status command returned an unsuccessful {kind:?} result: {message}; diagnostics: \
-         {diagnostics:?}"
+        "the status command returned an unsuccessful {disposition:?} result: {message}; \
+         diagnostics: {diagnostics:?}"
     )]
     Unsuccessful {
-        kind: CommandOutcomeKind,
+        disposition: CommandDisposition,
         message: String,
         diagnostics: Vec<Diagnostic>,
     },
@@ -225,21 +230,36 @@ impl StatusEndpoint {
 
         // Holding the command sender keeps the session's request stream open until the result
         // arrives, so the node never sees the session end while it answers.
+        let limits = SessionLimits::DEFAULT;
         let (command_tx, command_rx) = mpsc::channel(1);
         let mut session = Request::new(ReceiverStream::new(command_rx));
         session
             .metadata_mut()
             .insert("authorization", authorization);
-        let mut client = SessionServiceClient::new(channel);
+        let mut client = tonic::client::Grpc::new(channel)
+            .max_decoding_message_size(limits.frame_bytes())
+            .max_encoding_message_size(limits.frame_bytes());
         let opened = StatusOperation::OpenSession
-            .within(deadline, client.session(session))
+            .within(deadline, async {
+                client.ready().await.map_err(|error| {
+                    tonic::Status::unavailable(format!("the channel is not ready: {error}"))
+                })?;
+                client
+                    .streaming(
+                        session,
+                        http::uri::PathAndQuery::from_static(EXCHANGE_PATH),
+                        ClientExchangeCodec::new(limits),
+                    )
+                    .await
+            })
             .await?;
         let mut responses = opened
             .map_err(|status| Report::new(StatusRequestError::OpenSession(status)))?
             .into_inner();
 
+        let (request_id, command) = Self::status_command(&limits)?;
         let sent = StatusOperation::SendCommand
-            .within(deadline, command_tx.send(Self::status_command()))
+            .within(deadline, command_tx.send(command))
             .await?;
         sent.map_err(|_| Report::new(StatusRequestError::SendCommand))?;
 
@@ -248,24 +268,26 @@ impl StatusEndpoint {
             let received = StatusOperation::ReceiveResponse
                 .within(deadline, responses.message())
                 .await?;
-            let response = received
+            let frame = received
                 .map_err(|status| Report::new(StatusRequestError::ReceiveResponse(status)))?;
-            let Some(response) = response else {
+            let Some(frame) = frame else {
                 return Err(Report::new(StatusRequestError::SessionEnded));
             };
-            match response.event {
-                Some(Event::Result(result)) => return Ok(CommandOutcome::from(*result)),
-                // Server, subscription and session-state events may precede the result.
-                Some(
-                    Event::Subscription(_)
-                    | Event::Server(_)
-                    | Event::Suggest(_)
-                    | Event::Snapshot(_)
-                    | Event::Domains(_)
-                    | Event::Cluster(_),
-                )
-                | None => {}
+            let message = ServerMessage::decode(&frame)
+                .map_err(|error| error.change_context(StatusRequestError::UndecodableFrame))?;
+            // Leadership, domain and notice events may precede the reply.
+            let ServerMessage::Reply(reply) = message else {
+                continue;
+            };
+            if reply.request_id != request_id {
+                continue;
             }
+            return match reply.body {
+                ReplyBody::Command(outcome) => Ok(*outcome),
+                body => Err(Report::new(StatusRequestError::UnexpectedReply {
+                    body: Box::new(body),
+                })),
+            };
         }
     }
 
@@ -275,15 +297,14 @@ impl StatusEndpoint {
         phase: PhaseDeadline,
     ) -> Result<String, Report<StatusRequestError>> {
         let outcome = self.request(phase).await?;
-        if outcome.success {
-            Ok(outcome.message)
-        } else {
-            Err(Report::new(StatusRequestError::Unsuccessful {
-                kind: outcome.kind,
-                message: outcome.message,
-                diagnostics: outcome.diagnostics,
-            }))
+        if let CommandDisposition::Completed { .. } = outcome.disposition {
+            return Ok(outcome.message);
         }
+        Err(Report::new(StatusRequestError::Unsuccessful {
+            disposition: outcome.disposition,
+            message: outcome.message,
+            diagnostics: outcome.diagnostics,
+        }))
     }
 
     /// Requests every node's status text at once, so a node that never replies cannot delay
@@ -303,16 +324,28 @@ impl StatusEndpoint {
         endpoints.keys().cloned().zip(statuses).collect()
     }
 
-    fn status_command() -> SessionRequest {
-        SessionRequest {
-            request: Some(session_request::Request::Command(CommandRequest {
+    /// The status command frame, and the request identity its reply names.
+    fn status_command(
+        limits: &SessionLimits,
+    ) -> Result<(RequestId, EncodedFrame<ClientFrame>), Report<StatusRequestError>> {
+        let request_id = RequestId::new(std::num::NonZeroU64::MIN);
+        let execution_reference =
+            CommandExecutionReference::parse(uuid::Uuid::now_v7().to_string())
+                .expect("a UUIDv7 in its hyphenated form is a valid execution reference");
+        let message = ClientMessage {
+            request_id,
+            request: ClientRequest::Command(CommandRequest {
                 query: Self::STATUS_QUERY.to_string(),
                 // Cluster status belongs to no domain, so the request names none.
-                domain: String::new(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: None,
+                execution_reference,
                 expected_transaction_position: None,
                 expected_preview: None,
-            })),
-        }
+            }),
+        };
+        let frame = message
+            .encode(limits)
+            .map_err(|error| error.change_context(StatusRequestError::EncodeRequest))?;
+        Ok((request_id, frame))
     }
 }

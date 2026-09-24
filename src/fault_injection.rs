@@ -17,11 +17,11 @@ use std::{
 
 use ahash::RandomState;
 use error_stack::Report;
-use meticulous::ResultExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, Executor, MemoryClass, sync::DashMap};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CommandExecutionReference,
-    DomainName, EmitterName, IngestorName, ModelName, RemoteRuntimeField,
+    DomainName, DomainNodeRef, EmitterName, IngestorName, ModelKind, ModelName, RemoteRuntimeField,
 };
 use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
@@ -96,6 +96,8 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     remote_relay_admission_pauses:
         DashMap<RemoteRelayAdmissionPauseKey, Arc<TestPause>, RandomState>,
+    /// A source pauses once inside dispatch so a test can engage quiesce while its loop awaits.
+    ingestor_dispatch_pauses: DashMap<DomainNodeRef, Arc<TestPause>, RandomState>,
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     ownership_handoff_preparation_pauses: DashMap<String, Arc<TestPause>, RandomState>,
     /// A destination pauses after making a handoff preparation durable but before returning its
@@ -264,6 +266,7 @@ impl Default for FaultInjection {
                 entity_gate_pauses: DashMap::default(),
                 entity_gate_response_pauses: DashMap::default(),
                 remote_relay_admission_pauses: DashMap::default(),
+                ingestor_dispatch_pauses: DashMap::default(),
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
@@ -959,6 +962,34 @@ impl FaultInjection {
         pause.release();
     }
 
+    pub fn pause_ingestor_dispatch(&self, ingestor: DomainNodeRef) {
+        self.inner
+            .ingestor_dispatch_pauses
+            .insert(ingestor, Arc::new(TestPause::default()));
+    }
+
+    pub async fn wait_for_ingestor_dispatch_pause(&self, ingestor: &DomainNodeRef) {
+        let pause = self
+            .inner
+            .ingestor_dispatch_pauses
+            .get(ingestor)
+            .assured("the scenario arms this ingestor's dispatch pause before waiting")
+            .value()
+            .clone();
+        pause.wait_until_reached().await;
+    }
+
+    pub fn release_ingestor_dispatch_pause(&self, ingestor: &DomainNodeRef) {
+        let pause = self
+            .inner
+            .ingestor_dispatch_pauses
+            .get(ingestor)
+            .assured("the scenario arms this ingestor's dispatch pause before releasing it")
+            .value()
+            .clone();
+        pause.release();
+    }
+
     pub fn pause_ownership_handoff_after_preparation(&self, domain: impl Into<String>) {
         self.inner.ownership_handoff_preparation_pauses.insert(
             domain.into().to_ascii_lowercase(),
@@ -1369,6 +1400,28 @@ impl FaultInjection {
         pause.reach();
         pause.wait_until_released().await;
         self.inner.entity_gate_pauses.remove(&key);
+    }
+
+    pub(crate) async fn pause_ingestor_dispatch_if_armed(
+        &self,
+        domain: &DomainName,
+        ingestor: &IngestorName,
+    ) {
+        let key = DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.clone());
+        let Some(pause) = self
+            .inner
+            .ingestor_dispatch_pauses
+            .get(&key)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        if pause.claimed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        pause.reach();
+        pause.wait_until_released().await;
+        self.inner.ingestor_dispatch_pauses.remove(&key);
     }
 
     pub(crate) async fn pause_entity_gate_response_if_armed(

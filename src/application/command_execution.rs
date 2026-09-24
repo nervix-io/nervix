@@ -16,33 +16,32 @@ use blake3::Hasher;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{
-    CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionChildResult,
-    CommandExecutionDiagnostic, CommandExecutionEffect, CommandExecutionPreviewStale,
-    CommandExecutionResult, CommandExecutionResultKind, CommandExecutionState,
+    CommandExecution, CommandExecutionAdmissionPolicy, CommandExecutionDiagnostic,
+    CommandExecutionDisposition, CommandExecutionEffect, CommandExecutionPreviewStale,
+    CommandExecutionRequestConflict, CommandExecutionResult, CommandExecutionState,
+    CommandExecutionStatementDisposition, CommandExecutionStatementResult,
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
-    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget,
+    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget, ConsensusError,
 };
 use nervix_execution::sync::DashMap;
 use nervix_models::{
-    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus,
-    ImpactPlanningBasis, Statement, Timestamp, TransactionOperationAdmission,
-    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, UserName,
+    CommandExecutionReference, DomainName, DomainStartPoint, DomainState, DomainStatus, Statement,
+    Timestamp, TransactionPosition, TransactionStatus, UserName,
 };
 use nervix_nspl::client_statement::ClientStatement;
 use thiserror::Error;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
-use tonic::Status;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tracing::warn;
 
 use super::{
     authentication::{user_credentials, verify_password_hash},
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult, OutcomeUnknownCause},
     domain_clock::current_timestamp,
-    model_mutation::{command_error, is_persistent_statement, parse_request_domain},
-    session_service::SessionServiceImpl,
+    model_mutation::{command_error, is_persistent_statement},
+    session_service::{SessionServiceImpl, conflicting_reference},
     subscription::{PendingSessionCommand, SessionCommandOperation, SessionSubscriptions},
-    transaction::{api_transaction_preview_identity, is_queueable_transaction_statement},
+    transaction::is_queueable_transaction_statement,
 };
-use crate::proto::{CommandResult, CommandResultKind, SessionResponse};
 
 const DEFAULT_COMMAND_RETRY_VALIDITY: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_COMMAND_EXECUTION_CAPACITY: usize = 65_536;
@@ -218,7 +217,7 @@ pub(in crate::application) enum PersistentCommandRequestError {
 impl PersistentCommandRequest {
     pub(in crate::application) fn from_operations(
         operations: &[SessionCommandOperation],
-        request_domain: &str,
+        request_domain: Option<&DomainName>,
     ) -> Result<Option<Self>, Report<PersistentCommandRequestError>> {
         let mut persistent_command = None;
         for operation in operations {
@@ -243,7 +242,7 @@ impl PersistentCommandRequest {
             return Ok(None);
         };
 
-        let domain = parse_request_domain(request_domain).ok();
+        let domain = request_domain.cloned();
         let mut hasher = Hasher::new();
         match &domain {
             Some(domain) => hasher.update(domain.as_str().as_bytes()),
@@ -418,13 +417,11 @@ impl SessionServiceImpl {
             let service = self.clone();
             self.inner.service_tasks.spawn(async move {
                 let _execution_guard = execution_guard;
-                let (response_tx, response_rx) = mpsc::channel(1);
                 let mut subscriptions = SessionSubscriptions::for_user(owner.clone());
                 let result = service
-                    .execute_persistent_command(&execution, &response_tx, &mut subscriptions)
+                    .execute_persistent_command(&execution, &mut subscriptions)
                     .await;
-                drop(response_rx);
-                if result.kind == i32::from(CommandResultKind::NotLeader) {
+                if result.is_not_leader() {
                     return;
                 }
                 if let Err(error) = service
@@ -459,7 +456,7 @@ impl SessionServiceImpl {
         reference: CommandExecutionReference,
         owner: UserName,
         request: &PersistentCommandRequest,
-    ) -> Result<CommandExecution, Box<CommandResult>> {
+    ) -> Result<CommandAdmission, Box<CommandResult>> {
         if let Some(existing) = self
             .inner
             .consensus
@@ -467,9 +464,11 @@ impl SessionServiceImpl {
             .await
         {
             if existing.is_expired() {
-                return Err(Box::new(command_error(format!(
-                    "command execution reference '{reference}' has expired"
-                ))));
+                let message = format!("command execution reference '{reference}' has expired");
+                return Err(Box::new(CommandResult {
+                    diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+                    ..CommandResult::new(CommandDisposition::ExecutionReferenceExpired, message)
+                }));
             }
             if let Some(conflict) = existing.request_conflict(
                 &owner,
@@ -477,14 +476,13 @@ impl SessionServiceImpl {
                 request.expected_transaction_position,
                 request.digest,
             ) {
-                return Err(Box::new(command_error(format!(
-                    "command execution reference '{reference}' conflicts by {conflict}"
-                ))));
+                return Err(Box::new(conflicting_reference(&reference, conflict)));
             }
             if !transaction_targets_match(&existing, request) {
-                return Err(Box::new(command_error(format!(
-                    "command execution reference '{reference}' conflicts by position"
-                ))));
+                return Err(Box::new(conflicting_reference(
+                    &reference,
+                    CommandExecutionRequestConflict::Position,
+                )));
             }
             if let (
                 Some(password_hash),
@@ -496,12 +494,14 @@ impl SessionServiceImpl {
                 && !verify_password_hash(password_hash.to_string(), create.body.password.clone())
                     .await
             {
-                return Err(Box::new(command_error(format!(
-                    "command execution reference '{reference}' is bound to different user \
-                     credentials"
-                ))));
+                // The password is left out of the request digest, so a retry that changed it is
+                // a different command under the same reference.
+                return Err(Box::new(conflicting_reference(
+                    &reference,
+                    CommandExecutionRequestConflict::Content,
+                )));
             }
-            return Ok(existing);
+            return Ok(CommandAdmission::Existing(existing));
         }
 
         let effect = match &request.body {
@@ -587,7 +587,7 @@ impl SessionServiceImpl {
             .command_execution_policy
             .admission_at(admitted_at);
         let execution = CommandExecution::applying_at_position(
-            reference,
+            reference.clone(),
             owner,
             request.domain.clone(),
             request.expected_transaction_position,
@@ -601,8 +601,19 @@ impl SessionServiceImpl {
             .admit_command_execution(execution, request.mutation_domains(), policy)
             .await
         {
-            Ok(execution) => Ok(execution),
+            Ok(execution) => Ok(CommandAdmission::Admitted(execution)),
             Err(error) => {
+                if let ConsensusError::LeadershipLost { .. } = error.current_context() {
+                    // The admission proposal may have reached the log before leadership moved,
+                    // so whether the command was admitted is not known here.
+                    return Err(Box::new(outcome_unknown(
+                        OutcomeUnknownCause::LeadershipLost,
+                        format!(
+                            "leadership moved while command execution reference '{reference}' was \
+                             being admitted; retry it with the same reference to learn its outcome"
+                        ),
+                    )));
+                }
                 let message = error.to_string();
                 let result = self
                     .consensus_error_response(error.current_context(), message)
@@ -615,7 +626,6 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn execute_persistent_command(
         &self,
         execution: &CommandExecution,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
         // Keep the independently owned command paths out of this dispatcher's poll frame. In a
@@ -706,20 +716,15 @@ impl SessionServiceImpl {
                     return Box::pin(self.drain_node(drain.node_id, Some(execution))).await;
                 }
                 statement => {
-                    let domain = match execution.domain() {
-                        Some(domain) => domain.to_string(),
-                        None => String::new(),
-                    };
                     let command = PendingSessionCommand {
                         request_reference: execution.reference.clone(),
                         expected_transaction_position: None,
                         source,
                         statement: ClientStatement::Server(statement),
-                        domain,
+                        domain: execution.domain().cloned(),
                     };
                     return Box::pin(self.process_session_command_operations(
                         vec![SessionCommandOperation::Execute(command)],
-                        tx,
                         subscriptions,
                     ))
                     .await;
@@ -768,6 +773,18 @@ impl SessionServiceImpl {
         {
             Ok(execution) => execution,
             Err(error) => {
+                if let ConsensusError::LeadershipLost { .. } = error.current_context() {
+                    // The effects applied, but recording their outcome may not have reached the
+                    // log before leadership moved. The next leader finishes the command.
+                    return Err(Box::new(outcome_unknown(
+                        OutcomeUnknownCause::LeadershipLost,
+                        format!(
+                            "leadership moved while command execution reference '{reference}' was \
+                             being finalized; retry it with the same reference to learn its \
+                             outcome"
+                        ),
+                    )));
+                }
                 let message = error.to_string();
                 let result = self
                     .consensus_error_response(error.current_context(), message)
@@ -785,25 +802,31 @@ impl SessionServiceImpl {
         execution: CommandExecution,
     ) -> Result<CommandResult, Box<CommandResult>> {
         match execution.state {
-            CommandExecutionState::Applying { .. } => Err(Box::new(command_error(format!(
-                "command execution reference '{reference}' is still applying"
-            )))),
-            CommandExecutionState::Expired => Err(Box::new(command_error(format!(
-                "command execution reference '{reference}' has expired"
-            )))),
+            CommandExecutionState::Applying { .. } => Err(Box::new(outcome_unknown(
+                OutcomeUnknownCause::StillApplying,
+                format!("command execution reference '{reference}' is still applying"),
+            ))),
+            CommandExecutionState::Expired => {
+                let message = format!("command execution reference '{reference}' has expired");
+                Err(Box::new(CommandResult {
+                    diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+                    ..CommandResult::new(CommandDisposition::ExecutionReferenceExpired, message)
+                }))
+            }
             CommandExecutionState::Finished {
                 outcome_revision,
                 result,
                 ..
             } => {
-                self.wait_for_authoritative_revision(outcome_revision)
-                    .await
-                    .map_err(|error| {
-                        Box::new(command_error(format!(
+                if let Err(error) = self.wait_for_authoritative_revision(outcome_revision).await {
+                    return Err(Box::new(outcome_unknown(
+                        OutcomeUnknownCause::NotYetAuthoritative,
+                        format!(
                             "command execution reference '{reference}' is durable but its result \
                              is not yet authoritative on every live node: {error}"
-                        )))
-                    })?;
+                        ),
+                    )));
+                }
                 Ok(command_result(*result))
             }
         }
@@ -812,18 +835,30 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn complete_persistent_command_request(
         &self,
         execution: CommandExecution,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
         let mut result = match &execution.state {
             CommandExecutionState::Applying { .. } => {
                 let result =
-                    Box::pin(self.execute_persistent_command(&execution, tx, subscriptions)).await;
+                    Box::pin(self.execute_persistent_command(&execution, subscriptions)).await;
                 let result = self
                     .command_with_transaction_status(result, subscriptions)
                     .await;
-                if result.kind == i32::from(CommandResultKind::NotLeader) {
-                    result
+                if result.is_not_leader() {
+                    // The command was admitted before leadership moved, so it is not refused: the
+                    // next leader resumes it, and its outcome is not known yet.
+                    CommandResult {
+                        diagnostics: result.diagnostics,
+                        transaction: result.transaction,
+                        ..CommandResult::new(
+                            CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::LeadershipLost),
+                            format!(
+                                "leadership moved while command execution reference '{}' was \
+                                 applying; retry it with the same reference to learn its outcome",
+                                execution.reference
+                            ),
+                        )
+                    }
                 } else {
                     match self
                         .finish_persistent_command(
@@ -871,21 +906,17 @@ impl SessionServiceImpl {
             return;
         };
         let target = target.id();
-        if transaction.id != target {
-            result.success = false;
-            result.kind = i32::from(CommandResultKind::Error);
-            result.message = format!(
+        if transaction.transaction_id() != target {
+            let message = format!(
                 "command execution reference '{}' recovered transaction '{}' instead of its \
                  durable target '{target}'",
-                execution.reference, transaction.id
+                execution.reference,
+                transaction.transaction_id()
             );
+            result.fail(message);
             return;
         }
-        let state = crate::proto::TransactionState::try_from(transaction.state);
-        if matches!(
-            state,
-            Ok(crate::proto::TransactionState::Open | crate::proto::TransactionState::Committing)
-        ) {
+        if transaction.lifecycle().is_active() {
             self.release_session_transaction_binding(subscriptions);
             self.inner
                 .transaction_bindings
@@ -897,224 +928,179 @@ impl SessionServiceImpl {
     }
 }
 
+/// How admitting a persistent command's execution reference turned out.
+pub(in crate::application) enum CommandAdmission {
+    /// This request admitted the reference, and its effects are this request's to run.
+    Admitted(CommandExecution),
+    /// An earlier request with the same identity admitted it; this one recovers its outcome.
+    Existing(CommandExecution),
+}
+
+/// An admitted command whose outcome is not known yet, for `cause`.
+fn outcome_unknown(cause: OutcomeUnknownCause, message: String) -> CommandResult {
+    CommandResult {
+        diagnostics: vec![CommandDiagnostic::unlocated(message.clone())],
+        ..CommandResult::new(CommandDisposition::OutcomeUnknown(cause), message)
+    }
+}
+
+/// The record the execution ledger keeps of a finished command.
+///
+/// Only a completion, a failure and a refused commit are ever recorded: a command that was
+/// redirected or whose outcome is unknown is not finished. Such a disposition reaching this point
+/// is kept as a failure.
 fn durable_command_result(result: &CommandResult) -> CommandExecutionResult {
-    let kind = if result.success && result.kind == i32::from(CommandResultKind::Ok) {
-        CommandExecutionResultKind::Ok
-    } else {
-        CommandExecutionResultKind::Error
+    let disposition = match &result.disposition {
+        CommandDisposition::Completed { already_existed } => {
+            CommandExecutionDisposition::Completed {
+                already_existed: *already_existed,
+            }
+        }
+        CommandDisposition::PreviewStale { expected, current } => {
+            CommandExecutionDisposition::PreviewStale(CommandExecutionPreviewStale {
+                expected: expected.clone(),
+                current: current.clone(),
+            })
+        }
+        CommandDisposition::Failed
+        | CommandDisposition::NotLeader(_)
+        | CommandDisposition::TransactionDetached { .. }
+        | CommandDisposition::TransactionTakenOver { .. }
+        | CommandDisposition::OutcomeUnknown(_)
+        | CommandDisposition::ExecutionReferenceConflict(_)
+        | CommandDisposition::ExecutionReferenceExpired => CommandExecutionDisposition::Failed,
     };
     CommandExecutionResult {
-        success: result.success,
-        kind,
+        disposition,
         message: result.message.clone(),
         diagnostics: result
             .diagnostics
             .iter()
-            .map(|diagnostic| CommandExecutionDiagnostic {
-                message: diagnostic.message.clone(),
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
+            .map(CommandExecutionDiagnostic::from)
             .collect(),
-        already_existed: result.already_existed,
-        results: result.results.iter().map(durable_child_result).collect(),
-        transaction: result.transaction.as_ref().map(|transaction| {
-            CommandExecutionTransactionStatus {
-                id: transaction.id.clone(),
-                domain: transaction.domain.clone(),
-                state: transaction.state,
-                pending_count: transaction.pending_count,
-                completed_count: transaction.completed_count,
-                total_count: transaction.total_count,
-                error: transaction.error.clone(),
-                failing_step: transaction.failing_step,
-            }
-        }),
-        transaction_admission: result
-            .transaction_admission
-            .as_ref()
-            .map(durable_transaction_admission),
-        preview_stale: result.preview_stale.as_ref().map(durable_preview_stale),
+        statements: result
+            .statements
+            .iter()
+            .map(durable_statement_result)
+            .collect(),
+        transaction: result.transaction.as_ref().map(durable_transaction_status),
+        transaction_admission: result.transaction_admission.clone(),
     }
 }
 
-/// The two previews a refused commit reported, as the execution ledger retains them.
-fn durable_preview_stale(
-    stale: &crate::proto::TransactionPreviewStale,
-) -> CommandExecutionPreviewStale {
-    CommandExecutionPreviewStale {
-        expected: durable_preview_identity(stale.expected.as_ref()),
-        current: durable_preview_identity(stale.current.as_ref()),
-    }
-}
-
-fn durable_preview_identity(
-    preview: Option<&crate::proto::TransactionPreviewIdentity>,
-) -> TransactionPreviewIdentity {
-    let preview = preview.assured("server-produced stale commits always carry both previews");
-    let position = usize::try_from(preview.position)
-        .assured("server-produced transaction positions fit the target pointer width");
-    let planning_basis = <[u8; 32]>::try_from(preview.planning_basis.as_ref())
-        .assured("server-produced transaction planning bases contain 32 bytes");
-    TransactionPreviewIdentity {
-        transaction_id: preview.transaction_id.clone(),
-        position: TransactionPosition::new(position),
-        planning_basis: ImpactPlanningBasis::new(planning_basis),
-    }
-}
-
-fn api_preview_stale(stale: CommandExecutionPreviewStale) -> crate::proto::TransactionPreviewStale {
-    crate::proto::TransactionPreviewStale {
-        expected: Some(api_transaction_preview_identity(&stale.expected)),
-        current: Some(api_transaction_preview_identity(&stale.current)),
+fn durable_transaction_status(status: &TransactionStatus) -> CommandExecutionTransactionStatus {
+    CommandExecutionTransactionStatus {
+        transaction_id: status.transaction_id().to_string(),
+        domain: status.domain().clone(),
+        lifecycle: status.lifecycle().clone(),
+        accepted_operations: status.accepted_operations(),
+        applied_operations: status.applied_operations(),
     }
 }
 
 fn command_result(result: CommandExecutionResult) -> CommandResult {
+    let disposition = match result.disposition {
+        CommandExecutionDisposition::Completed { already_existed } => {
+            CommandDisposition::Completed { already_existed }
+        }
+        CommandExecutionDisposition::Failed => CommandDisposition::Failed,
+        // A refused commit is recorded with both previews. Restoring the typed disposition is what
+        // lets a recovered outcome tell a client to read the transaction again rather than only
+        // that its commit failed.
+        CommandExecutionDisposition::PreviewStale(stale) => CommandDisposition::PreviewStale {
+            expected: stale.expected,
+            current: stale.current,
+        },
+    };
+    let transaction = match result.transaction {
+        Some(status) => Some(
+            TransactionStatus::new(
+                status.transaction_id,
+                status.domain,
+                status.lifecycle,
+                status.accepted_operations,
+                status.applied_operations,
+            )
+            .assured(
+                "a recorded status was written from a status that held its applied operations to \
+                 its accepted ones",
+            ),
+        ),
+        None => None,
+    };
     CommandResult {
-        success: result.success,
-        message: result.message,
         diagnostics: result
             .diagnostics
-            .into_iter()
-            .map(|diagnostic| crate::proto::Diagnostic {
-                message: diagnostic.message,
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
+            .iter()
+            .map(CommandDiagnostic::from)
             .collect(),
-        // A refused commit is recorded as an error carrying both previews. Restoring the typed
-        // disposition is what lets a recovered outcome tell a client to read the transaction
-        // again rather than only that its commit failed.
-        kind: match (&result.kind, &result.preview_stale) {
-            (_, Some(_)) => i32::from(CommandResultKind::PreviewStale),
-            (CommandExecutionResultKind::Ok, None) => i32::from(CommandResultKind::Ok),
-            (CommandExecutionResultKind::Error, None) => i32::from(CommandResultKind::Error),
-        },
-        already_existed: result.already_existed,
-        results: result.results.into_iter().map(child_result).collect(),
-        transaction: result
-            .transaction
-            .map(|transaction| crate::proto::TransactionStatus {
-                id: transaction.id,
-                domain: transaction.domain,
-                state: transaction.state,
-                pending_count: transaction.pending_count,
-                completed_count: transaction.completed_count,
-                total_count: transaction.total_count,
-                error: transaction.error,
-                failing_step: transaction.failing_step,
-            }),
-        transaction_admission: result.transaction_admission.map(api_transaction_admission),
-        preview_stale: result.preview_stale.map(api_preview_stale),
-        ..Default::default()
+        statements: result
+            .statements
+            .into_iter()
+            .map(statement_result)
+            .collect(),
+        transaction,
+        transaction_admission: result.transaction_admission,
+        ..CommandResult::new(disposition, result.message)
     }
 }
 
-fn durable_child_result(result: &CommandResult) -> CommandExecutionChildResult {
-    let kind = if result.success && result.kind == i32::from(CommandResultKind::Ok) {
-        CommandExecutionResultKind::Ok
-    } else {
-        CommandExecutionResultKind::Error
+fn durable_statement_result(result: &CommandResult) -> CommandExecutionStatementResult {
+    let disposition = match result.disposition {
+        CommandDisposition::Completed { already_existed } => {
+            CommandExecutionStatementDisposition::Completed { already_existed }
+        }
+        _ => CommandExecutionStatementDisposition::Failed,
     };
-    CommandExecutionChildResult {
-        success: result.success,
-        kind,
+    CommandExecutionStatementResult {
+        disposition,
         message: result.message.clone(),
         diagnostics: result
             .diagnostics
             .iter()
-            .map(|diagnostic| CommandExecutionDiagnostic {
-                message: diagnostic.message.clone(),
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
+            .map(CommandExecutionDiagnostic::from)
             .collect(),
-        already_existed: result.already_existed,
-        transaction_admission: result
-            .transaction_admission
-            .as_ref()
-            .map(durable_transaction_admission),
     }
 }
 
-fn child_result(result: CommandExecutionChildResult) -> CommandResult {
+fn statement_result(result: CommandExecutionStatementResult) -> CommandResult {
+    let disposition = match result.disposition {
+        CommandExecutionStatementDisposition::Completed { already_existed } => {
+            CommandDisposition::Completed { already_existed }
+        }
+        CommandExecutionStatementDisposition::Failed => CommandDisposition::Failed,
+    };
     CommandResult {
-        success: result.success,
-        message: result.message,
         diagnostics: result
             .diagnostics
-            .into_iter()
-            .map(|diagnostic| crate::proto::Diagnostic {
-                message: diagnostic.message,
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
+            .iter()
+            .map(CommandDiagnostic::from)
             .collect(),
-        kind: match result.kind {
-            CommandExecutionResultKind::Ok => i32::from(CommandResultKind::Ok),
-            CommandExecutionResultKind::Error => i32::from(CommandResultKind::Error),
-        },
-        already_existed: result.already_existed,
-        transaction_admission: result.transaction_admission.map(api_transaction_admission),
-        ..Default::default()
-    }
-}
-
-fn durable_transaction_admission(
-    admission: &crate::proto::TransactionOperationAdmission,
-) -> TransactionOperationAdmission {
-    let operation = usize::try_from(admission.operation)
-        .assured("server-produced transaction operation numbers fit the target pointer width");
-    let operation_index = operation
-        .checked_sub(1)
-        .assured("server-produced transaction operation numbers are one-based");
-    let operation = TransactionOperationNumber::from_index(operation_index)
-        .assured("server-produced transaction operation numbers are addressable");
-    let preview = admission
-        .preview
-        .as_ref()
-        .assured("server-produced transaction admissions always carry a preview");
-    let position = usize::try_from(preview.position)
-        .assured("server-produced transaction positions fit the target pointer width");
-    let planning_basis = <[u8; 32]>::try_from(preview.planning_basis.as_ref())
-        .assured("server-produced transaction planning bases contain 32 bytes");
-    TransactionOperationAdmission {
-        operation,
-        preview: TransactionPreviewIdentity {
-            transaction_id: preview.transaction_id.clone(),
-            position: TransactionPosition::new(position),
-            planning_basis: ImpactPlanningBasis::new(planning_basis),
-        },
-    }
-}
-
-fn api_transaction_admission(
-    admission: TransactionOperationAdmission,
-) -> crate::proto::TransactionOperationAdmission {
-    crate::proto::TransactionOperationAdmission {
-        operation: u64::try_from(admission.operation.get())
-            .assured("supported targets have a pointer width no larger than u64"),
-        preview: Some(crate::proto::TransactionPreviewIdentity {
-            transaction_id: admission.preview.transaction_id,
-            position: u64::try_from(admission.preview.position.accepted_operations())
-                .assured("supported targets have a pointer width no larger than u64"),
-            planning_basis: admission
-                .preview
-                .planning_basis
-                .fingerprint()
-                .to_vec()
-                .into(),
-        }),
+        ..CommandResult::new(disposition, result.message)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateStatement, CreateUser};
+    use nervix_models::{
+        CreateStatement, CreateUser, ImpactPlanningBasis, TransactionLifecycle,
+        TransactionOperationAdmission, TransactionOperationNumber, TransactionPosition,
+        TransactionPreviewIdentity,
+    };
 
     use super::*;
-    use crate::proto::{Diagnostic, TransactionState, TransactionStatus};
+
+    fn domain() -> DomainName {
+        DomainName::parse("default").assured("the test domain is an identifier-shaped literal")
+    }
+
+    fn preview(position: usize, basis: u8) -> TransactionPreviewIdentity {
+        TransactionPreviewIdentity {
+            transaction_id: "transaction-1".to_string(),
+            position: TransactionPosition::new(position),
+            planning_basis: ImpactPlanningBasis::new([basis; 32]),
+        }
+    }
 
     fn persistent_user_operation(password: &str) -> SessionCommandOperation {
         let statement = Statement::CreateUser(CreateStatement::new(
@@ -1131,7 +1117,7 @@ mod tests {
             expected_transaction_position: None,
             source: "CREATE USER operator WITH PASSWORD 'secret'".to_string(),
             statement: ClientStatement::Server(statement),
-            domain: String::new(),
+            domain: None,
         })
     }
 
@@ -1167,13 +1153,13 @@ mod tests {
     fn persistent_request_digest_omits_user_password_and_rejects_multiple_effects() {
         let first = PersistentCommandRequest::from_operations(
             &[persistent_user_operation("first-secret")],
-            "default",
+            Some(&domain()),
         )
         .assured("the test statement has serializable semantics")
         .assured("the test includes one persistent statement");
         let retried = PersistentCommandRequest::from_operations(
             &[persistent_user_operation("changed-secret")],
-            "default",
+            Some(&domain()),
         )
         .assured("the test statement has serializable semantics")
         .assured("the test includes one persistent statement");
@@ -1185,7 +1171,7 @@ mod tests {
                 persistent_user_operation("first-secret"),
                 persistent_user_operation("first-secret"),
             ],
-            "default",
+            Some(&domain()),
         );
         let error = match duplicate {
             Ok(_) => panic!("two persistent effects must be rejected"),
@@ -1198,67 +1184,54 @@ mod tests {
     }
 
     #[test]
-    fn durable_command_results_preserve_nested_diagnostics_and_transaction_status() {
-        let successful_child = CommandResult {
-            success: true,
-            message: "created schema".to_string(),
-            diagnostics: vec![Diagnostic {
+    fn durable_command_results_preserve_statements_diagnostics_and_transaction_status() {
+        let admission = TransactionOperationAdmission {
+            operation: TransactionOperationNumber::from_index(1)
+                .assured("the second operation is addressable"),
+            preview: preview(2, 7),
+        };
+        let successful_statement = CommandResult {
+            diagnostics: vec![CommandDiagnostic {
                 message: "success detail".to_string(),
-                span_start: 2,
-                span_end: 7,
+                span: Some(2..7),
             }],
-            kind: i32::from(CommandResultKind::Ok),
-            already_existed: true,
-            transaction_admission: Some(crate::proto::TransactionOperationAdmission {
-                operation: 1,
-                preview: Some(crate::proto::TransactionPreviewIdentity {
-                    transaction_id: "transaction-1".to_string(),
-                    position: 1,
-                    planning_basis: vec![3; 32].into(),
-                }),
-            }),
-            ..Default::default()
+            ..CommandResult::new(
+                CommandDisposition::Completed {
+                    already_existed: true,
+                },
+                "created schema".to_string(),
+            )
         };
-        let failed_child = CommandResult {
-            success: false,
-            message: "invalid relay".to_string(),
-            diagnostics: vec![Diagnostic {
-                message: "failure detail".to_string(),
-                span_start: 11,
-                span_end: 19,
-            }],
-            kind: i32::from(CommandResultKind::Error),
-            ..Default::default()
+        let failed_statement = CommandResult {
+            diagnostics: vec![CommandDiagnostic::unlocated("failure detail".to_string())],
+            ..CommandResult::new(CommandDisposition::Failed, "invalid relay".to_string())
         };
-        let result = CommandResult {
-            success: true,
-            message: "committed".to_string(),
-            diagnostics: vec![Diagnostic {
-                message: "commit detail".to_string(),
-                span_start: 0,
-                span_end: 9,
-            }],
-            kind: i32::from(CommandResultKind::Ok),
-            results: vec![successful_child, failed_child],
-            transaction: Some(TransactionStatus {
-                id: "command.request".to_string(),
-                domain: "default".to_string(),
-                state: i32::from(TransactionState::Committed),
-                pending_count: 1,
-                completed_count: 2,
-                total_count: 3,
+        let transaction = TransactionStatus::new(
+            "command.request".to_string(),
+            domain(),
+            TransactionLifecycle::Failed {
+                failing_operation: TransactionOperationNumber::from_index(0)
+                    .assured("the first operation is addressable"),
                 error: "retained detail".to_string(),
-                failing_step: Some(1),
-            }),
-            transaction_admission: Some(crate::proto::TransactionOperationAdmission {
-                operation: 2,
-                preview: Some(crate::proto::TransactionPreviewIdentity {
-                    transaction_id: "transaction-1".to_string(),
-                    position: 2,
-                    planning_basis: vec![7; 32].into(),
-                }),
-            }),
-            ..Default::default()
+            },
+            TransactionPosition::new(3),
+            2,
+        )
+        .assured("two applied operations fit three accepted ones");
+        let result = CommandResult {
+            diagnostics: vec![CommandDiagnostic {
+                message: "commit detail".to_string(),
+                span: Some(0..9),
+            }],
+            statements: vec![successful_statement, failed_statement],
+            transaction: Some(transaction),
+            transaction_admission: Some(admission),
+            ..CommandResult::new(
+                CommandDisposition::Completed {
+                    already_existed: false,
+                },
+                "committed".to_string(),
+            )
         };
 
         let restored = command_result(durable_command_result(&result));
@@ -1267,43 +1240,34 @@ mod tests {
     }
 
     #[test]
-    fn durable_command_results_normalize_non_success_kinds_to_error() {
-        let result = CommandResult {
-            success: false,
-            message: "redirect".to_string(),
-            kind: i32::from(CommandResultKind::NotLeader),
-            ..Default::default()
-        };
-
-        let durable = durable_command_result(&result);
-        assert_eq!(durable.kind, CommandExecutionResultKind::Error);
-        let restored = command_result(durable);
-        assert_eq!(restored.kind, i32::from(CommandResultKind::Error));
+    fn durable_command_results_keep_only_finished_dispositions() {
+        for disposition in [
+            CommandDisposition::NotLeader(crate::application::command_result::LeaderRedirect {
+                leader: None,
+            }),
+            CommandDisposition::OutcomeUnknown(OutcomeUnknownCause::LeadershipLost),
+            CommandDisposition::ExecutionReferenceExpired,
+        ] {
+            let result = CommandResult::new(disposition, "not finished".to_string());
+            let durable = durable_command_result(&result);
+            assert_eq!(durable.disposition, CommandExecutionDisposition::Failed);
+            let restored = command_result(durable);
+            assert_eq!(restored.disposition, CommandDisposition::Failed);
+        }
     }
 
     #[test]
     fn a_recovered_stale_commit_still_reports_both_previews() {
-        let preview = |position: u64, basis: u8| crate::proto::TransactionPreviewIdentity {
-            transaction_id: "transaction-1".to_string(),
-            position,
-            planning_basis: vec![basis; 32].into(),
-        };
-        let result = CommandResult {
-            success: false,
-            message: "transaction 'transaction-1' was planned from different inputs".to_string(),
-            kind: i32::from(CommandResultKind::PreviewStale),
-            preview_stale: Some(crate::proto::TransactionPreviewStale {
-                expected: Some(preview(1, 3)),
-                current: Some(preview(1, 9)),
-            }),
-            ..Default::default()
-        };
+        let result = CommandResult::new(
+            CommandDisposition::PreviewStale {
+                expected: preview(1, 3),
+                current: preview(1, 9),
+            },
+            "transaction 'transaction-1' was planned from different inputs".to_string(),
+        );
 
-        let durable = durable_command_result(&result);
-        assert_eq!(durable.kind, CommandExecutionResultKind::Error);
-        let restored = command_result(durable);
+        let restored = command_result(durable_command_result(&result));
 
         assert_eq!(restored, result);
-        assert_eq!(restored.kind, i32::from(CommandResultKind::PreviewStale));
     }
 }

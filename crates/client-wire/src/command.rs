@@ -3,16 +3,17 @@
 use error_stack::Report;
 use flatbuffers::WIPOffset;
 use nervix_models::{
-    CommandExecutionReference, TransactionOperationAdmission, TransactionPreviewIdentity,
-    TransactionStatus,
+    CommandExecutionReference, TransactionInspection, TransactionOperationAdmission,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, OutcomeOrigin},
     transaction::{
-        decode_operation_number, decode_preview_identity, decode_transaction_status,
-        encode_operation_number, encode_preview_identity, encode_transaction_status,
+        decode_inspection, decode_operation_number, decode_preview_identity,
+        decode_transaction_status, encode_inspection, encode_operation_number,
+        encode_preview_identity, encode_transaction_status,
     },
     wire,
 };
@@ -326,6 +327,10 @@ pub struct CommandOutcome {
     pub transaction: Option<TransactionStatus>,
     /// Stable operation metadata when the command accepted one transaction append.
     pub transaction_admission: Option<TransactionOperationAdmission>,
+    /// The read of a command that inspected a transaction, whatever format rendered its message.
+    /// It may name a transaction other than `transaction`, which keeps describing this session's
+    /// own binding.
+    pub inspection: Option<Box<TransactionInspection>>,
 }
 
 impl CommandOutcome {
@@ -363,6 +368,10 @@ impl CommandOutcome {
             }
             None => None,
         };
+        let inspection = match &self.inspection {
+            Some(inspection) => Some(encode_inspection(encoder, inspection)?),
+            None => None,
+        };
         let outcome = wire::CommandOutcome::create(
             encoder.fbb(),
             &wire::CommandOutcomeArgs {
@@ -375,6 +384,7 @@ impl CommandOutcome {
                 statements: Some(statements),
                 transaction,
                 transaction_admission,
+                inspection,
             },
         );
         Ok(EncodedUnion::new(wire::ReplyBody::CommandOutcome, outcome))
@@ -422,6 +432,10 @@ impl CommandOutcome {
             }),
             None => None,
         };
+        let inspection = match outcome.inspection() {
+            Some(inspected) => Some(Box::new(decode_inspection(decoder, inspected)?)),
+            None => None,
+        };
         Ok(Self {
             execution_reference,
             origin,
@@ -431,6 +445,7 @@ impl CommandOutcome {
             statements,
             transaction,
             transaction_admission,
+            inspection,
         })
     }
 }

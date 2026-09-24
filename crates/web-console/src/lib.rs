@@ -5,8 +5,8 @@
 //!
 //! - **Owns.** What the console draws and how it is placed: a graph snapshot becomes items, edges
 //!   and branch groups, and geometry is computed here as a pure function of topology.
-//! - **Depends on.** The proto wire types, the dataflow-graph description, the language layer for
-//!   editor completion, and the vocabulary.
+//! - **Depends on.** The client wire session types, the dataflow-graph description, the language
+//!   layer for editor completion, and the vocabulary.
 //! - **Must not know.** The server's internals. Every value it shows arrived over the session API.
 
 pub mod graph;

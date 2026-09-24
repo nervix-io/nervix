@@ -168,16 +168,20 @@ nothing was cordoned and nothing is cleared.
 Stop admission closes the node's public surface. It stops accepting on the session gRPC, connector,
 observability, and console listeners and closes the client connections those listeners had accepted.
 
-Closing a connection cancels the requests it carries. A session stream or a resource upload waiting
-on its client ends at once, so no client can hold the drain or the process open. An authenticated
-upload held open at any point of its progress — before its first message, between chunks, or
-trickling chunks indefinitely — is cancelled this way and does not delay the exit.
+Closing a connection cancels the requests it carries. A session first tells its client that the
+server is shutting down, then ends. Every request the session had not yet admitted is cancelled
+before admission and never begins an effect, so the client can send it again, with the same
+execution reference, to another node. A session stream or a resource upload waiting on its client
+ends at once, so no client can hold the drain or the process open. An authenticated upload held open
+at any point of its progress — before its first message, between chunks, or trickling chunks
+indefinitely — is cancelled this way and does not delay the exit.
 
-Work that a session command had already started is not cancelled here. A transaction commit in
-progress keeps running, and terminal teardown waits for it until the shutdown deadline. A commit
-still running when the deadline passes is cancelled with the process; its replicated progress
-survives, and a later leader resumes it from its recorded step, so the transaction reaches
-`COMMITTED` after the node restarts.
+Work that a session command had already admitted is not cancelled here. Its session stops waiting
+for it, and no reply follows for it, but its effect keeps running. A transaction commit in progress
+keeps running, and terminal teardown waits for it until the shutdown deadline. A commit still
+running when the deadline passes is cancelled with the process; its replicated progress survives,
+and a later leader resumes it from its recorded step, so the transaction reaches `COMMITTED` after
+the node restarts.
 
 The terminating node then stops new intake on **every** one of its ingestors, including endpoint and
 Syslog ingestors that serve on every node and ingestors whose scheduled owner did not move. Its
@@ -189,6 +193,10 @@ the ingestor will run again. Shutdown and ownership handoff are not resumable, s
 endpoint admission simply stop, and no `SUSPEND`, `BUFFER`, `DROP`, or `REJECT` policy is applied on
 behalf of the stop. An endpoint refuses new requests outright, without offering a retry delay.
 Payloads already admitted continue through their routes.
+Each source host retains the quiesce publication it observed before awaiting dispatch. Its next
+change wait compares against that publication after registering the waiter, so a shutdown or
+ownership-handoff engagement during dispatch is observed on the next loop turn even when the
+notification arrived before the wait began.
 
 A raw quiesce buffer is not part of the drain. Payloads that a `BUFFER` mode retained during an
 earlier hold are outside runtime graph work: a shutdown does not replay them, and they are discarded

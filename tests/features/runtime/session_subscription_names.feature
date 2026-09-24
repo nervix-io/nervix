@@ -59,6 +59,34 @@ Feature: Named session subscriptions
       | 1            |
       | 3            |
 
+  Scenario Outline: Subscription requests naming a relay or a subscription that does not exist are refused
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands fail on the active session
+      """
+      CREATE SUBSCRIPTION ghost_events TO ghost_relay;
+      """
+    Then the last command error contains
+      """
+      stream 'ghost_relay' does not exist in domain '{{domain}}'
+      """
+    When these NSPL commands fail on the active session
+      """
+      DELETE SUBSCRIPTION ghost_events;
+      """
+    Then the last command error contains
+      """
+      session subscription 'ghost_events' does not exist
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Subscription names are local to each session
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands

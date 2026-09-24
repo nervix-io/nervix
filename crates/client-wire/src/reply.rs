@@ -7,13 +7,9 @@ use nervix_models::{DomainName, RelayName, TransactionInspection, TransactionIns
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, RequestId},
-    impact::{decode_report, encode_report},
     row::RowSchema,
     subscription::{SubscriptionHandle, SubscriptionType},
-    transaction::{
-        decode_operation_number, decode_transaction_status, encode_operation_number,
-        encode_transaction_status,
-    },
+    transaction::{decode_inspection, encode_inspection},
     wire,
 };
 
@@ -127,17 +123,7 @@ impl InspectionOutcome {
     ) -> Result<EncodedUnion<wire::ReplyBody>, Report<WireEncodeError>> {
         let disposition = match self {
             Self::Inspected(inspection) => {
-                let transaction = encode_transaction_status(encoder, &inspection.transaction)?;
-                let report = encode_report(encoder, &inspection.report)?;
-                let operation = inspection.operation.map(encode_operation_number);
-                let inspected = wire::TransactionInspected::create(
-                    encoder.fbb(),
-                    &wire::TransactionInspectedArgs {
-                        transaction: Some(transaction),
-                        operation,
-                        report: Some(report),
-                    },
-                );
+                let inspected = encode_inspection(encoder, inspection)?;
                 EncodedUnion::new(wire::InspectionDisposition::TransactionInspected, inspected)
             }
             Self::Rejected { rejection, message } => {
@@ -174,21 +160,8 @@ impl InspectionOutcome {
         outcome: wire::InspectionOutcome<'_>,
     ) -> Result<Self, Report<WireDecodeError>> {
         if let Some(inspected) = outcome.disposition_as_transaction_inspected() {
-            let transaction = decode_transaction_status(decoder, inspected.transaction())?;
-            let operation = match inspected.operation() {
-                Some(operation) => Some(decode_operation_number(
-                    decoder,
-                    "TransactionInspected.operation",
-                    operation,
-                )?),
-                None => None,
-            };
-            let report = decode_report(decoder, inspected.report())?;
-            return Ok(Self::Inspected(Box::new(TransactionInspection {
-                transaction,
-                operation,
-                report,
-            })));
+            let inspection = decode_inspection(decoder, inspected)?;
+            return Ok(Self::Inspected(Box::new(inspection)));
         }
         if let Some(rejected) = outcome.disposition_as_inspection_rejected() {
             let rejection = decoder
@@ -502,6 +475,12 @@ pub enum RequestRejection {
     DuplicateRequestId,
     /// The complete reply is larger than the session transfer limit.
     ReplyTooLarge,
+    /// The session already has as many requests in flight as the server admits. Nothing was
+    /// admitted; the request can be sent again once an earlier one has its terminal reply.
+    TooManyRequestsInFlight,
+    /// The server had no capacity left to prepare the reply of a request that changes nothing.
+    /// The request can be sent again later.
+    ServerBusy,
 }
 
 wire_enum!(ALL_REQUEST_REJECTIONS: RequestRejection => wire::RequestRejection {
@@ -510,6 +489,8 @@ wire_enum!(ALL_REQUEST_REJECTIONS: RequestRejection => wire::RequestRejection {
     UnsupportedValue,
     DuplicateRequestId,
     ReplyTooLarge,
+    TooManyRequestsInFlight,
+    ServerBusy,
 });
 
 /// The request was not served.

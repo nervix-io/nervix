@@ -8,40 +8,29 @@
 //! - **Must not know.** Production ownership beyond the parent module under test.
 
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::{
-    DomainName, ImpactPlanningBasis, ImpactReportCompleteness, TransactionImpactReport,
-    TransactionInspection, TransactionLifecycle, TransactionOperationNumber, TransactionPosition,
-    TransactionStatus, UserName,
-};
-use tokio::sync::mpsc;
+use nervix_client_wire::CommandRequest;
+use nervix_models::{TransactionLifecycle, TransactionPosition, UserName};
 
-use crate::{
-    application::{
-        SessionServiceImpl,
-        subscription::SessionSubscriptions,
-        test_fixtures::{TestService, build_test_service, test_command_request},
-    },
-    proto::{
-        CommandRequest, CommandResult, SessionResponse, TransactionState as ApiTransactionState,
-    },
+use crate::application::{
+    SessionServiceImpl,
+    command_result::CommandResult,
+    subscription::SessionSubscriptions,
+    test_fixtures::{TestService, build_test_service, test_command_request},
 };
-
-type SessionSender = mpsc::Sender<Result<SessionResponse, tonic::Status>>;
 
 async fn execute(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
-    tx: &SessionSender,
     query: &str,
-    expected_transaction_position: Option<u64>,
+    expected_transaction_position: Option<usize>,
 ) -> CommandResult {
     service
-        .process_command(
+        .test_command(
             CommandRequest {
-                expected_transaction_position,
+                expected_transaction_position: expected_transaction_position
+                    .map(TransactionPosition::new),
                 ..test_command_request(query, "default")
             },
-            tx,
             subscriptions,
         )
         .await
@@ -50,19 +39,14 @@ async fn execute(
 async fn accepted(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
-    tx: &SessionSender,
     query: &str,
-    expected_transaction_position: Option<u64>,
+    expected_transaction_position: Option<usize>,
 ) -> CommandResult {
-    let result = execute(
-        service,
-        subscriptions,
-        tx,
-        query,
-        expected_transaction_position,
-    )
-    .await;
-    assert!(result.success, "{query:?} should be accepted: {result:?}");
+    let result = execute(service, subscriptions, query, expected_transaction_position).await;
+    assert!(
+        result.succeeded(),
+        "{query:?} should be accepted: {result:?}"
+    );
     result
 }
 
@@ -70,13 +54,11 @@ async fn accepted(
 async fn two_operation_transaction(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
-    tx: &SessionSender,
 ) -> String {
-    accepted(service, subscriptions, tx, "BEGIN;", None).await;
+    accepted(service, subscriptions, "BEGIN;", None).await;
     accepted(
         service,
         subscriptions,
-        tx,
         "CREATE SCHEMA described_first ( user_id U32 );",
         Some(0),
     )
@@ -84,7 +66,6 @@ async fn two_operation_transaction(
     accepted(
         service,
         subscriptions,
-        tx,
         "CREATE SCHEMA described_second ( order_id U32 );",
         Some(1),
     )
@@ -113,14 +94,12 @@ async fn describing_the_attached_transaction_neither_queues_nor_moves_its_positi
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    let transaction_id = two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    let transaction_id = two_operation_transaction(&service, &mut subscriptions).await;
 
     let described = accepted(
         &service,
         &mut subscriptions,
-        &tx,
         "DESCRIBE TRANSACTION;",
         Some(2),
     )
@@ -145,25 +124,21 @@ async fn describing_the_attached_transaction_neither_queues_nor_moves_its_positi
         .inspection
         .as_ref()
         .verified("an inspection result carries the typed envelope");
-    let inspected = inspection
-        .transaction
-        .as_ref()
-        .verified("the envelope names the inspected transaction");
-    assert_eq!(inspected.id, transaction_id);
-    assert_eq!(inspected.state, i32::from(ApiTransactionState::Open));
-    assert_eq!(inspected.total_count, 2);
+    let inspected = &inspection.transaction;
+    assert_eq!(inspected.transaction_id(), transaction_id);
+    assert_eq!(inspected.lifecycle(), &TransactionLifecycle::Open);
+    assert_eq!(inspected.accepted_operations(), TransactionPosition::new(2));
     assert_eq!(inspection.operation, None);
     let binding = described
         .transaction
         .as_ref()
         .verified("the result reports the caller's own binding");
-    assert_eq!(binding.id, transaction_id);
+    assert_eq!(binding.transaction_id(), transaction_id);
     assert_eq!(queued_statements(&service, &transaction_id).await, 2);
 
     let appended = accepted(
         &service,
         &mut subscriptions,
-        &tx,
         "CREATE SCHEMA described_third ( note STRING );",
         Some(2),
     )
@@ -172,7 +147,8 @@ async fn describing_the_attached_transaction_neither_queues_nor_moves_its_positi
         .transaction_admission
         .verified("an accepted append reports its operation number");
     assert_eq!(
-        admission.operation, 3,
+        admission.operation.get(),
+        3,
         "an inspection consumes no operation number"
     );
 
@@ -187,14 +163,12 @@ async fn a_selected_operation_in_json_carries_the_same_typed_report() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    let transaction_id = two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    let transaction_id = two_operation_transaction(&service, &mut subscriptions).await;
 
     let described = accepted(
         &service,
         &mut subscriptions,
-        &tx,
         "describe transaction operation 2 format json;",
         Some(2),
     )
@@ -209,9 +183,10 @@ async fn a_selected_operation_in_json_carries_the_same_typed_report() {
         .inspection
         .as_ref()
         .verified("JSON keeps the typed envelope beside its rendering");
-    assert_eq!(inspection.operation, Some(2));
-    let report: serde_json::Value = serde_json::from_slice(&inspection.report)
-        .assured("the envelope carries the report's JSON representation");
+    let operation = inspection.operation.map(|operation| operation.get());
+    assert_eq!(operation, Some(2));
+    let report =
+        serde_json::to_value(&inspection.report).assured("an impact report serializes to JSON");
     assert_eq!(report, document["report"]);
 
     subscriptions.stop_all(&service).await;
@@ -225,19 +200,17 @@ async fn describe_transaction_is_refused_inside_a_multi_statement_request() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
-    let transaction_id = two_operation_transaction(&service, &mut subscriptions, &tx).await;
+    let transaction_id = two_operation_transaction(&service, &mut subscriptions).await;
 
     let appended_with_inspection = execute(
         &service,
         &mut subscriptions,
-        &tx,
         "CREATE SCHEMA described_third ( note STRING ); DESCRIBE TRANSACTION;",
         Some(2),
     )
     .await;
-    assert!(!appended_with_inspection.success);
+    assert!(!appended_with_inspection.succeeded());
     assert!(
         appended_with_inspection
             .message
@@ -252,15 +225,9 @@ async fn describe_transaction_is_refused_inside_a_multi_statement_request() {
     );
 
     let mut fresh = SessionSubscriptions::new();
-    let opened_with_inspection = execute(
-        &service,
-        &mut fresh,
-        &tx,
-        "BEGIN; DESCRIBE TRANSACTION;",
-        None,
-    )
-    .await;
-    assert!(!opened_with_inspection.success);
+    let opened_with_inspection =
+        execute(&service, &mut fresh, "BEGIN; DESCRIBE TRANSACTION;", None).await;
+    assert!(!opened_with_inspection.succeeded());
     assert_eq!(
         fresh.transaction_id(),
         None,
@@ -279,15 +246,13 @@ async fn describing_by_identity_leaves_the_inspecting_session_unbound() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut owner = SessionSubscriptions::new();
-    let transaction_id = two_operation_transaction(&service, &mut owner, &tx).await;
+    let transaction_id = two_operation_transaction(&service, &mut owner).await;
     let mut observer = SessionSubscriptions::new();
 
     let described = accepted(
         &service,
         &mut observer,
-        &tx,
         &format!("DESCRIBE TRANSACTION '{transaction_id}' OPERATION 1;"),
         None,
     )
@@ -305,11 +270,7 @@ async fn describing_by_identity_leaves_the_inspecting_session_unbound() {
         .inspection
         .as_ref()
         .verified("an inspection result carries the typed envelope");
-    let inspected = inspection
-        .transaction
-        .as_ref()
-        .verified("the envelope names the inspected transaction");
-    assert_eq!(inspected.id, transaction_id);
+    assert_eq!(inspection.transaction.transaction_id(), transaction_id);
     assert_eq!(
         described.transaction, None,
         "the observer holds no binding, and inspecting by identity does not create one"
@@ -327,19 +288,11 @@ async fn describing_by_identity_leaves_the_inspecting_session_unbound() {
 async fn refusal(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
-    tx: &SessionSender,
     query: &str,
-    expected_transaction_position: Option<u64>,
+    expected_transaction_position: Option<usize>,
 ) -> String {
-    let result = execute(
-        service,
-        subscriptions,
-        tx,
-        query,
-        expected_transaction_position,
-    )
-    .await;
-    assert!(!result.success, "{query:?} must be refused");
+    let result = execute(service, subscriptions, query, expected_transaction_position).await;
+    assert!(!result.succeeded(), "{query:?} must be refused");
     assert_eq!(result.inspection, None, "a refusal carries no report");
     result.message
 }
@@ -351,23 +304,21 @@ async fn a_refused_inspection_names_why_nothing_was_read() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut owner = SessionSubscriptions::new();
-    let transaction_id = two_operation_transaction(&service, &mut owner, &tx).await;
+    let transaction_id = two_operation_transaction(&service, &mut owner).await;
     let mut unbound = SessionSubscriptions::new();
     let mut intruder = SessionSubscriptions::for_user(
         UserName::parse("intruder").assured("the fixture user name is an accepted literal"),
     );
 
     assert_eq!(
-        refusal(&service, &mut unbound, &tx, "DESCRIBE TRANSACTION;", None).await,
+        refusal(&service, &mut unbound, "DESCRIBE TRANSACTION;", None).await,
         "no transaction is attached to this session"
     );
     assert_eq!(
         refusal(
             &service,
             &mut unbound,
-            &tx,
             "DESCRIBE TRANSACTION 'reclaimed';",
             None
         )
@@ -378,7 +329,6 @@ async fn a_refused_inspection_names_why_nothing_was_read() {
         refusal(
             &service,
             &mut owner,
-            &tx,
             "DESCRIBE TRANSACTION OPERATION 3;",
             Some(2)
         )
@@ -391,7 +341,6 @@ async fn a_refused_inspection_names_why_nothing_was_read() {
         refusal(
             &service,
             &mut intruder,
-            &tx,
             &format!("DESCRIBE TRANSACTION '{transaction_id}';"),
             None
         )
@@ -405,107 +354,4 @@ async fn a_refused_inspection_names_why_nothing_was_read() {
     unbound.stop_all(&service).await;
     owner.stop_all(&service).await;
     let _ = std::fs::remove_dir_all(&path);
-}
-
-fn empty_report() -> TransactionImpactReport {
-    TransactionImpactReport::new(
-        DomainName::parse("default").assured("the fixture domain is an accepted literal"),
-        TransactionPosition::new(0),
-        ImpactPlanningBasis::new([3; 32]),
-        ImpactReportCompleteness::Complete,
-        Vec::new(),
-        Vec::new(),
-    )
-    .assured("an empty report numbers no operation and so needs no execution step")
-}
-
-fn operation(number: usize) -> TransactionOperationNumber {
-    TransactionOperationNumber::from_index(
-        number
-            .checked_sub(1)
-            .assured("a test operation number is one-based"),
-    )
-    .assured("a test operation number is addressable")
-}
-
-#[test]
-fn the_envelope_reports_every_lifecycle_as_the_session_api_names_it() {
-    for (lifecycle, expected) in [
-        (TransactionLifecycle::Open, ApiTransactionState::Open),
-        (
-            TransactionLifecycle::Committing,
-            ApiTransactionState::Committing,
-        ),
-        (
-            TransactionLifecycle::Committed,
-            ApiTransactionState::Committed,
-        ),
-        (
-            TransactionLifecycle::Reverted,
-            ApiTransactionState::Reverted,
-        ),
-        (TransactionLifecycle::Expired, ApiTransactionState::Expired),
-    ] {
-        let inspection = TransactionInspection {
-            transaction: TransactionStatus::new(
-                "tx-lifecycle".to_string(),
-                DomainName::parse("default").assured("the fixture domain is an accepted literal"),
-                lifecycle,
-                TransactionPosition::new(0),
-                0,
-            )
-            .assured("the fixture applies no more operations than it accepted"),
-            operation: None,
-            report: empty_report(),
-        };
-
-        let envelope = super::api_transaction_inspection(&inspection);
-
-        let status = envelope
-            .transaction
-            .verified("the envelope always names the inspected transaction");
-        assert_eq!(status.state, i32::from(expected));
-        assert_eq!(status.error, "");
-        assert_eq!(status.failing_step, None);
-        assert_eq!(envelope.operation, None);
-    }
-}
-
-#[test]
-fn a_failed_inspection_envelope_names_the_failing_operation_and_its_error() {
-    let inspection = TransactionInspection {
-        transaction: TransactionStatus::new(
-            "tx-failed".to_string(),
-            DomainName::parse("default").assured("the fixture domain is an accepted literal"),
-            TransactionLifecycle::Failed {
-                failing_operation: operation(2),
-                error: "domain start refused".to_string(),
-            },
-            TransactionPosition::new(2),
-            1,
-        )
-        .assured("the fixture applies no more operations than it accepted"),
-        operation: Some(operation(2)),
-        report: empty_report(),
-    };
-
-    let envelope = super::api_transaction_inspection(&inspection);
-
-    let status = envelope
-        .transaction
-        .verified("the envelope always names the inspected transaction");
-    assert_eq!(status.id, "tx-failed");
-    assert_eq!(status.state, i32::from(ApiTransactionState::Failed));
-    assert_eq!(status.error, "domain start refused");
-    assert_eq!(status.failing_step, Some(2));
-    assert_eq!(status.total_count, 2);
-    assert_eq!(status.completed_count, 1);
-    assert_eq!(
-        status.pending_count, 0,
-        "a finished transaction has nothing pending"
-    );
-    assert_eq!(envelope.operation, Some(2));
-    let report: TransactionImpactReport = serde_json::from_slice(&envelope.report)
-        .assured("the envelope carries the report's JSON representation");
-    assert_eq!(report, inspection.report);
 }

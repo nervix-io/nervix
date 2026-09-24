@@ -8,27 +8,25 @@
 use std::time::Duration;
 
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_client_wire::CommandRequest;
 use nervix_consensus::{
     ReplicatedTransaction, TransactionActivity, TransactionOutcome, TransactionState,
 };
 use nervix_models::{
     CreateRelay, CreateSchema, DomainName, ExecutionStepOutcome, ModelName, Timestamp,
-    TransactionOperationNumber,
+    TransactionLifecycle, TransactionOperationNumber, TransactionPosition,
 };
-use tokio::sync::mpsc;
 
 use super::{
     super::{
+        command_result::CommandDiagnostic,
         subscription::SessionSubscriptions,
         test_fixtures::{
             TestService, build_test_service, command_transaction_state, create_test_domain, named,
+            test_execution_reference,
         },
     },
-    DEFAULT_TRANSACTION_MAX_OPEN,
-};
-use crate::{
-    proto,
-    proto::{CommandRequest, TransactionState as ApiTransactionState},
+    DEFAULT_TRANSACTION_MAX_OPEN, TransactionAttachment,
 };
 
 #[test]
@@ -77,18 +75,19 @@ async fn attaching_an_overdue_transaction_atomically_expires_it() {
         .insert(id.clone(), "former-session".to_string());
 
     let attached = service
-        .attach_transaction(
-            proto::AttachTransactionRequest { id: id.clone() },
-            &mut subscriptions,
-        )
+        .attach_transaction(id.clone(), &mut subscriptions)
         .await;
 
-    assert!(!attached.success);
-    assert!(attached.message.contains("finished with outcome EXPIRED"));
-    assert_eq!(
-        command_transaction_state(&attached),
-        Some(ApiTransactionState::Expired)
-    );
+    let TransactionAttachment::AlreadyFinished {
+        transaction,
+        message,
+        ..
+    } = attached
+    else {
+        panic!("an expired transaction is reported finished, found {attached:?}");
+    };
+    assert!(message.contains("finished with outcome EXPIRED"));
+    assert_eq!(transaction.lifecycle(), &TransactionLifecycle::Expired);
     assert!(!subscriptions.transaction_active());
     assert!(!service.inner.transaction_bindings.contains_key(&id));
     let expired = service
@@ -150,33 +149,35 @@ async fn process_command_commits_explicit_transaction_without_trailing_semicolon
         path,
     } = build_test_service(false).await;
     create_test_domain(&service.inner.consensus, "prod").await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
 
     let result = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "BEGIN; CREATE RELAY notifications SCHEMA notification UNBRANCHED; CREATE \
                         SCHEMA notification ( user_id U32 ); COMMIT"
                     .to_string(),
-                domain: "prod".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: Some(named("prod")),
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
 
-    assert!(result.success, "command must succeed: {}", result.message);
+    assert!(
+        result.succeeded(),
+        "command must succeed: {}",
+        result.message
+    );
     assert_eq!(
         command_transaction_state(&result),
-        Some(ApiTransactionState::Committed)
+        Some(TransactionLifecycle::Committed)
     );
     assert!(result.message.contains("quiesce level: DYNAMIC"));
     let commit = result
-        .results
+        .statements
         .last()
         .expect("COMMIT result must be retained");
     assert_eq!(commit.message, "quiesce level: DYNAMIC");
@@ -186,7 +187,7 @@ async fn process_command_commits_explicit_transaction_without_trailing_semicolon
     let Some(transaction) = service
         .inner
         .consensus
-        .current_transaction(&status.id)
+        .current_transaction(status.transaction_id())
         .await
     else {
         panic!("the committed transaction must remain as a retained tombstone");
@@ -234,46 +235,43 @@ async fn process_command_queues_transaction_across_requests_and_reverts() {
         registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
 
     let begin = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "BEGIN;".to_string(),
-                domain: "default".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: Some(named("default")),
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(begin.success);
+    assert!(begin.succeeded());
     assert_eq!(
         command_transaction_state(&begin),
-        Some(ApiTransactionState::Open)
+        Some(TransactionLifecycle::Open)
     );
 
     let queued = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "CREATE SCHEMA queued_event ( user_id U32 );".to_string(),
-                domain: "default".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
-                expected_transaction_position: Some(0),
+                domain: Some(named("default")),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: Some(TransactionPosition::new(0)),
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(queued.success);
+    assert!(queued.succeeded());
     assert_eq!(queued.message, "quiesce level: DYNAMIC");
     assert_eq!(
         command_transaction_state(&queued),
-        Some(ApiTransactionState::Open)
+        Some(TransactionLifecycle::Open)
     );
     assert!(
         registry
@@ -287,19 +285,18 @@ async fn process_command_queues_transaction_across_requests_and_reverts() {
     );
 
     let reverted = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "REVERT;".to_string(),
-                domain: "default".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: Some(named("default")),
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(reverted.success);
+    assert!(reverted.succeeded());
     assert!(
         reverted
             .message
@@ -307,7 +304,7 @@ async fn process_command_queues_transaction_across_requests_and_reverts() {
     );
     assert_eq!(
         command_transaction_state(&reverted),
-        Some(ApiTransactionState::Reverted)
+        Some(TransactionLifecycle::Reverted)
     );
     let reverted_status = reverted
         .transaction
@@ -315,16 +312,16 @@ async fn process_command_queues_transaction_across_requests_and_reverts() {
         .verified("a successful revert reports its terminal transaction");
     let replayed = service
         .revert_identified_transaction(
-            reverted_status.id.clone(),
+            reverted_status.transaction_id().to_string(),
             subscriptions.user.clone(),
             service.transaction_activity(),
         )
         .await;
-    assert!(replayed.success);
+    assert!(replayed.succeeded());
     assert_eq!(replayed.message, reverted.message);
     assert_eq!(
         command_transaction_state(&replayed),
-        Some(ApiTransactionState::Reverted)
+        Some(TransactionLifecycle::Reverted)
     );
     assert!(
         registry
@@ -348,46 +345,43 @@ async fn process_command_rejects_begin_inside_begin() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
 
     let begin = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "BEGIN;".to_string(),
-                domain: "default".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: Some(named("default")),
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(begin.success);
+    assert!(begin.succeeded());
     assert_eq!(
         command_transaction_state(&begin),
-        Some(ApiTransactionState::Open)
+        Some(TransactionLifecycle::Open)
     );
 
     let nested = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "BEGIN;".to_string(),
-                domain: "default".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: Some(named("default")),
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(!nested.success);
+    assert!(!nested.succeeded());
     assert_eq!(nested.message, "transaction is already active");
     assert_eq!(
         command_transaction_state(&nested),
-        Some(ApiTransactionState::Open)
+        Some(TransactionLifecycle::Open)
     );
 
     subscriptions.stop_all(&service).await;
@@ -401,7 +395,6 @@ async fn process_command_rejects_domain_and_user_creation_inside_a_transaction()
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
 
     for query in [
@@ -409,20 +402,19 @@ async fn process_command_rejects_domain_and_user_creation_inside_a_transaction()
         "BEGIN; CREATE USER alpha WITH PASSWORD 'secret'; COMMIT",
     ] {
         let result = service
-            .process_command(
+            .test_command(
                 CommandRequest {
                     query: query.to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    domain: Some(named("default")),
+                    execution_reference: test_execution_reference(),
                     expected_transaction_position: None,
                     expected_preview: None,
                 },
-                &tx,
                 &mut subscriptions,
             )
             .await;
 
-        assert!(!result.success, "'{query}' must be rejected");
+        assert!(!result.succeeded(), "'{query}' must be rejected");
         assert!(
             result.message.contains("cannot be queued in a transaction"),
             "'{query}' produced: {}",
@@ -430,20 +422,19 @@ async fn process_command_rejects_domain_and_user_creation_inside_a_transaction()
         );
 
         let reverted = service
-            .process_command(
+            .test_command(
                 CommandRequest {
                     query: "REVERT;".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    domain: Some(named("default")),
+                    execution_reference: test_execution_reference(),
                     expected_transaction_position: None,
                     expected_preview: None,
                 },
-                &tx,
                 &mut subscriptions,
             )
             .await;
         assert!(
-            reverted.success,
+            reverted.succeeded(),
             "revert must succeed: {}",
             reverted.message
         );
@@ -470,40 +461,37 @@ async fn process_command_rejects_begin_without_an_existing_domain() {
         registry: _registry,
         path,
     } = build_test_service(false).await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
 
     let missing = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "BEGIN;".to_string(),
-                domain: "absent".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: Some(named("absent")),
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(!missing.success);
+    assert!(!missing.succeeded());
     assert_eq!(missing.message, "domain 'absent' does not exist");
     assert!(!subscriptions.transaction_active());
 
     let unselected = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "BEGIN;".to_string(),
-                domain: String::new(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: None,
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(!unselected.success);
+    assert!(!unselected.succeeded());
     assert_eq!(unselected.message, "no active domain selected");
     assert!(!subscriptions.transaction_active());
 
@@ -519,45 +507,42 @@ async fn process_command_rejects_statements_selecting_another_domain() {
         path,
     } = build_test_service(true).await;
     create_test_domain(&service.inner.consensus, "other").await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut subscriptions = SessionSubscriptions::new();
 
     let begin = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "BEGIN;".to_string(),
-                domain: "default".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: Some(named("default")),
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(begin.success, "begin must succeed: {}", begin.message);
+    assert!(begin.succeeded(), "begin must succeed: {}", begin.message);
     assert_eq!(
         begin
             .transaction
             .as_ref()
-            .map(|status| status.domain.as_str()),
+            .map(|status| status.domain().as_str()),
         Some("default")
     );
 
     let foreign = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "CREATE SCHEMA foreign_event ( user_id U32 );".to_string(),
-                domain: "other".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
-                expected_transaction_position: Some(0),
+                domain: Some(named("other")),
+                execution_reference: test_execution_reference(),
+                expected_transaction_position: Some(TransactionPosition::new(0)),
                 expected_preview: None,
             },
-            &tx,
             &mut subscriptions,
         )
         .await;
-    assert!(!foreign.success);
+    assert!(!foreign.succeeded());
     assert!(
         foreign.message.contains("is bound to domain 'default'"),
         "unexpected message: {}",
@@ -587,24 +572,22 @@ async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
         path,
     } = build_test_service(false).await;
     create_test_domain(&service.inner.consensus, "attach_results").await;
-    let (tx, _rx) = mpsc::channel(16);
     let mut owner = SessionSubscriptions::new();
 
     let committed = service
-        .process_command(
+        .test_command(
             CommandRequest {
                 query: "BEGIN; CREATE SCHEMA notification ( user_id U32 ); COMMIT".to_string(),
-                domain: "attach_results".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
+                domain: Some(named("attach_results")),
+                execution_reference: test_execution_reference(),
                 expected_transaction_position: None,
                 expected_preview: None,
             },
-            &tx,
             &mut owner,
         )
         .await;
     assert!(
-        committed.success,
+        committed.succeeded(),
         "commit must succeed: {}",
         committed.message
     );
@@ -612,28 +595,30 @@ async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
         .transaction
         .as_ref()
         .expect("commit result must carry transaction status")
-        .id
-        .clone();
+        .transaction_id()
+        .to_string();
 
     let mut observer = SessionSubscriptions::new();
     let attached = service
-        .attach_transaction(
-            proto::AttachTransactionRequest { id: transaction_id },
-            &mut observer,
-        )
+        .attach_transaction(transaction_id, &mut observer)
         .await;
 
-    assert!(
-        !attached.success,
-        "finished transaction attach must be terminal"
-    );
+    let TransactionAttachment::AlreadyFinished {
+        transaction,
+        message,
+        diagnostics,
+    } = attached
+    else {
+        panic!("finished transaction attach must be terminal, found {attached:?}");
+    };
+    assert_eq!(transaction.lifecycle(), &TransactionLifecycle::Committed);
+    assert!(message.contains("finished with outcome COMMITTED"));
     assert_eq!(
-        attached.transaction.as_ref().map(|status| status.state),
-        Some(i32::from(ApiTransactionState::Committed))
+        diagnostics,
+        [CommandDiagnostic::unlocated(
+            "quiesce level: DYNAMIC".to_string()
+        )]
     );
-    assert!(attached.message.contains("finished with outcome COMMITTED"));
-    assert_eq!(attached.results.len(), 1);
-    assert_eq!(attached.results[0].message, "quiesce level: DYNAMIC");
 
     owner.stop_all(&service).await;
     observer.stop_all(&service).await;

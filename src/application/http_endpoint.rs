@@ -456,53 +456,12 @@ pub(in crate::application) async fn serve_https(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::{subscription::format_stream_message, test_fixtures::string_branch_key},
-        *,
-    };
-    use crate::{runtime::RelayMessage, runtime_schema};
+    use super::*;
 
     #[test]
-    fn http_request_helpers_detect_upgrade_and_format_messages() {
+    fn http_request_helpers_detect_upgrade_tokens() {
         let header = hyper::header::HeaderValue::from_static("keep-alive, Upgrade");
         assert!(header_contains_token(&header, "upgrade"));
         assert!(!header_contains_token(&header, "websocket"));
-
-        let message = RelayMessage {
-            key: string_branch_key("tenant", "acme"),
-            record: runtime_schema::test_runtime_row([(
-                "user_id".to_string(),
-                runtime_schema::RuntimeValue::U32(42),
-            )]),
-            acks: crate::runtime_ack::AckSet::empty(),
-        };
-        let no_sensitive_fields = nervix_vm::SchemaSensitivity::default();
-        assert_eq!(
-            format_stream_message(&message, &no_sensitive_fields, &no_sensitive_fields),
-            r#"key={"tenant":"acme"} payload={"user_id":42}"#
-        );
-        let sensitive_user_id = nervix_vm::SchemaSensitivity::from_sensitive_fields(["user_id"]);
-        assert_eq!(
-            format_stream_message(&message, &sensitive_user_id, &no_sensitive_fields),
-            r#"key={"tenant":"acme"} payload={"user_id":"<masked>"}"#
-        );
-        let sensitive_tenant = nervix_vm::SchemaSensitivity::from_sensitive_fields(["tenant"]);
-        assert_eq!(
-            format_stream_message(&message, &no_sensitive_fields, &sensitive_tenant),
-            r#"key={"tenant":"<masked>"} payload={"user_id":42}"#
-        );
-
-        let no_key = RelayMessage {
-            key: None,
-            record: runtime_schema::test_runtime_row([(
-                "user_id".to_string(),
-                runtime_schema::RuntimeValue::U32(42),
-            )]),
-            acks: crate::runtime_ack::AckSet::empty(),
-        };
-        assert_eq!(
-            format_stream_message(&no_key, &no_sensitive_fields, &no_sensitive_fields),
-            r#"{"user_id":42}"#
-        );
     }
 }

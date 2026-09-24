@@ -16,14 +16,6 @@ fn frame_bytes(frames: &[EncodedFrame<ServerFrame>]) -> usize {
     })
 }
 
-fn protobuf_bytes(rows: &[Vec<u8>]) -> usize {
-    rows.iter().fold(0, |total, row| {
-        total
-            .checked_add(row.len())
-            .assured("the benchmark output is bounded by in-memory string vectors")
-    })
-}
-
 fn subscription_row_encoding(criterion: &mut Criterion) {
     let rows = NonZeroUsize::new(ROWS).assured("the benchmark row count is nonzero");
     let detail_bytes =
@@ -31,12 +23,9 @@ fn subscription_row_encoding(criterion: &mut Criterion) {
     let benchmark = SubscriptionRowBenchmark::new(rows, detail_bytes);
 
     let typed = benchmark.encode_typed_rows();
-    let json = benchmark.encode_protobuf_json_rows();
     eprintln!(
-        "subscription_row_evidence rows={ROWS} detail_bytes={DETAIL_BYTES} typed_bytes={} \
-         json_bytes={}",
+        "subscription_row_evidence rows={ROWS} detail_bytes={DETAIL_BYTES} typed_bytes={}",
         frame_bytes(&typed),
-        protobuf_bytes(&json),
     );
 
     let mut group = criterion.benchmark_group("subscription_row_encoding");
@@ -45,9 +34,6 @@ fn subscription_row_encoding(criterion: &mut Criterion) {
     ));
     group.bench_function("typed_flatbuffers", |bencher| {
         bencher.iter(|| black_box(benchmark.encode_typed_rows()));
-    });
-    group.bench_function("current_protobuf_json", |bencher| {
-        bencher.iter(|| black_box(benchmark.encode_protobuf_json_rows()));
     });
     group.finish();
 }

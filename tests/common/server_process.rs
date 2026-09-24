@@ -20,6 +20,7 @@ use std::{
     fs::OpenOptions,
     io,
     net::{Ipv4Addr, SocketAddr},
+    num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -28,13 +29,15 @@ use std::{
 
 use bytes::{BufMut as _, Bytes, BytesMut};
 use meticulous::OptionExt as _;
+use nervix_client_wire::{
+    RequestId, SessionLimits, UploadChunk, UploadStart, grpc::UPLOAD_RESOURCE_PATH,
+};
+use nervix_models::{DomainName, ResourceName, ResourceUploadIdentity};
 use nervix_recovery::Discarded as _;
-use nervix_server::proto::{UploadResourceRequest, UploadResourceStart, upload_resource_request};
 use nix::{
     sys::signal::{Signal, kill},
     unistd::Pid,
 };
-use prost::Message as _;
 use tempfile::TempDir;
 use tokio::{
     net::TcpStream,
@@ -76,7 +79,6 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(120);
 const LOG_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const LOG_TAIL_LINES: usize = 80;
-const UPLOAD_RESOURCE_PATH: &str = "/io.nervix.api.v1.SessionService/UploadResource";
 const HELD_UPLOAD_IDENTITY: &str = "held-upload";
 /// The archive size a held upload declares. A slow upload sends one byte per interval, so it
 /// would take far longer than any scenario to finish.
@@ -924,25 +926,28 @@ fn staged_upload_archive_exists(resources: &Path) -> io::Result<bool> {
 }
 
 fn upload_start_frame(domain: &str, resource: &str) -> io::Result<Bytes> {
-    grpc_message_frame(&UploadResourceRequest {
-        event: Some(upload_resource_request::Event::Start(UploadResourceStart {
-            name: resource.to_string(),
-            total_bytes: HELD_UPLOAD_DECLARED_BYTES,
-            domain: domain.to_string(),
-            upload_identity: HELD_UPLOAD_IDENTITY.to_string(),
-        })),
-    })
+    let start = UploadStart {
+        request_id: RequestId::new(NonZeroU64::MIN),
+        domain: DomainName::parse(domain).map_err(io::Error::other)?,
+        resource: ResourceName::parse(resource).map_err(io::Error::other)?,
+        upload_identity: ResourceUploadIdentity::parse(HELD_UPLOAD_IDENTITY)
+            .map_err(io::Error::other)?,
+        total_bytes: NonZeroU64::new(HELD_UPLOAD_DECLARED_BYTES)
+            .ok_or_else(|| io::Error::other("a held upload declares a non-zero size"))?,
+    };
+    let frame = start
+        .encode(&SessionLimits::DEFAULT)
+        .map_err(io::Error::other)?;
+    grpc_message_frame(frame.bytes())
 }
 
 fn upload_chunk_frame() -> io::Result<Bytes> {
-    grpc_message_frame(&UploadResourceRequest {
-        event: Some(upload_resource_request::Event::Chunk(vec![0].into())),
-    })
+    let frame = UploadChunk::encode(&[0], &SessionLimits::DEFAULT).map_err(io::Error::other)?;
+    grpc_message_frame(frame.bytes())
 }
 
-/// Frames one message the way gRPC carries it on an HTTP/2 stream.
-fn grpc_message_frame(message: &UploadResourceRequest) -> io::Result<Bytes> {
-    let encoded = message.encode_to_vec();
+/// Frames one upload frame the way gRPC carries it on an HTTP/2 stream.
+fn grpc_message_frame(encoded: &[u8]) -> io::Result<Bytes> {
     let length = u32::try_from(encoded.len()).map_err(io::Error::other)?;
     let capacity = GRPC_MESSAGE_PREFIX_BYTES
         .checked_add(encoded.len())
@@ -950,7 +955,7 @@ fn grpc_message_frame(message: &UploadResourceRequest) -> io::Result<Bytes> {
     let mut frame = BytesMut::with_capacity(capacity);
     frame.put_u8(UNCOMPRESSED_GRPC_MESSAGE);
     frame.put_u32(length);
-    frame.put_slice(&encoded);
+    frame.put_slice(encoded);
     Ok(frame.freeze())
 }
 

@@ -34,11 +34,11 @@ use thiserror::Error;
 use tonic::{Status, metadata::MetadataMap};
 
 use super::{
+    command_result::CommandResult,
     model_mutation::{command_error, command_ok, command_ok_already_existed},
     session_service::SessionServiceImpl,
     web_console::{WEB_CONSOLE_AUTH_QUERY_PARAM, web_console_query_param},
 };
-use crate::proto::CommandResult;
 
 pub(in crate::application) const DEFAULT_USER: &str = "default";
 
@@ -410,7 +410,10 @@ mod tests {
                 false,
             ))
             .await;
-        assert!(created.success, "user creation must succeed: {created:?}");
+        assert!(
+            created.succeeded(),
+            "user creation must succeed: {created:?}"
+        );
         let duplicate = service
             .create_user(CreateStatement::new(
                 CreateUser {
@@ -421,10 +424,10 @@ mod tests {
             ))
             .await;
         assert!(
-            duplicate.success,
+            duplicate.succeeded(),
             "idempotent creation must succeed: {duplicate:?}"
         );
-        assert!(duplicate.already_existed);
+        assert!(duplicate.found_existing());
 
         let retained_name = UserName::parse("retained_user")
             .assured("the test user name is an identifier-shaped literal");
@@ -435,7 +438,7 @@ mod tests {
             .apply_persistent_user_creation(false, retained.clone())
             .await;
         assert!(
-            applied.success,
+            applied.succeeded(),
             "admitted user creation must succeed: {applied:?}"
         );
 
@@ -450,13 +453,13 @@ mod tests {
         let ignored_conflict = service
             .apply_persistent_user_creation(true, conflicting.clone())
             .await;
-        assert!(ignored_conflict.success);
-        assert!(ignored_conflict.already_existed);
+        assert!(ignored_conflict.succeeded());
+        assert!(ignored_conflict.found_existing());
 
         let rejected_conflict = service
             .apply_persistent_user_creation(false, conflicting)
             .await;
-        assert!(!rejected_conflict.success);
+        assert!(!rejected_conflict.succeeded());
         assert!(rejected_conflict.message.contains("already exists"));
 
         let _ = std::fs::remove_dir_all(&path);

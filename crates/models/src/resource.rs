@@ -659,6 +659,23 @@ impl ResourceVersionStatus {
     pub fn is_declared(&self, domain: &DomainName, identifier: &ResourceName) -> bool {
         self.next_version(domain, identifier).is_some()
     }
+
+    /// The resources declared in `domain`, in name order. The catalog is sorted by domain first,
+    /// so a domain's resources are one contiguous run, located by binary search.
+    pub fn resources_in<'a>(
+        &'a self,
+        domain: &DomainName,
+    ) -> impl Iterator<Item = &'a ResourceName> + 'a {
+        let start = self
+            .next_version_by_resource
+            .partition_point(|counter| counter.domain < *domain);
+        let end = self
+            .next_version_by_resource
+            .partition_point(|counter| counter.domain <= *domain);
+        self.next_version_by_resource[start..end]
+            .iter()
+            .map(|counter| &counter.identifier)
+    }
 }
 
 #[cfg(test)]
