@@ -126,16 +126,9 @@ def main() -> int:
         runtime_root / "emitter_task.rs",
         runtime_root / "endpoint.rs",
         runtime_root / "ingestors/kafka.rs",
-        runtime_root / "ingestors/mqtt.rs",
-        runtime_root / "ingestors/nats.rs",
-        runtime_root / "ingestors/pulsar.rs",
-        runtime_root / "ingestors/rabbitmq.rs",
-        runtime_root / "ingestors/redis_pubsub.rs",
         runtime_root / "ingestors/source.rs",
-        runtime_root / "ingestors/sqs.rs",
         runtime_root / "ingestors/syslog.rs",
         runtime_root / "ingestors/websockets.rs",
-        runtime_root / "ingestors/zeromq.rs",
     }
     physical_capability_owners = {
         runtime_root / "branch_buffering.rs",

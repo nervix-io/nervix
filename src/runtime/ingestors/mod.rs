@@ -75,34 +75,12 @@ impl IngestorStarter {
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{ClientConfigEntry, CreateClientWebsockets, CreateClientZeroMq};
+    use nervix_models::{ClientConfigEntry, CreateClientWebsockets};
 
     use super::*;
 
     #[test]
     fn client_config_extractors_handle_defaults_and_missing_keys() {
-        let zeromq = CreateClientZeroMq::<u64> {
-            name: named("zmq"),
-            mount: None,
-            config: vec![
-                ClientConfigEntry {
-                    key: "addr".to_string(),
-                    value: "tcp://127.0.0.1:5555".to_string(),
-                },
-                ClientConfigEntry {
-                    key: "bind".to_string(),
-                    value: "TRUE".to_string(),
-                },
-            ],
-        };
-        assert_eq!(
-            ingestors::zeromq::ZeroMqIngestor::addr_from_config(&zeromq.config).expect("addr"),
-            "tcp://127.0.0.1:5555"
-        );
-        assert!(ingestors::zeromq::ZeroMqIngestor::bind_from_config(
-            &zeromq.config
-        ));
-
         let websocket = CreateClientWebsockets::<u64> {
             name: named("ws"),
             mount: None,
@@ -118,31 +96,6 @@ mod tests {
             "wss://example.com/socket"
         );
 
-        let zeromq_default = CreateClientZeroMq::<u64> {
-            name: named("zmq"),
-            mount: None,
-            config: vec![ClientConfigEntry {
-                key: "addr".to_string(),
-                value: "tcp://127.0.0.1:5555".to_string(),
-            }],
-        };
-        assert!(!ingestors::zeromq::ZeroMqIngestor::bind_from_config(
-            &zeromq_default.config
-        ));
-
-        assert!(
-            ingestors::zeromq::ZeroMqIngestor::addr_from_config(
-                &CreateClientZeroMq::<u64> {
-                    name: named("zmq"),
-                    mount: None,
-                    config: vec![],
-                }
-                .config
-            )
-            .expect_err("missing zeromq addr")
-            .to_string()
-            .contains("missing ZeroMQ client config key 'addr'")
-        );
         assert!(
             ingestors::websockets::WebsocketsIngestor::endpoint_from_config(
                 &CreateClientWebsockets::<u64> {

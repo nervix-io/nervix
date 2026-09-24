@@ -98,7 +98,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    TransactionReportsAndWasmGenerations = 3,
+    BoundedCommandExecutionHistory = 4,
 }
 
 #[derive(Debug)]
@@ -107,6 +107,7 @@ struct StateMetadata {
     last_applied_log_id: Option<LogIdOf>,
     last_membership: Arc<StoredMembershipOf>,
     runtime_revision: u64,
+    command_retry_fence: Option<nervix_models::Timestamp>,
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -115,6 +116,7 @@ struct StateMetadataRecord {
     last_applied_log_id: Option<LogIdRecord>,
     last_membership: StoredMembershipRecord,
     runtime_revision: u64,
+    command_retry_fence: Option<nervix_models::Timestamp>,
 }
 
 impl From<&StateMetadata> for StateMetadataRecord {
@@ -124,6 +126,7 @@ impl From<&StateMetadata> for StateMetadataRecord {
             last_applied_log_id: value.last_applied_log_id.clone().map(Into::into),
             last_membership: StoredMembershipRecord::from(value.last_membership.as_ref()),
             runtime_revision: value.runtime_revision,
+            command_retry_fence: value.command_retry_fence,
         }
     }
 }
@@ -142,6 +145,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
                     .map_err(|_| io::Error::other(StorageFailure::InvalidState))?,
             ),
             runtime_revision: value.runtime_revision,
+            command_retry_fence: value.command_retry_fence,
         })
     }
 }
@@ -149,10 +153,11 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::TransactionReportsAndWasmGenerations,
+            encoding: StateEncoding::BoundedCommandExecutionHistory,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
+            command_retry_fence: state.command_executions.retry_fence(),
         }
     }
 }
@@ -177,10 +182,11 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::TransactionReportsAndWasmGenerations,
+            encoding: StateEncoding::BoundedCommandExecutionHistory,
             last_applied_log_id,
             last_membership,
             runtime_revision,
+            command_retry_fence,
         } = metadata;
         Ok(Self {
             last_applied_log_id,
@@ -206,7 +212,10 @@ impl StateMachineData {
                 sm,
             )?,
             transaction_reports: crate::transaction_report::TransactionReportRecords::load(sm)?,
-            command_executions: Records::load(b'e', sm)?,
+            command_executions: crate::command_execution::CommandExecutionRecords::load(
+                sm,
+                command_retry_fence,
+            )?,
         })
     }
 
@@ -312,7 +321,7 @@ impl StateMachineData {
         self.transaction_reports
             .write_changes(&preceding.transaction_reports, batch, sm)?;
         self.command_executions
-            .write_changes(&preceding.command_executions, b'e', batch, sm)
+            .write_changes(&preceding.command_executions, batch, sm)
     }
 
     fn write_metadata(&self, batch: &mut DurableBatch<'_>, sm: &Keyspace) -> io::Result<()> {

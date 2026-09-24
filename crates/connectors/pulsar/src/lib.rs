@@ -1,9 +1,11 @@
-//! Pulsar sink connector.
+//! Pulsar source and sink connector.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Pulsar client and producer configuration, its TLS options, topic qualification,
-//!   record and property publication, and send-receipt classification.
+//! - **Owns.** Pulsar client and producer configuration, its TLS options, topic
+//!   qualification, the shared-subscription consumers a source reads through, message
+//!   properties as ingest headers, per-message acknowledgement, record and property
+//!   publication, and send-receipt classification.
 //! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and
 //!   `pulsar`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
@@ -11,6 +13,8 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
+
+mod source;
 
 use std::{collections::VecDeque, time::Duration};
 
@@ -29,6 +33,10 @@ use pulsar::{
     ConnectionRetryOptions, Error as PulsarError, OperationRetryOptions, Pulsar,
     TlsOptions as PulsarTlsOptions, TokioExecutor,
     producer::{Message as PulsarProducerMessage, SendFuture as PulsarSendFuture},
+};
+pub use source::{
+    PulsarMessageProperties, PulsarSource, PulsarSourceError, PulsarSourceMessage,
+    PulsarSourcePlan, PulsarSourcePosition, PulsarSourceSettings,
 };
 use tokio::time::{Instant, sleep};
 

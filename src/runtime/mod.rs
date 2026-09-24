@@ -95,7 +95,7 @@ use nervix_models::{
     CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
     CreateClientWebsockets, CreateClientZeroMq,
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
+use nervix_recovery::{Discarded as _, NoReceiver as _};
 use nervix_roto::UdfExecutor;
 #[cfg(test)]
 use nervix_vm::SPAWN_BLOCKING_ROW_THRESHOLD as VM_SPAWN_BLOCKING_ROW_THRESHOLD;
@@ -348,14 +348,12 @@ use force_flush::{
 };
 use generator::{GeneratorTaskRouteSpec, GeneratorTaskSpec};
 use inferencer_output::flush_branch_inferencer_output;
+pub(in crate::runtime) use ingest_group::INGEST_GROUP_MAX_ROWS;
 use ingest_group::{
     BranchedEntrypointInput, IngestGroupDispatch, IngestRouteCollector, IngestorDependencies,
     IngestorRouteRuntimes, RawIngestDispatch, branched_branch_filter_blocking,
     branched_branch_plan_blocking, branched_entrypoint_batch_from_inputs_blocking,
     decode_ingested_payload,
-};
-pub(in crate::runtime) use ingest_group::{
-    INGEST_FLUSH_FAILURES_ARE_HANDLED, INGEST_GROUP_MAX_ROWS,
 };
 pub(in crate::runtime) use ingest_metadata::IngestMetadataKind;
 use ingest_metadata::{

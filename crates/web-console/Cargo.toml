@@ -25,6 +25,7 @@ nervix-proto = { workspace = true }
 nervix-recovery = { workspace = true }
 prost = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, features = ["js", "v7"] }
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [

@@ -235,10 +235,15 @@ retry serve this purpose for their respective operations. This adds no new NSPL 
 Clients must match the outstanding operation, not infer its completion from an unrelated change
 in a transaction's state or count.
 
-Ordinary command outcomes are retained for 15 minutes after completion. Transaction outcomes keep
-their configured tombstone retention, and upload identity records retain their existing resource
-lifetime. Applying operations do not expire. After an outcome has expired, a resume request
-reports that the outcome is unavailable and does not submit a new command. Clients never convert
+Ordinary command outcomes are retained for the configured retry validity, 15 minutes by default,
+after completion. Transaction outcomes keep their configured tombstone retention, and upload
+identity records retain their existing resource lifetime. Applying operations do not expire. An
+ordinary execution reference is a UUIDv7. A new reference is admitted only while its creation time
+lies within the retry validity and at most five minutes ahead of the cluster clock. A durable,
+monotonic retry fence refuses every older reference, so reclaiming an expired outcome never makes
+its reference executable again, including after restart or snapshot installation. After an outcome
+has expired, a resume request reports that the outcome is unavailable and does not submit a new
+command. Clients never convert
 an uncertain outcome into a fresh execution identity automatically. A retained success describes
 the original completion; later availability changes are handled by service admission and normal
 error reporting.
