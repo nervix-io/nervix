@@ -29,7 +29,11 @@ use nervix_connector::{
 use nervix_models::{DomainClockPeriod, IngestAcknowledgement};
 use tokio_util::sync::CancellationToken;
 
-use super::super::{domain_clock::DomainCadence, *};
+use super::super::{
+    domain_clock::{DomainCadence, DomainClockWaitResult},
+    *,
+};
+use crate::runtime::ingestor_quiesce::IngestorQuiesceObservation;
 
 const SOURCE_ERROR_RETRY: Duration = Duration::from_millis(100);
 
@@ -426,6 +430,7 @@ pub(super) struct RuntimeSourceHost {
     metrics: MessageMetricsHandle,
     branched_senders: HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     quiesce: Arc<IngestorQuiesceControl>,
+    quiesce_observation: IngestorQuiesceObservation,
     ack_root_trackers: IngestorAckRootTrackers,
     shutdown: watch::Receiver<bool>,
     instance_index: u64,
@@ -444,6 +449,7 @@ impl RuntimeSourceHost {
             INGEST_GROUP_MAX_ROWS,
             spec.metrics.clone(),
         );
+        let quiesce_observation = spec.quiesce.observation();
         Self {
             runtime: spec.runtime,
             domain: spec.domain,
@@ -455,6 +461,7 @@ impl RuntimeSourceHost {
             metrics: spec.metrics,
             branched_senders: spec.branched_senders,
             quiesce: spec.quiesce,
+            quiesce_observation,
             ack_root_trackers,
             shutdown: spec.shutdown,
             instance_index: spec.instance_index,
@@ -522,10 +529,6 @@ impl RuntimeSourceHost {
             })
             .await
             .change_context(SourceIntakeError::Dispatch)
-    }
-
-    fn should_skip_poll(&self) -> bool {
-        self.quiesce.should_skip_poll()
     }
 
     /// The intake a request-scoped source binds its routes to.
@@ -837,7 +840,9 @@ impl SourceHostServices for RuntimeSourceHost {
     }
 
     async fn wait_for_quiesce_change(&mut self) {
-        self.quiesce.wait_for_change().await;
+        self.quiesce
+            .wait_for_change_since(&mut self.quiesce_observation)
+            .await;
     }
 
     async fn wait_until_not_suspended(&mut self) {
@@ -925,13 +930,43 @@ impl RuntimeSourceHost {
     }
 }
 
+#[async_trait]
 trait PacedSourceHostServices: SourceHostServices {
+    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool>;
+    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool>;
+    fn should_skip_poll(&self) -> bool;
     fn record_poll_error(&self, reason: String);
 }
 
+#[async_trait]
 impl PacedSourceHostServices for RuntimeSourceHost {
+    async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
+        RuntimeSourceHost::intake_poll(self, poll).await
+    }
+
+    async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
+        RuntimeSourceHost::replay_buffered_poll(self).await
+    }
+
+    fn should_skip_poll(&self) -> bool {
+        self.quiesce.should_skip_poll()
+    }
+
     fn record_poll_error(&self, reason: String) {
         RuntimeSourceHost::record_poll_error(self, reason);
+    }
+}
+
+#[async_trait]
+trait PacedSourceCadence: Send + 'static {
+    async fn next(&mut self, cancellation: &CancellationToken) -> DomainClockWaitResult<Timestamp>;
+}
+
+#[async_trait]
+impl PacedSourceCadence for DomainCadence {
+    async fn next(&mut self, cancellation: &CancellationToken) -> DomainClockWaitResult<Timestamp> {
+        let occurrence = DomainCadence::next(self, cancellation).await?;
+        Ok(occurrence.due_at())
     }
 }
 
@@ -1008,13 +1043,15 @@ where
     PacedSourceAction::Poll
 }
 
-pub(super) async fn run_paced_source<C>(
+async fn run_paced_source<C, H, D>(
     mut source: C,
-    mut host: RuntimeSourceHost,
-    mut cadence: DomainCadence,
+    mut host: H,
+    mut cadence: D,
     mut shutdown: watch::Receiver<bool>,
 ) where
     C: PacedSourceConnector,
+    H: PacedSourceHostServices,
+    D: PacedSourceCadence,
 {
     let cadence_cancellation = CancellationToken::new();
     let mut ready = false;
@@ -1036,7 +1073,7 @@ pub(super) async fn run_paced_source<C>(
             Err(error) => host.report_error(error.to_string()),
         }
 
-        let occurrence = tokio::select! {
+        let due_at = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
@@ -1046,10 +1083,10 @@ pub(super) async fn run_paced_source<C>(
             _ = host.wait_for_quiesce_change() => {
                 continue;
             }
-            occurrence = cadence.next(&cadence_cancellation) => occurrence,
+            due_at = cadence.next(&cadence_cancellation) => due_at,
         };
-        let occurrence = match occurrence {
-            Ok(occurrence) => occurrence,
+        let due_at = match due_at {
+            Ok(due_at) => due_at,
             Err(error) => {
                 host.report_error(format!("could not advance source cadence: {error}"));
                 break;
@@ -1069,7 +1106,7 @@ pub(super) async fn run_paced_source<C>(
             _ = host.wait_for_quiesce_change() => {
                 continue;
             }
-            poll = source.poll(occurrence.due_at()) => poll,
+            poll = source.poll(due_at) => poll,
         };
         let poll = match poll {
             Ok(poll) => poll,
@@ -1712,7 +1749,20 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl PacedSourceHostServices for FakeHost {
+        async fn intake_poll(&mut self, poll: SourcePoll) -> SourceIntakeResult<bool> {
+            Ok(!poll.messages.is_empty())
+        }
+
+        async fn replay_buffered_poll(&mut self) -> SourceIntakeResult<bool> {
+            Ok(false)
+        }
+
+        fn should_skip_poll(&self) -> bool {
+            self.suspend_intake
+        }
+
         fn record_poll_error(&self, reason: String) {
             self.observations.lock().poll_errors.push(reason.clone());
             self.report_error(reason);
@@ -1990,3 +2040,7 @@ mod tests {
         assert_eq!(observations.acknowledged, vec![vec![0], vec![1], vec![2]]);
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "source_shuttle_tests.rs"]
+mod shuttle_tests;
