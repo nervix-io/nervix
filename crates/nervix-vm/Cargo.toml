@@ -40,6 +40,7 @@ strum = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 triomphe = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true, features = ["v4", "v7"] }
 xxhash-rust = { workspace = true }
 

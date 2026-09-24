@@ -272,6 +272,17 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   native bytes. Convert explicitly with `bytes_from_utf8`, `bytes_to_utf8`, `base64_encode`,
   `base64_decode`, `hex_encode`, and `hex_decode`; `sha256` returns raw digest bytes and `xxh3_64`
   returns a deterministic `U64`. Encoding and hashing keep input sensitivity.
+- Parse address text once with `ip_from_string` into a 4-octet IPv4 or 16-octet IPv6 `BYTES`
+  value, then test and mask the value with `ip_in_network(address, '<cidr>')`, `ip_trunc`,
+  `ip_family`, and `ip_unmap`, and write it with `ip_to_string`. Families never mix: an
+  IPv4-mapped `::ffff:a.b.c.d` address matches no IPv4 network until `ip_unmap`. Write a literal
+  network in exact CIDR form without host bits, or the statement is rejected.
+- Read URL parts with `url_scheme`, `url_host`, `url_port`, `url_path`, `url_query`,
+  `url_fragment`, `url_query_value`, and `url_query_values`, and decode escapes with `url_decode`.
+  Inputs must be absolute URLs; prefix a request target with a base explicitly. Host, port, query,
+  fragment, and query values are null when the URL lacks them, so write them to `OPTIONAL` fields or
+  `coalesce` them. Malformed addresses, networks, URLs, and escapes fail the message; guard with
+  `is_ip_address` or `is_url` in a `CASE` to route them without an error.
 - Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
   STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
   the same format-qualified ALTER form owns field evolution.
