@@ -516,6 +516,10 @@ Supported built-ins include string, null-handling, numeric, regex, and contextua
 - extrema: `greatest`, `least`, `clamp`
 - datetime: `date_part`, `date_trunc`, `date_bin`, `date_add`, `date_diff`, `to_unix`, `from_unix`,
   `format_datetime`, `parse_datetime`, with calendar units and explicit time zones
+- IP addresses and networks: `ip_from_string`, `ip_to_string`, `ip_family`, `ip_trunc`,
+  `ip_in_network`, `ip_unmap`, `is_ip_address`, over 4- or 16-octet `BYTES` addresses
+- URLs: `url_scheme`, `url_host`, `url_port`, `url_path`, `url_query`, `url_fragment`,
+  `url_query_value`, `url_query_values`, `url_decode`, `is_url`
 - contextual functions: `now`, `uuid_v4`, `uuid_v7`
 
 See [Filter-Map Functions](filter-map-functions.md) for the full current function list, signatures, and aliases.
