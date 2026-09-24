@@ -65,7 +65,10 @@ A subscription delivers typed rows against the schema its subscribe reply announ
 `SubscriptionRowsEvent::display_lines()` renders each row as one JSON object, prefixed with its
 concrete branch key as `key=<object> payload=<object>` on a branched relay; a sensitive field reads
 `"<masked>"`. The other subscription events report rows a dropping subscription could not deliver,
-rows it skipped, and the end of the subscription with its reason.
+rows it skipped, and the end of the subscription with its reason: `RelayChanged` when the relay was
+redefined, so the announced schema no longer describes its rows, or `RelayRemoved` when the relay
+or its domain no longer exists. The end is the last event of that subscription; subscribe again to
+keep reading a redefined relay. See [Sessions](sessions.md#subscription-lifecycle).
 
 ## Transaction Handles And Attach
 

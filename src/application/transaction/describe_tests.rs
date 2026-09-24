@@ -152,7 +152,7 @@ async fn describing_the_attached_transaction_neither_queues_nor_moves_its_positi
         "an inspection consumes no operation number"
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -189,7 +189,7 @@ async fn a_selected_operation_in_json_carries_the_same_typed_report() {
         serde_json::to_value(&inspection.report).assured("an impact report serializes to JSON");
     assert_eq!(report, document["report"]);
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -234,8 +234,8 @@ async fn describe_transaction_is_refused_inside_a_multi_statement_request() {
         "a refused request opens no transaction"
     );
 
-    fresh.stop_all(&service).await;
-    subscriptions.stop_all(&service).await;
+    fresh.stop_all().await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -279,8 +279,8 @@ async fn describing_by_identity_leaves_the_inspecting_session_unbound() {
     assert_eq!(owner.transaction_id(), Some(transaction_id.as_str()));
     assert_eq!(queued_statements(&service, &transaction_id).await, 2);
 
-    observer.stop_all(&service).await;
-    owner.stop_all(&service).await;
+    observer.stop_all().await;
+    owner.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -350,8 +350,8 @@ async fn a_refused_inspection_names_why_nothing_was_read() {
     assert_eq!(queued_statements(&service, &transaction_id).await, 2);
     assert_eq!(owner.transaction_id(), Some(transaction_id.as_str()));
 
-    intruder.stop_all(&service).await;
-    unbound.stop_all(&service).await;
-    owner.stop_all(&service).await;
+    intruder.stop_all().await;
+    unbound.stop_all().await;
+    owner.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }

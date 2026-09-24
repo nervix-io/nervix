@@ -108,7 +108,7 @@ async fn drain_reports_when_its_captured_eligibility_has_no_replacement() {
             .contains("no live schedulable raft voters remain")
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     drop(service);
     drop(registry);
     std::fs::remove_dir_all(path).discarded("the throwaway test database may already be gone");

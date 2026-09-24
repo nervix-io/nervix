@@ -89,6 +89,11 @@ Nervix records these raw metric families:
   overflow, memory-pressure zero-capacity behavior, or an interrupting termination
 - `nervix_ingestor_quiesce_rejected_total`: endpoint requests or connections refused while an
   ingestor cannot accept them
+- `nervix_session_subscriptions`: open session subscriptions the node delivers from a relay. The
+  node advertises interest in the relay to the cluster exactly while this is above zero, and the
+  series stays at `0` once the relay's last subscription on the node closes
+- `nervix_session_subscription_dropped_rows_total`: rows `DROPPING` session subscriptions on the
+  node discarded because their session could not take them in time
 - `nervix_jemalloc_active_bytes`: bytes in active allocator pages
 - `nervix_jemalloc_allocated_bytes`: bytes allocated by the process
 - `nervix_jemalloc_mapped_bytes`: bytes mapped by active allocator extents
@@ -107,6 +112,10 @@ Prometheus receives raw values only. The `/metrics` endpoint is encoded by the P
 The four ingestor-quiesce families use `domain`, `ingestor`, and `physical_node_id` labels. Buffer
 families are gauges; dropped and rejected families are monotonic counters. They are process-local:
 quiesce buffers do not migrate during termination or failover.
+
+The two session-subscription families use `domain` and `relay` labels and describe the node that
+exports them: the subscriptions its sessions hold and the rows those sessions lost. A client is told
+of its own losses directly, as described in [Sessions](sessions.md).
 
 ## Interconnection Metrics
 

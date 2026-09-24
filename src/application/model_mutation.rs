@@ -2422,7 +2422,7 @@ mod tests {
         assert_eq!(schema.fields.len(), 1);
         assert_eq!(schema.fields[0].name.as_str(), "user_id");
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2466,7 +2466,7 @@ mod tests {
             1
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2503,7 +2503,7 @@ mod tests {
             "implicit batch must not create later models"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2557,7 +2557,7 @@ mod tests {
             .expect("open transaction must remain replicated");
         assert_eq!(transaction.pending_statement_count(), 1);
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2601,7 +2601,7 @@ mod tests {
             "failed model batch must not persist schema"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2665,7 +2665,7 @@ mod tests {
         assert_eq!(deduplicator.mode, AckMode::Detached);
         assert_eq!(emitter.mode, AckMode::Detached);
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2727,7 +2727,7 @@ mod tests {
             "notifications_all"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2798,7 +2798,7 @@ mod tests {
         assert_eq!(deduplicator.max_time, "10m");
         assert_eq!(deduplicator.mode, nervix_models::AckMode::Attached);
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 

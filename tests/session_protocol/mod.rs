@@ -2,8 +2,9 @@
 //!
 //! Layer: test harness.
 //! - **Owns.** Requests a scenario names and answers by name, cancellations, altered and malformed
-//!   frames, upload streams shaped the way the protocol does not allow, and the typed dispositions
-//!   and transport statuses a session reports.
+//!   frames, upload streams shaped the way the protocol does not allow, the typed dispositions and
+//!   transport statuses a session reports, and the lifetime a session observes for each of its
+//!   subscriptions.
 //! - **Depends on.** The harness's own session client and the scenario cluster.
 //! - **Must not know.** How the server correlates, admits or cancels a request.
 
@@ -11,11 +12,12 @@ use cucumber::{then, when};
 use nervix_client_wire::{
     CancelState, CancellationStage, ClientMessage, ClientRequest, CommandDisposition,
     CommandRequest, DomainList, InspectTransactionRequest, InspectionOutcome, ReplyBody, RequestId,
-    RequestRejection, SessionEndReason, SuggestRequest, UnknownOutcomeCause, UploadDisposition,
+    RequestRejection, SessionEndReason, SubscriptionEndReason, SuggestRequest, UnknownOutcomeCause,
+    UnsubscribeDisposition, UploadDisposition,
 };
 use nervix_models::{
-    CommandExecutionReference, ResourceUploadIdentity, TransactionInspectionRejection,
-    TransactionInspectionTarget,
+    CommandExecutionReference, ResourceUploadIdentity, SubscriptionName,
+    TransactionInspectionRejection, TransactionInspectionTarget,
 };
 
 use super::*;
@@ -539,6 +541,118 @@ async fn then_background_command_request_ends_without_an_answer(world: &mut Scen
     if let Ok(outcome) = result {
         panic!("the background command request was answered: {outcome:?}");
     }
+}
+
+#[when(expr = "the active session sends request {string} deleting subscription {string}")]
+async fn when_active_session_sends_unsubscribe(
+    world: &mut ScenarioWorld,
+    name: String,
+    subscription: String,
+) {
+    let subscription = SubscriptionName::parse(&expand_placeholders(world, &subscription))
+        .expect("scenario subscription names are valid");
+    let request_id = active_session(world)
+        .send_unsubscribe(subscription)
+        .await
+        .unwrap_or_else(|error| panic!("failed to send request '{name}': {error}"));
+    world.session_requests.insert(name, request_id);
+}
+
+#[then(expr = "request {string} deleted subscription {string}")]
+async fn then_request_deleted_subscription(
+    world: &mut ScenarioWorld,
+    name: String,
+    subscription: String,
+) {
+    let subscription = expand_placeholders(world, &subscription);
+    let body = reply_to_named(world, &name).await;
+    let ReplyBody::Unsubscribe(outcome) = body else {
+        panic!("request '{name}' was answered with {body:?}");
+    };
+    let UnsubscribeDisposition::Deleted(handle) = &outcome.disposition else {
+        panic!("request '{name}' did not delete a subscription: {outcome:?}");
+    };
+    assert_eq!(
+        handle.name.as_str(),
+        subscription,
+        "request '{name}' deleted another subscription"
+    );
+}
+
+#[then(
+    expr = "within {string} subscription {string} of the active session ends because its relay \
+            was {word}"
+)]
+async fn then_active_session_subscription_ends(
+    world: &mut ScenarioWorld,
+    duration: String,
+    subscription: String,
+    cause: String,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let subscription = expand_placeholders(world, &subscription);
+    let expected = match cause.as_str() {
+        "removed" => SubscriptionEndReason::RelayRemoved,
+        "redefined" => SubscriptionEndReason::RelayChanged,
+        other => panic!("unknown subscription end cause '{other}'"),
+    };
+    let ended = active_session(world)
+        .try_next_subscription_end(duration)
+        .await
+        .unwrap_or_else(|error| panic!("failed while waiting for a subscription end: {error}"))
+        .unwrap_or_else(|| panic!("subscription '{subscription}' did not end within {duration:?}"));
+    assert_eq!(
+        ended.subscription.name.as_str(),
+        subscription,
+        "another subscription ended: {ended:?}"
+    );
+    assert_eq!(ended.reason, expected, "{ended:?}");
+}
+
+#[then(expr = "no row the active session received contains {string}")]
+async fn then_no_received_row_contains(world: &mut ScenarioWorld, fragment: String) {
+    let fragment = expand_placeholders(world, &fragment);
+    let leaked = active_session(world)
+        .delivered_payloads()
+        .iter()
+        .filter(|payload| payload.contains(&fragment))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        leaked.is_empty(),
+        "the active session received rows containing {fragment:?}: {leaked:?}"
+    );
+}
+
+#[when(expr = "the active session reads its frames for {string}")]
+async fn when_active_session_reads_frames(world: &mut ScenarioWorld, duration: String) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    active_session(world)
+        .read_for(duration)
+        .await
+        .unwrap_or_else(|error| panic!("failed to read the active session's frames: {error}"));
+}
+
+#[then("the active session received no frame about a subscription outside its lifetime")]
+async fn then_no_frame_outside_subscription_lifetime(world: &mut ScenarioWorld) {
+    let outside = active_session(world).frames_outside_lifetime();
+    assert!(
+        outside.is_empty(),
+        "the active session received frames about subscriptions it did not hold: {outside:?}"
+    );
+}
+
+#[when("the active session closes its session cleanly")]
+async fn when_active_session_closes_cleanly(world: &mut ScenarioWorld) {
+    let session = world
+        .active_session
+        .take()
+        .expect("an active session must exist");
+    drop(session);
+    world.active_session_node = None;
+    world.active_session_has_subscription = false;
 }
 
 /// The frames of an upload stream shaped the way a scenario names it.

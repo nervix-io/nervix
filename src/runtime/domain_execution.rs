@@ -326,6 +326,7 @@ impl Runtime {
         }
 
         let Some(graph) = graph else {
+            self.withdraw_undeclared_relay_subscriptions(domain, |_| false);
             self.clear_domain_graph_handle(domain).await;
             self.clear_expiring_stream_states_for_domain(domain);
             return Ok(());
@@ -511,12 +512,16 @@ impl Runtime {
                 } else {
                     None
                 };
+                let branching = node
+                    .resolved_branching
+                    .clone()
+                    .assured("the registry resolves every relay branch declaration");
                 let fanout = self
                     .relay_boundary_fanout_with_capacity(
                         domain,
                         &relay.name,
-                        !relay.branching.is_unbranched(),
                         relay.buffer,
+                        RelaySubscriptionDefinition::new(schema.clone(), branching.clone()),
                     )
                     .await;
                 let registry = match expiring_state.as_ref() {
@@ -533,10 +538,6 @@ impl Runtime {
                         remote_runtime_consumers: Vec::new(),
                     },
                 );
-                let branching = node
-                    .resolved_branching
-                    .clone()
-                    .assured("the registry resolves every relay branch declaration");
                 relay_branchings.insert(relay.name.clone(), branching.clone());
                 relay_schemas.insert(relay.name.clone(), schema);
                 if relay.materialized_state.is_some() {

@@ -225,8 +225,8 @@ fn ended_frame(handle: SubscriptionHandle) -> VerifiedFrame<ServerFrame> {
     verified(
         SubscriptionEnded {
             subscription: handle,
-            reason: SubscriptionEndReason::RelayClosed,
-            message: "relay 'orders' was rebuilt".to_string(),
+            reason: SubscriptionEndReason::RelayChanged,
+            message: "relay 'orders' was redefined".to_string(),
         }
         .encode(&SESSION_LIMITS)
         .assured("a test end fits a frame"),

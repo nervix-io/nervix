@@ -35,6 +35,11 @@ use testcontainers::{
     },
     runners::{AsyncBuilder, AsyncRunner},
 };
+
+mod reaper;
+
+use reaper::ResourceReaper;
+
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const REUSABLE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const TEST_CONCURRENCY_FACTOR_ENV: &str = "NERVIX_TEST_CONCURRENCY_FACTOR";
@@ -275,6 +280,7 @@ pub struct DependencyEnvironment {
     tls_configuration_hash: Option<String>,
     scope: String,
     mode: ContainerMode,
+    reaper: ResourceReaper,
 }
 
 impl DependencyEnvironment {
@@ -291,6 +297,7 @@ impl DependencyEnvironment {
             tls_configuration_hash: None,
             scope: scope.into(),
             mode,
+            reaper: ResourceReaper::new(!mode.is_reusable()),
         }
     }
 
@@ -1038,7 +1045,9 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                      sleep 1; done"
                 ),
             ])
-            .with_startup_timeout(STARTUP_TIMEOUT)
+            .with_startup_timeout(STARTUP_TIMEOUT);
+        let init = self
+            .configure_transient_container("rustfs-init", init)
             .start()
             .await
             .map_err(testcontainers_error("RustFS bucket initialization"))?;
@@ -1143,7 +1152,9 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
                  nervix-iceberg --connection-string \"$AZURE_STORAGE_CONNECTION_STRING\"; then \
                  exit 0; fi; sleep 1; done; exit 1",
             ])
-            .with_startup_timeout(STARTUP_TIMEOUT)
+            .with_startup_timeout(STARTUP_TIMEOUT);
+        let init = self
+            .configure_transient_container("azurite-init", init)
             .start()
             .await
             .map_err(testcontainers_error("Azurite container initialization"))?;
@@ -1396,6 +1407,9 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         self.endpoints = DependencyEndpoints::default();
         self.tls = None;
         self.tls_configuration_hash = None;
+        if let Err(error) = self.reaper.shutdown(errors.is_empty()).await {
+            errors.push(error.to_string());
+        }
         errors
     }
 
@@ -1417,7 +1431,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
     }
 
     async fn start_container<I, Build>(
-        &self,
+        &mut self,
         role: &'static str,
         ready_port: ContainerPort,
         operation: &'static str,
@@ -1437,7 +1451,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
     }
 
     async fn start_container_with_readiness<I, Build>(
-        &self,
+        &mut self,
         role: &'static str,
         readiness: ContainerReadiness,
         operation: &'static str,
@@ -1447,6 +1461,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         I: Image,
         Build: FnMut() -> ContainerRequest<I>,
     {
+        self.reaper.ensure_running().await?;
         let _startup_lock = if self.mode.is_reusable() {
             Some(ReusableStartupLock::acquire(&self.configuration_hash(role), operation).await?)
         } else {
@@ -1535,14 +1550,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
         request: ContainerRequest<I>,
     ) -> ContainerRequest<I> {
         let config_hash = self.configuration_hash(role);
-        let request = request.with_labels([
-            (TESTCONTAINERS_CONFIG_LABEL, config_hash.clone()),
-            (TESTCONTAINERS_ROLE_LABEL, role.to_string()),
-            (
-                TESTCONTAINERS_REUSABLE_LABEL,
-                self.mode.is_reusable().to_string(),
-            ),
-        ]);
+        let request = self.with_lifecycle_labels(role, self.mode.is_reusable(), request);
         if self.mode.is_reusable() {
             request
                 .with_container_name(reusable_container_name(role, &config_hash))
@@ -1553,6 +1561,38 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             // performs an explicit graceful stop and removal so teardown failures are reported.
             request.with_reuse(ReuseDirective::Never)
         }
+    }
+
+    fn configure_transient_container<I: Image>(
+        &self,
+        role: &'static str,
+        request: ContainerRequest<I>,
+    ) -> ContainerRequest<I> {
+        self.with_lifecycle_labels(role, false, request)
+            .with_reuse(ReuseDirective::Never)
+    }
+
+    fn with_lifecycle_labels<I: Image>(
+        &self,
+        role: &'static str,
+        reusable: bool,
+        request: ContainerRequest<I>,
+    ) -> ContainerRequest<I> {
+        let mut labels = BTreeMap::from([
+            (
+                TESTCONTAINERS_CONFIG_LABEL.to_string(),
+                self.configuration_hash(role),
+            ),
+            (TESTCONTAINERS_ROLE_LABEL.to_string(), role.to_string()),
+            (
+                TESTCONTAINERS_REUSABLE_LABEL.to_string(),
+                reusable.to_string(),
+            ),
+        ]);
+        if let Some((label, session)) = self.reaper.session_label() {
+            labels.insert(label.to_string(), session.to_string());
+        }
+        request.with_labels(labels)
     }
 
     fn network_name(&self, stack: &'static str) -> String {
