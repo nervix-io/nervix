@@ -18,6 +18,7 @@ mod canonical;
 mod cluster_node;
 mod command;
 mod domain_clock;
+mod emitter_batch;
 mod expression;
 mod message_error;
 mod model_index;
@@ -51,6 +52,10 @@ pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
     DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,
     DomainClockProgress, DomainClockSkew, DomainClockState, DomainTimeRate,
+};
+pub use emitter_batch::{
+    BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,
+    EmitterBatchRequirement, PayloadSizeLimit,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
@@ -129,26 +134,27 @@ pub use statement::{
     AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation, AlterReorderer,
     AlterReordererError, AlterReordererOperation, AzureBlobConfigEntry, BranchEviction,
     BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, ClientConfigEntry,
-    ClientPoolBounds, ClientPoolBoundsError, ClientResourceMount, ClusterSchedule, CodecEncoding,
-    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CordonNode, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-    CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateResource, CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser,
-    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, DeleteSubscription,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
-    DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
-    DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode,
-    EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-    ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
+    ClientPoolBounds, ClientPoolBoundsError, ClientResourceMount, ClusterSchedule,
+    CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
+    CodecProtobufConfig, CodecWireFormat, CordonNode, CorrelationTimeoutAction,
+    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSignalingProtocol,
+    CreateStatement, CreateSubscription, CreateUser, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, DeleteSubscription, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint,
+    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink,
+    EmitterAckWindow, EmitterBatchContractError, EmitterPublishingMode, EndpointIngestMode,
+    EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
     IcebergCatalog, IcebergRestConfigEntry, IcebergStorageBackend, IcebergValueMapping,
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,

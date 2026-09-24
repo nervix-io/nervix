@@ -616,6 +616,7 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink_a"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "30s".to_string(),
                 max_batch_size: "1MiB".to_string(),

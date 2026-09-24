@@ -7175,6 +7175,7 @@ dependencies = [
  "nervix-approx-into",
  "nonzero_ext",
  "rkyv",
+ "rstest",
  "serde",
  "serde_json",
  "sorted-vec",

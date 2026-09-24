@@ -631,14 +631,14 @@ fn undeclared_report_members_are_refused() {
         }
     );
     let report = RawReport {
-        aspect: Some(wire::ModelChangeAspect(75)),
+        aspect: Some(wire::ModelChangeAspect(76)),
         ..RawReport::default()
     };
     assert_eq!(
         report.decode_error(),
         WireDecodeError::UnknownEnumValue {
             field: "ConfigurationReason.aspect",
-            value: 75,
+            value: 76,
         }
     );
     let report = RawReport {

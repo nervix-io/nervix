@@ -248,6 +248,25 @@ The resource contains the `.proto` files. `USING RESOURCE` requires `VERSION <n>
 `VERSION LATEST`, and the codec compiles its descriptors from the one version it stores.
 `CONFIG` declares compile parameters; `file`/`files` select source files and `include`/`includes` select import roots, all relative to the resource root. If no file is listed, all `.proto` files in the resource are compiled.
 
+A protobuf codec that a [batching emitter](emitters.md#batching) encodes through names the message
+a batch is published as, after `MESSAGE`:
+
+```nspl,ignore
+CREATE CODEC notification_proto
+  FROM PROTOBUF
+  USING RESOURCE proto_bundle VERSION 1
+  CONFIG {'file' = 'notification.proto', 'include' = '.'}
+  MESSAGE 'nervix.test.Notification'
+  BATCH MESSAGE 'nervix.test.NotificationBatch'
+  TO SCHEMA notification
+  WITH JAQ TRANSFORMATIONS ON EMITTING '{user_id: .user_id, action: .action}';
+```
+
+`BATCH MESSAGE` names a message in the same compiled descriptors, and the domain build fails when it
+does not exist. Without an `ON EMITTING BATCH` transformation it must declare exactly one field,
+`repeated <MESSAGE>`, which holds the members. With one, it may have any shape the
+transformation's output is a valid instance of.
+
 Current schemaful codec wire formats are:
 
 - `JSON`, with an explicit JSON wire schema
@@ -289,16 +308,39 @@ Semantics:
 
 - no-wire codecs must use `FROM JSON|YAML|TOML|XML|CBOR ... WITH JAQ ...`
 - protobuf codecs must use
-  `FROM PROTOBUF USING RESOURCE ... VERSION <n> | LATEST CONFIG {...} MESSAGE ... WITH JAQ ...`
+  `FROM PROTOBUF USING RESOURCE ... VERSION <n> | LATEST CONFIG {...} MESSAGE ... [BATCH MESSAGE ...] WITH JAQ ...`
 - codecs using declared wire schemas must use `FROM WIRE JSON|CBOR|AVRO SCHEMA ...` and do not
   carry JAQ transforms
 - codecs using the predefined SYSLOG wire schema must use `FROM SYSLOG TO SCHEMA ...` and do not
   carry JAQ transformations or field encoding rules
-- `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order
+- `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order, and
+  `ON EMITTING` may be followed by `ON EMITTING BATCH` ([Batch Transformations](#batch-transformations))
 - `ON INGESTION` runs on every value the parsed native or protobuf payload holds and may yield zero or more JSON objects, each of which becomes one message compatible with the internal schema ([Unfolding Payloads](#unfolding-payloads))
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 
 JAQ-backed encode/decode is dispatched to blocking workers so expensive transforms do not stall async ingestor or emitter tasks.
+
+### Batch Transformations
+
+A JAQ-backed codec — JAQ-native or protobuf — may declare a third transformation for emitters that
+declare a [batching clause](emitters.md#batching):
+
+```nspl
+CREATE IF NOT EXISTS CODEC notification_envelope
+  FROM JSON
+  TO SCHEMA notification
+  WITH JAQ TRANSFORMATIONS
+    ON EMITTING '{id: .user_id, action: .action}'
+    ON EMITTING BATCH '{schema_version: 2, count: length, records: .}';
+```
+
+`ON EMITTING BATCH` is written only after `ON EMITTING`, because its input is built from that
+transformation's outputs: one array holding the member values of a batch, in publication order. It
+must yield exactly one value, valid in the codec's format; for a protobuf codec, a valid instance of
+the declared `BATCH MESSAGE`. The program compiles with the codec, so a program that cannot compile
+fails the domain build. A batching Sentry emitter requires its codec to declare this
+transformation. `ON EMITTING` keeps its meaning exactly: it runs per record and yields one value per
+record.
 
 ### Unfolding Payloads
 

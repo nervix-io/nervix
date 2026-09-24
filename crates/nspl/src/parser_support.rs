@@ -1374,6 +1374,28 @@ fn route_boundary_token(token: &Token) -> bool {
     )
 }
 
+/// The three words that open an emitter's `BATCH MAX MESSAGES` clause, which ends the route
+/// construction written before it.
+///
+/// The whole phrase is the boundary rather than its first word, so a field named `batch` stays
+/// usable inside a construction.
+fn emitter_batch_clause_start<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    let word = |expected: Identifier| {
+        any().filter(move |token: &Token| {
+            matches!(
+                token,
+                Token::Word(Word::KnownWord { iden, .. }) if *iden == expected
+            )
+        })
+    };
+    word(Identifier::Batch)
+        .then(word(Identifier::Max))
+        .then(word(Identifier::Messages))
+        .ignored()
+        .boxed()
+}
+
 pub(crate) fn from_where_boundary_token(token: &Token) -> bool {
     processor_output_boundary_token(token)
         || matches!(
@@ -1399,6 +1421,7 @@ fn route_construction_body<'src>(
 ) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
     any()
         .filter(|token: &Token| !route_boundary_token(token))
+        .and_is(emitter_batch_clause_start().not())
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()
