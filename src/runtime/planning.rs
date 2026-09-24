@@ -364,6 +364,7 @@ pub(in crate::runtime) fn branched_node_specs_from_models(
                         output_routes: branched_outputs(&window_processor.output_routes),
                         width: window_processor.width.clone(),
                         step: window_processor.step.clone(),
+                        state_limit: window_processor.state_limit,
                     },
                 };
                 processors.push(processor_node_spec(
@@ -695,6 +696,7 @@ fn materialize_nodes(
                     output_routes,
                     width,
                     step,
+                    state_limit,
                 } => {
                     if output_routes.outputs().next().is_none() {
                         return Err(Report::new(PlanningError::MissingWindowOutput {
@@ -742,9 +744,6 @@ fn materialize_nodes(
 
                     // The shared accumulator plan the branch-local window state is built from,
                     // whose demands follow the same written route order as the offsets above.
-                    let plan = WindowAccumulatorPlan::new(
-                        compiled_aggregates.iter().map(|compiled| &compiled.route),
-                    );
                     let aggregate =
                         WindowAggregateProgram::combine_route_programs(&route_aggregates);
 
@@ -772,6 +771,26 @@ fn materialize_nodes(
                         WindowDurationSetting::Step,
                         step.duration.as_deref(),
                     )?;
+                    let sketch_layout = match (width_duration, step_duration) {
+                        (Some(width), Some(step))
+                            if aggregate
+                                .demands()
+                                .iter()
+                                .any(|demand| demand.sketch.is_some()) =>
+                        {
+                            WindowPaneLayout::for_width_and_step(width, step)
+                        }
+                        _ => None,
+                    };
+                    let max_state_bytes = match state_limit {
+                        nervix_models::WindowStateLimit::Unbounded => None,
+                        nervix_models::WindowStateLimit::MaxBytes(bytes) => Some(*bytes),
+                    };
+                    let plan = WindowAccumulatorPlan::new(
+                        compiled_aggregates.iter().map(|compiled| &compiled.route),
+                        sketch_layout,
+                        max_state_bytes,
+                    );
 
                     RelayProcessorOperationTemplate::WindowProcessor {
                         output_routes: materialized_outputs,
@@ -1147,6 +1166,7 @@ mod tests {
                 output_routes,
                 width: WindowBound::of_messages(10),
                 step: WindowBound::of_messages(5),
+                state_limit: nervix_models::WindowStateLimit::Unbounded,
             },
         }
     }
@@ -1782,6 +1802,7 @@ mod tests {
                             messages: Some(10),
                             duration: None,
                         },
+                        state_limit: nervix_models::WindowStateLimit::Unbounded,
                         mode: AckMode::Attached,
                         filter_where: None,
                         materialized_state: Vec::new(),
@@ -1823,6 +1844,7 @@ mod tests {
             output_routes,
             width,
             step,
+            ..
         } = &window.spec.operation
         else {
             panic!("expected window processor branch node");
@@ -2718,6 +2740,7 @@ mod tests {
                 },
                 width: WindowBound::of_messages(3),
                 step: WindowBound::of_messages(3),
+                state_limit: nervix_models::WindowStateLimit::Unbounded,
             },
         };
         let mut relay_schemas = HashMap::default();

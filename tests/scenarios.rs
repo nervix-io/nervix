@@ -3009,15 +3009,15 @@ fn build_ingestor_logic_commands(
 
       CREATE SCHEMA logic_notification_list_operations (
         tenant STRING,
-        total I64,
-        first_value I64,
-        last_value I64,
-        second_value I64,
+        total I64 OPTIONAL,
+        first_value I64 OPTIONAL,
+        last_value I64 OPTIONAL,
+        second_value I64 OPTIONAL,
         value_count I64,
-        fixed_first I64,
-        fixed_last I64,
-        first_label STRING,
-        last_label STRING
+        fixed_first I64 OPTIONAL,
+        fixed_last I64 OPTIONAL,
+        first_label STRING OPTIONAL,
+        last_label STRING OPTIONAL
       );
 
       CREATE WIRE JSON SCHEMA logic_notification_ingest_wire MODE STRICT (
@@ -8906,8 +8906,18 @@ async fn when_named_client_begins_resource_upload_in_the_background(
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .assured("the scenario identity is an identifier-shaped literal");
     world.background_nspl = Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        let upload_domain = client
+            .domain()
+            .await
+            .assured("the upload client selected a domain");
         let outcome = client
-            .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+            .upload_resource_from_directory_with_identity(
+                &resource,
+                directory,
+                upload_domain,
+                identity,
+                |_| {},
+            )
             .await
             .map_err(|error| error.to_string())?;
         if outcome.succeeded() {
@@ -9491,8 +9501,18 @@ async fn when_named_client_uploads_resource_with_identity(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .expect("scenario upload identity must be valid");
+    let upload_domain = client
+        .domain()
+        .await
+        .assured("the upload client selected a domain");
     let outcome = client
-        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .upload_resource_from_directory_with_identity(
+            &resource,
+            directory,
+            upload_domain,
+            identity,
+            |_| {},
+        )
         .await
         .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
     assert!(
@@ -9605,8 +9625,18 @@ async fn when_named_client_resource_upload_fails_with(
         .clone();
     let identity = nervix_client_core::ResourceUploadIdentity::parse(identity)
         .expect("scenario upload identity must be valid");
+    let upload_domain = client
+        .domain()
+        .await
+        .assured("the upload client selected a domain");
     let outcome = client
-        .upload_resource_from_directory_with_identity(&resource, directory, identity, |_| {})
+        .upload_resource_from_directory_with_identity(
+            &resource,
+            directory,
+            upload_domain,
+            identity,
+            |_| {},
+        )
         .await
         .unwrap_or_else(|error| panic!("client '{name}' resource upload failed: {error}"));
     assert!(

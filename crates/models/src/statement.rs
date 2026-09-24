@@ -5827,11 +5827,30 @@ pub struct CreateWindowProcessor {
     pub branched_by: BranchSelection,
     pub width: WindowBound,
     pub step: WindowBound,
+    pub state_limit: WindowStateLimit,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_where: Option<crate::Expression>,
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
+}
+
+/// The state allowance of one concrete window branch. Sketch windows require a byte limit.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum WindowStateLimit {
+    Unbounded,
+    MaxBytes(NonZeroU64),
 }
 
 #[derive(

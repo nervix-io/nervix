@@ -8,6 +8,7 @@
 //! - **Must not know.** How events are routed off the exchange.
 
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_client_wire::{
     NoticeLevel, RowConformanceError, RowSchema, ServerNotice, SubscriptionDeliveryLost,
     SubscriptionEnded, SubscriptionHandle, SubscriptionRows, SubscriptionRowsSkipped, Suggestion,
@@ -37,6 +38,16 @@ impl SubscriptionEvent {
             Self::RowsSkipped(skipped) => &skipped.subscription,
             Self::Ended(ended) => &ended.subscription,
         }
+    }
+
+    pub(crate) fn queued_bytes(&self) -> usize {
+        let dynamic_bytes = match self {
+            Self::Rows(rows) => rows.rows.frame().len(),
+            Self::DeliveryLost(_) | Self::RowsSkipped(_) | Self::Ended(_) => 0,
+        };
+        dynamic_bytes
+            .checked_add(std::mem::size_of::<Self>())
+            .assured("an event's decoded frame and in-memory header fit the process address space")
     }
 }
 
@@ -69,6 +80,15 @@ impl From<ServerNotice> for ServerEvent {
             level: notice.level,
             message: notice.message,
         }
+    }
+}
+
+impl ServerEvent {
+    pub(crate) fn queued_bytes(&self) -> usize {
+        self.message
+            .len()
+            .checked_add(std::mem::size_of::<Self>())
+            .assured("a decoded notice and its in-memory header fit the process address space")
     }
 }
 

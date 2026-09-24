@@ -498,6 +498,36 @@ impl Compiler {
         }
         let first_type = self.infer_expr_type(&args[0])?;
         match function {
+            WindowAggregateFunction::ApproxCountDistinct => {
+                if !Self::is_window_orderable(&first_type) {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
+                             argument, found {first_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[0].span,
+                    });
+                }
+                Ok(DataType::Int64)
+            }
+            WindowAggregateFunction::ApproxTopK => {
+                if !Self::is_window_orderable(&first_type) {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
+                             argument, found {first_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[0].span,
+                    });
+                }
+                Ok(DataType::List(Arc::new(Field::new(
+                    "item", first_type, false,
+                ))))
+            }
             WindowAggregateFunction::Count => Ok(DataType::Int64),
             WindowAggregateFunction::CountIf => {
                 if let Some(error) =
@@ -523,7 +553,8 @@ impl Compiler {
                 }
                 Ok(first_type)
             }
-            WindowAggregateFunction::Avg
+            WindowAggregateFunction::ApproxQuantile
+            | WindowAggregateFunction::Avg
             | WindowAggregateFunction::PercentileLinearHistogram
             | WindowAggregateFunction::StddevPop
             | WindowAggregateFunction::StddevSamp
@@ -1385,6 +1416,22 @@ impl Compiler {
             return Ok(target_type.clone());
         }
 
+        if let Expr::Call {
+            function: FunctionName::Vec,
+            args,
+        } = &expr.inner
+            && args.is_empty()
+        {
+            if let DataType::List(_) = target_type {
+                return Ok(target_type.clone());
+            }
+            return Err(CompileError {
+                code: "type_mismatch",
+                message: "vec() requires a declared VEC assignment target".to_string(),
+                span: expr.span,
+            });
+        }
+
         self.infer_expr_type(expr)
     }
 
@@ -1456,8 +1503,10 @@ impl Compiler {
                     // emits retains a row, so present arguments always contribute, except that
                     // sample statistics need two rows and a correlation needs variation.
                     let window_function = invocation.function;
-                    if let WindowAggregateFunction::Count | WindowAggregateFunction::CountIf =
-                        window_function
+                    if let WindowAggregateFunction::ApproxCountDistinct
+                    | WindowAggregateFunction::ApproxTopK
+                    | WindowAggregateFunction::Count
+                    | WindowAggregateFunction::CountIf = window_function
                     {
                         return Ok(false);
                     }
@@ -1481,6 +1530,16 @@ impl Compiler {
                     return Ok(false);
                 }
                 if let FunctionName::NullIf = function {
+                    return Ok(true);
+                }
+                if let FunctionName::First
+                | FunctionName::Last
+                | FunctionName::Nth
+                | FunctionName::Sum
+                | FunctionName::Min
+                | FunctionName::Max
+                | FunctionName::Mean = function
+                {
                     return Ok(true);
                 }
                 // `greatest` and `least` skip null arguments like `coalesce` does, so one required
@@ -1731,6 +1790,25 @@ impl Compiler {
                 InstructionKind::NullLiteral {
                     dst,
                     data_type: target_type.clone(),
+                },
+                expr.span,
+            );
+            return Ok(dst);
+        }
+
+        if let Expr::Call {
+            function: FunctionName::Vec,
+            args,
+        } = &expr.inner
+            && args.is_empty()
+            && let DataType::List(_) = target_type
+        {
+            let dst = self.alloc_temp(RegisterType::Generic);
+            self.emit(
+                InstructionKind::Builtin {
+                    dst,
+                    lowering: BuiltinLowering::EmptyVec(target_type.clone()),
+                    inputs: Vec::new(),
                 },
                 expr.span,
             );
@@ -3046,6 +3124,15 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Greatest
         | FunctionName::Least
         | FunctionName::Clamp
+        | FunctionName::Array
+        | FunctionName::Vec
+        | FunctionName::Overlap
+        | FunctionName::Slice
+        | FunctionName::Min
+        | FunctionName::Max
+        | FunctionName::Mean
+        | FunctionName::Dot
+        | FunctionName::Distance
         | FunctionName::Datetime(_) => None,
     }
 }
@@ -5373,3 +5460,7 @@ mod comparison_tests;
 #[cfg(test)]
 #[path = "compiler_numeric_function_tests.rs"]
 mod numeric_function_tests;
+
+#[cfg(test)]
+#[path = "compiler_collection_function_tests.rs"]
+mod collection_function_tests;

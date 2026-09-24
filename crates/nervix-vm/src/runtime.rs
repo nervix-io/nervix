@@ -20,14 +20,15 @@ use arch_into::ArchInto as _;
 use arrow_arith::{
     aggregate::sum_checked as arrow_sum_checked,
     boolean::{and_kleene, is_null, not, or_kleene},
+    numeric::mul as arrow_mul,
 };
 use arrow_array::{
     Array, ArrayRef, ArrowNumericType, BinaryArray, BooleanArray, Datum, FixedSizeListArray,
     Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray,
-    PrimitiveArray, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array,
-    UInt64Array,
+    PrimitiveArray, Scalar, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array,
+    UInt32Array, UInt64Array,
     builder::{BooleanBuilder, Int64Builder, PrimitiveBuilder, StringBuilder},
-    new_null_array,
+    make_array, new_empty_array, new_null_array,
     types::{
         ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
         TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
@@ -39,9 +40,10 @@ use arrow_cast::{
     display::FormatOptions,
 };
 use arrow_ord::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
-use arrow_schema::{ArrowError, DataType};
+use arrow_schema::{ArrowError, DataType, Field};
 use arrow_select::{
     filter::{FilterBuilder, FilterPredicate, prep_null_mask_filter},
+    interleave::interleave,
     nullif::nullif,
     take::{TakeOptions, take},
     zip::zip,
@@ -52,6 +54,7 @@ use arrow_string::like::{
 use chrono::DateTime;
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use tokio::task;
 use uuid::{NoContext, Timestamp as UuidTimestamp, Uuid};
@@ -62,8 +65,8 @@ use crate::{
     count::{CountOperand, SignedCount},
     datetime::{self, FormattedColumn, TextFailure, UnitCounts, UnresolvedLocalTime},
     error::{
-        DatetimeOperation, FloatOperation, IntegerOperation, RowErrorMask, RowErrors, RuntimeError,
-        SideError, SideErrorReason, TextOperation,
+        CollectionLimit, DatetimeOperation, FloatOperation, IntegerOperation, RowErrorMask,
+        RowErrors, RuntimeError, SideError, SideErrorReason, TextOperation,
     },
     extremum::{self, ClampBoundsDefect},
     ip_address::{self, NetworkSource},
@@ -2186,18 +2189,60 @@ fn execute_builtin(
         BuiltinLowering::Atan => execute_math(&column(0)?, MathFunction::Atan, row_errors, span),
         BuiltinLowering::Ceil => execute_rounding(&column(0)?, Rounding::Ceil, row_errors, span),
         BuiltinLowering::Concat => {
+            if let TypedArray::Generic(_) = column(0)? {
+                return Ok(execute_list_concat(&columns()?)?);
+            }
             let mut parts = Vec::with_capacity(inputs.len());
             for index in 0..inputs.len() {
                 parts.push(text(index)?);
             }
             Ok(TypedArray::Utf8(execute_concat(row_count, &parts)))
         }
+        BuiltinLowering::ArrayConstruct => {
+            Ok(ListConstruction::Fixed.construct(&columns()?, row_count)?)
+        }
+        BuiltinLowering::VecConstruct => {
+            Ok(ListConstruction::Variable.construct(&columns()?, row_count)?)
+        }
+        BuiltinLowering::EmptyVec(data_type) => {
+            Ok(ListConstruction::empty_vector(data_type, row_count)?)
+        }
+        BuiltinLowering::Overlap => Ok(TypedArray::Boolean(execute_list_overlap(
+            &column(0)?,
+            &column(1)?,
+        )?)),
+        BuiltinLowering::Slice => Ok(execute_list_slice(&column(0)?, count(1)?, count(2)?)?),
+        BuiltinLowering::ListMin => Ok(execute_list_extremum(&column(0)?, ListExtremum::Min)?),
+        BuiltinLowering::ListMax => Ok(execute_list_extremum(&column(0)?, ListExtremum::Max)?),
+        BuiltinLowering::Mean => Ok(execute_list_mean(&column(0)?, row_errors, span)?),
+        BuiltinLowering::Dot => Ok(execute_list_dot(
+            &column(0)?,
+            &column(1)?,
+            row_errors,
+            span,
+        )?),
+        BuiltinLowering::Distance => Ok(execute_list_distance(
+            &column(0)?,
+            &column(1)?,
+            row_errors,
+            span,
+        )?),
         BuiltinLowering::Sum => execute_list_sum(&column(0)?, row_errors, span),
         BuiltinLowering::First => execute_list_item(&column(0)?, ListItem::First),
         BuiltinLowering::Last => execute_list_item(&column(0)?, ListItem::Last),
         BuiltinLowering::Count => Ok(TypedArray::Int64(execute_list_count(&column(0)?)?)),
         BuiltinLowering::Nth => execute_list_item(&column(0)?, ListItem::Nth(count(1)?)),
-        BuiltinLowering::Contains => Ok(TypedArray::Boolean(execute_contains(text(0)?, text(1)?))),
+        BuiltinLowering::Contains => {
+            let input = column(0)?;
+            if let TypedArray::Generic(_) = input {
+                Ok(TypedArray::Boolean(execute_list_contains(
+                    &input,
+                    &column(1)?,
+                )?))
+            } else {
+                Ok(TypedArray::Boolean(execute_contains(text(0)?, text(1)?)))
+            }
+        }
         BuiltinLowering::Cos => execute_math(&column(0)?, MathFunction::Cos, row_errors, span),
         BuiltinLowering::StartsWith => {
             Ok(TypedArray::Boolean(execute_starts_with(text(0)?, text(1)?)))
@@ -2708,40 +2753,201 @@ enum ListItem<'a> {
 }
 
 #[derive(Clone, Copy)]
+enum ListConstruction {
+    Fixed,
+    Variable,
+}
+
+impl ListConstruction {
+    fn operation(self) -> &'static str {
+        match self {
+            Self::Fixed => "array",
+            Self::Variable => "vec",
+        }
+    }
+
+    fn empty_vector(
+        data_type: &DataType,
+        row_count: usize,
+    ) -> error_stack::Result<TypedArray, RuntimeError> {
+        let DataType::List(field) = data_type else {
+            return Err(RuntimeError::CollectionExpectedList {
+                actual: data_type.clone(),
+            }
+            .into());
+        };
+        let values = new_empty_array(field.data_type());
+        let offsets = OffsetBuffer::from_lengths(std::iter::repeat_n(0, row_count));
+        let output = ListArray::try_new(field.clone(), offsets, values, None).map_err(|error| {
+            RuntimeError::CollectionArrow {
+                operation: "empty VEC construction",
+                source: error,
+            }
+        })?;
+        Ok(TypedArray::Generic(StdArc::new(output)))
+    }
+
+    /// Interleave whole Arrow columns into one child column. A row with any absent element has
+    /// an absent container, so a declared non-nullable element never appears in a valid list.
+    fn construct(
+        self,
+        columns: &[TypedArray],
+        row_count: usize,
+    ) -> error_stack::Result<TypedArray, RuntimeError> {
+        let Some(first) = columns.first() else {
+            return Err(RuntimeError::CollectionMissingArguments {
+                operation: self.operation(),
+            }
+            .into());
+        };
+        let child_type = first.data_type();
+        let mut sources = Vec::with_capacity(columns.len());
+        for column in columns {
+            if column.data_type() != child_type {
+                return Err(RuntimeError::CollectionTypeMismatch {
+                    operation: self.operation(),
+                    expected: child_type.clone(),
+                    actual: column.data_type(),
+                }
+                .into());
+            }
+            if column.len() != row_count {
+                return Err(RuntimeError::CollectionLengthMismatch {
+                    operation: self.operation(),
+                    expected: row_count,
+                    actual: column.len(),
+                }
+                .into());
+            }
+            sources.push(column.as_array());
+        }
+        let item_count = row_count.checked_mul(columns.len()).ok_or_else(|| {
+            RuntimeError::CollectionTooLarge {
+                operation: self.operation(),
+                limit: CollectionLimit::AddressableLength,
+            }
+        })?;
+        if matches!(self, Self::Variable) {
+            i32::try_from(item_count).map_err(|_| RuntimeError::CollectionTooLarge {
+                operation: self.operation(),
+                limit: CollectionLimit::VectorOffsets,
+            })?;
+        }
+        let mut indices = Vec::with_capacity(item_count);
+        let mut validity = Vec::with_capacity(row_count);
+        for row in 0..row_count {
+            let mut valid = true;
+            for (column_index, column) in columns.iter().enumerate() {
+                indices.push((column_index, row));
+                valid &= !column.as_array().is_null(row);
+            }
+            validity.push(valid);
+        }
+        let child = if columns.len() == 1 {
+            first.to_array_ref()
+        } else {
+            interleave(&sources, &indices).map_err(|error| RuntimeError::CollectionArrow {
+                operation: "list construction interleave",
+                source: error,
+            })?
+        };
+        let nulls = validity
+            .iter()
+            .any(|valid| !valid)
+            .then(|| NullBuffer::from(validity));
+        let field = StdArc::new(Field::new("item", child_type.clone(), false));
+        let output: ArrayRef = match self {
+            Self::Fixed => {
+                let width =
+                    i32::try_from(columns.len()).map_err(|_| RuntimeError::CollectionTooLarge {
+                        operation: self.operation(),
+                        limit: CollectionLimit::FixedWidth,
+                    })?;
+                StdArc::new(
+                    FixedSizeListArray::try_new(field, width, child, nulls).map_err(|error| {
+                        RuntimeError::CollectionArrow {
+                            operation: "ARRAY construction",
+                            source: error,
+                        }
+                    })?,
+                )
+            }
+            Self::Variable => {
+                // ListArray requires a non-nullable child to have no physical nulls, even when
+                // its parent row is null. Replace those hidden slots with a typed empty value.
+                let child = if let Some(nulls) = child.nulls() {
+                    let mask = BooleanArray::new(nulls.inner().clone(), None);
+                    let empty = new_null_array(&child_type, 1);
+                    let empty = empty
+                        .to_data()
+                        .into_builder()
+                        .nulls(None)
+                        .build()
+                        .map(make_array)
+                        .map_err(|error| RuntimeError::CollectionArrow {
+                            operation: "VEC null-element replacement",
+                            source: error,
+                        })?;
+                    zip(&mask, &child, &Scalar::new(empty)).map_err(|error| {
+                        RuntimeError::CollectionArrow {
+                            operation: "VEC null-element replacement",
+                            source: error,
+                        }
+                    })?
+                } else {
+                    child
+                };
+                let offsets =
+                    OffsetBuffer::from_lengths(std::iter::repeat_n(columns.len(), row_count));
+                StdArc::new(
+                    ListArray::try_new(field, offsets, child, nulls).map_err(|error| {
+                        RuntimeError::CollectionArrow {
+                            operation: "VEC construction",
+                            source: error,
+                        }
+                    })?,
+                )
+            }
+        };
+        Ok(TypedArray::Generic(output))
+    }
+}
+
+#[derive(Clone, Copy)]
 enum ListColumn<'a> {
     Variable(&'a ListArray),
     Fixed(&'a FixedSizeListArray),
 }
 
 impl<'a> ListColumn<'a> {
-    fn from_typed(input: &'a TypedArray) -> Result<Self, RuntimeError> {
+    fn from_typed(input: &'a TypedArray) -> error_stack::Result<Self, RuntimeError> {
         let TypedArray::Generic(array) = input else {
-            return Err(RuntimeError::InvalidBatch {
-                message: format!(
-                    "list builtin requires ARRAY or VEC input, found {:?}",
-                    input.data_type()
-                ),
-            });
+            return Err(RuntimeError::CollectionExpectedList {
+                actual: input.data_type(),
+            }
+            .into());
         };
         match array.data_type() {
             DataType::List(_) => match array.as_any().downcast_ref::<ListArray>() {
                 Some(array) => Ok(Self::Variable(array)),
-                None => Err(RuntimeError::InvalidBatch {
-                    message: "list data type is not backed by ListArray".to_string(),
-                }),
+                None => Err(RuntimeError::CollectionBackingMismatch {
+                    data_type: array.data_type().clone(),
+                }
+                .into()),
             },
             DataType::FixedSizeList(_, _) => {
                 match array.as_any().downcast_ref::<FixedSizeListArray>() {
                     Some(array) => Ok(Self::Fixed(array)),
-                    None => Err(RuntimeError::InvalidBatch {
-                        message: "fixed-size list data type is not backed by FixedSizeListArray"
-                            .to_string(),
-                    }),
+                    None => Err(RuntimeError::CollectionBackingMismatch {
+                        data_type: array.data_type().clone(),
+                    }
+                    .into()),
                 }
             }
-            other => Err(RuntimeError::InvalidBatch {
-                message: format!("list builtin requires ARRAY or VEC input, found {other:?}"),
-            }),
+            other => Err(RuntimeError::CollectionExpectedList {
+                actual: other.clone(),
+            }
+            .into()),
         }
     }
 
@@ -2777,24 +2983,954 @@ impl<'a> ListColumn<'a> {
         self.values().data_type()
     }
 
+    fn require_element_column(
+        self,
+        column: &TypedArray,
+        operation: &'static str,
+    ) -> error_stack::Result<(), RuntimeError> {
+        if column.data_type() != *self.element_data_type() {
+            return Err(RuntimeError::CollectionTypeMismatch {
+                operation,
+                expected: self.element_data_type().clone(),
+                actual: column.data_type(),
+            }
+            .into());
+        }
+        if column.len() != self.len() {
+            return Err(RuntimeError::CollectionLengthMismatch {
+                operation,
+                expected: self.len(),
+                actual: column.len(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    fn require_compatible(
+        self,
+        other: Self,
+        operation: &'static str,
+    ) -> error_stack::Result<(), RuntimeError> {
+        if other.element_data_type() != self.element_data_type() {
+            return Err(RuntimeError::CollectionTypeMismatch {
+                operation,
+                expected: self.element_data_type().clone(),
+                actual: other.element_data_type().clone(),
+            }
+            .into());
+        }
+        if other.len() != self.len() {
+            return Err(RuntimeError::CollectionLengthMismatch {
+                operation,
+                expected: self.len(),
+                actual: other.len(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     fn value_range(self, row: usize) -> Range<usize> {
         match self {
             Self::Variable(array) => {
                 let offsets = array.value_offsets();
                 let start = usize::try_from(offsets[row])
                     .assured("arrow offset and width buffers are non-negative by construction");
-                let end = usize::try_from(offsets[row + 1])
+                let next_row = row
+                    .checked_add(1)
+                    .assured("a row below an Arrow array's length has a following offset");
+                let end = usize::try_from(offsets[next_row])
                     .assured("arrow offset and width buffers are non-negative by construction");
                 start..end
             }
             Self::Fixed(array) => {
                 let width = usize::try_from(array.value_length())
                     .assured("arrow offset and width buffers are non-negative by construction");
-                let start = row * width;
-                start..start + width
+                let start = row
+                    .checked_mul(width)
+                    .assured("a fixed-list row and width fit within its validated child array");
+                let end = start
+                    .checked_add(width)
+                    .assured("a fixed-list row ends within its validated child array");
+                start..end
             }
         }
     }
+
+    fn contains_in_range(
+        self,
+        mut range: Range<usize>,
+        needle: ArrayRef,
+    ) -> error_stack::Result<bool, RuntimeError> {
+        if range.is_empty() || needle.is_null(0) {
+            return Ok(false);
+        }
+        // Membership uses the same IEEE equality as `=` and `IN`: NaN matches nothing and
+        // signed zeros compare equal. Arrow's generic float `eq` uses totalOrder instead.
+        if let Some(values) = self.values().as_any().downcast_ref::<Float32Array>() {
+            let needle = needle
+                .as_any()
+                .downcast_ref::<Float32Array>()
+                .verified("list and needle element types matched at compilation");
+            return Ok(
+                range.any(|index| !values.is_null(index) && values.value(index) == needle.value(0))
+            );
+        }
+        if let Some(values) = self.values().as_any().downcast_ref::<Float64Array>() {
+            let needle = needle
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .verified("list and needle element types matched at compilation");
+            return Ok(
+                range.any(|index| !values.is_null(index) && values.value(index) == needle.value(0))
+            );
+        }
+        let segment = self.values().slice(range.start, range.len());
+        let scalar = Scalar::new(needle);
+        let equal = eq(&segment, &scalar).map_err(|error| RuntimeError::CollectionArrow {
+            operation: "list contains comparison",
+            source: error,
+        })?;
+        Ok(equal.iter().any(|value| value == Some(true)))
+    }
+
+    fn aligned_ranges(
+        self,
+        right: Self,
+        row: usize,
+        row_errors: &mut RowErrors,
+        span: Span,
+    ) -> Option<(Range<usize>, Range<usize>)> {
+        if self.is_null(row) || right.is_null(row) {
+            return None;
+        }
+        let left = self.value_range(row);
+        let right = right.value_range(row);
+        if left.len() != right.len() {
+            row_errors.push(
+                row,
+                SideError {
+                    reason: SideErrorReason::VectorLengthMismatch {
+                        left: left.len(),
+                        right: right.len(),
+                    },
+                    span,
+                },
+            );
+            return None;
+        }
+        Some((left, right))
+    }
+}
+
+fn execute_list_contains(
+    input: &TypedArray,
+    needle: &TypedArray,
+) -> error_stack::Result<BooleanArray, RuntimeError> {
+    let list = ListColumn::from_typed(input)?;
+    list.require_element_column(needle, "contains")?;
+    let mut output = Vec::with_capacity(list.len());
+    for row in 0..list.len() {
+        if list.is_null(row) || needle.as_array().is_null(row) {
+            output.push(None);
+            continue;
+        }
+        let item = needle.as_array().slice(row, 1);
+        output.push(Some(list.contains_in_range(list.value_range(row), item)?));
+    }
+    Ok(BooleanArray::from(output))
+}
+
+fn execute_list_overlap(
+    left: &TypedArray,
+    right: &TypedArray,
+) -> error_stack::Result<BooleanArray, RuntimeError> {
+    let left = ListColumn::from_typed(left)?;
+    let right = ListColumn::from_typed(right)?;
+    left.require_compatible(right, "overlap")?;
+    let mut output = Vec::with_capacity(left.len());
+    for row in 0..left.len() {
+        if left.is_null(row) || right.is_null(row) {
+            output.push(None);
+            continue;
+        }
+        let left_range = left.value_range(row);
+        let right_range = right.value_range(row);
+        let mut found = false;
+        for index in left_range {
+            if left.values().is_null(index) {
+                continue;
+            }
+            let item = left.values().slice(index, 1);
+            if right.contains_in_range(right_range.clone(), item)? {
+                found = true;
+                break;
+            }
+        }
+        output.push(Some(found));
+    }
+    Ok(BooleanArray::from(output))
+}
+
+fn execute_list_slice(
+    input: &TypedArray,
+    start: CountOperand<'_>,
+    length: CountOperand<'_>,
+) -> error_stack::Result<TypedArray, RuntimeError> {
+    let list = ListColumn::from_typed(input)?;
+    let mut selected = Vec::new();
+    let offset_count = list
+        .len()
+        .checked_add(1)
+        .assured("an Arrow array's length is below the allocator's isize limit");
+    let mut offsets = Vec::with_capacity(offset_count);
+    let mut validity = Vec::with_capacity(list.len());
+    offsets.push(0_i32);
+    let mut identity = true;
+    for row in 0..list.len() {
+        let range = list.value_range(row);
+        let bounds = match (start.value(row), length.value(row)) {
+            (Some(start), Some(length)) if !list.is_null(row) => {
+                let start = match start {
+                    SignedCount::NonNegative(value) => value.min(range.len()),
+                    SignedCount::Negative(_) => 0,
+                };
+                let length = match length {
+                    SignedCount::NonNegative(value) => value,
+                    SignedCount::Negative(_) => 0,
+                };
+                let remaining = range.len() - start;
+                let end = start
+                    .checked_add(length.min(remaining))
+                    .assured("the slice end is bounded by the list row's length");
+                Some((start, end))
+            }
+            _ => None,
+        };
+        let Some((begin, end)) = bounds else {
+            validity.push(false);
+            identity = false;
+            offsets.push(*offsets.last().verified("slice offsets start at zero"));
+            continue;
+        };
+        validity.push(true);
+        identity &= begin == 0 && end == range.len();
+        let first = range
+            .start
+            .checked_add(begin)
+            .assured("the slice start is bounded by the child range");
+        let last = range
+            .start
+            .checked_add(end)
+            .assured("the slice end is bounded by the child range");
+        for index in first..last {
+            selected.push(u64::try_from(index).assured("an Arrow child index fits a u64"));
+        }
+        let next = i32::try_from(selected.len()).map_err(|_| RuntimeError::CollectionTooLarge {
+            operation: "slice",
+            limit: CollectionLimit::VectorOffsets,
+        })?;
+        offsets.push(next);
+    }
+    if identity && let ListColumn::Variable(_) = list {
+        return Ok(input.clone());
+    }
+    let indices = UInt64Array::from_iter_values(selected);
+    let child = take(list.values().as_ref(), &indices, None).map_err(|error| {
+        RuntimeError::CollectionArrow {
+            operation: "list slice take",
+            source: error,
+        }
+    })?;
+    let field = StdArc::new(Field::new("item", list.element_data_type().clone(), false));
+    let nulls = validity
+        .iter()
+        .any(|valid| !valid)
+        .then(|| NullBuffer::from(validity));
+    let result = ListArray::try_new(
+        field,
+        OffsetBuffer::new(ScalarBuffer::from(offsets)),
+        child,
+        nulls,
+    )
+    .map_err(|error| RuntimeError::CollectionArrow {
+        operation: "list slice construction",
+        source: error,
+    })?;
+    Ok(TypedArray::Generic(StdArc::new(result)))
+}
+
+fn execute_list_concat(inputs: &[TypedArray]) -> error_stack::Result<TypedArray, RuntimeError> {
+    if let [input] = inputs {
+        return Ok(input.clone());
+    }
+    let mut lists = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        lists.push(ListColumn::from_typed(input)?);
+    }
+    let first = *lists
+        .first()
+        .ok_or(RuntimeError::CollectionMissingArguments {
+            operation: "concat",
+        })?;
+    let mut fixed_width = Some(0_i32);
+    for list in &lists {
+        first.require_compatible(*list, "concat")?;
+        fixed_width = match (fixed_width, list) {
+            (Some(total), ListColumn::Fixed(array)) => {
+                Some(total.checked_add(array.value_length()).ok_or_else(|| {
+                    RuntimeError::CollectionTooLarge {
+                        operation: "concat",
+                        limit: CollectionLimit::FixedWidth,
+                    }
+                })?)
+            }
+            _ => None,
+        };
+    }
+    let children = lists
+        .iter()
+        .map(|list| list.values().as_ref())
+        .collect::<Vec<_>>();
+    let mut selected = Vec::new();
+    let offset_count = first
+        .len()
+        .checked_add(1)
+        .assured("an Arrow array's length is below the allocator's isize limit");
+    let mut offsets = Vec::with_capacity(offset_count);
+    let mut validity = Vec::with_capacity(first.len());
+    offsets.push(0_i32);
+    for row in 0..first.len() {
+        let valid = lists.iter().all(|list| !list.is_null(row));
+        validity.push(valid);
+        for (child_index, list) in lists.iter().enumerate() {
+            for index in list.value_range(row) {
+                selected.push((child_index, index));
+            }
+        }
+        offsets.push(i32::try_from(selected.len()).map_err(|_| {
+            RuntimeError::CollectionTooLarge {
+                operation: "concat",
+                limit: CollectionLimit::VectorOffsets,
+            }
+        })?);
+    }
+    let child =
+        interleave(&children, &selected).map_err(|error| RuntimeError::CollectionArrow {
+            operation: "list concat interleave",
+            source: error,
+        })?;
+    let field = StdArc::new(Field::new("item", first.element_data_type().clone(), false));
+    let nulls = validity
+        .iter()
+        .any(|valid| !valid)
+        .then(|| NullBuffer::from(validity));
+    let output: ArrayRef = match fixed_width {
+        Some(width) => StdArc::new(
+            FixedSizeListArray::try_new(field, width, child, nulls).map_err(|error| {
+                RuntimeError::CollectionArrow {
+                    operation: "ARRAY concat",
+                    source: error,
+                }
+            })?,
+        ),
+        None => StdArc::new(
+            ListArray::try_new(
+                field,
+                OffsetBuffer::new(ScalarBuffer::from(offsets)),
+                child,
+                nulls,
+            )
+            .map_err(|error| RuntimeError::CollectionArrow {
+                operation: "VEC concat",
+                source: error,
+            })?,
+        ),
+    };
+    Ok(TypedArray::Generic(output))
+}
+
+#[derive(Clone, Copy)]
+enum ListExtremum {
+    Min,
+    Max,
+}
+
+impl ListExtremum {
+    fn compare(
+        self,
+        candidate: &dyn Datum,
+        previous: &dyn Datum,
+    ) -> Result<BooleanArray, ArrowError> {
+        match self {
+            Self::Min => lt(candidate, previous),
+            Self::Max => gt(candidate, previous),
+        }
+    }
+
+    /// Fold a fixed-width child column lane by lane, comparing whole Arrow columns at once.
+    /// Nullable child items retain the segmented path below so the null-skipping rule is exact.
+    fn execute_fixed(
+        self,
+        list: &FixedSizeListArray,
+    ) -> error_stack::Result<TypedArray, RuntimeError> {
+        let width = usize::try_from(list.value_length())
+            .assured("Arrow fixed-list widths are non-negative by construction");
+        let values = list.values();
+        let mut best_indices = UInt64Array::from_iter_values((0..list.len()).map(|row| {
+            let index = row
+                .checked_mul(width)
+                .assured("each fixed-list row begins inside its validated child array");
+            u64::try_from(index).assured("an Arrow child index fits u64")
+        }));
+        for lane in 1..width {
+            let candidate_indices = UInt64Array::from_iter_values((0..list.len()).map(|row| {
+                let start = row
+                    .checked_mul(width)
+                    .assured("each fixed-list row begins inside its validated child array");
+                let index = start
+                    .checked_add(lane)
+                    .assured("a lane below the fixed width lies inside its child row");
+                u64::try_from(index).assured("an Arrow child index fits u64")
+            }));
+            let candidate = take(values.as_ref(), &candidate_indices, None).map_err(|error| {
+                RuntimeError::CollectionArrow {
+                    operation: "fixed extremum lane take",
+                    source: error,
+                }
+            })?;
+            let previous = take(values.as_ref(), &best_indices, None).map_err(|error| {
+                RuntimeError::CollectionArrow {
+                    operation: "fixed extremum best take",
+                    source: error,
+                }
+            })?;
+            let comparison = self.compare(&candidate, &previous).map_err(|error| {
+                RuntimeError::CollectionArrow {
+                    operation: "fixed extremum comparison",
+                    source: error,
+                }
+            })?;
+            let selected =
+                zip(&comparison, &candidate_indices, &best_indices).map_err(|error| {
+                    RuntimeError::CollectionArrow {
+                        operation: "fixed extremum selection",
+                        source: error,
+                    }
+                })?;
+            best_indices = selected
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .verified("zipping two U64 index arrays produces a U64 index array")
+                .clone();
+        }
+        let best_indices = UInt64Array::new(best_indices.values().clone(), list.nulls().cloned());
+        let output = take(values.as_ref(), &best_indices, None).map_err(|error| {
+            RuntimeError::CollectionArrow {
+                operation: "fixed extremum output take",
+                source: error,
+            }
+        })?;
+        Ok(array_ref_to_typed_array(output)?)
+    }
+}
+
+fn execute_list_extremum(
+    input: &TypedArray,
+    operation: ListExtremum,
+) -> error_stack::Result<TypedArray, RuntimeError> {
+    let list = ListColumn::from_typed(input)?;
+    if let ListColumn::Fixed(array) = list
+        && array.value_length() > 0
+        && array.values().null_count() == 0
+    {
+        return operation.execute_fixed(array);
+    }
+    let mut indices = Vec::with_capacity(list.len());
+    for row in 0..list.len() {
+        if list.is_null(row) {
+            indices.push(None);
+            continue;
+        }
+        let mut best = None;
+        for index in list.value_range(row) {
+            if list.values().is_null(index) {
+                continue;
+            }
+            if let Some(current) = best {
+                let candidate = list.values().slice(index, 1);
+                let previous = list.values().slice(current, 1);
+                let comparison = operation.compare(&candidate, &previous).map_err(|error| {
+                    RuntimeError::CollectionArrow {
+                        operation: "list extremum comparison",
+                        source: error,
+                    }
+                })?;
+                if comparison.value(0) {
+                    best = Some(index);
+                }
+            } else {
+                best = Some(index);
+            }
+        }
+        indices
+            .push(best.map(|index| u64::try_from(index).assured("an Arrow child index fits u64")));
+    }
+    let indices = UInt64Array::from(indices);
+    let output = take(
+        list.values().as_ref(),
+        &indices,
+        Some(TakeOptions { check_bounds: true }),
+    )
+    .map_err(|error| RuntimeError::CollectionArrow {
+        operation: "list extremum take",
+        source: error,
+    })?;
+    Ok(array_ref_to_typed_array(output)?)
+}
+
+fn execute_list_mean_numeric<T>(
+    list: ListColumn<'_>,
+    to_f64: impl Fn(T::Native) -> f64,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<Float64Array, RuntimeError>
+where
+    T: ArrowNumericType,
+{
+    let values = list
+        .values()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
+            data_type: list.element_data_type().clone(),
+        })?;
+    let mut output = Vec::with_capacity(list.len());
+    for row in 0..list.len() {
+        if list.is_null(row) {
+            output.push(None);
+            continue;
+        }
+        let mut total = 0.0_f64;
+        let mut count = 0_usize;
+        for index in list.value_range(row) {
+            if values.is_null(index) {
+                continue;
+            }
+            total += to_f64(values.value(index));
+            count = count
+                .checked_add(1)
+                .assured("the count cannot exceed the in-memory Arrow child length");
+        }
+        if count == 0 {
+            output.push(None);
+            continue;
+        }
+        let mean = total / count.approx_into::<f64>();
+        if mean.is_finite() {
+            output.push(Some(mean));
+        } else {
+            output.push(None);
+            row_errors.push(
+                row,
+                SideError {
+                    reason: SideErrorReason::NonFiniteResult(FloatOperation::Mean),
+                    span,
+                },
+            );
+        }
+    }
+    Ok(Float64Array::from(output))
+}
+
+fn execute_list_mean(
+    input: &TypedArray,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<TypedArray, RuntimeError> {
+    let list = ListColumn::from_typed(input)?;
+    let output = match list.element_data_type() {
+        DataType::UInt8 => {
+            execute_list_mean_numeric::<UInt8Type>(list, f64::from, row_errors, span)
+        }
+        DataType::Int8 => execute_list_mean_numeric::<Int8Type>(list, f64::from, row_errors, span),
+        DataType::UInt16 => {
+            execute_list_mean_numeric::<UInt16Type>(list, f64::from, row_errors, span)
+        }
+        DataType::Int16 => {
+            execute_list_mean_numeric::<Int16Type>(list, f64::from, row_errors, span)
+        }
+        DataType::UInt32 => {
+            execute_list_mean_numeric::<UInt32Type>(list, f64::from, row_errors, span)
+        }
+        DataType::Int32 => {
+            execute_list_mean_numeric::<Int32Type>(list, f64::from, row_errors, span)
+        }
+        DataType::UInt64 => execute_list_mean_numeric::<UInt64Type>(
+            list,
+            |value| value.approx_into(),
+            row_errors,
+            span,
+        ),
+        DataType::Int64 => execute_list_mean_numeric::<Int64Type>(
+            list,
+            |value| value.approx_into(),
+            row_errors,
+            span,
+        ),
+        DataType::Float32 => {
+            execute_list_mean_numeric::<Float32Type>(list, f64::from, row_errors, span)
+        }
+        DataType::Float64 => {
+            execute_list_mean_numeric::<Float64Type>(list, |value| value, row_errors, span)
+        }
+        other => Err(RuntimeError::CollectionNonNumericElement {
+            operation: "mean",
+            actual: other.clone(),
+        }
+        .into()),
+    }?;
+    Ok(TypedArray::Float64(output))
+}
+
+fn execute_list_dot_integer<T>(
+    left: ListColumn<'_>,
+    right: ListColumn<'_>,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<PrimitiveArray<T>, RuntimeError>
+where
+    T: ArrowNumericType,
+    T::Native: CheckedInteger,
+{
+    let left_values = left
+        .values()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
+            data_type: left.element_data_type().clone(),
+        })?;
+    let right_values = right
+        .values()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
+            data_type: right.element_data_type().clone(),
+        })?;
+    let mut output = Vec::with_capacity(left.len());
+    for row in 0..left.len() {
+        let Some((left_range, right_range)) = left.aligned_ranges(right, row, row_errors, span)
+        else {
+            output.push(None);
+            continue;
+        };
+        let mut total = T::Native::default();
+        let mut invalid = false;
+        for (left_index, right_index) in left_range.zip(right_range) {
+            if left_values.is_null(left_index) || right_values.is_null(right_index) {
+                invalid = true;
+                break;
+            }
+            let (product, product_failed) = left_values
+                .value(left_index)
+                .lane_product(right_values.value(right_index));
+            let (next, sum_failed) = total.lane_sum(product);
+            if product_failed || sum_failed {
+                row_errors.push(
+                    row,
+                    SideError {
+                        reason: SideErrorReason::IntegerOverflow(IntegerOperation::Dot),
+                        span,
+                    },
+                );
+                invalid = true;
+                break;
+            }
+            total = next;
+        }
+        output.push((!invalid).then_some(total));
+    }
+    Ok(PrimitiveArray::<T>::from_iter(output))
+}
+
+fn execute_list_dot_float<T>(
+    left: ListColumn<'_>,
+    right: ListColumn<'_>,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<PrimitiveArray<T>, RuntimeError>
+where
+    T: ArrowNumericType,
+    T::Native: CheckedFloat,
+{
+    if let (ListColumn::Fixed(left_array), ListColumn::Fixed(right_array)) = (left, right)
+        && left_array.value_length() == right_array.value_length()
+    {
+        return execute_fixed_dot_float::<T>(left_array, right_array, row_errors, span);
+    }
+    let left_values = left
+        .values()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
+            data_type: left.element_data_type().clone(),
+        })?;
+    let right_values = right
+        .values()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
+            data_type: right.element_data_type().clone(),
+        })?;
+    let mut output = Vec::with_capacity(left.len());
+    for row in 0..left.len() {
+        let Some((left_range, right_range)) = left.aligned_ranges(right, row, row_errors, span)
+        else {
+            output.push(None);
+            continue;
+        };
+        let mut total = T::Native::default();
+        let mut invalid = false;
+        for (left_index, right_index) in left_range.zip(right_range) {
+            if left_values.is_null(left_index) || right_values.is_null(right_index) {
+                invalid = true;
+                break;
+            }
+            total = total + left_values.value(left_index) * right_values.value(right_index);
+            if total.finite_lane().1 {
+                row_errors.push(
+                    row,
+                    SideError {
+                        reason: SideErrorReason::NonFiniteResult(FloatOperation::Dot),
+                        span,
+                    },
+                );
+                invalid = true;
+                break;
+            }
+        }
+        output.push((!invalid).then_some(total));
+    }
+    Ok(PrimitiveArray::<T>::from_iter(output))
+}
+
+/// Arrow multiplies every fixed-width child lane in one kernel. The row fold keeps the VM's
+/// ordered accumulation and non-finite side-error contract, which a whole-column sum would lose.
+fn execute_fixed_dot_float<T>(
+    left: &FixedSizeListArray,
+    right: &FixedSizeListArray,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<PrimitiveArray<T>, RuntimeError>
+where
+    T: ArrowNumericType,
+    T::Native: CheckedFloat,
+{
+    let products = arrow_mul(left.values(), right.values()).map_err(|error| {
+        RuntimeError::CollectionArrow {
+            operation: "fixed dot child multiplication",
+            source: error,
+        }
+    })?;
+    let products = products
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .verified("multiplying matching numeric Arrow children keeps their element type");
+    let width = usize::try_from(left.value_length())
+        .assured("Arrow fixed-list widths are non-negative by construction");
+    let mut output = Vec::with_capacity(left.len());
+    for row in 0..left.len() {
+        if left.is_null(row) || right.is_null(row) {
+            output.push(None);
+            continue;
+        }
+        let first = row
+            .checked_mul(width)
+            .assured("a fixed-list row begins inside its validated child array");
+        let end = first
+            .checked_add(width)
+            .assured("a fixed-list row ends inside its validated child array");
+        let mut total = T::Native::default();
+        let mut invalid = false;
+        for index in first..end {
+            if products.is_null(index) {
+                invalid = true;
+                break;
+            }
+            total = total + products.value(index);
+            if total.finite_lane().1 {
+                row_errors.push(
+                    row,
+                    SideError {
+                        reason: SideErrorReason::NonFiniteResult(FloatOperation::Dot),
+                        span,
+                    },
+                );
+                invalid = true;
+                break;
+            }
+        }
+        output.push((!invalid).then_some(total));
+    }
+    Ok(PrimitiveArray::<T>::from_iter(output))
+}
+
+fn execute_list_dot(
+    left: &TypedArray,
+    right: &TypedArray,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<TypedArray, RuntimeError> {
+    let left = ListColumn::from_typed(left)?;
+    let right = ListColumn::from_typed(right)?;
+    left.require_compatible(right, "dot")?;
+    match left.element_data_type() {
+        DataType::UInt8 => execute_list_dot_integer::<UInt8Type>(left, right, row_errors, span)
+            .map(TypedArray::UInt8),
+        DataType::Int8 => execute_list_dot_integer::<Int8Type>(left, right, row_errors, span)
+            .map(TypedArray::Int8),
+        DataType::UInt16 => execute_list_dot_integer::<UInt16Type>(left, right, row_errors, span)
+            .map(TypedArray::UInt16),
+        DataType::Int16 => execute_list_dot_integer::<Int16Type>(left, right, row_errors, span)
+            .map(TypedArray::Int16),
+        DataType::UInt32 => execute_list_dot_integer::<UInt32Type>(left, right, row_errors, span)
+            .map(TypedArray::UInt32),
+        DataType::Int32 => execute_list_dot_integer::<Int32Type>(left, right, row_errors, span)
+            .map(TypedArray::Int32),
+        DataType::UInt64 => execute_list_dot_integer::<UInt64Type>(left, right, row_errors, span)
+            .map(TypedArray::UInt64),
+        DataType::Int64 => execute_list_dot_integer::<Int64Type>(left, right, row_errors, span)
+            .map(TypedArray::Int64),
+        DataType::Float32 => execute_list_dot_float::<Float32Type>(left, right, row_errors, span)
+            .map(TypedArray::Float32),
+        DataType::Float64 => execute_list_dot_float::<Float64Type>(left, right, row_errors, span)
+            .map(TypedArray::Float64),
+        other => Err(RuntimeError::CollectionNonNumericElement {
+            operation: "dot",
+            actual: other.clone(),
+        }
+        .into()),
+    }
+}
+
+fn execute_list_distance_numeric<T>(
+    left: ListColumn<'_>,
+    right: ListColumn<'_>,
+    to_f64: impl Fn(T::Native) -> f64,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<Float64Array, RuntimeError>
+where
+    T: ArrowNumericType,
+{
+    let left_values = left
+        .values()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
+            data_type: left.element_data_type().clone(),
+        })?;
+    let right_values = right
+        .values()
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| RuntimeError::CollectionBackingMismatch {
+            data_type: right.element_data_type().clone(),
+        })?;
+    let mut output = Vec::with_capacity(left.len());
+    for row in 0..left.len() {
+        let Some((left_range, right_range)) = left.aligned_ranges(right, row, row_errors, span)
+        else {
+            output.push(None);
+            continue;
+        };
+        let mut squared = 0.0_f64;
+        let mut invalid = false;
+        for (left_index, right_index) in left_range.zip(right_range) {
+            if left_values.is_null(left_index) || right_values.is_null(right_index) {
+                invalid = true;
+                break;
+            }
+            let difference =
+                to_f64(left_values.value(left_index)) - to_f64(right_values.value(right_index));
+            squared += difference * difference;
+            if !squared.is_finite() {
+                row_errors.push(
+                    row,
+                    SideError {
+                        reason: SideErrorReason::NonFiniteResult(FloatOperation::Distance),
+                        span,
+                    },
+                );
+                invalid = true;
+                break;
+            }
+        }
+        output.push((!invalid).then_some(squared.sqrt()));
+    }
+    Ok(Float64Array::from(output))
+}
+
+fn execute_list_distance(
+    left: &TypedArray,
+    right: &TypedArray,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> error_stack::Result<TypedArray, RuntimeError> {
+    let left = ListColumn::from_typed(left)?;
+    let right = ListColumn::from_typed(right)?;
+    left.require_compatible(right, "distance")?;
+    let output = match left.element_data_type() {
+        DataType::UInt8 => {
+            execute_list_distance_numeric::<UInt8Type>(left, right, f64::from, row_errors, span)
+        }
+        DataType::Int8 => {
+            execute_list_distance_numeric::<Int8Type>(left, right, f64::from, row_errors, span)
+        }
+        DataType::UInt16 => {
+            execute_list_distance_numeric::<UInt16Type>(left, right, f64::from, row_errors, span)
+        }
+        DataType::Int16 => {
+            execute_list_distance_numeric::<Int16Type>(left, right, f64::from, row_errors, span)
+        }
+        DataType::UInt32 => {
+            execute_list_distance_numeric::<UInt32Type>(left, right, f64::from, row_errors, span)
+        }
+        DataType::Int32 => {
+            execute_list_distance_numeric::<Int32Type>(left, right, f64::from, row_errors, span)
+        }
+        DataType::UInt64 => execute_list_distance_numeric::<UInt64Type>(
+            left,
+            right,
+            |value| value.approx_into(),
+            row_errors,
+            span,
+        ),
+        DataType::Int64 => execute_list_distance_numeric::<Int64Type>(
+            left,
+            right,
+            |value| value.approx_into(),
+            row_errors,
+            span,
+        ),
+        DataType::Float32 => {
+            execute_list_distance_numeric::<Float32Type>(left, right, f64::from, row_errors, span)
+        }
+        DataType::Float64 => execute_list_distance_numeric::<Float64Type>(
+            left,
+            right,
+            |value| value,
+            row_errors,
+            span,
+        ),
+        other => Err(RuntimeError::CollectionNonNumericElement {
+            operation: "distance",
+            actual: other.clone(),
+        }
+        .into()),
+    }?;
+    Ok(TypedArray::Float64(output))
 }
 
 fn execute_list_count(input: &TypedArray) -> Result<Int64Array, RuntimeError> {
@@ -4606,6 +5742,10 @@ fn selected_rows(predicate: &BooleanArray) -> Vec<usize> {
 fn row_selected(predicate: &BooleanArray, row: usize) -> bool {
     !predicate.is_null(row) && predicate.value(row)
 }
+
+#[cfg(test)]
+#[path = "runtime_list_tests.rs"]
+mod list_tests;
 
 #[cfg(test)]
 mod tests {
