@@ -21001,8 +21001,7 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::io::stdout()
         .flush()
         .expect("lifecycle helper marker should flush");
-    std::future::pending::<()>().await;
-    None
+    std::future::pending::<SuiteOutcome>().await
 }
 
 /// Everything a scenario run may be configured with beyond cucumber's own options.
