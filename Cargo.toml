@@ -212,6 +212,7 @@ criterion = { workspace = true }
 cucumber = { workspace = true, features = ["libtest"] }
 h2 = { workspace = true }
 http = { workspace = true }
+httparse = { workspace = true }
 iceberg = { workspace = true }
 iceberg-catalog-rest = { workspace = true }
 iceberg-storage-opendal = { workspace = true }
@@ -392,6 +393,7 @@ h2 = "0.4"
 hdrhistogram = "7.5.4"
 http = "1"
 http-body-util = "0.1"
+httparse = "1"
 humantime = "2"
 hyper = "1"
 hyper-rustls = "0.27"
