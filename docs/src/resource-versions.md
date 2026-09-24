@@ -286,7 +286,7 @@ sees models that earlier statements of the same transaction create or drop.
 5. The rebuilt models pass the same checks as `CREATE`: registry validation of the complete
    candidate graph, and the leader's content checks for each changed VHOST, hash map, inferencer,
    and WASM processor against the target version. One failing model rejects the whole statement, and
-   the error names it, for example `invalid INFERENCER '<name>': ...`.
+   the error names it, for example `INFERENCER '<name>' binding validation failed in domain '<domain>': ...`.
 
 A rejection at any of these steps happens before any effect: no model is stored, nothing pauses,
 and every usage keeps its version.
@@ -416,8 +416,10 @@ they are usable is a property of the model that binds them. A version whose cont
 use, such as a malformed TLS bundle, completes like any other upload, and every existing binding
 keeps its version. The problem is reported only when a statement binds that version: the leader's
 content checks reject it before any effect, for example with
-`invalid TLS resource for VHOST '<name>': no certificates found`, and content that only a consumer
-proves fails the statement's activation.
+`invalid TLS resource for VHOST '<name>' in domain '<domain>' from '<resource>@<version>': no certificates found in TLS CA certificate`,
+and content that only a consumer proves fails the statement's activation. TLS failures identify
+the certificate, private key, or CA certificate by kind without exposing its filesystem path or
+material in the command result or server log.
 
 ## The `DYNAMIC` TLS Refresh
 

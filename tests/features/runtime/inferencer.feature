@@ -121,7 +121,6 @@ Feature: Inferencer resources
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
       """
-
     Examples:
       | cluster_size | replica_count | vector_type   | score_type    | model_file        | input_tensor | output_tensor | input_dimensions | output_dimensions | tensor_type       | expected_error                       |
       | 1            | 0             | ARRAY<F32, 3> | ARRAY<F32, 1> | simple_score.onnx | features     | score         | 3                | 1                 | DENSE TENSOR<F32> | incompatible shape                   |
@@ -219,6 +218,10 @@ Feature: Inferencer resources
         SET scores = scores
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG;
+      """
+    Then the last command error contains
+      """
+      INFERENCER 'incomplete_bindings' binding validation failed
       """
 
     Examples:

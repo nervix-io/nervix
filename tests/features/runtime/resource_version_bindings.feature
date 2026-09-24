@@ -827,7 +827,7 @@ Feature: Resource version bindings
         DECODE USING lookup_codec;
       UPLOAD RESOURCE shared_bundle VERSION '{{shared_v2}}';
       """
-    When these NSPL commands fail with "invalid INFERENCER 'score_model':"
+    When these NSPL commands fail with "INFERENCER 'score_model' binding validation failed"
       """
       REBIND RESOURCE shared_bundle TO VERSION 2;
       """

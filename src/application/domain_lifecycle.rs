@@ -279,7 +279,7 @@ impl SessionServiceImpl {
                     }
                     Err(error) => {
                         all_drained = false;
-                        last_status_error = Some(error);
+                        last_status_error = Some(format!("{error:#}"));
                         if tokio::time::Instant::now() >= deadline {
                             break;
                         }
