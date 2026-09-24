@@ -475,7 +475,7 @@ pub(super) fn collect_expression_field_paths(
             collect_expression_field_paths(low, fields);
             collect_expression_field_paths(high, fields);
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             collect_expression_field_paths(expr, fields);
         }
         Expr::Binary { left, right, .. } => {

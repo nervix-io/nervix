@@ -13,7 +13,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator as ModelBinaryOperator,
     CaseBranch as ModelCaseBranch, Expression as ModelExpression, FieldName, FieldReference,
-    FieldScope, Inheritance, Literal as ModelLiteral, MembershipOperator, ParseAsType,
+    FieldScope, Inheritance, JsonPath, Literal as ModelLiteral, MembershipOperator, ParseAsType,
     RangeOperator, RouteConstruction, UnaryOperator as ModelUnaryOperator,
 };
 use strum::VariantNames as _;
@@ -21,6 +21,7 @@ use thiserror::Error;
 
 use crate::{
     datetime::{DatetimeFormat, DatetimeParser, FormatDefect, ParseFormat, ParserZoneMismatch},
+    json::{JsonExtraction, JsonOperation, JsonOutput, JsonTarget, JsonTargetDefect},
     program::{
         BinaryOp, CalendarUnit, CaseArm, CastFailure, DateBinWidth, DatePart, DatetimeFunction,
         DatetimeFunctionName, DatetimeUnit, Disambiguation, Expr, FieldRef, FixedTimeUnit,
@@ -151,6 +152,11 @@ pub enum FrontendErrorKind {
     },
     #[error("INHERIT must be expanded against the input and output schemas")]
     UnexpandedInheritance,
+    #[error("{operation} cannot read {defect}")]
+    UnreadableJsonTarget {
+        operation: JsonOperation,
+        defect: JsonTargetDefect,
+    },
     #[error("cast target expected {expected}, found {found:?}")]
     UnsupportedCollectionCast {
         expected: CastTargetKind,
@@ -1197,6 +1203,28 @@ fn resolve_expression(
             expression: Box::new(resolve_expression(expression, resolve_field)?),
             target: target.clone(),
         },
+        ModelExpression::JsonValue {
+            document,
+            path,
+            target,
+        } => ModelExpression::JsonValue {
+            document: Box::new(resolve_expression(document, resolve_field)?),
+            path: path.clone(),
+            target: target.clone(),
+        },
+        ModelExpression::TryJsonValue {
+            document,
+            path,
+            target,
+        } => ModelExpression::TryJsonValue {
+            document: Box::new(resolve_expression(document, resolve_field)?),
+            path: path.clone(),
+            target: target.clone(),
+        },
+        ModelExpression::JsonExists { document, path } => ModelExpression::JsonExists {
+            document: Box::new(resolve_expression(document, resolve_field)?),
+            path: path.clone(),
+        },
         ModelExpression::Call {
             function,
             arguments,
@@ -1449,6 +1477,29 @@ fn lower_expression_with_span(
             expr: Box::new(lower_expression_with_span(expression, scope_policy, span)?),
             data_type: scalar_data_type(target, span)?,
             on_failure: CastFailure::Null,
+        },
+        ModelExpression::JsonValue {
+            document,
+            path,
+            target,
+        } => Expr::Json {
+            document: Box::new(lower_expression_with_span(document, scope_policy, span)?),
+            extraction: json_value_extraction(path, target, CastFailure::Error, span)?,
+        },
+        ModelExpression::TryJsonValue {
+            document,
+            path,
+            target,
+        } => Expr::Json {
+            document: Box::new(lower_expression_with_span(document, scope_policy, span)?),
+            extraction: json_value_extraction(path, target, CastFailure::Null, span)?,
+        },
+        ModelExpression::JsonExists { document, path } => Expr::Json {
+            document: Box::new(lower_expression_with_span(document, scope_policy, span)?),
+            extraction: JsonExtraction {
+                path: triomphe::Arc::new(path.clone()),
+                output: JsonOutput::Exists,
+            },
         },
         ModelExpression::Call {
             function,
@@ -1880,6 +1931,32 @@ impl DatetimeFunctionName {
             )
         })
     }
+}
+
+/// The extraction a `JSON_VALUE` or `TRY_JSON_VALUE` makes, reading its declared type.
+fn json_value_extraction(
+    path: &JsonPath,
+    target: &ParseAsType,
+    on_failure: CastFailure,
+    span: Span,
+) -> FrontendResult<JsonExtraction> {
+    let operation = match on_failure {
+        CastFailure::Error => JsonOperation::JsonValue,
+        CastFailure::Null => JsonOperation::TryJsonValue,
+    };
+    let target = JsonTarget::try_from(target).map_err(|defect| {
+        FrontendError::report(
+            span,
+            FrontendErrorKind::UnreadableJsonTarget { operation, defect },
+        )
+    })?;
+    Ok(JsonExtraction {
+        path: triomphe::Arc::new(path.clone()),
+        output: JsonOutput::Value {
+            target: triomphe::Arc::new(target),
+            on_failure,
+        },
+    })
 }
 
 fn scalar_data_type(target: &ParseAsType, span: Span) -> FrontendResult<DataType> {

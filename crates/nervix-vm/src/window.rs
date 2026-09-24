@@ -346,7 +346,7 @@ fn validate_window_input_scope(
             )))
         }
         Expr::FieldRef(_) | Expr::InternalFieldRef(_) | Expr::Literal(_) => Ok(()),
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             validate_window_input_scope(&expr.inner, inside_aggregate)
         }
         Expr::Binary { left, right, .. } => {
@@ -419,7 +419,7 @@ impl WindowAggregateExpr {
 
 fn offset_expr_demand_references(expr: &mut Expr, offset: usize) {
     match expr {
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             offset_expr_demand_references(&mut expr.inner, offset);
         }
         Expr::Binary { left, right, .. } => {
@@ -468,7 +468,7 @@ fn offset_expr_demand_references(expr: &mut Expr, offset: usize) {
 
 fn collect_expr_demand_references(expr: &Expr, counts: &mut [usize]) {
     match expr {
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             collect_expr_demand_references(&expr.inner, counts);
         }
         Expr::Binary { left, right, .. } => {
@@ -519,7 +519,9 @@ fn collect_expr_demand_references(expr: &Expr, counts: &mut [usize]) {
 
 fn validate_aggregate_expr(expr: &SpannedExpr) -> WindowAggregateResult<()> {
     match &expr.inner {
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => validate_aggregate_expr(expr),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
+            validate_aggregate_expr(expr)
+        }
         Expr::Binary { left, right, .. } => {
             validate_aggregate_expr(left)?;
             validate_aggregate_expr(right)
@@ -676,7 +678,9 @@ fn contains_aggregate_call(expr: &Expr) -> bool {
             WindowAggregateFunction::parse_name(function).is_some()
                 || args.iter().any(|arg| contains_aggregate_call(&arg.inner))
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => contains_aggregate_call(&expr.inner),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
+            contains_aggregate_call(&expr.inner)
+        }
         Expr::Binary { left, right, .. } => {
             contains_aggregate_call(&left.inner) || contains_aggregate_call(&right.inner)
         }
@@ -731,7 +735,7 @@ fn assign_expr_demands(expr: &mut WindowAggregateExpr, demands: &mut Vec<WindowA
 
 fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggregateDemand>) {
     match &mut expr.inner {
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             assign_vm_expr_demands(expr, demands);
         }
         Expr::Binary { left, right, .. } => {
@@ -871,7 +875,7 @@ fn collect_referenced_field_refs<'a>(expr: &'a WindowAggregateExpr, refs: &mut V
 fn collect_expr_field_refs<'a>(expr: &'a Expr, refs: &mut Vec<&'a FieldRef>) {
     match expr {
         Expr::FieldRef(field_ref) => refs.push(field_ref),
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             collect_expr_field_refs(&expr.inner, refs);
         }
         Expr::Binary { left, right, .. } => {

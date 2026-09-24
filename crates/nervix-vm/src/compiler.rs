@@ -19,6 +19,7 @@ use crate::{
         InstructionKind, InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef,
         RegisterSpace, RegisterType, ScalarValue, SelectArm,
     },
+    json::{JsonExtraction, JsonOutput, JsonScanOutput},
     membership::MembershipSet,
     program::{
         BinaryOp, CaseArm, CastFailure, Expr, FieldRef, FunctionName, InternalFieldNamespace,
@@ -184,6 +185,10 @@ struct Compiler {
     expr_cache: HashMap<CachedExpr, RegisterRef>,
     expr_cache_generation: usize,
     current_selection: Option<RegisterRef>,
+    /// The scan instruction answering the JSON extractions made so far from each document
+    /// register under each selection, so every later extraction from the same documents joins
+    /// that scan instead of parsing them again.
+    json_scans: HashMap<JsonScanKey, JsonScanSite>,
     allow_header_reads: bool,
     allow_header_writes: bool,
     udf_signatures: UdfSignatures,
@@ -233,6 +238,24 @@ enum ExprKey {
         low: Box<ExprKey>,
         high: Box<ExprKey>,
     },
+    Json {
+        document: Box<ExprKey>,
+        extraction: JsonExtraction,
+    },
+}
+
+/// The documents a JSON scan parses and the rows it parses them for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct JsonScanKey {
+    document: RegisterRef,
+    selection: Option<RegisterRef>,
+}
+
+/// Where a JSON scan was emitted and the register holding its answers.
+#[derive(Debug, Clone, Copy)]
+struct JsonScanSite {
+    instruction: usize,
+    answers: RegisterRef,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -749,6 +772,7 @@ impl Compiler {
                 layouts,
                 expr_cache: HashMap::new(),
                 expr_cache_generation: 0,
+                json_scans: HashMap::new(),
                 current_selection: None,
                 allow_header_reads: false,
                 allow_header_writes: false,
@@ -1354,6 +1378,23 @@ impl Compiler {
                 }
                 Ok(DataType::Boolean)
             }
+            Expr::Json {
+                document,
+                extraction,
+            } => {
+                let document_type = self.infer_expr_type(document)?;
+                if document_type != DataType::Utf8 {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "{} document must be STRING, found {document_type:?}",
+                            extraction.output.operation()
+                        ),
+                        span: expr.span,
+                    });
+                }
+                Ok(extraction.output.data_type())
+            }
         }
     }
 
@@ -1441,6 +1482,14 @@ impl Compiler {
             Expr::Between { operand, low, high } => Ok(self.expr_may_be_null(operand)?
                 || self.expr_may_be_null(low)?
                 || self.expr_may_be_null(high)?),
+            // A path that finds nothing or JSON null reads as null, whatever the document.
+            Expr::Json {
+                document,
+                extraction,
+            } => match extraction.output {
+                JsonOutput::Value { .. } => Ok(true),
+                JsonOutput::Exists => self.expr_may_be_null(document),
+            },
             Expr::Call { function, args } => {
                 if let FunctionName::LeakSensitive = function {
                     let arg = self.leak_sensitive_arg(args, expr.span)?;
@@ -1630,6 +1679,7 @@ impl Compiler {
             Expr::Between { operand, low, high } => Ok(self.expr_is_sensitive(operand)?
                 || self.expr_is_sensitive(low)?
                 || self.expr_is_sensitive(high)?),
+            Expr::Json { document, .. } => self.expr_is_sensitive(document),
         }
     }
 
@@ -2032,7 +2082,94 @@ impl Compiler {
                     self.emit_boolean_binary(BinaryOp::LtEq, operand, high, expr.span);
                 Ok(self.emit_boolean_binary(BinaryOp::And, at_least_low, at_most_high, expr.span))
             }
+            Expr::Json {
+                document,
+                extraction,
+            } => {
+                let output_type = self.infer_expr_type(expr)?;
+                let answer_type =
+                    Self::register_type_for_data_type(&output_type, expr.span, "JSON extraction")?;
+                let document = self.compile_expr(document)?;
+                Ok(self.compile_json_extraction(document, extraction, answer_type, expr.span))
+            }
         }
+    }
+
+    /// Answers `extraction` from the scan of `document` under the current selection, emitting
+    /// that scan when this is the first extraction from those documents, and joining it
+    /// otherwise. An extraction one operation repeats is answered once; the same extraction in
+    /// another operation is answered again so that its failures are reported against it.
+    fn compile_json_extraction(
+        &mut self,
+        document: RegisterRef,
+        extraction: &JsonExtraction,
+        answer_type: RegisterType,
+        span: Span,
+    ) -> RegisterRef {
+        let key = JsonScanKey {
+            document,
+            selection: self.current_selection,
+        };
+        let site = match self.json_scans.get(&key) {
+            Some(site) => *site,
+            None => {
+                let answers = self.alloc_temp(RegisterType::Generic);
+                self.emit(
+                    InstructionKind::JsonScan {
+                        dst: answers,
+                        input: document,
+                        outputs: Vec::new(),
+                    },
+                    span,
+                );
+                let instruction = self
+                    .instructions
+                    .len()
+                    .checked_sub(1)
+                    .verified("the scan was pushed onto the instructions just above");
+                let site = JsonScanSite {
+                    instruction,
+                    answers,
+                };
+                self.json_scans.insert(key, site);
+                site
+            }
+        };
+        let instruction = self
+            .instructions
+            .get_mut(site.instruction)
+            .verified("a scan site records the index of an instruction it emitted");
+        let outputs = instruction
+            .kind
+            .json_scan_outputs_mut()
+            .verified("the instruction a scan site records is the scan it emitted");
+        let mut answered = None;
+        for (index, output) in outputs.iter().enumerate() {
+            if output.extraction == *extraction && output.span == span {
+                answered = Some(index);
+                break;
+            }
+        }
+        let index = match answered {
+            Some(index) => index,
+            None => {
+                outputs.push(JsonScanOutput {
+                    extraction: extraction.clone(),
+                    span,
+                });
+                outputs.len() - 1
+            }
+        };
+        let dst = self.alloc_temp(answer_type);
+        self.emit(
+            InstructionKind::JsonField {
+                dst,
+                input: site.answers,
+                index,
+            },
+            span,
+        );
+        dst
     }
 
     fn compile_case(
@@ -2455,6 +2592,13 @@ impl ExprKey {
                 low: Box::new(Self::from_expr(low)),
                 high: Box::new(Self::from_expr(high)),
             },
+            Expr::Json {
+                document,
+                extraction,
+            } => Self::Json {
+                document: Box::new(Self::from_expr(document)),
+                extraction: extraction.clone(),
+            },
         }
     }
 }
@@ -2528,7 +2672,8 @@ impl SetElementDefect {
             | Expr::Call { .. }
             | Expr::Case { .. }
             | Expr::Membership { .. }
-            | Expr::Between { .. } => Some(Self::NotConstant),
+            | Expr::Between { .. }
+            | Expr::Json { .. } => Some(Self::NotConstant),
         }
     }
 
@@ -2619,7 +2764,8 @@ fn evaluate_set_element(element: &SpannedExpr) -> Result<TypedArray, SetElementD
         | Expr::Call { .. }
         | Expr::Case { .. }
         | Expr::Membership { .. }
-        | Expr::Between { .. } => Err(SetElementDefect::NotConstant),
+        | Expr::Between { .. }
+        | Expr::Json { .. } => Err(SetElementDefect::NotConstant),
     }
 }
 
@@ -2704,7 +2850,7 @@ fn fold_constant_expr(expr: &SpannedExpr) -> Result<Option<FoldedValue>, Compile
                 .transpose()
                 .map(Option::flatten)
         }
-        Expr::Membership { .. } | Expr::Between { .. } => Ok(None),
+        Expr::Membership { .. } | Expr::Between { .. } | Expr::Json { .. } => Ok(None),
     }
 }
 
@@ -3683,6 +3829,7 @@ fn expression_contains_udf(expr: &SpannedExpr) -> bool {
                 || expression_contains_udf(low)
                 || expression_contains_udf(high)
         }
+        Expr::Json { document, .. } => expression_contains_udf(document),
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
 }
@@ -3732,6 +3879,7 @@ fn expression_contains_volatile_udf(expr: &SpannedExpr, signatures: &UdfSignatur
                 || expression_contains_volatile_udf(low, signatures)
                 || expression_contains_volatile_udf(high, signatures)
         }
+        Expr::Json { document, .. } => expression_contains_volatile_udf(document, signatures),
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
 }
@@ -3806,7 +3954,16 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
             builtin_semantics_for_lowering(lowering).supports_common_subexpression_elimination()
         }
         InstructionKind::Inject { .. } => false,
-        InstructionKind::Select { .. } => true,
+        InstructionKind::Select { .. } | InstructionKind::JsonField { .. } => true,
+        // A scan whose every answer yields null for what it cannot read reports nothing that
+        // matters once no answer is read.
+        InstructionKind::JsonScan { outputs, .. } => {
+            let mut reports = false;
+            for output in outputs {
+                reports |= output.extraction.output.reports_defects();
+            }
+            !reports
+        }
     }
 }
 
@@ -3839,8 +3996,10 @@ fn instruction_observes_selection(kind: &InstructionKind) -> bool {
         | InstructionKind::Literal { .. }
         | InstructionKind::NullLiteral { .. }
         | InstructionKind::Uninitialized { .. }
-        | InstructionKind::Select { .. } => false,
-        InstructionKind::Inject { .. } => true,
+        | InstructionKind::Select { .. }
+        | InstructionKind::JsonField { .. } => false,
+        // Parsing a document costs far more than narrowing to the rows that need it.
+        InstructionKind::Inject { .. } | InstructionKind::JsonScan { .. } => true,
     }
 }
 
@@ -3932,7 +4091,9 @@ fn rewrite_instruction_output(kind: &mut InstructionKind, dst: RegisterRef) {
         | InstructionKind::Cast { dst: output, .. }
         | InstructionKind::Builtin { dst: output, .. }
         | InstructionKind::Inject { dst: output, .. }
-        | InstructionKind::Select { dst: output, .. } => *output = dst,
+        | InstructionKind::Select { dst: output, .. }
+        | InstructionKind::JsonScan { dst: output, .. }
+        | InstructionKind::JsonField { dst: output, .. } => *output = dst,
     }
 }
 
@@ -3946,7 +4107,9 @@ fn rewrite_temp_input(instruction: &mut Instruction, from: RegisterRef, to_index
     match &mut instruction.kind {
         InstructionKind::Move { input, .. }
         | InstructionKind::Unary { input, .. }
-        | InstructionKind::Cast { input, .. } => rewrite(input),
+        | InstructionKind::Cast { input, .. }
+        | InstructionKind::JsonScan { input, .. }
+        | InstructionKind::JsonField { input, .. } => rewrite(input),
         InstructionKind::Assign {
             input, fallback, ..
         } => {
@@ -3994,7 +4157,9 @@ fn rewrite_temp_output(kind: &mut InstructionKind, to_index: usize) {
         | InstructionKind::Cast { dst, .. }
         | InstructionKind::Builtin { dst, .. }
         | InstructionKind::Inject { dst, .. }
-        | InstructionKind::Select { dst, .. } => dst,
+        | InstructionKind::Select { dst, .. }
+        | InstructionKind::JsonScan { dst, .. }
+        | InstructionKind::JsonField { dst, .. } => dst,
     };
     output.index = to_index;
 }

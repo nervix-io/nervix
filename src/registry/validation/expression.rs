@@ -354,6 +354,15 @@ fn rewrite_lookup_hash_map_expr(
             data_type: data_type.clone(),
             on_failure: *on_failure,
         },
+        Expr::Json {
+            document,
+            extraction,
+        } => Expr::Json {
+            document: Box::new(rewrite_lookup_hash_map_expr(
+                domain, identifier, models, document, calls, next_field,
+            )?),
+            extraction: extraction.clone(),
+        },
         Expr::Call { function, args } => {
             if let FunctionName::LookupHashMap = function {
                 if args.len() != 3 {
@@ -522,7 +531,7 @@ fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>)
         Expr::FieldRef(field_ref) => {
             refs.push((field_ref.relay.clone(), field_ref.field.clone()));
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             collect_expr_field_refs(expr, refs);
         }
         Expr::Binary { left, right, .. } => {
@@ -564,7 +573,9 @@ fn expr_uses_header_read(expr: &SpannedExpr) -> bool {
                 || expr_uses_header_read(low)
                 || expr_uses_header_read(high)
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expr_uses_header_read(expr),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
+            expr_uses_header_read(expr)
+        }
         Expr::Binary { left, right, .. } => {
             expr_uses_header_read(left) || expr_uses_header_read(right)
         }

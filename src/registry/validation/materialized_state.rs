@@ -199,9 +199,19 @@ fn expression_contains_nondeterministic_or_side_effect_call(
         Expression::Literal(_) | Expression::Field(_) => false,
         Expression::Unary { expression, .. }
         | Expression::Cast { expression, .. }
-        | Expression::TryCast { expression, .. } => {
-            expression_contains_nondeterministic_or_side_effect_call(expression, models)
+        | Expression::TryCast { expression, .. }
+        | Expression::JsonValue {
+            document: expression,
+            ..
         }
+        | Expression::TryJsonValue {
+            document: expression,
+            ..
+        }
+        | Expression::JsonExists {
+            document: expression,
+            ..
+        } => expression_contains_nondeterministic_or_side_effect_call(expression, models),
         Expression::Binary { left, right, .. } => {
             expression_contains_nondeterministic_or_side_effect_call(left, models)
                 || expression_contains_nondeterministic_or_side_effect_call(right, models)

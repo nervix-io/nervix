@@ -341,6 +341,31 @@ pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNs
             expression_to_nspl(expression)?,
             parse_as_to_keyword(target)
         )),
+        Expression::JsonValue {
+            document,
+            path,
+            target,
+        } => Ok(format!(
+            "JSON_VALUE({}, {} AS {})",
+            expression_to_nspl(document)?,
+            string_literal(&path.to_string()),
+            parse_as_to_keyword(target)
+        )),
+        Expression::TryJsonValue {
+            document,
+            path,
+            target,
+        } => Ok(format!(
+            "TRY_JSON_VALUE({}, {} AS {})",
+            expression_to_nspl(document)?,
+            string_literal(&path.to_string()),
+            parse_as_to_keyword(target)
+        )),
+        Expression::JsonExists { document, path } => Ok(format!(
+            "JSON_EXISTS({}, {})",
+            expression_to_nspl(document)?,
+            string_literal(&path.to_string())
+        )),
         Expression::Call {
             function,
             arguments,
@@ -5317,6 +5342,44 @@ mod tests {
         for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
             expression_to_nspl(&float_value(value)).expect_err("must not render");
         }
+    }
+
+    #[test]
+    fn renders_json_extractions_with_their_canonical_path_and_declared_type() {
+        let path = |text: &str| crate::JsonPath::parse(text).expect("test paths are valid");
+        let document = || Box::new(scoped_field(FieldScope::Input, "doc"));
+        let vector = ParseAsType::Vec {
+            element: Box::new(ParseAsType::Array {
+                element: Box::new(ParseAsType::F32),
+                len: nonzero_ext::nonzero!(2_u32),
+            }),
+        };
+        assert_eq!(
+            expression_to_nspl(&Expression::JsonValue {
+                document: document(),
+                path: path(r#"$["plain"][0]"#),
+                target: ParseAsType::I64,
+            })
+            .expect("must render"),
+            "JSON_VALUE(input.doc, '$.plain[0]' AS I64)"
+        );
+        assert_eq!(
+            expression_to_nspl(&Expression::TryJsonValue {
+                document: document(),
+                path: path(r#"$["odd key"]"#),
+                target: vector,
+            })
+            .expect("must render"),
+            r#"TRY_JSON_VALUE(input.doc, '$["odd key"]' AS VEC<ARRAY<F32, 2>>)"#
+        );
+        assert_eq!(
+            expression_to_nspl(&Expression::JsonExists {
+                document: document(),
+                path: path(r#"$["it's \"quoted\""]"#),
+            })
+            .expect("must render"),
+            r#"JSON_EXISTS(input.doc, $s$$["it's \"quoted\""]$s$)"#
+        );
     }
 
     #[test]

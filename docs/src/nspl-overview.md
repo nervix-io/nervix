@@ -481,6 +481,10 @@ Supported expression surface:
 - [explicit conversions](filter-map-functions.md#conversions) only: `expr AS TYPE`, which fails a
   message whose value does not convert, and `TRY_CAST(expr AS TYPE)`, which yields a typed null
   for it instead
+- [JSON extraction](filter-map-functions.md#json-documents) from `STRING` values holding JSON:
+  `JSON_VALUE(doc, '$.path' AS TYPE)`, which fails a message whose document or value does not read
+  as `TYPE`, `TRY_JSON_VALUE(doc, '$.path' AS TYPE)`, which yields a typed null for it instead, and
+  `JSON_EXISTS(doc, '$.path')`; `TYPE` may be a scalar, `VEC<...>`, or `ARRAY<..., n>` type
 
 Conditional result arms must have one exact type. Searched `CASE` conditions and the `IF` condition
 must be `BOOL`; simple `CASE` match values must have the operand's exact type. Arms are tested in

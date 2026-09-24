@@ -23,6 +23,7 @@ use crate::{
     CompileError, RegisterType,
     extremum::Extremum,
     ip_address::NetworkSource,
+    json::JsonOutput,
     membership::MembershipSet,
     program::{BinaryOp, CastFailure, DatetimeFunction, Expr, FunctionName, SpannedExpr, UnaryOp},
     regexp::{RegexpCall, RegexpFunction},
@@ -760,6 +761,24 @@ pub const fn range_semantics() -> OperationSemantics {
         has_side_effects: false,
         can_error: false,
         null_propagation: NullPropagation::Custom,
+    }
+}
+
+/// A JSON extraction never has side effects and depends only on its document. `JSON_VALUE` and
+/// `JSON_EXISTS` fail a row whose document or value they cannot read, while `TRY_JSON_VALUE`
+/// yields a typed null for it. A value read can be null wherever the path finds nothing or JSON
+/// null, while `JSON_EXISTS` is null exactly where its document is.
+pub const fn json_semantics(output: &JsonOutput) -> OperationSemantics {
+    let null_propagation = match output {
+        JsonOutput::Value { .. } => NullPropagation::Custom,
+        JsonOutput::Exists => NullPropagation::Strict,
+    };
+    OperationSemantics {
+        volatility: Volatility::Immutable,
+        dependency_scope: DependencyScope::Constant,
+        has_side_effects: false,
+        can_error: output.reports_defects(),
+        null_propagation,
     }
 }
 
@@ -2329,6 +2348,13 @@ pub fn expr_semantics(expr: &SpannedExpr) -> Option<ExpressionSemantics> {
                 expr_semantics(low)?,
                 expr_semantics(high)?,
             ],
+        )),
+        Expr::Json {
+            document,
+            extraction,
+        } => Some(ExpressionSemantics::from_operation(
+            json_semantics(&extraction.output),
+            [expr_semantics(document)?],
         )),
     }
 }
