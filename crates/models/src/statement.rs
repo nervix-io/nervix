@@ -29,9 +29,9 @@ use crate::{
     FieldName, GeneratorName, InferencerName, IngestorName, JsonType, JunctionName, LookupName,
     ModelName, NodeRef, ParseAsType, PlacementName, PulsarSubscriptionName, QueueGroupName,
     QueueName, RebindResource, ReingestorName, RelayName, ReordererName, RequestedResourceVersion,
-    ResourceName, SchemaFingerprint, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest, UdfName,
-    UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
+    ResetWasmState, ResourceName, SchemaFingerprint, SchemaName, SignalingProtocolName,
+    SubjectName, SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest,
+    UdfName, UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
     WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
     WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
     WindowProcessorName, WireSchemaName,
@@ -46,6 +46,7 @@ pub enum Statement {
     CreateUser(CreateStatement<CreateUser>),
     CreateResource(CreateStatement<CreateResource>),
     RebindResource(RebindResource),
+    ResetWasmState(ResetWasmState),
     UploadResource(UploadResource),
     StartDomain(StartDomain),
     StopDomain(StopDomain),
@@ -107,6 +108,7 @@ impl Statement {
                     | Self::StopDomain(_)
                     | Self::DrainNode(_)
                     | Self::Relocate(_)
+                    | Self::ResetWasmState(_)
             )
     }
 
@@ -164,7 +166,8 @@ impl Statement {
             | Self::ShowRelayMaterializedState(_)
             | Self::ShowClusterStatus(_)
             | Self::ShowTransactions(_)
-            | Self::DescribeTransaction(_) => false,
+            | Self::DescribeTransaction(_)
+            | Self::ResetWasmState(_) => false,
         }
     }
 }

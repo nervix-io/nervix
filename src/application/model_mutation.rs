@@ -165,6 +165,7 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
                 | Statement::UncordonNode(_)
                 | Statement::DrainNode(_)
                 | Statement::Relocate(_)
+                | Statement::ResetWasmState(_)
         )
 }
 
@@ -859,13 +860,18 @@ impl SessionServiceImpl {
                 .iter()
                 .any(|statement| matches!(statement, Statement::RebindResource(_)))
         {
-            let captured =
-                match Box::pin(self.plan_transaction_statements(&domain, &statements, 0, false))
-                    .await
-                {
-                    Ok(captured) => captured,
-                    Err(error) => return command_error(transaction_planning_error_message(&error)),
-                };
+            let captured = match Box::pin(self.plan_transaction_statements(
+                &domain,
+                &statements,
+                &[],
+                0,
+                false,
+            ))
+            .await
+            {
+                Ok(captured) => captured,
+                Err(error) => return command_error(transaction_planning_error_message(&error)),
+            };
             let Some(step) = captured.plan.steps().first().cloned() else {
                 return command_error(
                     "resource rebind planning produced no model step".to_string(),
@@ -2151,6 +2157,7 @@ impl SessionServiceImpl {
             | Statement::AlterGenerator(_)
             | Statement::AlterPlacement(_)
             | Statement::RebindResource(_)
+            | Statement::ResetWasmState(_)
             | Statement::Drop(_) => {
                 unreachable!("model mutations are handled before statement dispatch")
             }
@@ -2422,7 +2429,7 @@ mod tests {
         assert_eq!(schema.fields.len(), 1);
         assert_eq!(schema.fields[0].name.as_str(), "user_id");
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2466,7 +2473,7 @@ mod tests {
             1
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2503,7 +2510,7 @@ mod tests {
             "implicit batch must not create later models"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2557,7 +2564,7 @@ mod tests {
             .expect("open transaction must remain replicated");
         assert_eq!(transaction.pending_statement_count(), 1);
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2601,7 +2608,7 @@ mod tests {
             "failed model batch must not persist schema"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2665,7 +2672,7 @@ mod tests {
         assert_eq!(deduplicator.mode, AckMode::Detached);
         assert_eq!(emitter.mode, AckMode::Detached);
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2727,7 +2734,7 @@ mod tests {
             "notifications_all"
         );
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -2798,7 +2805,7 @@ mod tests {
         assert_eq!(deduplicator.max_time, "10m");
         assert_eq!(deduplicator.mode, nervix_models::AckMode::Attached);
 
-        subscriptions.stop_all(&service).await;
+        subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
     }
 

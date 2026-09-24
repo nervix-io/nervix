@@ -123,6 +123,7 @@ pub fn statement_parser<'src>()
         crate::node_control::drain_node_parser().map(Statement::DrainNode),
         crate::relocation::relocate_parser().map(Statement::Relocate),
         crate::rebind_resource::rebind_resource_parser().map(Statement::RebindResource),
+        crate::reset_wasm_state::reset_wasm_state_parser().map(Statement::ResetWasmState),
         crate::relocation::describe_relocation_parser().map(Statement::DescribeRelocation),
         crate::drop_stmt::drop_node_parser().map(Statement::DropNode),
         crate::drop_stmt::drop_parser().map(Statement::Drop),

@@ -181,6 +181,15 @@ impl RelayRecordBatch {
         Self::from_messages(schema, vec![RelayMessage { key, record, acks }])
     }
 
+    /// One unbranched row of `schema` without acknowledgements, for tests outside the runtime.
+    #[cfg(test)]
+    pub(crate) fn unbranched_for_test(schema: Arc<CompiledSchema>, record: RuntimeRow) -> Self {
+        meticulous::ResultExt::assured(
+            Self::single(schema, None, record, AckSet::empty()),
+            "a test row is built for the schema it is batched under",
+        )
+    }
+
     pub(super) fn from_messages(
         schema: Arc<CompiledSchema>,
         messages: Vec<RelayMessage>,

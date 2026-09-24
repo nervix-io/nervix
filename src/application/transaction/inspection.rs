@@ -208,8 +208,19 @@ impl SessionServiceImpl {
             .iter()
             .map(|queued| queued.statement.clone())
             .collect::<Vec<_>>();
+        let operation_references = transaction
+            .statements
+            .iter()
+            .map(|queued| queued.request_reference.clone())
+            .collect::<Vec<_>>();
         let captured = self
-            .plan_transaction_statements(&transaction.domain, &statements, 0, true)
+            .plan_transaction_statements(
+                &transaction.domain,
+                &statements,
+                &operation_references,
+                0,
+                true,
+            )
             .await
             .change_context(InspectedReportError::Planning {
                 transaction_id: transaction.id.clone(),

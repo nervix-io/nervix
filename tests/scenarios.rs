@@ -15186,6 +15186,31 @@ async fn then_node_observability_metric_with_labels_eventually_reaches(
         .await;
 }
 
+#[then(
+    expr = "within {string} node {string} observability metric {string} with labels eventually \
+            reaches at least {int}"
+)]
+async fn then_within_duration_node_observability_metric_with_labels_eventually_reaches(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    metric_name: String,
+    minimum_value: i64,
+    #[step] step: &Step,
+) {
+    let wait =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    world
+        .wait_for_observability_metric_at_least(
+            &node_id,
+            &metric_name,
+            minimum_value,
+            Some(wait),
+            step,
+        )
+        .await;
+}
+
 #[then(expr = "node {string} interconnection metrics use only bounded dimensions")]
 async fn then_node_interconnection_metrics_use_bounded_dimensions(
     world: &mut ScenarioWorld,
@@ -20985,6 +21010,10 @@ fn main() {
     outcome.end_process();
 }
 
+/// Holds one dependency container open until the parent scenario kills this process.
+///
+/// The helper never finishes on its own, so it never produces an outcome: the pending future
+/// carries the caller's return type rather than a value this function could never reach.
 async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     let mut dependencies = TestDependencies::default();
     dependencies
@@ -21001,8 +21030,7 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::io::stdout()
         .flush()
         .expect("lifecycle helper marker should flush");
-    std::future::pending::<()>().await;
-    None
+    std::future::pending::<SuiteOutcome>().await
 }
 
 /// Everything a scenario run may be configured with beyond cucumber's own options.

@@ -3,6 +3,332 @@ Feature: Coordinated WASM processor state reset
   Records already completed before the reset remain completed, and records admitted afterwards
   can observe only the new lifetime.
 
+  Scenario Outline: NSPL resets one WASM branch through the public command path
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: Retrying an NSPL reset keeps the selected branch's new lifetime
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And this NSPL command request with execution reference "retry-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command request succeeded
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And this NSPL command request with execution reference "retry-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command request succeeded
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario: A reset reply lost across a leader change keeps its command identity
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And a 3 node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "new_leader"
+    Given command response delivery on node "{{old_leader}}" pauses after execution
+    When the active session begins this NSPL command request with execution reference "lost-reset-{{test_id}}" in the background
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the command response delivery pause on node "{{old_leader}}" is reached
+    When the background command request connection is dropped
+    And the command response delivery pause on node "{{old_leader}}" is released
+    And leadership is transferred from node "{{old_leader}}" to node "{{new_leader}}"
+    Then node "{{new_leader}}" eventually reports leader "{{new_leader}}"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And this NSPL command request with execution reference "lost-reset-{{test_id}}" is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command request succeeded
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
+  Scenario Outline: An expired reset identity cannot start a guest-state lifetime
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And this NSPL command request with an execution reference created "1h" before now is executed on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then the last command error contains
+      """
+      has expired
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Invalid NSPL reset selections leave the active branch unchanged
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a 1 node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And this NSPL command request is executed on the leader node
+      """
+      <command>
+      """
+    Then the last command error contains
+      """
+      <error>
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
+    Examples:
+      | command                                                                                                   | error                                       |
+      | RESET WASM PROCESSOR missing_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };     | does not exist                              |
+      | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN absent_domain FOR BRANCH VALUES { tenant = 'alpha' }; | names domain                                |
+      | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR UNBRANCHED;                            | invalid branch scope                        |
+      | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 7 };          | requires an exact STRING literal            |
+      | RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'unseen' };   | no active execution for the selected branch |
+
+  Scenario Outline: NSPL all-branch reset replaces each active branch together
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":1}
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR ALL BRANCHES;
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      key={"tenant":"beta"} | "tenant":"beta" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: NSPL unbranched reset starts one fresh guest lifetime
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And an unbranched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"root","sequence":1}
+      """
+    When these NSPL commands are executed through the client on the leader node
+      """
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR UNBRANCHED;
+      """
+    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"root","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"root","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      "tenant":"unbranched" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
+  Scenario Outline: An ordered transaction reports and applies its WASM reset effect
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
+    And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    Then transaction "{{transaction_id}}" eventually has state "COMMITTED"
+    When client "owner" executes these NSPL commands
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}' FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /report/operations/0/operation/kind = "RESET_WASM_STATE"
+      /report/execution_steps/0/actual/outcome/status = "APPLIED"
+      """
+    When client "owner" executes these NSPL commands
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}';
+      """
+    Then the last command output contains
+      """
+      processor=counting_guest
+      """
+    And the last command output contains
+      """
+      WASM_STATE_RESET
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":2}
+      """
+    Then the relay subscription does not receive a payload within "1500ms"
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":3}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"alpha"} | "tenant":"alpha" | "note":"even"
+      """
+
+    Examples:
+      | cluster_size | replica_count |
+      | 1            | 0             |
+      | 3            | 1             |
+
   Scenario Outline: Resetting one WASM branch survives restart and leaves its sibling lifetime intact
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And the production sticky scheduler is configured
@@ -250,6 +576,10 @@ Feature: Coordinated WASM processor state reset
     And a 1 node nervix cluster is started
     And node "node-1" has state-counting WASM processor fixture resource directory "wasm_processor"
     And a branched state-counting WASM reset graph is running
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":1}
+      """
     When WASM processor "counting_guest" state reset for branch fails
       """
       {"unexpected":"alpha"}
@@ -322,6 +652,10 @@ Feature: Coordinated WASM processor state reset
     Then the last command error contains
       """
       reset target does not match WASM processor 'counting_guest' branching
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"alpha","sequence":0}
       """
     When WASM processor "counting_guest" state is reset through node "node-1" for branch
       """

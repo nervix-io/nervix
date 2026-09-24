@@ -583,6 +583,7 @@ thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.7.0", features = ["stats"] }
 tikv-jemallocator = { version = "0.7.0", features = ["stats"] }
 tokio = "1"
+turmoil = "0.7.2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 # 0.14 adds explicit AWS-LC support; the previous 0.13 line depended on Ring.
 tokio-rustls = "0.26"

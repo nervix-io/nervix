@@ -9,6 +9,10 @@
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_dashmap as dashmap;
+#[cfg(all(feature = "shuttle", feature = "turmoil"))]
+compile_error!(
+    "nervix-interconnect: Shuttle and Turmoil scheduler modes cannot be enabled together"
+);
 #[cfg(feature = "shuttle")]
 extern crate shuttle_parking_lot as parking_lot;
 #[cfg(feature = "shuttle")]

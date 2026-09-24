@@ -75,6 +75,11 @@ pub enum TransactionCommitStepKind {
         resource: ResourceName,
         already_existed: bool,
     },
+    ResetWasmState {
+        reset: Box<crate::ResetWasmState>,
+        request: crate::CommandExecutionReference,
+        schedule: Box<DomainSchedule>,
+    },
 }
 
 #[derive(

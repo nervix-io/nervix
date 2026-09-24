@@ -47,6 +47,22 @@ impl SessionServiceImpl {
                     }
                     None
                 }
+                Some(TransactionStepEffect::ResetWasmState { reset, request, .. }) => {
+                    match Box::pin(self.apply_transaction_wasm_state_reset(
+                        transaction,
+                        reset,
+                        request,
+                    ))
+                    .await
+                    {
+                        Ok(()) => None,
+                        Err(error) => Some(format!(
+                            "transaction '{}' committed the WASM state reset, but it did not \
+                             become usable: {error:#}",
+                            transaction.id
+                        )),
+                    }
+                }
                 Some(_) => match self
                     .wait_for_runtime_revision(applying.effect_revision)
                     .await

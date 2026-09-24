@@ -25,6 +25,7 @@
 pub(in crate::application) mod admission;
 mod events;
 pub(in crate::application) mod grpc;
+pub(in crate::application) mod outbound;
 mod outcome;
 mod upload;
 pub(in crate::application) mod websocket;
@@ -53,27 +54,24 @@ use nervix_nspl::{
     client_statement::{ClientStatement, ParsedClientStatement, parse_client_statement_sources},
     schema::ParseFromSourceError,
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _};
 use parking_lot::{Mutex, RwLock};
 use tokio::{
     sync::{mpsc, watch},
     task::AbortHandle,
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use triomphe::Arc;
 
 use self::{
     admission::{CancelledBeforeAdmission, CancelledStage, RequestAdmission},
+    outbound::{LaneClosed, SessionOutbound},
     outcome::{attach_outcome, command_outcome, leader_redirect, wire_diagnostics},
 };
 use super::{
     command_result::CommandResult,
     model_mutation::command_error,
     session_service::{SessionServiceImpl, error_response},
-    subscription::{
-        OpenedSubscription, SessionDelivery, SessionOutbound, SessionSubscriptions, SessionView,
-    },
+    subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
     transaction::TransactionInspectionOutcome,
 };
 
@@ -81,11 +79,6 @@ use super::{
 /// queued, so a client flooding one session cannot grow what the server holds for it. It is also
 /// what bounds the queue of ordered requests waiting for the lane.
 const MAX_IN_FLIGHT_REQUESTS: usize = 64;
-
-/// How many frames a session queues for its transport before whatever produces them waits. A frame
-/// is at most the session frame limit, so this bounds the bytes a session holds for a client that
-/// reads slowly; a transfer's parts wait for room one at a time.
-pub(in crate::application) const SESSION_OUTBOUND_CAPACITY: usize = 16;
 
 /// The transport a session arrived on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +140,17 @@ struct CancelTarget {
     task: Option<AbortHandle>,
 }
 
+/// What a session queued for a reply it owed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueuedReply {
+    /// The reply, whole.
+    Reply,
+    /// A rejection in place of a reply that could not be encoded.
+    Rejection,
+    /// Nothing: another path already answered the request, or the session ended first.
+    Nothing,
+}
+
 /// Why a reply could not be encoded.
 enum ReplyEncodingFailure {
     /// The reply does not fit the session limits.
@@ -196,8 +200,6 @@ pub(super) struct SessionShared {
     view: RwLock<SessionView>,
     /// The domain whose observations the session receives.
     selection: watch::Sender<Option<DomainName>>,
-    /// Cancelled when the session ends, whatever ended it.
-    ended: CancellationToken,
 }
 
 impl SessionShared {
@@ -205,12 +207,15 @@ impl SessionShared {
         &self.delivery.limits
     }
 
-    /// Queues one frame for the client. An error means the transport stopped taking frames.
-    async fn send_frame(
-        &self,
-        frame: EncodedFrame<ServerFrame>,
-    ) -> Result<(), mpsc::error::SendError<EncodedFrame<ServerFrame>>> {
+    /// Queues one control frame for the client. An error means the session ended or its
+    /// transport stopped taking frames.
+    async fn send_frame(&self, frame: EncodedFrame<ServerFrame>) -> Result<(), LaneClosed> {
         self.delivery.outbound.send(frame).await
+    }
+
+    /// Resolves once the session has ended, whatever ended it.
+    async fn ended(&self) {
+        self.delivery.outbound.ended().await;
     }
 
     /// Takes the request's in-flight entry. `true` means the caller owes it its terminal reply.
@@ -218,22 +223,22 @@ impl SessionShared {
         self.in_flight.lock().remove(&request_id).is_some()
     }
 
-    /// Sends the terminal reply of a request whose entry the caller still has to take. `false`
-    /// means another path already answered it, or the session ended.
-    async fn finish_with(&self, request_id: RequestId, body: ReplyBody) -> bool {
+    /// Sends the terminal reply of a request whose entry the caller still has to take, and says
+    /// what was queued. [`QueuedReply::Nothing`] means another path already answered the request,
+    /// or the session ended.
+    async fn finish_with(&self, request_id: RequestId, body: ReplyBody) -> QueuedReply {
         if !self.finish(request_id) {
-            return false;
+            return QueuedReply::Nothing;
         }
-        self.reply(request_id, body).await;
-        true
+        self.reply(request_id, body).await
     }
 
     /// Encodes and queues one reply, splitting it into transfer parts when it is larger than a
     /// frame. A reply that cannot be encoded is replaced by a typed rejection, never truncated.
-    async fn reply(&self, request_id: RequestId, body: ReplyBody) {
+    async fn reply(&self, request_id: RequestId, body: ReplyBody) -> QueuedReply {
         let reply = Reply { request_id, body };
-        let delivery = match self.encode_reply(reply).await {
-            Ok(delivery) => delivery,
+        let (delivery, queued) = match self.encode_reply(reply).await {
+            Ok(delivery) => (delivery, QueuedReply::Reply),
             Err(failure) => {
                 let rejection = failure.rejection();
                 debug!(
@@ -246,30 +251,32 @@ impl SessionShared {
                     body: ReplyBody::Rejected(rejection),
                 };
                 match rejected.encode(self.limits()) {
-                    Ok(delivery) => delivery,
+                    Ok(delivery) => (delivery, QueuedReply::Rejection),
                     Err(error) => {
                         warn!(%request_id, error = %error, "a session rejection does not fit a frame");
-                        return;
+                        return QueuedReply::Nothing;
                     }
                 }
             }
         };
         match delivery {
             ReplyDelivery::Frame(frame) => {
-                self.send_frame(frame)
-                    .await
-                    .means_peer_left("the session's client");
+                if self.send_frame(frame).await.is_err() {
+                    debug!(%request_id, "the session ended before its reply was queued");
+                    return QueuedReply::Nothing;
+                }
             }
             ReplyDelivery::Transfer(parts) => {
                 for part in parts {
                     tokio::task::consume_budget().await;
                     if self.send_frame(part).await.is_err() {
-                        debug!(%request_id, "the session's client left during a reply transfer");
-                        return;
+                        debug!(%request_id, "the session ended during a reply transfer");
+                        return QueuedReply::Nothing;
                     }
                 }
             }
         }
+        queued
     }
 
     /// Encodes a reply. A reply carrying an impact report can be large, so it is encoded on the
@@ -307,21 +314,24 @@ impl SessionShared {
 
     /// Answers a request that was not served.
     async fn reject(&self, request_id: RequestId, rejection: RequestRejected) {
-        self.reply(request_id, ReplyBody::Rejected(rejection)).await;
+        let queued = self.reply(request_id, ReplyBody::Rejected(rejection)).await;
+        if let QueuedReply::Nothing = queued {
+            debug!(%request_id, "a request rejection was not queued");
+        }
     }
 
-    /// Tells the client why the session ends, and ends it.
-    async fn end(&self, reason: SessionEndReason) {
-        let ending = SessionEnding { reason }.encode(self.limits());
-        match ending {
-            Ok(frame) => {
-                self.send_frame(frame)
-                    .await
-                    .means_peer_left("the session's client");
+    /// Tells the client why the session ends, and ends it. Ending never waits on the client: the
+    /// transport writes the ending after the control frames already queued, if the client reads
+    /// that far.
+    fn end(&self, reason: SessionEndReason) {
+        let ending = match (SessionEnding { reason }).encode(self.limits()) {
+            Ok(frame) => Some(frame),
+            Err(error) => {
+                warn!(error = %error, "a session ending does not fit a frame");
+                None
             }
-            Err(error) => warn!(error = %error, "a session ending does not fit a frame"),
-        }
-        self.ended.cancel();
+        };
+        self.delivery.outbound.end(ending);
     }
 
     fn publish_view(&self, subscriptions: &SessionSubscriptions) {
@@ -493,7 +503,6 @@ impl SessionServiceImpl {
             in_flight: Mutex::new(BTreeMap::new()),
             view: RwLock::new(subscriptions.view()),
             selection,
-            ended: CancellationToken::new(),
         });
         // Every queued request is registered in flight first, so the queue holds at most
         // `MAX_IN_FLIGHT_REQUESTS` requests even though the channel itself is unbounded.
@@ -513,16 +522,27 @@ impl SessionServiceImpl {
             tokio::task::consume_budget().await;
             let item = tokio::select! {
                 biased;
-                _ = shared.ended.cancelled() => break,
+                _ = shared.ended() => break,
                 _ = self.inner.admission_shutdown.cancelled() => {
-                    shared.end(SessionEndReason::ServerShuttingDown).await;
+                    shared.end(SessionEndReason::ServerShuttingDown);
                     break;
                 }
                 item = inbound.next() => item,
             };
             match item {
                 Some(InboundFrame::Frame(frame)) => {
-                    let accepted = accept_frame(&shared, &ordered_tx, frame).await;
+                    // Taking a frame can wait for room to answer it, which a client that reads
+                    // nothing never makes. Neither the node stopping nor the session ending waits
+                    // on that client.
+                    let accepted = tokio::select! {
+                        biased;
+                        _ = shared.ended() => break,
+                        _ = self.inner.admission_shutdown.cancelled() => {
+                            shared.end(SessionEndReason::ServerShuttingDown);
+                            break;
+                        }
+                        accepted = accept_frame(&shared, &ordered_tx, frame) => accepted,
+                    };
                     if !accepted {
                         break;
                     }
@@ -535,7 +555,7 @@ impl SessionServiceImpl {
             }
         }
 
-        shared.ended.cancel();
+        shared.delivery.outbound.end(None);
         shared.abandon_in_flight();
         drop(ordered_tx);
         events.abort();
@@ -550,7 +570,7 @@ impl SessionServiceImpl {
                 return;
             }
         };
-        subscriptions.stop_all(self).await;
+        subscriptions.stop_all().await;
         if closed_cleanly {
             self.clean_close_transaction(&mut subscriptions).await;
         } else {
@@ -574,7 +594,7 @@ async fn accept_frame(
                 let reason = SessionEndReason::ProtocolViolated {
                     message: format!("a request without a valid identity: {error}"),
                 };
-                shared.end(reason).await;
+                shared.end(reason);
                 return false;
             };
             shared.reject(request_id, decode_rejection(&error)).await;
@@ -832,7 +852,7 @@ async fn serve_subscribe(
     let OpenedSubscription {
         opened,
         message,
-        release,
+        pending,
     } = match opened {
         Ok(opened) => opened,
         Err(result) => {
@@ -853,14 +873,14 @@ async fn serve_subscribe(
         diagnostics: Vec::new(),
     };
     // The rows follow the reply that announces their schema. A subscription whose reply was not
-    // sent was never announced, so it stays gated and delivers nothing until the session ends.
-    let announced = shared
+    // queued, because the request was cancelled, the session ended or the reply could not be
+    // encoded, was never announced, so it is abandoned before it delivers anything.
+    let queued = shared
         .finish_with(request_id, ReplyBody::Subscribe(outcome))
         .await;
-    if announced {
-        release
-            .send(())
-            .discarded("a subscription whose task already ended has no rows to release");
+    match queued {
+        QueuedReply::Reply => subscriptions.activate(pending).await,
+        QueuedReply::Rejection | QueuedReply::Nothing => pending.abandon().await,
     }
 }
 

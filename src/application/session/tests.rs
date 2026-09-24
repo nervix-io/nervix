@@ -15,18 +15,16 @@ use std::{
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CancelRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest, EncodedFrame,
+    CancelRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest,
     LeaderRedirect as WireLeaderRedirect, ReplyBody, RequestId, RequestRejection, ServerFrame,
     ServerMessage, SessionLimitSettings, SessionLimits, TransferAssembly, VerifiedFrame,
 };
 use nervix_models::{TransactionPosition, UserName};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::sync::CancellationToken;
 
-use super::{
-    InboundFrame, MAX_IN_FLIGHT_REQUESTS, SESSION_OUTBOUND_CAPACITY, SessionShared,
-    SessionTransport,
-};
+use super::{InboundFrame, MAX_IN_FLIGHT_REQUESTS, SessionShared, SessionTransport, outbound};
 use crate::application::{
     command_result::CommandDisposition,
     session_service::SessionServiceImpl,
@@ -58,7 +56,7 @@ fn small_limits(transfer_bytes: usize) -> SessionLimits {
 /// One session served by the engine, driven by the frames a test sends it.
 struct SessionUnderTest {
     inbound: mpsc::UnboundedSender<InboundFrame>,
-    outbound: mpsc::Receiver<EncodedFrame<ServerFrame>>,
+    outbound: outbound::SessionFrames,
     limits: SessionLimits,
     task: JoinHandle<()>,
 }
@@ -66,7 +64,7 @@ struct SessionUnderTest {
 impl SessionUnderTest {
     fn start(service: &SessionServiceImpl, limits: SessionLimits) -> Self {
         let (inbound, inbound_rx) = mpsc::unbounded_channel();
-        let (outbound_tx, outbound) = mpsc::channel(SESSION_OUTBOUND_CAPACITY);
+        let (outbound_tx, outbound) = outbound::channel(CancellationToken::new());
         let service = service.clone();
         let task = tokio::spawn(async move {
             service
@@ -115,7 +113,7 @@ impl SessionUnderTest {
         let mut frames = 0_usize;
         loop {
             tokio::task::consume_budget().await;
-            let frame = tokio::time::timeout(REPLY_TIMEOUT, self.outbound.recv())
+            let frame = tokio::time::timeout(REPLY_TIMEOUT, self.outbound.next())
                 .await
                 .assured("the session answers within the deadline")
                 .assured("the session sends until the test closes it");
@@ -269,7 +267,7 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
         registry: _registry,
         path,
     } = build_test_service(true).await;
-    let (outbound, _frames) = mpsc::channel(SESSION_OUTBOUND_CAPACITY);
+    let (outbound, _frames) = outbound::channel(CancellationToken::new());
     let subscriptions = SessionSubscriptions::for_user(named::<UserName>("default"));
     let (selection, _) = tokio::sync::watch::channel(None);
     let shared = SessionShared {
@@ -282,7 +280,6 @@ async fn registration_refuses_a_duplicate_and_every_request_beyond_the_limit() {
         in_flight: parking_lot::Mutex::new(std::collections::BTreeMap::new()),
         view: parking_lot::RwLock::new(subscriptions.view()),
         selection,
-        ended: tokio_util::sync::CancellationToken::new(),
     };
 
     shared

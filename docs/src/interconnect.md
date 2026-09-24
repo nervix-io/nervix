@@ -12,6 +12,24 @@ In particular, a transport response is not automatically a statement that runtim
 Relay delivery exposes separate receipt, admission, and downstream-completion boundaries so callers
 can distinguish those outcomes.
 
+## Simulation Boundary
+
+The interconnect and its execution dependency have an optional Turmoil test mode. It is separate
+from the Shuttle scheduler mode; selecting both is an invalid build configuration. The normal
+runtime dependency graph contains neither simulation scheduler. The synchronous Turmoil runner is
+a test harness outside product ownership, with a fixed seed, UTC epoch, network topology, simulated
+duration, step limit, and real wall-clock escape bound. It supervises host tasks so their failures
+fail the scenario.
+
+The initial runner qualifies bounded scheduling and Tokio timers. The production listener,
+outbound TCP connections, and DNS resolution still use Tokio's real network APIs; execution jobs
+still use Tokio's blocking pool. Certificate validity still reads the process wall clock, while
+process-epoch generation uses OS randomness. External connectors, filesystem and database work,
+gossip and consensus randomness, and domain-clock authority are outside this first simulation
+boundary. A simulated host crash tears down its runtime and is not evidence of power-loss or
+SIGKILL durability. A simulation result therefore makes no claim yet about production transport
+faults, authentication, or full-node recovery.
+
 ## Listener And Peer Topology
 
 Each node exposes one TCP listener for all node-to-node traffic. Every accepted connection uses
@@ -122,6 +140,12 @@ typed reset scope to the entity-gate purpose. Engagement publishes a branch-sele
 one concrete fingerprint, the explicit unbranched instance, or all concrete branches. A retry must
 match the complete domain, relay and entity set, purpose, and scope. It cannot widen a one-branch
 hold or release another reset's hold.
+
+An operator's NSPL reset enters through the ordinary typed session command protocol and ordered
+transaction planner. The transaction step retains the command execution reference and exact scope;
+the leader uses that reference when invoking this same coordinator request. A reconnect or a new
+leader resumes the recorded step with the same identity. No separate public reset wire request or
+JSON command path is introduced.
 
 The management pool exposes one typed coordinator request for internal administrative, SDK, and
 recovery callers. It carries the stable execution reference and exact reset target to the leader,
@@ -461,6 +485,15 @@ relay owner loads that snapshot and performs borrowed domain and relay lookups, 
 fan-out neither formats a gossip key nor waits on the gossip mutex. Subscription creation waits for
 the exact subscriber incarnation to appear in every live node's published index before it reports
 success. A withdrawal disappears from fan-out when the next gossip state snapshot is published.
+
+A node advertises interest in a relay exactly while at least one of its session subscriptions
+holds a lease on it. Every subscription takes one lease before it attaches and releases it exactly
+once, when it is withdrawn, abandoned before it was announced, or ended by its relay, so any
+number of subscriptions from any number of sessions share one advertisement and the last release
+withdraws it. Each write of the advertisement reads the lease count while it holds the gossip lock
+that orders the writes, so the last write always matches the count: a release that finishes late
+cannot withdraw the interest of a subscription that attached after it. The count per relay is
+exported as `nervix_session_subscriptions`.
 
 Consensus separates traffic according to the progress it protects:
 

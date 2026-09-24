@@ -101,7 +101,7 @@ async fn attaching_an_overdue_transaction_atomically_expires_it() {
         Some(TransactionOutcome::Expired)
     ));
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -224,7 +224,7 @@ async fn process_command_commits_explicit_transaction_without_trailing_semicolon
         "model create batch should resolve relay references atomically"
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -334,7 +334,7 @@ async fn process_command_queues_transaction_across_requests_and_reverts() {
         "reverted command must not persist"
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -384,7 +384,7 @@ async fn process_command_rejects_begin_inside_begin() {
         Some(TransactionLifecycle::Open)
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -450,7 +450,7 @@ async fn process_command_rejects_domain_and_user_creation_inside_a_transaction()
         "a rejected CREATE DOMAIN must not reach the control plane"
     );
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -495,7 +495,7 @@ async fn process_command_rejects_begin_without_an_existing_domain() {
     assert_eq!(unselected.message, "no active domain selected");
     assert!(!subscriptions.transaction_active());
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -560,7 +560,7 @@ async fn process_command_rejects_statements_selecting_another_domain() {
         .expect("open transaction must remain replicated");
     assert_eq!(transaction.pending_statement_count(), 0);
 
-    subscriptions.stop_all(&service).await;
+    subscriptions.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -620,7 +620,7 @@ async fn attaching_to_committed_transaction_returns_the_recorded_aggregate() {
         )]
     );
 
-    owner.stop_all(&service).await;
-    observer.stop_all(&service).await;
+    owner.stop_all().await;
+    observer.stop_all().await;
     let _ = std::fs::remove_dir_all(&path);
 }

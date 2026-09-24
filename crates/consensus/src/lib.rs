@@ -5648,6 +5648,14 @@ fn validate_transaction_step_effect(
                         Statement::CreateResource(create) if &create.identifier == identifier
                     )
             }
+            TransactionStepEffect::ResetWasmState { reset, request, .. } => {
+                statements.len() == 1
+                    && statements[0].request_reference == *request
+                    && matches!(
+                        &statements[0].statement,
+                        Statement::ResetWasmState(statement) if statement == reset.as_ref()
+                    )
+            }
         };
     if !effect_matches {
         return Err(TransactionMutationError::EffectMismatch {
@@ -5751,6 +5759,7 @@ fn apply_transaction_step_effect(
             state.resources.ensure_catalog(domain, identifier);
             changes.resources_changed = true;
         }
+        TransactionStepEffect::ResetWasmState { .. } => {}
     }
 }
 
