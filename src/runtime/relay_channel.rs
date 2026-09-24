@@ -616,7 +616,7 @@ impl<T> RelayBroadcast<T> {
         }
     }
 
-    pub(in crate::runtime) fn receiver_count(&self) -> usize {
+    pub(crate) fn receiver_count(&self) -> usize {
         self.fanout.receiver_count.load(Ordering::Acquire)
     }
 
@@ -637,7 +637,7 @@ impl<T> RelayBroadcast<T> {
     }
 
     #[cfg(test)]
-    pub(in crate::runtime) fn waiting_publishers(&self) -> usize {
+    pub(crate) fn waiting_publishers(&self) -> usize {
         self.fanout.waiting_publishers.load(Ordering::SeqCst)
     }
 
@@ -649,6 +649,21 @@ impl<T> RelayBroadcast<T> {
         self.fanout
             .capacity
             .store(capacity.get(), Ordering::Release);
+        self.fanout.admission.notify_waiters();
+    }
+
+    /// Ends delivery to every consumer registered so far.
+    ///
+    /// Each of them takes the batches already delivered to it and then observes that nothing more
+    /// will come, exactly as if the fan-out had been dropped. A publisher skips a closed consumer,
+    /// including one it is already waiting on, so a consumer that never drains its backlog cannot
+    /// hold the fan-out. A consumer registered afterwards receives every batch whose publishing
+    /// begins after it registers, as any consumer does.
+    pub(in crate::runtime) fn close_receivers(&self) {
+        for consumer in self.fanout.consumers.load().iter() {
+            consumer.batches.close();
+            consumer.delivered.wake();
+        }
         self.fanout.admission.notify_waiters();
     }
 }
@@ -686,6 +701,15 @@ impl<T: Clone> RelayBroadcast<T> {
         }
         RelayConsumerQueue::deliver_each(admitted, batch)
             .map_err(|batch| RelayFanoutClosed { batch })
+    }
+}
+
+#[cfg(test)]
+impl<T: Clone> RelayBroadcast<T> {
+    /// Publishes `batch` as a relay does, for tests outside the runtime. `false` means no
+    /// consumer was left to take it.
+    pub(crate) async fn publish_for_test(&self, batch: T) -> bool {
+        self.broadcast(batch).await.is_ok()
     }
 }
 
@@ -1036,6 +1060,37 @@ mod tests {
         assert_eq!(receiver.recv().await, Some(1));
         assert_eq!(receiver.recv().await, None);
         assert_eq!(receiver.try_recv(), RelayTryRecv::Closed);
+    }
+
+    #[tokio::test]
+    async fn closing_receivers_ends_them_after_they_drain_and_releases_their_publisher() {
+        let channel = RelayBroadcast::with_capacity(capacity(1));
+        let mut closed = channel.new_receiver();
+        channel.broadcast(1).await.expect("the consumer has room");
+
+        // The consumer is at capacity, so this publisher waits on it until it is closed.
+        let publishing = channel.broadcast(2);
+        tokio::pin!(publishing);
+        assert!(
+            futures_util::poll!(publishing.as_mut()).is_pending(),
+            "a full consumer holds its publisher"
+        );
+        channel.close_receivers();
+        let returned = publishing
+            .await
+            .expect_err("the only consumer was closed, so none is left to take the batch");
+        assert_eq!(returned.batch, 2);
+
+        assert_eq!(closed.recv().await, Some(1));
+        assert_eq!(closed.recv().await, None);
+
+        let mut joined_later = channel.new_receiver();
+        channel
+            .broadcast(3)
+            .await
+            .expect("a consumer registered after the close has room");
+        assert_eq!(joined_later.recv().await, Some(3));
+        assert_eq!(closed.try_recv(), RelayTryRecv::Closed);
     }
 
     #[tokio::test]

@@ -468,6 +468,13 @@ pub(super) fn test_branching(fields: &[(&str, ParseAsType)]) -> ResolvedBranchin
     test_named_branching("test_branch", fields)
 }
 
+/// The definition an unbranched relay of `fields` declares to its session subscribers.
+pub(super) fn unbranched_subscription_definition(
+    fields: &[(&str, ParseAsType)],
+) -> RelaySubscriptionDefinition {
+    RelaySubscriptionDefinition::new(test_schema(fields), ResolvedBranching::unbranched())
+}
+
 pub(super) fn test_named_branching(
     branch: &str,
     fields: &[(&str, ParseAsType)],

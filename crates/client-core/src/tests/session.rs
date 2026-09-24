@@ -573,8 +573,8 @@ async fn subscription_rows_render_against_the_schema_the_subscription_opened_wit
         .send(
             SubscriptionEnded {
                 subscription: subscription(1),
-                reason: SubscriptionEndReason::RelayClosed,
-                message: "relay 'orders' was rebuilt".to_string(),
+                reason: SubscriptionEndReason::RelayChanged,
+                message: "relay 'orders' was redefined".to_string(),
             }
             .encode(&limits())
             .assured("a subscription end fits a frame"),

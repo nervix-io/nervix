@@ -150,17 +150,28 @@ fn subscription_reports_round_trip() {
         assert_eq!(decoded, skipped);
     }
 
-    let ended = SubscriptionEnded {
-        subscription: subscription(),
-        reason: SubscriptionEndReason::RelayClosed,
-        message: "relay 'orders' was rebuilt".to_string(),
-    };
-    let ServerEvent::SubscriptionEnded(decoded) =
-        decode_event(ended.encode(&limits()).assured("a report fits the limits"))
-    else {
-        panic!("an end report decodes as an end report");
-    };
-    assert_eq!(decoded, ended);
+    for (reason, message) in [
+        (
+            SubscriptionEndReason::RelayRemoved,
+            "relay 'orders' no longer exists",
+        ),
+        (
+            SubscriptionEndReason::RelayChanged,
+            "relay 'orders' was redefined",
+        ),
+    ] {
+        let ended = SubscriptionEnded {
+            subscription: subscription(),
+            reason,
+            message: message.to_string(),
+        };
+        let ServerEvent::SubscriptionEnded(decoded) =
+            decode_event(ended.encode(&limits()).assured("a report fits the limits"))
+        else {
+            panic!("an end report decodes as an end report");
+        };
+        assert_eq!(decoded, ended);
+    }
 }
 
 #[test]

@@ -15153,6 +15153,31 @@ async fn then_node_observability_metric_with_labels_eventually_reaches(
         .await;
 }
 
+#[then(
+    expr = "within {string} node {string} observability metric {string} with labels eventually \
+            reaches at least {int}"
+)]
+async fn then_within_duration_node_observability_metric_with_labels_eventually_reaches(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    metric_name: String,
+    minimum_value: i64,
+    #[step] step: &Step,
+) {
+    let wait =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    world
+        .wait_for_observability_metric_at_least(
+            &node_id,
+            &metric_name,
+            minimum_value,
+            Some(wait),
+            step,
+        )
+        .await;
+}
+
 #[then(expr = "node {string} interconnection metrics use only bounded dimensions")]
 async fn then_node_interconnection_metrics_use_bounded_dimensions(
     world: &mut ScenarioWorld,
