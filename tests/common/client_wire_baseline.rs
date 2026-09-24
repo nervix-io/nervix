@@ -2,8 +2,8 @@
 //!
 //! Outside the layer order: a benchmark harness. Product code must not name it.
 //!
-//! - **Owns.** The fixed client-wire workload, its raw protobuf/WebSocket observations, process
-//!   counters, Prometheus scrape, and reproducible JSON artifact.
+//! - **Owns.** The fixed client-wire workload, the exact frame bytes it exchanges over gRPC and the
+//!   console WebSocket, process counters, Prometheus scrape, and reproducible JSON artifact.
 //! - **Depends on.** Public gRPC, HTTP, WebSocket, metrics, and process interfaces plus the shared
 //!   real-process fixture.
 //! - **Must not know.** Registry, consensus, runtime, or connector implementation internals.
@@ -20,9 +20,14 @@ use anyhow::{Context as _, Result, anyhow, ensure};
 use futures_util::{SinkExt as _, StreamExt as _};
 use hdrhistogram::Histogram;
 use nervix_client_core::{
-    Client, CommandOutcome, CommandOutcomeKind, ResourceUploadIdentity, SubscriptionRequest,
+    Client, CommandOutcome, ResourceUploadIdentity, SubscriptionEvent, SubscriptionRequest,
 };
-use prost::Message as _;
+use nervix_client_wire::{
+    ClientMessage, ClientRequest, DomainSelection, OutcomeOrigin, ReplyBody, RequestId,
+    SelectDomainRequest, ServerEvent, ServerMessage, SessionLimits, UploadChunk, UploadDisposition,
+    UploadReply, UploadStart, VerifiedFrame,
+};
+use nervix_models::{DomainName, ResourceName};
 use serde::{Deserialize, Serialize};
 use tikv_jemalloc_ctl::{epoch, stats};
 use tokio::time::timeout;
@@ -34,7 +39,8 @@ use triomphe::Arc;
 use uuid::Uuid;
 
 use super::{
-    cluster::{client_connect_options, proto, test_basic_authorization},
+    cluster::{client_connect_options, client_domain, test_basic_authorization},
+    raw_session::outcome_succeeded,
     server_process::ServerProcess,
 };
 
@@ -46,7 +52,7 @@ const MAX_UPLOAD_BYTES: usize = 16 * 1024 * 1024;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_QUERY: &str = "DESCRIBE DOMAIN;";
 const METRICS_FILE: &str = "metrics.prom";
-const REPORT_FILE: &str = "client-wire-protobuf-baseline.json";
+const REPORT_FILE: &str = "client-wire-baseline.json";
 
 #[derive(Clone, Debug, Serialize)]
 struct Workload {
@@ -415,7 +421,7 @@ pub(crate) async fn capture(
         captured_at_utc: chrono::Utc::now().to_rfc3339(),
         git_commit: command_output("git", &["rev-parse", "HEAD"])?,
         git_worktree_status: command_output("git", &["status", "--short"])?,
-        protocol: "protobuf over native gRPC and console WebSocket",
+        protocol: "FlatBuffers frames over native gRPC and console WebSocket",
         workload: settings.workload,
         environment: capture_environment()?,
         configured_limits: configured_limits(),
@@ -498,7 +504,7 @@ async fn measure_commands(
     let mut session = process.open_session(domain).await?;
     let warmup = session.observe_command(COMMAND_QUERY).await?;
     ensure!(
-        warmup.result.success,
+        outcome_succeeded(&warmup.result),
         "command warm-up failed: {}",
         warmup.result.message
     );
@@ -512,12 +518,12 @@ async fn measure_commands(
         observations.latency.record_duration(started.elapsed())?;
         observations
             .request_bytes
-            .record_usize(observed.request_protobuf_bytes)?;
+            .record_usize(observed.request_frame_bytes)?;
         observations
             .response_bytes
-            .record_usize(observed.response_protobuf_bytes)?;
+            .record_usize(observed.response_frame_bytes)?;
         ensure!(
-            observed.result.success,
+            outcome_succeeded(&observed.result),
             "command baseline failed: {}",
             observed.result.message
         );
@@ -535,7 +541,7 @@ async fn measure_subscriptions(
     let grpc_uri = process.grpc_uri();
     let client = Client::connect_with_options(
         &grpc_uri,
-        domain.to_string(),
+        client_domain(domain),
         client_connect_options(&grpc_uri)?,
     )
     .await
@@ -549,7 +555,7 @@ async fn measure_subscriptions(
         .await
         .context("failed to create native subscription")?;
     ensure!(
-        outcome.success,
+        outcome.succeeded(),
         "failed to create subscription: {}",
         outcome.message
     );
@@ -575,9 +581,20 @@ async fn measure_subscriptions(
             .context("subscription baseline timed out")??;
         observations.latency.record_duration(started.elapsed())?;
         observations.request_bytes.record_usize(payload.len())?;
-        let (_, record_json) = event.payload.split_once(" payload=").ok_or_else(|| {
-            anyhow!("branched subscription payload omitted its current JSON envelope")
-        })?;
+        let SubscriptionEvent::Rows(rows) = event else {
+            return Err(anyhow!(
+                "the subscription delivered {event:?} instead of rows"
+            ));
+        };
+        let lines = rows
+            .display_lines()
+            .map_err(|report| anyhow!("subscription rows do not render: {report}"))?;
+        let [line] = lines.as_slice() else {
+            return Err(anyhow!("one record delivered {} rows", lines.len()));
+        };
+        let (_, record_json) = line
+            .split_once(" payload=")
+            .ok_or_else(|| anyhow!("branched subscription row omitted its branch key"))?;
         let decoded: SubscriptionPayload = serde_json::from_str(record_json)
             .context("subscription payload is not current JSON")?;
         ensure!(
@@ -586,21 +603,11 @@ async fn measure_subscriptions(
                 && decoded.detail.len() == detail_bytes,
             "typed subscription payload changed during the baseline"
         );
-        let response = proto::SessionResponse {
-            event: Some(proto::session_response::Event::Subscription(
-                proto::SubscriptionEvent {
-                    subscription: event.subscription,
-                    relay: event.relay,
-                    payload: event.payload,
-                },
-            )),
-        };
         observations
             .response_bytes
-            .record_usize(response.encoded_len())?;
+            .record_usize(rows.rows.frame().len())?;
     }
-    Ok(observations
-        .finish("HTTP admission to native gRPC typed subscription (key=<json> payload=<json>)"))
+    Ok(observations.finish("HTTP admission to native gRPC typed Row subscription frames"))
 }
 
 async fn measure_graph_snapshots(
@@ -620,20 +627,30 @@ async fn measure_graph_snapshots(
     let (mut websocket, _) = connect_async(request)
         .await
         .context("failed to connect console WebSocket")?;
+    let limits = SessionLimits::DEFAULT;
+    let domain_name = DomainName::parse(domain)
+        .map_err(|report| anyhow!("the baseline domain is invalid: {report:?}"))?;
     let mut observations = OperationSamples::new()?;
-    for _ in 0..samples {
+    for sample in 1..=samples {
         tokio::task::consume_budget().await;
-        let request = proto::SessionRequest {
-            request: Some(proto::session_request::Request::SetActiveDomain(
-                proto::SetActiveDomainRequest {
-                    domain: domain.to_string(),
-                },
-            )),
+        let request_id = u64::try_from(sample)
+            .ok()
+            .and_then(std::num::NonZeroU64::new)
+            .map(RequestId::new)
+            .ok_or_else(|| anyhow!("a sample number is not a request identity"))?;
+        let request = ClientMessage {
+            request_id,
+            request: ClientRequest::SelectDomain(SelectDomainRequest {
+                domain: domain_name.clone(),
+            }),
         };
-        let request_bytes = request.encode_to_vec();
+        let request_bytes = request
+            .encode(&limits)
+            .map_err(|report| anyhow!("a domain selection does not fit a frame: {report:?}"))?
+            .into_bytes();
         let started = Instant::now();
         websocket
-            .send(WebSocketMessage::Binary(request_bytes.clone()))
+            .send(WebSocketMessage::Binary(request_bytes.to_vec()))
             .await
             .context("failed to request graph snapshot")?;
         let response_bytes = timeout(
@@ -652,7 +669,7 @@ async fn measure_graph_snapshots(
         .close(None)
         .await
         .context("failed to close console WebSocket")?;
-    Ok(observations.finish("console WebSocket protobuf frames"))
+    Ok(observations.finish("console WebSocket FlatBuffers frames"))
 }
 
 async fn next_domain_snapshot<S>(
@@ -671,19 +688,29 @@ where
         let WebSocketMessage::Binary(payload) = message else {
             continue;
         };
-        let response = proto::SessionResponse::decode(payload.as_slice())
-            .context("console response is not protobuf")?;
-        let Some(proto::session_response::Event::Snapshot(snapshot)) = response.event else {
-            continue;
+        let payload_bytes = payload.len();
+        let frame = VerifiedFrame::verify(payload.into(), &SessionLimits::DEFAULT)
+            .map_err(|report| anyhow!("console message is not a verified frame: {report:?}"))?;
+        let message = ServerMessage::decode(&frame)
+            .map_err(|report| anyhow!("console frame does not decode: {report:?}"))?;
+        let snapshot = match message {
+            ServerMessage::Event(ServerEvent::DomainSnapshot(snapshot)) => snapshot,
+            ServerMessage::Reply(reply) => {
+                if let ReplyBody::DomainSelection(DomainSelection::NotFound(missing)) = reply.body {
+                    return Err(anyhow!("the console did not find domain '{missing}'"));
+                }
+                continue;
+            }
+            _ => continue,
         };
-        if snapshot.domain != domain {
+        if snapshot.domain().as_str() != domain {
             continue;
         }
         ensure!(
-            !snapshot.dataflow_graph.is_empty(),
+            !snapshot.graph_json().is_empty(),
             "console returned an empty graph snapshot"
         );
-        return Ok(payload.len());
+        return Ok(payload_bytes);
     }
 }
 
@@ -696,7 +723,7 @@ async fn measure_uploads(
     let grpc_uri = process.grpc_uri();
     let client = Client::connect_with_options(
         &grpc_uri,
-        domain.to_string(),
+        client_domain(domain),
         client_connect_options(&grpc_uri)?,
     )
     .await
@@ -728,7 +755,7 @@ async fn measure_uploads(
         .context("resource upload baseline timed out")??;
         observations.latency.record_duration(started.elapsed())?;
         ensure!(
-            outcome.success,
+            outcome.succeeded(),
             "resource upload failed: {}",
             outcome.message
         );
@@ -744,75 +771,69 @@ async fn measure_uploads(
             .response_bytes
             .record_usize(upload_response_bytes(&outcome)?)?;
     }
-    Ok(observations.finish("native gRPC client-streaming protobuf"))
+    Ok(observations.finish("native gRPC client-streaming FlatBuffers frames"))
 }
 
+/// The bytes of the upload frames the client sent: its start and one chunk frame per chunk.
 fn upload_request_bytes(
     domain: &str,
     identity: &str,
     archive_bytes: u64,
     chunks: &[u64],
 ) -> Result<u64> {
-    let start = proto::UploadResourceRequest {
-        event: Some(proto::upload_resource_request::Event::Start(
-            proto::UploadResourceStart {
-                name: "client_wire_resource".to_string(),
-                total_bytes: archive_bytes,
-                domain: domain.to_string(),
-                upload_identity: identity.to_string(),
-            },
-        )),
+    let limits = SessionLimits::DEFAULT;
+    let start = UploadStart {
+        request_id: RequestId::new(std::num::NonZeroU64::MIN),
+        domain: DomainName::parse(domain)
+            .map_err(|report| anyhow!("the baseline domain is invalid: {report:?}"))?,
+        resource: ResourceName::parse("client_wire_resource")
+            .map_err(|report| anyhow!("the baseline resource name is invalid: {report:?}"))?,
+        upload_identity: ResourceUploadIdentity::parse(identity)
+            .map_err(|report| anyhow!("the upload identity is invalid: {report}"))?,
+        total_bytes: std::num::NonZeroU64::new(archive_bytes)
+            .ok_or_else(|| anyhow!("an uploaded archive is never empty"))?,
     };
-    let mut encoded =
-        u64::try_from(start.encoded_len()).context("upload start encoded size does not fit u64")?;
+    let start_bytes = start
+        .encode(&limits)
+        .map_err(|report| anyhow!("an upload start does not fit a frame: {report:?}"))?
+        .len();
+    let mut encoded = u64::try_from(start_bytes).context("frame size does not fit u64")?;
     for chunk in chunks {
         let chunk_len = usize::try_from(*chunk).context("upload chunk size does not fit usize")?;
-        let request = proto::UploadResourceRequest {
-            event: Some(proto::upload_resource_request::Event::Chunk(
-                vec![0; chunk_len].into(),
-            )),
-        };
-        let request_bytes = u64::try_from(request.encoded_len())
-            .context("upload chunk encoded size does not fit u64")?;
+        let chunk_bytes = UploadChunk::encode(&vec![0; chunk_len], &limits)
+            .map_err(|report| anyhow!("an upload chunk does not fit a frame: {report:?}"))?
+            .len();
+        let chunk_bytes = u64::try_from(chunk_bytes).context("frame size does not fit u64")?;
         encoded = encoded
-            .checked_add(request_bytes)
-            .ok_or_else(|| anyhow!("upload protobuf byte count overflowed"))?;
+            .checked_add(chunk_bytes)
+            .ok_or_else(|| anyhow!("upload frame byte count overflowed"))?;
     }
     Ok(encoded)
 }
 
+/// The bytes of the upload reply frame that answered the upload.
 fn upload_response_bytes(outcome: &CommandOutcome) -> Result<usize> {
     let upload = outcome
         .resource_upload
         .as_ref()
         .ok_or_else(|| anyhow!("resource upload outcome omitted its identity and version"))?;
-    let kind = match outcome.kind {
-        CommandOutcomeKind::Unspecified => proto::CommandResultKind::Unspecified,
-        CommandOutcomeKind::Ok => proto::CommandResultKind::Ok,
-        CommandOutcomeKind::Error => proto::CommandResultKind::Error,
-        CommandOutcomeKind::NotLeader => proto::CommandResultKind::NotLeader,
-        CommandOutcomeKind::TransactionDetached => proto::CommandResultKind::TransactionDetached,
-        CommandOutcomeKind::PreviewStale => proto::CommandResultKind::PreviewStale,
-    };
-    let response = proto::UploadResourceResponse {
-        success: outcome.success,
+    let version = upload
+        .version
+        .ok_or_else(|| anyhow!("an installed upload reports its version"))?;
+    let reply = UploadReply {
+        request_id: Some(RequestId::new(std::num::NonZeroU64::MIN)),
+        disposition: UploadDisposition::Installed {
+            upload_identity: upload.identity.clone(),
+            version,
+            origin: upload.origin.unwrap_or(OutcomeOrigin::Executed),
+        },
         message: outcome.message.clone(),
-        version: upload.version,
-        diagnostics: outcome
-            .diagnostics
-            .iter()
-            .map(|diagnostic| proto::Diagnostic {
-                message: diagnostic.message.clone(),
-                span_start: diagnostic.span_start,
-                span_end: diagnostic.span_end,
-            })
-            .collect(),
-        kind: i32::from(kind),
-        leader: outcome.leader.clone().unwrap_or_default(),
-        leader_grpc_uri: outcome.leader_grpc_uri.clone().unwrap_or_default(),
-        upload_identity: upload.identity.to_string(),
+        diagnostics: outcome.diagnostics.clone(),
     };
-    Ok(response.encoded_len())
+    Ok(reply
+        .encode(&SessionLimits::DEFAULT)
+        .map_err(|report| anyhow!("an upload reply does not fit a frame: {report:?}"))?
+        .len())
 }
 
 fn checked_sum(values: &[u64]) -> Result<u64> {

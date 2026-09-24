@@ -22,7 +22,8 @@ use strum::IntoStaticStr;
 use thiserror::Error;
 
 use crate::{
-    DomainMutationLease, DomainMutationOwner, DomainPlanningInputs, TransactionReportArchive,
+    DiagnosticSpan, DomainMutationLease, DomainMutationOwner, DomainPlanningInputs,
+    TransactionReportArchive,
 };
 
 #[derive(
@@ -148,8 +149,8 @@ pub(crate) enum TransactionQueueDecision {
 )]
 pub struct TransactionDiagnostic {
     pub message: String,
-    pub span_start: u32,
-    pub span_end: u32,
+    /// Absent when the problem has no location in the statement's source.
+    pub span: Option<DiagnosticSpan>,
 }
 
 #[derive(
@@ -928,8 +929,7 @@ impl ReplicatedTransaction {
             applying.result.result.message = error.clone();
             applying.result.result.diagnostics = vec![TransactionDiagnostic {
                 message: error.clone(),
-                span_start: 0,
-                span_end: 0,
+                span: None,
             }];
             applying.result.impact.actual_mut().outcome = ExecutionStepOutcome::Failed {
                 diagnostic: ImpactDiagnostic {

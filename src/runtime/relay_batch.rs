@@ -144,7 +144,18 @@ pub(super) struct UnkeyedRelayBatchParts {
 }
 
 impl RelayRecordBatch {
-    pub(super) fn runtime_row(
+    /// The Arrow rows the batch carries.
+    pub(crate) fn record_batch(&self) -> &arrow_array::RecordBatch {
+        self.batch.batch()
+    }
+
+    /// The concrete branch of every row, in row order.
+    pub(crate) fn branch_keys(&self) -> &[Option<BranchKey>] {
+        &self.keys
+    }
+
+    /// Addresses one row of the batch with its metadata, without copying its values.
+    pub(crate) fn runtime_row(
         &self,
         row: usize,
     ) -> error_stack::Result<RuntimeRow, RelayRecordBatchError> {

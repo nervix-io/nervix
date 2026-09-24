@@ -935,3 +935,139 @@ fn malformed_schemas_are_refused() {
     );
     assert!(ServerMessage::decode(&raw_server(bytes)).is_ok());
 }
+
+/// A small schema whose display text is known exactly: fields out of name order, an optional, a
+/// sensitive, a datetime and a list field, on a two-field branch key.
+fn display_schema(branched: bool) -> RowSchema {
+    let field = |raw: &str, ty: ParseAsType| SchemaField {
+        name: name(raw),
+        ty,
+        optional: false,
+        sensitive: false,
+    };
+    let branch = RowBranch::new(
+        name("tenants"),
+        vec![
+            field("tenant", ParseAsType::String),
+            field("region", ParseAsType::U16),
+        ],
+    )
+    .assured("the display branch has key fields");
+    RowSchema {
+        fields: vec![
+            field("user_id", ParseAsType::U32),
+            field("amount", ParseAsType::F32),
+            SchemaField {
+                optional: true,
+                ..field("note", ParseAsType::String)
+            },
+            SchemaField {
+                sensitive: true,
+                ..field("secret", ParseAsType::String)
+            },
+            field("seen_at", ParseAsType::Datetime),
+            field(
+                "tags",
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::String),
+                },
+            ),
+        ],
+        branch: branched.then_some(branch),
+    }
+}
+
+fn write_display_row(
+    cells: &mut CellWriter<'_, 'static>,
+    user_id: u32,
+    amount: f32,
+    note: Option<&str>,
+) -> Result<(), Report<WireEncodeError>> {
+    cells.push_u32(user_id)?;
+    cells.push_f32(amount)?;
+    match note {
+        Some(note) => cells.push_string(note)?,
+        None => cells.push_null()?,
+    }
+    cells.push_redacted()?;
+    cells.push_datetime(Timestamp::from_unix_nanos(1_500_000_000))?;
+    cells.push_list(|tags| {
+        tags.push_string("a")?;
+        tags.push_string("b")?;
+        Ok(())
+    })
+}
+
+#[test]
+fn rows_display_as_json_objects_in_field_name_order_after_their_branch_key() {
+    let mut batch = SubscriptionRowsEncoder::branched(subscription(), &limits(), |key| {
+        key.push_string("acme")?;
+        key.push_u16(7)
+    })
+    .assured("the display key fits the limits");
+    batch
+        .push_row(|cells| write_display_row(cells, 1, 0.5, None))
+        .assured("the display row fits the limits");
+    batch
+        .push_row(|cells| write_display_row(cells, 2, 0.1, Some("say \"hi\"\n")))
+        .assured("the display row fits the limits");
+    let rows = decode_rows(
+        batch
+            .finish()
+            .assured("the display batch fits")
+            .into_bytes(),
+    );
+
+    let lines = rows
+        .batch()
+        .display_lines(&display_schema(true))
+        .assured("the batch follows the display schema");
+    assert_eq!(
+        lines,
+        [
+            "key={\"tenant\":\"acme\",\"region\":7} \
+             payload={\"amount\":0.5,\"secret\":\"<masked>\",\"seen_at\":\"1970-01-01T00:00:01.\
+             500+00:00\",\"tags\":[\"a\",\"b\"],\"user_id\":1}",
+            "key={\"tenant\":\"acme\",\"region\":7} \
+             payload={\"amount\":0.10000000149011612,\"note\":\"say \
+             \\\"hi\\\"\\n\",\"secret\":\"<masked>\",\"seen_at\":\"1970-01-01T00:00:01.500+00:00\"\
+             ,\"tags\":[\"a\",\"b\"],\"user_id\":2}",
+        ]
+    );
+
+    let error = rows
+        .batch()
+        .display_lines(&display_schema(false))
+        .expect_err("a branched batch does not follow an unbranched schema");
+    assert_eq!(
+        error.current_context(),
+        &RowConformanceError::UnexpectedBranchKey
+    );
+}
+
+#[test]
+fn unbranched_rows_display_without_a_key() {
+    let mut batch = SubscriptionRowsEncoder::unbranched(subscription(), &limits())
+        .assured("an unbranched batch starts within the limits");
+    batch
+        .push_row(|cells| write_display_row(cells, 3, -1.25, Some("")))
+        .assured("the display row fits the limits");
+    let rows = decode_rows(
+        batch
+            .finish()
+            .assured("the display batch fits")
+            .into_bytes(),
+    );
+
+    let lines = rows
+        .batch()
+        .display_lines(&display_schema(false))
+        .assured("the batch follows the display schema");
+    assert_eq!(
+        lines,
+        [
+            "{\"amount\":-1.25,\"note\":\"\",\"secret\":\"<masked>\",\"seen_at\":\"1970-01-01T00:\
+             00:01.500+00:00\",\"tags\":[\"a\",\"b\"],\"user_id\":3}"
+        ]
+    );
+}

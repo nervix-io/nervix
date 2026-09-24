@@ -247,7 +247,7 @@ impl SessionServiceImpl {
 ///
 /// The accepted position comes from the report rather than the queue, so status and report cannot
 /// disagree about how many operations the reader was shown.
-fn transaction_inspection_status(
+pub(super) fn transaction_inspection_status(
     transaction: &ReplicatedTransaction,
     accepted_operations: TransactionPosition,
 ) -> TransactionStatus {

@@ -61,7 +61,18 @@ pub struct TransactionInspectionRequest {
 }
 
 /// Where a replicated transaction is in its lifecycle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, AsRefStr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    AsRefStr,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
 #[serde(tag = "state", rename_all = "SCREAMING_SNAKE_CASE")]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionLifecycle {

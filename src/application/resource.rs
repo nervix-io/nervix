@@ -22,12 +22,12 @@ use thiserror::Error;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use super::{
+    command_result::{CommandOrigin, CommandResult},
     domain_clock::current_timestamp,
     model_mutation::{command_error, command_ok, command_ok_already_existed},
     session_service::SessionServiceImpl,
 };
 use crate::{
-    proto::CommandResult,
     resource::{ResourceStore, StagedResourceArchive},
     resource_interconnect::{FetchResourceArchive, PublishResourceReplica},
 };
@@ -98,6 +98,9 @@ impl ResourceUploadError {
 
 pub(in crate::application) struct ResourceInstallation {
     pub(in crate::application) version: u64,
+    /// Whether this call installed the version, or found the upload identity already completed by
+    /// an earlier call whose reply was lost.
+    pub(in crate::application) origin: CommandOrigin,
 }
 
 struct ResourceReplication {
@@ -734,6 +737,7 @@ impl SessionServiceImpl {
                     })?;
                 return Ok(ResourceInstallation {
                     version: upload.version,
+                    origin: CommandOrigin::Recovered,
                 });
             }
             ResourceUploadState::Failed { reason, .. } => {
@@ -921,6 +925,7 @@ impl SessionServiceImpl {
             .await?;
         Ok(ResourceInstallation {
             version: manifest.resource.id.version,
+            origin: CommandOrigin::Executed,
         })
     }
 
@@ -1062,7 +1067,7 @@ mod tests {
             )
             .await;
         assert!(
-            created.success,
+            created.succeeded(),
             "resource catalog must be created: {created:?}"
         );
     }
@@ -1303,8 +1308,8 @@ mod tests {
                 ),
             )
             .await;
-        assert!(first.success);
-        assert!(!first.already_existed);
+        assert!(first.succeeded());
+        assert!(!first.found_existing());
 
         let duplicate = service
             .create_resource(
@@ -1317,8 +1322,8 @@ mod tests {
                 ),
             )
             .await;
-        assert!(duplicate.success);
-        assert!(duplicate.already_existed);
+        assert!(duplicate.succeeded());
+        assert!(duplicate.found_existing());
         assert!(duplicate.message.contains("already exists"));
 
         let same_name_other_domain = service
@@ -1333,11 +1338,11 @@ mod tests {
             )
             .await;
         assert!(
-            same_name_other_domain.success,
+            same_name_other_domain.succeeded(),
             "resources are domain-owned: {}",
             same_name_other_domain.message
         );
-        assert!(!same_name_other_domain.already_existed);
+        assert!(!same_name_other_domain.found_existing());
 
         let _ = std::fs::remove_dir_all(&path);
     }

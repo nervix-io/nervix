@@ -1,10 +1,13 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    num::NonZeroU64,
     time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use futures_channel::mpsc::{UnboundedSender, unbounded};
+use bytes::Bytes;
+use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
@@ -12,12 +15,26 @@ use gloo_net::websocket::{
 use leptos::{ev, mount::mount_to_body, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_client_wire::{
+    AttachDisposition, AttachOutcome, AttachTransactionRequest, CancellationStage, ClientMessage,
+    ClientRequest, ClusterObserved, CommandDisposition, CommandOutcome, CommandRequest, Diagnostic,
+    DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved, LeaderRedirect, Leadership,
+    NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView, RowSchema,
+    SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionEndReason,
+    SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
+    SubscribeRequest, SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType,
+    SuggestRequest, TransferAssembly, TransferPart, UnsubscribeRequest, VerifiedFrame,
+    websocket::{ClientWebSocketCodec, WebSocketData},
+};
 use nervix_dataflow_graph::{
     DataflowBranch, DataflowEdgeKind, DataflowGraph, DataflowInputSide, DataflowNodeKind,
     DataflowNodeRole, DataflowNodeStatus, DataflowProcessorKind, DataflowSchemaField,
     DataflowStatistics,
 };
-use nervix_models::{ClusterNodeName, Statement};
+use nervix_models::{
+    ClusterNodeName, CommandExecutionReference, DomainName, DomainPace, DomainStatus, ModelKind,
+    Statement, SubscriptionName, TransactionLifecycle, TransactionStatus,
+};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
 };
@@ -27,7 +44,6 @@ use nervix_web_console::graph::{
     layout::{EdgeTravel, GroupRegion, Rect},
     viewport::{Extent, GraphBounds, Viewport},
 };
-use prost::Message as ProstMessage;
 use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
@@ -36,6 +52,13 @@ const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_
 const SUGGESTION_REQUEST_DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
 const WEBSOCKET_INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const WEBSOCKET_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+
+/// The limits every frame of the console's session is held to.
+const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
+
+/// What a request shows when the server answered it with a reply meant for another kind of
+/// request.
+const UNEXPECTED_REPLY: &str = "the server answered with a reply of another kind";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConsoleConnectionState {
@@ -47,7 +70,7 @@ enum ConsoleConnectionState {
 #[derive(Clone)]
 struct WebConsoleSession {
     state: RwSignal<ConsoleConnectionState>,
-    request_tx: RwSignal<Option<UnboundedSender<QueuedRequest>>>,
+    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
     upload_base_url: RwSignal<Option<String>>,
     auth_token: RwSignal<Option<String>>,
 }
@@ -56,109 +79,407 @@ struct WebConsoleSession {
 struct WebConsoleSignals {
     terminal_lines: RwSignal<Vec<TermLine>>,
     suggestions: RwSignal<Vec<String>>,
-    domain_snapshots: RwSignal<Vec<DomainSnapshotView>>,
+    domain_snapshots: RwSignal<BTreeMap<DomainName, DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
-    active_domain: RwSignal<Option<String>>,
-    transaction_status: RwSignal<Option<nervix_proto::TransactionStatus>>,
+    active_domain: RwSignal<Option<DomainName>>,
+    transaction_status: RwSignal<Option<TransactionStatus>>,
     domains: RwSignal<Vec<DomainView>>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
     active_subscription_tab: RwSignal<Option<u64>>,
     domains_loaded: RwSignal<bool>,
-    user_selected_domain: RwSignal<bool>,
     auth_token: RwSignal<Option<String>>,
     auth_error: RwSignal<Option<String>>,
 }
 
+/// A request the console sends over its session, together with what its reply is for.
 #[derive(Clone)]
-enum QueuedRequest {
+enum ConsoleRequest {
+    /// Executes NSPL statements.
     Command {
-        query: String,
-        request: nervix_proto::SessionRequest,
+        request: CommandRequest,
+        purpose: CommandPurpose,
     },
+    /// `LIST DOMAINS` typed in the REPL. The reply updates the domain list and is printed.
+    ListDomains,
+    /// Opens the subscription the tab `tab_id` shows.
     SubscriptionStart {
         tab_id: u64,
-        request: nervix_proto::SessionRequest,
+        request: SubscribeRequest,
     },
-    SubscriptionStop {
-        request: nervix_proto::SessionRequest,
-    },
-    ResourceDescribe {
-        resource: String,
-        request: nervix_proto::SessionRequest,
-    },
-    SetActiveDomain {
-        request: nervix_proto::SessionRequest,
-    },
-    Suggest {
-        request: nervix_proto::SessionRequest,
-    },
+    /// Closes the subscription of a tab the operator closed.
+    SubscriptionStop(UnsubscribeRequest),
+    /// Selects the domain whose observations the session receives.
+    SelectDomain(SelectDomainRequest),
+    /// Asks for completions of the REPL input.
+    Suggest(SuggestRequest),
+    /// Binds the session's transaction to the connection.
+    AttachTransaction(AttachTransactionRequest),
 }
 
+/// Who reads the outcome of a command.
 #[derive(Clone)]
-struct QueuedCommand {
-    query: String,
-    request: nervix_proto::SessionRequest,
+enum CommandPurpose {
+    /// The REPL prints it.
+    Repl,
+    /// The resource dialog reads the versions of `resource` from its `DESCRIBE RESOURCE` text.
+    ResourceDescription { resource: String },
 }
 
-#[derive(Clone)]
-enum PendingRequest {
-    AttachTransaction {
-        request: nervix_proto::SessionRequest,
-    },
-    Command(QueuedCommand),
-    SubscriptionStart {
-        tab_id: u64,
-        request: nervix_proto::SessionRequest,
-    },
-    SubscriptionStop {
-        request: nervix_proto::SessionRequest,
-    },
-    ResourceDescribe {
-        resource: String,
-        request: nervix_proto::SessionRequest,
-    },
-}
-
-impl QueuedRequest {
-    fn request(&self) -> &nervix_proto::SessionRequest {
+impl ConsoleRequest {
+    /// Whether the request keeps its place in the order the console issued requests: it waits
+    /// until the session can serve it and outlives a connection that ended before answering it.
+    ///
+    /// Every connection selects the active domain and attaches the session's transaction again
+    /// itself, and a completion request only matters while the operator is typing, so those are
+    /// sent at once and forgotten with the connection.
+    fn is_ordered(&self) -> bool {
         match self {
-            Self::Command { request, .. }
-            | Self::SubscriptionStart { request, .. }
-            | Self::SubscriptionStop { request, .. }
-            | Self::ResourceDescribe { request, .. }
-            | Self::SetActiveDomain { request }
-            | Self::Suggest { request } => request,
+            Self::Command { .. }
+            | Self::ListDomains
+            | Self::SubscriptionStart { .. }
+            | Self::SubscriptionStop(_) => true,
+            Self::SelectDomain(_) | Self::Suggest(_) | Self::AttachTransaction(_) => false,
+        }
+    }
+
+    /// The wire request that carries this request.
+    fn client_request(&self) -> ClientRequest {
+        match self {
+            Self::Command { request, .. } => ClientRequest::Command(request.clone()),
+            Self::ListDomains => ClientRequest::ListDomains,
+            Self::SubscriptionStart { request, .. } => ClientRequest::Subscribe(request.clone()),
+            Self::SubscriptionStop(request) => ClientRequest::Unsubscribe(request.clone()),
+            Self::SelectDomain(request) => ClientRequest::SelectDomain(request.clone()),
+            Self::Suggest(request) => ClientRequest::Suggest(request.clone()),
+            Self::AttachTransaction(request) => ClientRequest::AttachTransaction(request.clone()),
         }
     }
 }
 
-impl PendingRequest {
-    fn request(&self) -> &nervix_proto::SessionRequest {
-        match self {
-            Self::AttachTransaction { request } => request,
-            Self::Command(command) => &command.request,
-            Self::SubscriptionStart { request, .. } | Self::SubscriptionStop { request, .. } => {
-                request
+/// The place of a request in the order the console issued its requests. A request keeps it when it
+/// is sent again, so requests sent again on a new connection keep their original order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct IssueOrder(u64);
+
+/// A request and its place in the issue order.
+struct IssuedRequest {
+    order: IssueOrder,
+    request: ConsoleRequest,
+}
+
+/// Where a server message goes.
+enum Routed {
+    /// An unsolicited message. It never answers a request.
+    Event(ServerEvent),
+    /// The terminal reply to a request that awaited it.
+    Reply(Box<AnsweredRequest>),
+    /// A reply that could not be read. The request it answers is over.
+    Unreadable(Box<UnreadableReply>),
+    /// A reply to a request the console no longer awaits.
+    Untracked,
+    /// A part of a reply that is still arriving.
+    Pending,
+}
+
+/// A request and the terminal reply that answers it.
+struct AnsweredRequest {
+    request: IssuedRequest,
+    body: ReplyBody,
+}
+
+/// A request whose reply could not be read, and why.
+struct UnreadableReply {
+    request: IssuedRequest,
+    reason: String,
+}
+
+/// Where every request of the console's session stands: waiting until the session can serve it,
+/// or sent on the current connection and awaiting its terminal reply.
+///
+/// A reply names the request it answers, so replies are paired with their requests by identity
+/// and never by arrival order. Unsolicited server messages answer no request, so they never
+/// complete or discard one.
+struct SessionRequests {
+    /// The place the next issued request takes.
+    next_issue: u64,
+    /// Ordered requests waiting until the session can serve them, in the order they were issued.
+    held: BTreeMap<IssueOrder, ConsoleRequest>,
+    /// The identity the next request sent on the current connection carries.
+    next_request_id: NonZeroU64,
+    /// The requests sent on the current connection that await their terminal reply, by the
+    /// identity the reply carries. Identities only increase, so iteration is send order.
+    in_flight: BTreeMap<RequestId, IssuedRequest>,
+    /// The replies too large for one frame whose parts are still arriving.
+    transfers: BTreeMap<RequestId, TransferAssembly>,
+    /// The latest completion request. An earlier one is no longer awaited, so its stale
+    /// suggestions are never shown.
+    latest_suggestion: Option<RequestId>,
+    /// Whether the server confirmed that the node serving the connection leads the cluster.
+    leader_confirmed: bool,
+    /// The request attaching the session's transaction to the connection, while it is in flight.
+    attaching: Option<RequestId>,
+}
+
+impl SessionRequests {
+    fn new() -> Self {
+        Self {
+            next_issue: 0,
+            held: BTreeMap::new(),
+            next_request_id: NonZeroU64::MIN,
+            in_flight: BTreeMap::new(),
+            transfers: BTreeMap::new(),
+            latest_suggestion: None,
+            leader_confirmed: false,
+            attaching: None,
+        }
+    }
+
+    /// Gives a request the next place in the issue order.
+    fn issue(&mut self, request: ConsoleRequest) -> IssuedRequest {
+        let order = IssueOrder(self.next_issue);
+        self.next_issue = self
+            .next_issue
+            .checked_add(1)
+            .assured("a console session cannot issue 2^64 requests");
+        IssuedRequest { order, request }
+    }
+
+    /// Whether ordered requests can be sent: the connection is served by the leader, and the
+    /// session's transaction is not being attached.
+    fn is_ready(&self) -> bool {
+        self.leader_confirmed && self.attaching.is_none()
+    }
+
+    /// Whether an attach of the session's transaction is in flight.
+    fn is_attaching(&self) -> bool {
+        self.attaching.is_some()
+    }
+
+    /// Records that the node serving the connection leads the cluster.
+    fn confirm_leader(&mut self) {
+        self.leader_confirmed = true;
+    }
+
+    /// Takes a newly issued request. An ordered request waits while the session is not ready;
+    /// anything else is sent at once, and the returned message carries it.
+    fn accept(&mut self, issued: IssuedRequest) -> Option<ClientMessage> {
+        if issued.request.is_ordered() && !self.is_ready() {
+            self.held.insert(issued.order, issued.request);
+            return None;
+        }
+        Some(self.dispatch(issued))
+    }
+
+    /// Registers a request as sent on the current connection and returns the message that
+    /// carries it, under a fresh identity.
+    fn dispatch(&mut self, issued: IssuedRequest) -> ClientMessage {
+        let request_id = RequestId::new(self.next_request_id);
+        self.next_request_id = self
+            .next_request_id
+            .checked_add(1)
+            .assured("a console connection cannot send 2^64 requests");
+        match &issued.request {
+            ConsoleRequest::Suggest(_) => {
+                if let Some(previous) = self.latest_suggestion.replace(request_id) {
+                    self.in_flight.remove(&previous);
+                }
             }
-            Self::ResourceDescribe { request, .. } => request,
+            ConsoleRequest::AttachTransaction(_) => {
+                self.attaching = Some(request_id);
+            }
+            ConsoleRequest::Command { .. }
+            | ConsoleRequest::ListDomains
+            | ConsoleRequest::SubscriptionStart { .. }
+            | ConsoleRequest::SubscriptionStop(_)
+            | ConsoleRequest::SelectDomain(_) => {}
+        }
+        let message = ClientMessage {
+            request_id,
+            request: issued.request.client_request(),
+        };
+        self.in_flight.insert(request_id, issued);
+        message
+    }
+
+    /// Dispatches the held requests in the order they were issued, once the session is ready.
+    fn release_held(&mut self) -> Vec<ClientMessage> {
+        if !self.is_ready() {
+            return Vec::new();
+        }
+        let held = std::mem::take(&mut self.held);
+        let mut messages = Vec::with_capacity(held.len());
+        for (order, request) in held {
+            messages.push(self.dispatch(IssuedRequest { order, request }));
+        }
+        messages
+    }
+
+    /// Holds a request that has to be sent again, in its original place in the issue order.
+    fn hold_again(&mut self, issued: IssuedRequest) {
+        self.held.insert(issued.order, issued.request);
+    }
+
+    /// Drops the held requests, which can no longer be served as they were issued.
+    fn clear_held(&mut self) {
+        self.held.clear();
+    }
+
+    /// Pairs a server message with the request it answers. An event answers no request.
+    fn route(&mut self, message: ServerMessage) -> Routed {
+        match message {
+            ServerMessage::Event(event) => Routed::Event(event),
+            ServerMessage::Reply(reply) => match self.answer(reply.request_id) {
+                Some(request) => Routed::Reply(Box::new(AnsweredRequest {
+                    request,
+                    body: reply.body,
+                })),
+                None => Routed::Untracked,
+            },
+            ServerMessage::TransferPart(part) => self.assemble(&part),
         }
     }
+
+    /// Ends the request `request_id` names, when it awaits its reply.
+    fn answer(&mut self, request_id: RequestId) -> Option<IssuedRequest> {
+        let request = self.in_flight.remove(&request_id)?;
+        self.transfers.remove(&request_id);
+        if self.attaching == Some(request_id) {
+            self.attaching = None;
+        }
+        if self.latest_suggestion == Some(request_id) {
+            self.latest_suggestion = None;
+        }
+        Some(request)
+    }
+
+    /// Adds one part to the reply it belongs to, and routes the reply once it is complete.
+    fn assemble(&mut self, part: &TransferPart) -> Routed {
+        let request_id = part.request_id();
+        if !self.in_flight.contains_key(&request_id) {
+            return Routed::Untracked;
+        }
+        let assembly = match self.transfers.entry(request_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                entry.insert(TransferAssembly::new(request_id, &SESSION_LIMITS))
+            }
+        };
+        let appended = assembly.append(part);
+        let complete = assembly.is_complete();
+        if let Err(error) = appended {
+            let request = self
+                .answer(request_id)
+                .verified("the request was found in flight above");
+            return Routed::Unreadable(Box::new(UnreadableReply {
+                request,
+                reason: format!("failed to reassemble a reply: {}", error.current_context()),
+            }));
+        }
+        if !complete {
+            return Routed::Pending;
+        }
+        let assembly = self
+            .transfers
+            .remove(&request_id)
+            .verified("the assembly was completed above");
+        let request = self
+            .answer(request_id)
+            .verified("the request was found in flight above");
+        match assembly.finish() {
+            Ok(reply) => Routed::Reply(Box::new(AnsweredRequest {
+                request,
+                body: reply.body,
+            })),
+            Err(error) => Routed::Unreadable(Box::new(UnreadableReply {
+                request,
+                reason: format!("failed to reassemble a reply: {}", error.current_context()),
+            })),
+        }
+    }
+
+    /// Forgets the connection that ended. Every ordered request it left unanswered waits for the
+    /// next connection in its place in the issue order; a command keeps its execution reference,
+    /// so the server recovers its recorded outcome instead of executing it twice.
+    fn end_connection(&mut self) {
+        let in_flight = std::mem::take(&mut self.in_flight);
+        for issued in in_flight.into_values() {
+            if issued.request.is_ordered() {
+                self.hold_again(issued);
+            }
+        }
+        self.transfers.clear();
+        self.next_request_id = NonZeroU64::MIN;
+        self.latest_suggestion = None;
+        self.leader_confirmed = false;
+        self.attaching = None;
+    }
+}
+
+/// What the session loop does after a server message was applied.
+enum SessionStep {
+    /// Keep serving the connection.
+    Continue,
+    /// Attach the session's transaction again. The requests held for it follow once it is
+    /// attached.
+    Reattach { transaction_id: String },
+    /// End the connection and continue the session at the leader's web console.
+    Redirect(Url),
+    /// End the connection and connect again at the same address after the reconnect delay.
+    Reconnect,
+}
+
+/// How a connection ended.
+enum ConnectionEnd {
+    /// The connection closed or failed. The next one opens at the same address.
+    Dropped,
+    /// The session continues at the leader's web console.
+    Redirected(Url),
+    /// The console stopped issuing requests, so the session is over.
+    ConsoleClosed,
 }
 
 #[derive(Clone)]
 struct SubscriptionTabView {
     id: u64,
     state: SubscriptionTabState,
-    name: String,
-    domain: String,
+    name: SubscriptionName,
+    domain: DomainName,
     relay: String,
     filter: String,
     sample_rate_index: usize,
     title: String,
     subscribe_command: String,
-    unsubscribe_command: String,
     lines: Vec<TermLine>,
+    /// The subscription the tab shows, once the server opened it.
+    stream: Option<TabStream>,
+}
+
+/// An opened subscription and the schema its rows follow.
+#[derive(Clone)]
+struct TabStream {
+    subscription: SubscriptionHandle,
+    schema: RowSchema,
+}
+
+impl SubscriptionTabView {
+    /// Whether the tab shows `subscription`. A name reused after deletion has a new generation, so
+    /// messages about an earlier subscription never reach a later tab.
+    fn streams(&self, subscription: &SubscriptionHandle) -> bool {
+        match &self.stream {
+            Some(stream) => stream.subscription == *subscription,
+            None => false,
+        }
+    }
+
+    /// The schema of `subscription`'s rows, when the tab shows that subscription.
+    fn stream_schema(&self, subscription: &SubscriptionHandle) -> Option<&RowSchema> {
+        let stream = self.stream.as_ref()?;
+        if stream.subscription != *subscription {
+            return None;
+        }
+        Some(&stream.schema)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -277,21 +598,20 @@ fn main() {
 
 #[component]
 fn App() -> impl IntoView {
-    let active_domain = RwSignal::new(None::<String>);
+    let active_domain = RwSignal::new(None::<DomainName>);
     let domains = RwSignal::new(Vec::<DomainView>::new());
     let active_theme = RwSignal::new(0_usize);
     let input = RwSignal::new(String::new());
     let terminal_lines = RwSignal::new(Vec::<TermLine>::new());
-    let transaction_status = RwSignal::new(None::<nervix_proto::TransactionStatus>);
+    let transaction_status = RwSignal::new(None::<TransactionStatus>);
     let subscription_tabs = RwSignal::new(Vec::<SubscriptionTabView>::new());
     let active_subscription_tab = RwSignal::new(None::<u64>);
     let next_subscription_tab_id = RwSignal::new(1_u64);
     let suggestions = RwSignal::new(Vec::<String>::new());
-    let domain_snapshots = RwSignal::new(Vec::<DomainSnapshotView>::new());
+    let domain_snapshots = RwSignal::new(BTreeMap::<DomainName, DomainSnapshotView>::new());
     let cluster_counters = RwSignal::new(ClusterCounters::default());
     let resource_details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
     let domains_loaded = RwSignal::new(false);
-    let user_selected_domain = RwSignal::new(false);
     let auth_token = RwSignal::new(web_console_auth_token_from_location());
     let auth_error = RwSignal::new(None::<String>);
     let web_console_session = use_websocket_session(WebConsoleSignals {
@@ -306,30 +626,33 @@ fn App() -> impl IntoView {
         subscription_tabs,
         active_subscription_tab,
         domains_loaded,
-        user_selected_domain,
         auth_token,
         auth_error,
     });
 
-    let active_domain_name = move || active_domain.get().unwrap_or_default();
+    let active_domain_name = move || match active_domain.get() {
+        Some(domain) => domain.to_string(),
+        None => String::new(),
+    };
     let active_graph = move || {
-        let active_id = active_domain_name();
-        let snapshots = domain_snapshots.get();
-        snapshots
-            .iter()
-            .find(|snapshot| snapshot.domain == active_id)
-            .cloned()
-            .filter(|snapshot| !snapshot.dataflow_graph.nodes.is_empty())
-            .map(|snapshot| GraphView::from_dataflow_graph(snapshot.dataflow_graph))
+        let active = active_domain.get()?;
+        let graph = {
+            let snapshots = domain_snapshots.read();
+            let snapshot = snapshots.get(&active)?;
+            snapshot.dataflow_graph.clone()
+        };
+        if graph.nodes.is_empty() {
+            return None;
+        }
+        Some(GraphView::from_dataflow_graph(graph))
     };
     let active_entities = move || {
-        let active_id = active_domain_name();
-        let snapshot = domain_snapshots
-            .get()
-            .into_iter()
-            .find(|snapshot| snapshot.domain == active_id);
-        match snapshot {
-            Some(snapshot) => snapshot.entities,
+        let Some(active) = active_domain.get() else {
+            return Vec::new();
+        };
+        let snapshots = domain_snapshots.read();
+        match snapshots.get(&active) {
+            Some(snapshot) => snapshot.entities.clone(),
             None => Vec::new(),
         }
     };
@@ -338,12 +661,7 @@ fn App() -> impl IntoView {
         let Some(domain) = active_domain.get() else {
             return;
         };
-        let request = nervix_proto::SessionRequest {
-            request: Some(nervix_proto::session_request::Request::SetActiveDomain(
-                nervix_proto::SetActiveDomainRequest { domain },
-            )),
-        };
-        let queued = QueuedRequest::SetActiveDomain { request };
+        let queued = ConsoleRequest::SelectDomain(SelectDomainRequest { domain });
         if let Some(request_tx) = active_domain_session.request_tx.get_untracked() {
             request_tx
                 .unbounded_send(queued)
@@ -363,24 +681,16 @@ fn App() -> impl IntoView {
             suggestions.set(Vec::new());
             return;
         }
-        let domain = active_domain_name();
+        let domain = active_domain.get_untracked();
         spawn_local(async move {
             wait_for_browser_delay(SUGGESTION_REQUEST_DEBOUNCE_DELAY).await;
             if suggestion_request_sequence.get_untracked() != request_sequence {
                 return;
             }
-            let cursor = u32::try_from(value.len())
-                .assured("WebAssembly linear memory limits input lengths to u32");
-            let request = nervix_proto::SessionRequest {
-                request: Some(nervix_proto::session_request::Request::Suggest(
-                    nervix_proto::SuggestRequest {
-                        input: value,
-                        cursor,
-                        domain,
-                    },
-                )),
-            };
-            let queued = QueuedRequest::Suggest { request };
+            let cursor = value.len();
+            let request = SuggestRequest::new(value, cursor, domain)
+                .assured("the end of the input is always a character boundary");
+            let queued = ConsoleRequest::Suggest(request);
             if let Some(request_tx) = suggestion_session.request_tx.get_untracked()
                 && request_tx.unbounded_send(queued).is_err()
             {
@@ -402,19 +712,20 @@ fn App() -> impl IntoView {
         if command.is_empty() {
             return;
         }
+        let prompt_transaction =
+            transaction_status.with_untracked(|status| ActiveTransaction::of(status.as_ref()));
         terminal_lines.update(|lines| {
-            lines.push(TermLine::prompt(
-                command.clone(),
-                current_transaction_state(transaction_status.get_untracked()),
-            ));
+            lines.push(TermLine::prompt(command.clone(), prompt_transaction));
         });
         if command.eq_ignore_ascii_case("clear") {
             terminal_lines.set(Vec::new());
             input.set(String::new());
             return;
         }
+        let transaction_active =
+            transaction_status.with_untracked(|status| transaction_is_active(status.as_ref()));
         if let Ok(ClientStatement::ListDomains) = parse_client_statement(&command) {
-            if transaction_is_active(transaction_status.get_untracked()) {
+            if transaction_active {
                 terminal_lines.update(|lines| {
                     lines.push(TermLine::error(
                         "client-local commands are not allowed while a transaction is active",
@@ -422,24 +733,17 @@ fn App() -> impl IntoView {
                 });
                 return;
             }
-            let request = nervix_proto::SessionRequest {
-                request: Some(nervix_proto::session_request::Request::ListDomains(
-                    nervix_proto::ListDomainsRequest {},
-                )),
-            };
-            let queued = QueuedRequest::Command {
-                query: command.clone(),
-                request,
-            };
             if let Some(request_tx) = web_console_session.request_tx.get_untracked()
-                && request_tx.unbounded_send(queued).is_err()
+                && request_tx
+                    .unbounded_send(ConsoleRequest::ListDomains)
+                    .is_err()
             {
                 terminal_lines.update(|lines| {
                     lines.push(TermLine::error("websocket command channel is closed"));
                 });
             }
         } else if let Ok(domain) = parse_use_domain(&command) {
-            if transaction_is_active(transaction_status.get_untracked()) {
+            if transaction_active {
                 terminal_lines.update(|lines| {
                     lines.push(TermLine::error(
                         "client-local commands are not allowed while a transaction is active",
@@ -447,26 +751,29 @@ fn App() -> impl IntoView {
                 });
                 return;
             }
-            let domain_name = domain.to_string();
-            if domains
-                .get_untracked()
-                .iter()
-                .any(|domain| domain.id == domain_name)
-            {
-                user_selected_domain.set(true);
-                active_domain.set(Some(domain_name.clone()));
+            let listed = {
+                let listed_domains = domains.read_untracked();
+                // Bounded by the domains of the cluster, which the domain menu lists in this
+                // order.
+                listed_domains
+                    .iter()
+                    .any(|candidate| candidate.domain == domain)
+            };
+            if listed {
+                active_domain.set(Some(domain.clone()));
                 terminal_lines.update(|lines| {
-                    lines.push(TermLine::info(format!("using domain '{domain_name}'")));
+                    lines.push(TermLine::info(format!("using domain '{domain}'")));
                 });
             } else {
                 terminal_lines.update(|lines| {
                     lines.push(TermLine::error(format!(
-                        "domain '{domain_name}' is not present in this console view"
+                        "domain '{domain}' is not present in this console view"
                     )));
                 });
             }
         } else {
-            if active_domain.get_untracked().is_none() && !is_domainless_server_command(&command) {
+            let request_domain = active_domain.get_untracked();
+            if request_domain.is_none() && !is_domainless_server_command(&command) {
                 terminal_lines.update(|lines| {
                     lines.push(TermLine::error("no active domain selected"));
                 });
@@ -474,27 +781,23 @@ fn App() -> impl IntoView {
                 input.set(String::new());
                 return;
             }
-            let request_domain = active_domain.get_untracked().unwrap_or_default();
-            let expected_transaction_position = match transaction_status.get_untracked() {
-                Some(status) if transaction_is_active(Some(status.clone())) => {
-                    Some(status.pending_count)
+            let transaction = transaction_status.get_untracked();
+            let expected_transaction_position = match &transaction {
+                Some(status) if status.lifecycle().is_active() => {
+                    Some(status.accepted_operations())
                 }
                 Some(_) | None => None,
             };
-            let request = nervix_proto::SessionRequest {
-                request: Some(nervix_proto::session_request::Request::Command(
-                    nervix_proto::CommandRequest {
-                        query: command.clone(),
-                        domain: request_domain,
-                        execution_reference: command_execution_reference(),
-                        expected_transaction_position,
-                        expected_preview: None,
-                    },
-                )),
-            };
-            let queued = QueuedRequest::Command {
+            let request = CommandRequest {
                 query: command.clone(),
+                domain: request_domain,
+                execution_reference: command_execution_reference(),
+                expected_transaction_position,
+                expected_preview: None,
+            };
+            let queued = ConsoleRequest::Command {
                 request,
+                purpose: CommandPurpose::Repl,
             };
             if let Some(request_tx) = web_console_session.request_tx.get_untracked() {
                 if request_tx.unbounded_send(queued).is_err() {
@@ -539,11 +842,14 @@ fn App() -> impl IntoView {
             return;
         }
         let tab_id = next_subscription_tab_id.get_untracked();
-        next_subscription_tab_id.set(tab_id + 1);
-        let name = format!("web_console_subscription_{tab_id}");
+        let next_tab_id = tab_id
+            .checked_add(1)
+            .assured("a console session cannot open 2^64 subscription tabs");
+        next_subscription_tab_id.set(next_tab_id);
+        let name = SubscriptionName::parse(&format!("web_console_subscription_{tab_id}"))
+            .assured("lower-case letters, underscores and at most 20 digits form a valid name");
         let subscribe_command =
-            subscribe_session_command(&name, &relay, &filter, sample_rate_index);
-        let unsubscribe_command = unsubscribe_session_command(&name);
+            subscribe_session_command(name.as_str(), &relay, &filter, sample_rate_index);
         subscription_tabs.update(|tabs| {
             tabs.push(SubscriptionTabView {
                 id: tab_id,
@@ -555,24 +861,18 @@ fn App() -> impl IntoView {
                 sample_rate_index,
                 title,
                 subscribe_command: subscribe_command.clone(),
-                unsubscribe_command,
                 lines: Vec::new(),
+                stream: None,
             });
         });
-        let request = nervix_proto::SessionRequest {
-            request: Some(nervix_proto::session_request::Request::Command(
-                nervix_proto::CommandRequest {
-                    query: subscribe_command,
-                    domain,
-                    execution_reference: command_execution_reference(),
-                    expected_transaction_position: None,
-                    expected_preview: None,
-                },
-            )),
+        let request = SubscribeRequest {
+            domain,
+            statement: subscribe_command,
+            subscription_type: SubscriptionType::Row,
         };
         if let Some(request_tx) = subscription_session.request_tx.get_untracked() {
             if request_tx
-                .unbounded_send(QueuedRequest::SubscriptionStart { tab_id, request })
+                .unbounded_send(ConsoleRequest::SubscriptionStart { tab_id, request })
                 .is_err()
             {
                 append_subscription_tab_line(
@@ -604,20 +904,12 @@ fn App() -> impl IntoView {
                 *active = None;
             }
         });
-        let request = nervix_proto::SessionRequest {
-            request: Some(nervix_proto::session_request::Request::Command(
-                nervix_proto::CommandRequest {
-                    query: tab.unsubscribe_command,
-                    domain: tab.domain,
-                    execution_reference: command_execution_reference(),
-                    expected_transaction_position: None,
-                    expected_preview: None,
-                },
-            )),
+        let request = UnsubscribeRequest {
+            subscription: tab.name,
         };
         if let Some(request_tx) = stop_subscription_session.request_tx.get_untracked() {
             request_tx
-                .unbounded_send(QueuedRequest::SubscriptionStop { request })
+                .unbounded_send(ConsoleRequest::SubscriptionStop(request))
                 .means_shutdown("web console session");
         }
     };
@@ -640,7 +932,7 @@ fn App() -> impl IntoView {
                     run_command=run_command
                 />
                 <div class="console-body">
-                    <Sidebar active_domain=active_domain user_selected_domain=user_selected_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details web_console_session=web_console_session.clone() run_command=run_command />
+                    <Sidebar active_domain=active_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details web_console_session=web_console_session.clone() run_command=run_command />
                     <section class="main-pane">
                         <GraphPanel
                             active_domain=active_domain
@@ -654,7 +946,7 @@ fn App() -> impl IntoView {
                             domain=active_domain_name
                             input=input
                             terminal_lines=terminal_lines
-                            transaction_state=move || current_transaction_state(transaction_status.get())
+                            transaction_state=move || transaction_status.with(|status| ActiveTransaction::of(status.as_ref()))
                             subscription_tabs=subscription_tabs
                             active_subscription_tab=active_subscription_tab
                             stop_subscription=stop_subscription
@@ -725,307 +1017,318 @@ fn AuthPanel(
 }
 
 fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
+    let state = RwSignal::new(ConsoleConnectionState::Connecting);
+    let upload_base_url = RwSignal::new(web_console_http_base_url());
+    let (sender, receiver) = unbounded::<ConsoleRequest>();
+    let request_tx = RwSignal::new(Some(sender));
+    spawn_local(run_websocket_session(
+        signals,
+        state,
+        upload_base_url,
+        receiver,
+    ));
+    WebConsoleSession {
+        state,
+        request_tx,
+        upload_base_url,
+        auth_token: signals.auth_token,
+    }
+}
+
+/// Keeps the console's session open: connects, serves each connection until it ends, and connects
+/// again, at the leader's web console when the server names it.
+async fn run_websocket_session(
+    signals: WebConsoleSignals,
+    state: RwSignal<ConsoleConnectionState>,
+    upload_base_url: RwSignal<Option<String>>,
+    mut queued: UnboundedReceiver<ConsoleRequest>,
+) {
     let WebConsoleSignals {
-        terminal_lines,
-        active_domain,
-        transaction_status,
         domains_loaded,
         auth_token,
         auth_error,
         ..
     } = signals;
-    let state = RwSignal::new(ConsoleConnectionState::Connecting);
-    let request_tx = RwSignal::new(None);
-    let upload_base_url = RwSignal::new(web_console_http_base_url());
-    let (tx, mut rx) = unbounded::<QueuedRequest>();
-    request_tx.set(Some(tx));
-
-    spawn_local(async move {
-        let mut reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
-        let mut pending_requests = VecDeque::new();
-        let mut redirected_url = None::<String>;
-        loop {
-            let Some(current_auth_token) = auth_token.get_untracked() else {
-                state.set(ConsoleConnectionState::Waiting);
-                domains_loaded.set(false);
-                pending_requests.clear();
-                redirected_url = None;
-                wait_for_browser_delay(WEBSOCKET_INITIAL_RECONNECT_DELAY).await;
-                continue;
-            };
-            let Some(url) = redirected_url
-                .clone()
-                .or_else(|| web_console_websocket_url(&current_auth_token))
-            else {
-                state.set(ConsoleConnectionState::Waiting);
-                wait_for_browser_delay(reconnect_delay).await;
-                reconnect_delay = (reconnect_delay * 2).min(WEBSOCKET_MAX_RECONNECT_DELAY);
-                continue;
-            };
-            state.set(ConsoleConnectionState::Connecting);
+    let mut reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
+    let mut requests = SessionRequests::new();
+    let mut redirected_url = None::<String>;
+    loop {
+        let Some(current_auth_token) = auth_token.get_untracked() else {
+            state.set(ConsoleConnectionState::Waiting);
             domains_loaded.set(false);
-            let mut opened_this_attempt = false;
-            match WebSocket::open(&url) {
-                Ok(mut socket) => {
-                    wait_for_websocket_open(&socket).await;
-                    if let WebSocketState::Open = socket.state() {
-                        opened_this_attempt = true;
-                        reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
-                        auth_error.set(None);
-                        if let Some(domain) = active_domain.get_untracked() {
-                            let request = nervix_proto::SessionRequest {
-                                request: Some(
-                                    nervix_proto::session_request::Request::SetActiveDomain(
-                                        nervix_proto::SetActiveDomainRequest { domain },
-                                    ),
-                                ),
-                            };
-                            if socket
-                                .send(WebSocketMessage::Bytes(request.encode_to_vec()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        let request = nervix_proto::SessionRequest {
-                            request: Some(nervix_proto::session_request::Request::ListDomains(
-                                nervix_proto::ListDomainsRequest {},
-                            )),
-                        };
-                        if socket
-                            .send(WebSocketMessage::Bytes(request.encode_to_vec()))
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                        let mut resend_pending_after_connect = !pending_requests.is_empty();
-                        let mut waiting_for_transaction_attach = false;
-                        if transaction_is_active(transaction_status.get_untracked()) {
-                            let (request, had_existing_attach) = match pending_requests.front() {
-                                Some(PendingRequest::AttachTransaction { request }) => {
-                                    (request.clone(), true)
-                                }
-                                _ => {
-                                    let id = match transaction_status.get_untracked() {
-                                        Some(status) => status.id,
-                                        None => String::new(),
-                                    };
-                                    (
-                                        nervix_proto::SessionRequest {
-                                            request: Some(
-                                                nervix_proto::session_request::Request::AttachTransaction(
-                                                    nervix_proto::AttachTransactionRequest { id },
-                                                ),
-                                            ),
-                                        },
-                                        false,
-                                    )
-                                }
-                            };
-                            if socket
-                                .send(WebSocketMessage::Bytes(request.encode_to_vec()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                            if !had_existing_attach {
-                                pending_requests
-                                    .push_front(PendingRequest::AttachTransaction { request });
-                            }
-                            waiting_for_transaction_attach = true;
-                        }
-                        loop {
-                            futures_util::select! {
-                                queued = rx.next().fuse() => {
-                                    let Some(queued) = queued else {
-                                        state.set(ConsoleConnectionState::Waiting);
-                                        return;
-                                    };
-                                    match socket
-                                        .send(WebSocketMessage::Bytes(queued.request().encode_to_vec()))
-                                        .await
-                                    {
-                                        Ok(()) => {
-                                            match queued {
-                                                QueuedRequest::Command { query, request } => {
-                                                    pending_requests.push_back(PendingRequest::Command(QueuedCommand { query, request }));
-                                                }
-                                                QueuedRequest::SubscriptionStart { tab_id, request } => {
-                                                    pending_requests.push_back(PendingRequest::SubscriptionStart { tab_id, request });
-                                                }
-                                                QueuedRequest::SubscriptionStop { request } => {
-                                                    pending_requests.push_back(PendingRequest::SubscriptionStop { request });
-                                                }
-                                                QueuedRequest::ResourceDescribe { resource, request } => {
-                                                    pending_requests.push_back(PendingRequest::ResourceDescribe { resource, request });
-                                                }
-                                                QueuedRequest::SetActiveDomain { .. } | QueuedRequest::Suggest { .. } => {}
-                                            }
-                                        }
-                                        Err(error) => {
-                                            leptos::logging::error!(
-                                                "failed to send web console websocket command: {error:?}"
-                                            );
-                                            match queued {
-                                                QueuedRequest::Command { query, request } => {
-                                                    pending_requests.push_front(PendingRequest::Command(QueuedCommand { query, request }));
-                                                }
-                                                QueuedRequest::SubscriptionStart { tab_id, request } => {
-                                                    pending_requests.push_front(PendingRequest::SubscriptionStart { tab_id, request });
-                                                }
-                                                QueuedRequest::SubscriptionStop { request } => {
-                                                    pending_requests.push_front(PendingRequest::SubscriptionStop { request });
-                                                }
-                                                QueuedRequest::ResourceDescribe { resource, request } => {
-                                                    pending_requests.push_front(PendingRequest::ResourceDescribe { resource, request });
-                                                }
-                                                QueuedRequest::SetActiveDomain { .. } | QueuedRequest::Suggest { .. } => {}
-                                            }
-                                            break;
-                                        }
-                                    }
-                                }
-                                message = socket.next().fuse() => {
-                                    let Some(message) = message else {
-                                        break;
-                                    };
-                                    match message {
-                                        Ok(WebSocketMessage::Bytes(payload)) => {
-                                            match nervix_proto::SessionResponse::decode(
-                                                prost::bytes::Bytes::from(payload),
-                                            ) {
-                                                Ok(response) => {
-                                                    match handle_session_response(
-                                                        signals,
-                                                        response,
-                                                        &mut pending_requests,
-                                                    ) {
-                                                        SessionResponseAction::Continue => {
-                                                            state.set(ConsoleConnectionState::Connected);
-                                                            if resend_pending_after_connect
-                                                                && !waiting_for_transaction_attach
-                                                            {
-                                                                resend_pending_after_connect = false;
-                                                                if !send_pending_websocket_commands(
-                                                                    &mut socket,
-                                                                    &mut pending_requests,
-                                                                )
-                                                                .await
-                                                                {
-                                                                    break;
-                                                                }
-                                                            }
-                                                        }
-                                                        SessionResponseAction::ReattachTransaction { id } => {
-                                                            let request = nervix_proto::SessionRequest {
-                                                                request: Some(
-                                                                    nervix_proto::session_request::Request::AttachTransaction(
-                                                                        nervix_proto::AttachTransactionRequest { id },
-                                                                    ),
-                                                                ),
-                                                            };
-                                                            if socket
-                                                                .send(WebSocketMessage::Bytes(request.encode_to_vec()))
-                                                                .await
-                                                                .is_err()
-                                                            {
-                                                                break;
-                                                            }
-                                                            pending_requests.push_front(
-                                                                PendingRequest::AttachTransaction { request },
-                                                            );
-                                                            waiting_for_transaction_attach = true;
-                                                            resend_pending_after_connect = true;
-                                                        }
-                                                        SessionResponseAction::TransactionAttached {
-                                                            replay_pending,
-                                                        } => {
-                                                            state.set(ConsoleConnectionState::Connected);
-                                                            waiting_for_transaction_attach = false;
-                                                            if resend_pending_after_connect
-                                                                && replay_pending
-                                                            {
-                                                                resend_pending_after_connect = false;
-                                                                if !send_pending_websocket_commands(
-                                                                    &mut socket,
-                                                                    &mut pending_requests,
-                                                                )
-                                                                .await
-                                                                {
-                                                                    break;
-                                                                }
-                                                            } else {
-                                                                resend_pending_after_connect = false;
-                                                            }
-                                                        }
-                                                        SessionResponseAction::TransactionAttachFailed => {
-                                                            state.set(ConsoleConnectionState::Connected);
-                                                            waiting_for_transaction_attach = false;
-                                                            resend_pending_after_connect = false;
-                                                        }
-                                                        SessionResponseAction::Reconnect(next_url) => {
-                                                            upload_base_url.set(Some(next_url.clone()));
-                                                            redirected_url = web_console_websocket_url_from_base(
-                                                                &next_url,
-                                                                &current_auth_token,
-                                                            );
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                Err(error) => {
-                                                    terminal_lines.update(|lines| {
-                                                        lines.push(TermLine::error(format!(
-                                                            "failed to decode protobuf response: {error}"
-                                                        )));
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        Ok(WebSocketMessage::Text(text)) => {
-                                            terminal_lines.update(|lines| {
-                                                lines.push(TermLine::output(text));
-                                            });
-                                        }
-                                        Err(error) => {
-                                            leptos::logging::error!(
-                                                "web console websocket failed: {error:?}"
-                                            );
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    leptos::logging::error!("failed to open web console websocket: {error:?}");
-                }
-            }
-            if !opened_this_attempt
-                && auth_token.get_untracked().as_deref() == Some(current_auth_token.as_str())
-            {
-                auth_error.set(Some("Authentication failed".to_string()));
-                auth_token.set(None);
-                pending_requests.clear();
-                redirected_url = None;
-                continue;
-            }
+            requests.clear_held();
+            redirected_url = None;
+            wait_for_browser_delay(WEBSOCKET_INITIAL_RECONNECT_DELAY).await;
+            continue;
+        };
+        let url = match &redirected_url {
+            Some(url) => Some(url.clone()),
+            None => web_console_websocket_url(&current_auth_token),
+        };
+        let Some(url) = url else {
             state.set(ConsoleConnectionState::Waiting);
             wait_for_browser_delay(reconnect_delay).await;
             reconnect_delay = (reconnect_delay * 2).min(WEBSOCKET_MAX_RECONNECT_DELAY);
+            continue;
+        };
+        state.set(ConsoleConnectionState::Connecting);
+        domains_loaded.set(false);
+        let mut opened_this_attempt = false;
+        match WebSocket::open(&url) {
+            Ok(socket) => {
+                wait_for_websocket_open(&socket).await;
+                let ended = if let WebSocketState::Open = socket.state() {
+                    Some(serve_connection(signals, state, socket, &mut requests, &mut queued).await)
+                } else {
+                    // A server that ends the session at once, such as a follower redirecting to the
+                    // leader, can close the connection before this loop sees it open. Its frames
+                    // are still buffered, and only a connection that never opened delivers none.
+                    drain_closed_connection(signals, state, socket, &mut requests).await
+                };
+                if let Some(ended) = ended {
+                    opened_this_attempt = true;
+                    reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
+                    auth_error.set(None);
+                    requests.end_connection();
+                    match ended {
+                        ConnectionEnd::Dropped => {}
+                        ConnectionEnd::Redirected(leader) => {
+                            upload_base_url.set(Some(leader.to_string()));
+                            redirected_url =
+                                web_console_websocket_url_from_base(&leader, &current_auth_token);
+                        }
+                        ConnectionEnd::ConsoleClosed => {
+                            state.set(ConsoleConnectionState::Waiting);
+                            return;
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                leptos::logging::error!("failed to open web console websocket: {error:?}");
+            }
         }
-    });
+        if !opened_this_attempt
+            && auth_token.get_untracked().as_deref() == Some(current_auth_token.as_str())
+        {
+            auth_error.set(Some("Authentication failed".to_string()));
+            auth_token.set(None);
+            requests.clear_held();
+            redirected_url = None;
+            continue;
+        }
+        state.set(ConsoleConnectionState::Waiting);
+        wait_for_browser_delay(reconnect_delay).await;
+        reconnect_delay = (reconnect_delay * 2).min(WEBSOCKET_MAX_RECONNECT_DELAY);
+    }
+}
 
-    WebConsoleSession {
-        state,
-        request_tx,
-        upload_base_url,
-        auth_token,
+/// Reads the frames a connection delivered before it closed, without sending anything on it.
+///
+/// `None` says no frame arrived, so the connection never opened, as when the server refused its
+/// credentials; otherwise the connection ends the way its frames say.
+async fn drain_closed_connection(
+    signals: WebConsoleSignals,
+    state: RwSignal<ConsoleConnectionState>,
+    mut socket: WebSocket,
+    requests: &mut SessionRequests,
+) -> Option<ConnectionEnd> {
+    let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
+    let mut received = false;
+    while let Some(Ok(message)) = socket.next().await {
+        let WebSocketMessage::Bytes(payload) = message else {
+            continue;
+        };
+        let Ok(frame) = codec.decode(WebSocketData::Binary(Bytes::from(payload))) else {
+            continue;
+        };
+        received = true;
+        match receive_frame(signals, state, requests, &frame) {
+            SessionStep::Redirect(leader) => return Some(ConnectionEnd::Redirected(leader)),
+            SessionStep::Continue | SessionStep::Reattach { .. } | SessionStep::Reconnect => {}
+        }
+    }
+    if received {
+        return Some(ConnectionEnd::Dropped);
+    }
+    None
+}
+
+/// Serves one connection until it ends.
+///
+/// The connection first selects the active domain again, so the domain's observations resume, and
+/// attaches the session's transaction again. Ordered requests wait until the server confirms that
+/// the serving node leads and the transaction is attached, and then go out in the order the
+/// console issued them.
+async fn serve_connection(
+    signals: WebConsoleSignals,
+    state: RwSignal<ConsoleConnectionState>,
+    mut socket: WebSocket,
+    requests: &mut SessionRequests,
+    queued: &mut UnboundedReceiver<ConsoleRequest>,
+) -> ConnectionEnd {
+    let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
+    let mut opening = Vec::new();
+    if let Some(domain) = signals.active_domain.get_untracked() {
+        opening.push(ConsoleRequest::SelectDomain(SelectDomainRequest { domain }));
+    }
+    let transaction_id = signals
+        .transaction_status
+        .with_untracked(|status| transaction_to_attach(status.as_ref()));
+    if let Some(transaction_id) = transaction_id {
+        opening.push(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest { transaction_id },
+        ));
+    }
+    for request in opening {
+        let issued = requests.issue(request);
+        let message = requests.dispatch(issued);
+        if !send_message(&mut socket, &codec, signals, requests, message).await {
+            return ConnectionEnd::Dropped;
+        }
+    }
+    loop {
+        let step = futures_util::select! {
+            request = queued.next().fuse() => {
+                let Some(request) = request else {
+                    return ConnectionEnd::ConsoleClosed;
+                };
+                let issued = requests.issue(request);
+                if let Some(message) = requests.accept(issued)
+                    && !send_message(&mut socket, &codec, signals, requests, message).await
+                {
+                    return ConnectionEnd::Dropped;
+                }
+                SessionStep::Continue
+            }
+            message = socket.next().fuse() => {
+                let Some(message) = message else {
+                    return ConnectionEnd::Dropped;
+                };
+                let data = match message {
+                    Ok(WebSocketMessage::Bytes(payload)) => {
+                        WebSocketData::Binary(Bytes::from(payload))
+                    }
+                    Ok(WebSocketMessage::Text(_)) => WebSocketData::Text,
+                    Err(error) => {
+                        leptos::logging::error!("web console websocket failed: {error:?}");
+                        return ConnectionEnd::Dropped;
+                    }
+                };
+                match codec.decode(data) {
+                    Ok(frame) => receive_frame(signals, state, requests, &frame),
+                    Err(error) => {
+                        let reason = format!(
+                            "the server sent a message that is not a session frame: {}",
+                            error.current_context()
+                        );
+                        signals
+                            .terminal_lines
+                            .update(|lines| lines.push(TermLine::error(reason)));
+                        return ConnectionEnd::Dropped;
+                    }
+                }
+            }
+        };
+        match step {
+            SessionStep::Continue => {}
+            SessionStep::Reattach { transaction_id } => {
+                if !requests.is_attaching() {
+                    let attach = ConsoleRequest::AttachTransaction(AttachTransactionRequest {
+                        transaction_id,
+                    });
+                    let issued = requests.issue(attach);
+                    let message = requests.dispatch(issued);
+                    if !send_message(&mut socket, &codec, signals, requests, message).await {
+                        return ConnectionEnd::Dropped;
+                    }
+                }
+            }
+            SessionStep::Redirect(leader) => return ConnectionEnd::Redirected(leader),
+            SessionStep::Reconnect => return ConnectionEnd::Dropped,
+        }
+        for message in requests.release_held() {
+            if !send_message(&mut socket, &codec, signals, requests, message).await {
+                return ConnectionEnd::Dropped;
+            }
+        }
+    }
+}
+
+/// Sends one request message as one binary WebSocket message.
+///
+/// `false` says the connection is gone. The request stays registered, so the next connection sends
+/// it again when it is ordered. A request that cannot become a frame is answered here, because no
+/// reply will ever answer it.
+async fn send_message(
+    socket: &mut WebSocket,
+    codec: &ClientWebSocketCodec,
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    message: ClientMessage,
+) -> bool {
+    let frame = match message.encode(&SESSION_LIMITS) {
+        Ok(frame) => frame,
+        Err(error) => {
+            if let Some(unsent) = requests.answer(message.request_id) {
+                let reason = format!("the request cannot be sent: {}", error.current_context());
+                fail_request(signals, requests, unsent.request, reason);
+            }
+            return true;
+        }
+    };
+    let payload = codec.encode(frame);
+    match socket
+        .send(WebSocketMessage::Bytes(Vec::from(payload)))
+        .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            leptos::logging::error!("failed to send web console request: {error:?}");
+            false
+        }
+    }
+}
+
+/// Applies one verified server frame.
+fn receive_frame(
+    signals: WebConsoleSignals,
+    state: RwSignal<ConsoleConnectionState>,
+    requests: &mut SessionRequests,
+    frame: &VerifiedFrame<ServerFrame>,
+) -> SessionStep {
+    let message = match ServerMessage::decode(frame) {
+        Ok(message) => message,
+        Err(error) => {
+            let reason = format!(
+                "failed to decode a server message: {}",
+                error.current_context()
+            );
+            // A reply that cannot be read still ends the request it answers.
+            let answered = match frame.request_id() {
+                Some(request_id) => requests.answer(request_id),
+                None => None,
+            };
+            match answered {
+                Some(unread) => fail_request(signals, requests, unread.request, reason),
+                None => {
+                    signals
+                        .terminal_lines
+                        .update(|lines| lines.push(TermLine::error(reason)));
+                }
+            }
+            return SessionStep::Continue;
+        }
+    };
+    match requests.route(message) {
+        Routed::Event(event) => apply_event(signals, state, requests, event),
+        Routed::Reply(answered) => apply_reply(signals, requests, *answered),
+        Routed::Unreadable(unreadable) => {
+            let UnreadableReply { request, reason } = *unreadable;
+            fail_request(signals, requests, request.request, reason);
+            SessionStep::Continue
+        }
+        Routed::Untracked | Routed::Pending => SessionStep::Continue,
     }
 }
 
@@ -1060,27 +1363,6 @@ async fn wait_for_browser_delay(delay: Duration) {
             "the wait is over either way: this promise carries no value and rejects only if the \
              timer threw",
         );
-}
-
-async fn send_pending_websocket_commands(
-    socket: &mut WebSocket,
-    pending_requests: &mut VecDeque<PendingRequest>,
-) -> bool {
-    let requests = pending_requests.drain(..).collect::<Vec<_>>();
-    for request in requests {
-        match socket
-            .send(WebSocketMessage::Bytes(request.request().encode_to_vec()))
-            .await
-        {
-            Ok(()) => pending_requests.push_back(request),
-            Err(error) => {
-                leptos::logging::error!("failed to resend web console command: {error:?}");
-                pending_requests.push_front(request);
-                return false;
-            }
-        }
-    }
-    true
 }
 
 /// The session token the console was opened with, or `None` when the page carries none.
@@ -1123,12 +1405,12 @@ fn web_console_http_base_url() -> Option<String> {
     Some(format!("{protocol}//{host}"))
 }
 
-/// The session websocket address for an explicitly configured base URL.
+/// The session websocket address of the web console at `base_url`.
 ///
-/// `None` says the base URL is not one a session can be opened on: it is not a URL, or its scheme
-/// has no websocket counterpart. The caller falls back to the page's own location.
-fn web_console_websocket_url_from_base(base_url: &str, auth_token: &str) -> Option<String> {
-    let mut url = Url::parse(base_url).ok()?;
+/// `None` says the base URL is not one a session can be opened on: its scheme has no websocket
+/// counterpart. The caller falls back to the page's own location.
+fn web_console_websocket_url_from_base(base_url: &Url, auth_token: &str) -> Option<String> {
+    let mut url = base_url.clone();
     let websocket_scheme = match url.scheme() {
         "https" | "wss" => "wss",
         "http" | "ws" => "ws",
@@ -1144,317 +1426,584 @@ fn web_console_websocket_url_from_base(base_url: &str, auth_token: &str) -> Opti
     Some(url.to_string())
 }
 
-enum SessionResponseAction {
-    Continue,
-    /// The leader has no binding for this session's transaction. Attach it again, then replay the
-    /// command that was rejected.
-    ReattachTransaction {
-        id: String,
-    },
-    TransactionAttached {
-        replay_pending: bool,
-    },
-    TransactionAttachFailed,
-    Reconnect(String),
+/// The state of the session's transaction the REPL prompt names, while the transaction can still
+/// change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActiveTransaction {
+    Open,
+    Committing,
 }
 
-fn current_transaction_state(
-    status: Option<nervix_proto::TransactionStatus>,
-) -> Option<nervix_proto::TransactionState> {
-    status.and_then(|status| nervix_proto::TransactionState::try_from(status.state).ok())
+impl ActiveTransaction {
+    /// The prompt state of the session's transaction, or `None` while it has none that can still
+    /// change.
+    fn of(status: Option<&TransactionStatus>) -> Option<Self> {
+        let status = status?;
+        match status.lifecycle() {
+            TransactionLifecycle::Open => Some(Self::Open),
+            TransactionLifecycle::Committing => Some(Self::Committing),
+            TransactionLifecycle::Committed
+            | TransactionLifecycle::Failed { .. }
+            | TransactionLifecycle::Reverted
+            | TransactionLifecycle::Expired => None,
+        }
+    }
 }
 
-fn transaction_is_active(status: Option<nervix_proto::TransactionStatus>) -> bool {
-    matches!(
-        current_transaction_state(status),
-        Some(nervix_proto::TransactionState::Open | nervix_proto::TransactionState::Committing)
-    )
+/// Whether the session's transaction can still change.
+fn transaction_is_active(status: Option<&TransactionStatus>) -> bool {
+    match status {
+        Some(status) => status.lifecycle().is_active(),
+        None => false,
+    }
 }
 
-fn active_domain_graph_missing(
-    active_domain: Option<String>,
-    domain_snapshots: &RwSignal<Vec<DomainSnapshotView>>,
-) -> bool {
-    let Some(active_domain) = active_domain else {
-        return true;
-    };
-    !domain_snapshots
-        .get_untracked()
-        .iter()
-        .any(|snapshot| snapshot.domain == active_domain)
+/// The transaction a new connection attaches again: the session's transaction, while it can still
+/// change.
+fn transaction_to_attach(status: Option<&TransactionStatus>) -> Option<String> {
+    let status = status?;
+    if !status.lifecycle().is_active() {
+        return None;
+    }
+    Some(status.transaction_id().to_string())
 }
 
-fn handle_session_response(
+/// Applies a message the server sent without a request.
+fn apply_event(
     signals: WebConsoleSignals,
-    response: nervix_proto::SessionResponse,
-    pending_requests: &mut VecDeque<PendingRequest>,
-) -> SessionResponseAction {
-    let WebConsoleSignals {
-        terminal_lines,
-        suggestions,
-        domain_snapshots,
-        cluster_counters,
-        active_domain,
-        transaction_status,
-        domains,
-        resource_details,
-        subscription_tabs,
-        active_subscription_tab,
-        domains_loaded,
-        user_selected_domain,
-        ..
-    } = signals;
-    match response.event {
-        Some(nervix_proto::session_response::Event::Result(result)) => {
-            let result = *result;
-            if let Some(leader_url) = leader_web_console_redirect_url(&result) {
-                return SessionResponseAction::Reconnect(leader_url);
-            }
-            if let Some(status) = result.transaction.clone() {
-                if !status.domain.is_empty()
-                    && active_domain.get_untracked().as_deref() != Some(status.domain.as_str())
-                {
-                    user_selected_domain.set(true);
-                    active_domain.set(Some(status.domain.clone()));
-                }
-                transaction_status.set(Some(status));
-            }
-            if result_is_set_active_domain_ack(&result) {
-                terminal_lines.update(|lines| lines.extend(command_result_lines(result, "")));
-                return SessionResponseAction::Continue;
-            }
-            let mut pending = pending_requests.pop_front();
-            if command_result_is_transaction_detached(&result)
-                && pending.is_some()
-                && let Some(id) = transaction_status
-                    .get_untracked()
-                    .map(|status| status.id)
-                    .filter(|id| !id.is_empty())
-            {
-                pending_requests.push_front(pending.take().verified(
-                    "the condition above matched on this same pending request being present",
-                ));
-                return SessionResponseAction::ReattachTransaction { id };
-            }
-            let pending = pending;
-            if let Some(PendingRequest::AttachTransaction { .. }) = pending {
-                let transaction_active = transaction_is_active(result.transaction.clone());
-                let terminal_transaction = result.transaction.is_some() && !transaction_active;
-                if !result.success && !terminal_transaction {
-                    if result.transaction.is_none() {
-                        transaction_status.set(None);
-                    }
-                    pending_requests.clear();
-                    let message = result.message.clone();
-                    let has_recorded_results = !result.results.is_empty();
-                    terminal_lines.update(|lines| {
-                        if has_recorded_results {
-                            lines.push(TermLine::error(message));
-                        }
-                        lines.extend(command_result_lines(result, "ATTACH TRANSACTION"));
-                    });
-                    return SessionResponseAction::TransactionAttachFailed;
-                }
-                if terminal_transaction {
-                    pending_requests.clear();
-                    terminal_lines.update(|lines| {
-                        lines.extend(command_result_lines(result, "ATTACH TRANSACTION"));
-                    });
-                }
-                return SessionResponseAction::TransactionAttached {
-                    replay_pending: transaction_active,
-                };
-            }
-            if let Some(PendingRequest::ResourceDescribe { resource, .. }) = pending {
-                resource_details.update(|details| {
-                    details.insert(resource, resource_detail_from_result(result));
+    state: RwSignal<ConsoleConnectionState>,
+    requests: &mut SessionRequests,
+    event: ServerEvent,
+) -> SessionStep {
+    match event {
+        ServerEvent::Leadership(observed) => match observed.leadership {
+            Leadership::ServingNode(node) => {
+                signals.terminal_lines.update(|lines| {
+                    lines.push(TermLine::info(format!("connected to leader '{node}'")));
                 });
-                return SessionResponseAction::Continue;
+                state.set(ConsoleConnectionState::Connected);
+                requests.confirm_leader();
+                SessionStep::Continue
             }
-            if let Some(PendingRequest::SubscriptionStart { tab_id, .. }) = pending {
-                let lines = command_result_lines(result, "");
-                if lines.iter().any(|line| line.kind == TermLineKind::Error) {
-                    append_subscription_tab_lines(subscription_tabs, tab_id, lines);
-                }
-                subscription_tabs.update(|tabs| {
-                    if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                        tab.state = SubscriptionTabState::Open;
-                    }
+            Leadership::Remote(leader) => redirect_step(
+                signals,
+                &LeaderRedirect {
+                    leader: Some(leader),
+                },
+            ),
+            Leadership::Unknown => redirect_step(signals, &LeaderRedirect { leader: None }),
+        },
+        ServerEvent::Notice(notice) => {
+            let line = notice_line(notice);
+            signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
+        }
+        ServerEvent::Domains(observed) => {
+            let listed = observed.domains.into_iter().map(DomainView::from).collect();
+            apply_domain_list(signals, listed);
+            SessionStep::Continue
+        }
+        ServerEvent::DomainSnapshot(snapshot) => {
+            apply_snapshot(signals, &snapshot);
+            SessionStep::Continue
+        }
+        ServerEvent::Cluster(cluster) => {
+            signals.cluster_counters.set(ClusterCounters::from(cluster));
+            SessionStep::Continue
+        }
+        ServerEvent::SubscriptionRows(rows) => {
+            append_subscription_rows(signals.subscription_tabs, &rows);
+            SessionStep::Continue
+        }
+        ServerEvent::SubscriptionDeliveryLost(lost) => {
+            let line = TermLine::info(format!(
+                "dropped {} rows the session could not take in time",
+                lost.dropped_rows
+            ));
+            append_subscription_line(signals.subscription_tabs, &lost.subscription, line);
+            SessionStep::Continue
+        }
+        ServerEvent::SubscriptionRowsSkipped(skipped) => {
+            let line = TermLine::error(skipped.message);
+            append_subscription_line(signals.subscription_tabs, &skipped.subscription, line);
+            SessionStep::Continue
+        }
+        ServerEvent::SubscriptionEnded(ended) => {
+            let line = TermLine::error(ended.message);
+            append_subscription_line(signals.subscription_tabs, &ended.subscription, line);
+            SessionStep::Continue
+        }
+        ServerEvent::SessionEnding(ending) => match ending.reason {
+            SessionEndReason::ServerShuttingDown => {
+                signals.terminal_lines.update(|lines| {
+                    lines.push(TermLine::info("the server is shutting down"));
                 });
-                active_subscription_tab.set(Some(tab_id));
-                return SessionResponseAction::Continue;
+                SessionStep::Reconnect
             }
-            if let Some(PendingRequest::SubscriptionStop { .. }) = pending {
-                return SessionResponseAction::Continue;
+            SessionEndReason::ProtocolViolated { message } => {
+                signals.terminal_lines.update(|lines| {
+                    lines.push(TermLine::error(format!(
+                        "the server ended the session: {message}"
+                    )));
+                });
+                SessionStep::Reconnect
             }
-            let query = match pending {
-                Some(PendingRequest::Command(command)) => command.query,
-                _ => String::new(),
-            };
-            if result.success
-                && let Some(domain) = first_created_domain_from_query(&query)
-            {
-                user_selected_domain.set(true);
-                active_domain.set(Some(domain));
-            }
-            terminal_lines.update(|lines| {
-                lines.extend(command_result_lines(result, &query));
-            });
+            SessionEndReason::LeaderRedirect(redirect) => redirect_step(signals, &redirect),
+        },
+    }
+}
+
+/// Applies the terminal reply to a request.
+fn apply_reply(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    answered: AnsweredRequest,
+) -> SessionStep {
+    let AnsweredRequest { request, body } = answered;
+    let IssuedRequest { order, request } = request;
+    match (request, body) {
+        (request, ReplyBody::Rejected(rejected)) => {
+            fail_request(signals, requests, request, rejected.message);
+            SessionStep::Continue
         }
-        Some(nervix_proto::session_response::Event::Subscription(event)) => {
-            append_subscription_event(subscription_tabs, event);
+        (request, ReplyBody::Cancelled(cancelled)) => {
+            fail_request(signals, requests, request, cancellation_reason(cancelled));
+            SessionStep::Continue
         }
-        Some(nervix_proto::session_response::Event::Server(event)) => {
-            terminal_lines.update(|lines| lines.push(server_event_line(event)));
+        (ConsoleRequest::Command { request, purpose }, ReplyBody::Command(outcome)) => {
+            apply_command_outcome(signals, requests, order, request, purpose, *outcome)
         }
-        Some(nervix_proto::session_response::Event::Suggest(response)) => {
-            suggestions.set(
-                response
-                    .suggestions
-                    .into_iter()
-                    .map(|suggestion| suggestion.value)
-                    .collect(),
-            );
-        }
-        Some(nervix_proto::session_response::Event::Domains(response)) => {
-            let next_domains = response
+        (ConsoleRequest::ListDomains, ReplyBody::DomainList(list)) => {
+            let listed = list
                 .domains
                 .into_iter()
                 .map(DomainView::from)
                 .collect::<Vec<_>>();
-            domains_loaded.set(true);
-            domains.set(next_domains.clone());
-            let current = active_domain.get_untracked();
-            if current
-                .as_ref()
-                .is_none_or(|id| !next_domains.iter().any(|domain| domain.id == *id))
-            {
-                active_domain.set(next_domains.first().map(|domain| domain.id.clone()));
-            }
-            if take_domain_list_command(pending_requests, response.response_to_request).is_some() {
-                terminal_lines.update(|lines| {
-                    lines.extend(domain_list_lines(&next_domains));
-                });
-            }
+            let lines = domain_list_lines(&listed);
+            apply_domain_list(signals, listed);
+            signals
+                .terminal_lines
+                .update(|terminal| terminal.extend(lines));
+            SessionStep::Continue
         }
-        Some(nervix_proto::session_response::Event::Snapshot(snapshot)) => {
-            match DataflowGraph::deserialize(&snapshot.dataflow_graph) {
-                Ok(graph) => {
-                    let graph_domain = snapshot.domain.clone();
-                    let should_select_graph_domain = !user_selected_domain.get_untracked()
-                        && active_domain_graph_missing(
-                            active_domain.get_untracked(),
-                            &domain_snapshots,
-                        );
-                    domain_snapshots.update(|snapshots| {
-                        snapshots.retain(|existing| existing.domain != snapshot.domain);
-                        snapshots.push(DomainSnapshotView::from_snapshot(snapshot, graph));
-                    });
-                    if should_select_graph_domain {
-                        active_domain.set(Some(graph_domain));
-                    }
-                }
-                Err(error) => {
-                    terminal_lines.update(|lines| {
-                        lines.push(TermLine::error(format!(
-                            "failed to decode graph snapshot for domain '{}': {error}",
-                            snapshot.domain
-                        )));
-                    });
-                }
-            }
+        (ConsoleRequest::SelectDomain(_), ReplyBody::DomainSelection(selection)) => {
+            let line = domain_selection_line(selection);
+            signals.terminal_lines.update(|lines| lines.push(line));
+            SessionStep::Continue
         }
-        Some(nervix_proto::session_response::Event::Cluster(summary)) => {
-            cluster_counters.set(ClusterCounters::from(summary));
+        (ConsoleRequest::Suggest(_), ReplyBody::Suggest(outcome)) => {
+            let values = outcome
+                .suggestions
+                .into_iter()
+                .map(|suggestion| suggestion.value)
+                .collect();
+            signals.suggestions.set(values);
+            SessionStep::Continue
         }
-        None => {}
-    }
-    SessionResponseAction::Continue
-}
-
-fn take_domain_list_command(
-    pending_requests: &mut VecDeque<PendingRequest>,
-    response_to_request: bool,
-) -> Option<QueuedCommand> {
-    if !response_to_request {
-        return None;
-    }
-    let pending = pending_requests.pop_front();
-    match pending {
-        Some(PendingRequest::Command(command)) => Some(command),
-        Some(PendingRequest::AttachTransaction { .. })
-        | Some(PendingRequest::SubscriptionStart { .. })
-        | Some(PendingRequest::SubscriptionStop { .. })
-        | Some(PendingRequest::ResourceDescribe { .. })
-        | None => None,
+        (ConsoleRequest::AttachTransaction(_), ReplyBody::Attach(outcome)) => {
+            apply_attach_outcome(signals, requests, outcome)
+        }
+        (ConsoleRequest::SubscriptionStart { tab_id, request }, ReplyBody::Subscribe(outcome)) => {
+            apply_subscribe_outcome(signals, tab_id, &request.statement, outcome);
+            SessionStep::Continue
+        }
+        (ConsoleRequest::SubscriptionStop(_), ReplyBody::Unsubscribe(_)) => SessionStep::Continue,
+        (request, _) => {
+            fail_request(signals, requests, request, UNEXPECTED_REPLY.to_string());
+            SessionStep::Continue
+        }
     }
 }
 
-fn result_is_set_active_domain_ack(result: &nervix_proto::CommandResult) -> bool {
-    result.success && result.message.starts_with("using domain '")
+/// Applies the outcome of a command.
+///
+/// A command the serving node could not run because it does not lead is sent again at the leader's
+/// console, and a command the leader could not bind to the session's transaction is sent again
+/// once the transaction is attached. Either keeps the command's execution reference, so the server
+/// recovers its recorded outcome instead of running it twice. Every other outcome goes to whoever
+/// reads the command.
+fn apply_command_outcome(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    order: IssueOrder,
+    request: CommandRequest,
+    purpose: CommandPurpose,
+    mut outcome: CommandOutcome,
+) -> SessionStep {
+    if let Some(leader) = command_redirect(&outcome.disposition) {
+        let leader = leader.clone();
+        requests.hold_again(IssuedRequest {
+            order,
+            request: ConsoleRequest::Command { request, purpose },
+        });
+        return SessionStep::Redirect(leader);
+    }
+    if let Some(status) = outcome.transaction.take() {
+        adopt_transaction(signals, status);
+    }
+    if let CommandDisposition::TransactionDetached { transaction_id } = &outcome.disposition {
+        let transaction_id = transaction_id.clone();
+        requests.hold_again(IssuedRequest {
+            order,
+            request: ConsoleRequest::Command { request, purpose },
+        });
+        return SessionStep::Reattach { transaction_id };
+    }
+    match purpose {
+        CommandPurpose::Repl => show_command_outcome(signals, &request.query, outcome),
+        CommandPurpose::ResourceDescription { resource } => {
+            let detail = ResourceDetailView::from_description(outcome);
+            signals.resource_details.update(|details| {
+                details.insert(resource, detail);
+            });
+        }
+    }
+    SessionStep::Continue
 }
 
-fn command_result_is_transaction_detached(result: &nervix_proto::CommandResult) -> bool {
-    nervix_proto::CommandResultKind::try_from(result.kind).ok()
-        == Some(nervix_proto::CommandResultKind::TransactionDetached)
-}
-
-fn leader_web_console_redirect_url(result: &nervix_proto::CommandResult) -> Option<String> {
-    if nervix_proto::CommandResultKind::try_from(result.kind).ok()
-        != Some(nervix_proto::CommandResultKind::NotLeader)
+/// Prints the outcome of a REPL command, and makes the domain a completed `CREATE DOMAIN` created
+/// the active one.
+fn show_command_outcome(signals: WebConsoleSignals, query: &str, outcome: CommandOutcome) {
+    if let CommandDisposition::Completed { .. } = outcome.disposition
+        && let Some(domain) = first_created_domain_from_query(query)
     {
-        return None;
+        signals.active_domain.set(Some(domain));
     }
-    (!result.leader_web_console_uri.is_empty()).then(|| result.leader_web_console_uri.clone())
+    let lines = command_outcome_lines(outcome, query);
+    signals
+        .terminal_lines
+        .update(|terminal| terminal.extend(lines));
 }
 
-fn command_result_lines(result: nervix_proto::CommandResult, query: &str) -> Vec<TermLine> {
-    if !result.results.is_empty() {
-        return result
-            .results
-            .into_iter()
-            .flat_map(|result| command_result_lines(result, query))
-            .collect();
+/// Applies the outcome of attaching the session's transaction.
+///
+/// Once the transaction is attached, the requests held for it are released. A transaction that
+/// already finished, or that could not be attached, ends the requests held for it.
+fn apply_attach_outcome(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    outcome: AttachOutcome,
+) -> SessionStep {
+    let AttachOutcome {
+        disposition,
+        message,
+        diagnostics,
+    } = outcome;
+    // An attach carries no source text, so no diagnostic of it points into one.
+    let query = "";
+    match disposition {
+        AttachDisposition::Attached(status) => {
+            let active = status.lifecycle().is_active();
+            adopt_transaction(signals, status);
+            if !active {
+                requests.clear_held();
+                let lines = completed_lines(message);
+                signals
+                    .terminal_lines
+                    .update(|terminal| terminal.extend(lines));
+            }
+            SessionStep::Continue
+        }
+        AttachDisposition::AlreadyFinished(status) => {
+            adopt_transaction(signals, status);
+            requests.clear_held();
+            let lines = failed_lines(message, diagnostics, query);
+            signals
+                .terminal_lines
+                .update(|terminal| terminal.extend(lines));
+            SessionStep::Continue
+        }
+        AttachDisposition::Failed => {
+            signals.transaction_status.set(None);
+            requests.clear_held();
+            let lines = failed_lines(message, diagnostics, query);
+            signals
+                .terminal_lines
+                .update(|terminal| terminal.extend(lines));
+            SessionStep::Continue
+        }
+        AttachDisposition::NotLeader(redirect) => redirect_step(signals, &redirect),
     }
+}
 
-    let mut lines = Vec::new();
-    if result.success {
-        if !result.message.is_empty() {
-            lines.push(TermLine::output(result.message));
+/// Applies the outcome of opening a tab's subscription. The tab opens either way: an opened
+/// subscription streams its rows into it, and a failure is shown in it.
+fn apply_subscribe_outcome(
+    signals: WebConsoleSignals,
+    tab_id: u64,
+    statement: &str,
+    outcome: SubscribeOutcome,
+) {
+    let SubscribeOutcome {
+        disposition,
+        message,
+        diagnostics,
+    } = outcome;
+    match disposition {
+        SubscribeDisposition::Opened(opened) => {
+            let SubscriptionOpened {
+                subscription,
+                schema,
+                ..
+            } = *opened;
+            let stream = TabStream {
+                subscription,
+                schema,
+            };
+            open_subscription_tab(signals, tab_id, Some(stream), Vec::new());
+        }
+        SubscribeDisposition::Failed => {
+            let lines = failed_lines(message, diagnostics, statement);
+            open_subscription_tab(signals, tab_id, None, lines);
+        }
+    }
+}
+
+/// Ends a request that gets no usable reply, showing `reason` where its reply would have been
+/// shown.
+fn fail_request(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    request: ConsoleRequest,
+    reason: String,
+) {
+    match request {
+        ConsoleRequest::Command {
+            purpose: CommandPurpose::Repl,
+            ..
+        }
+        | ConsoleRequest::ListDomains
+        | ConsoleRequest::SubscriptionStop(_)
+        | ConsoleRequest::SelectDomain(_) => {
+            signals
+                .terminal_lines
+                .update(|lines| lines.push(TermLine::error(reason)));
+        }
+        ConsoleRequest::Command {
+            purpose: CommandPurpose::ResourceDescription { resource },
+            ..
+        } => {
+            let detail = ResourceDetailView {
+                versions: Vec::new(),
+                status: reason,
+            };
+            signals.resource_details.update(|details| {
+                details.insert(resource, detail);
+            });
+        }
+        ConsoleRequest::SubscriptionStart { tab_id, .. } => {
+            open_subscription_tab(signals, tab_id, None, vec![TermLine::error(reason)]);
+        }
+        ConsoleRequest::Suggest(_) => signals.suggestions.set(Vec::new()),
+        ConsoleRequest::AttachTransaction(_) => {
+            // Without its transaction attached, the session cannot serve what was held for it.
+            signals.transaction_status.set(None);
+            requests.clear_held();
+            signals
+                .terminal_lines
+                .update(|lines| lines.push(TermLine::error(reason)));
+        }
+    }
+}
+
+/// Takes the session's transaction as the server reports it, and makes its domain the active one.
+fn adopt_transaction(signals: WebConsoleSignals, status: TransactionStatus) {
+    let domain = status.domain().clone();
+    let already_active = signals
+        .active_domain
+        .with_untracked(|active| active.as_ref() == Some(&domain));
+    if !already_active {
+        signals.active_domain.set(Some(domain));
+    }
+    signals.transaction_status.set(Some(status));
+}
+
+/// Takes the complete domain list. The active domain stays while it is listed; otherwise the first
+/// listed domain becomes the active one.
+fn apply_domain_list(signals: WebConsoleSignals, listed: Vec<DomainView>) {
+    let active = signals.active_domain.get_untracked();
+    // Bounded by the domains of the cluster, which the domain menu lists in this order.
+    let active_is_listed = match &active {
+        Some(active) => listed.iter().any(|domain| domain.domain == *active),
+        None => false,
+    };
+    let first = listed.first().map(|domain| domain.domain.clone());
+    signals.domains_loaded.set(true);
+    signals.domains.set(listed);
+    if !active_is_listed {
+        signals.active_domain.set(first);
+    }
+}
+
+/// Keeps the latest snapshot of a domain's graph and entities.
+fn apply_snapshot(signals: WebConsoleSignals, snapshot: &DomainSnapshotObserved) {
+    match DataflowGraph::deserialize(snapshot.graph_json().as_bytes()) {
+        Ok(graph) => {
+            let view = DomainSnapshotView::new(snapshot.entities(), graph);
+            let domain = snapshot.domain().clone();
+            signals.domain_snapshots.update(|snapshots| {
+                snapshots.insert(domain, view);
+            });
+        }
+        Err(error) => {
+            let reason = format!(
+                "failed to decode graph snapshot for domain '{}': {error}",
+                snapshot.domain()
+            );
+            signals
+                .terminal_lines
+                .update(|lines| lines.push(TermLine::error(reason)));
+        }
+    }
+}
+
+/// Continues the session at the leader's web console, or, while the leader or its console is not
+/// known, says so and connects again at the same address.
+fn redirect_step(signals: WebConsoleSignals, redirect: &LeaderRedirect) -> SessionStep {
+    if let Some(leader) = redirect_console(redirect) {
+        return SessionStep::Redirect(leader.clone());
+    }
+    let line = leader_redirect_line(redirect);
+    signals.terminal_lines.update(|lines| lines.push(line));
+    SessionStep::Reconnect
+}
+
+/// The leader's web console a command has to be sent to, when the serving node does not lead and
+/// knows where the leader's console is.
+fn command_redirect(disposition: &CommandDisposition) -> Option<&Url> {
+    let CommandDisposition::NotLeader(redirect) = disposition else {
+        return None;
+    };
+    redirect_console(redirect)
+}
+
+/// The web console a redirect names, when the leader is known and advertises one.
+fn redirect_console(redirect: &LeaderRedirect) -> Option<&Url> {
+    let leader = redirect.leader.as_ref()?;
+    leader.web_console_uri.as_ref()
+}
+
+/// The terminal lines of a command outcome, whose diagnostics point into `query`. A command of
+/// several statements shows the outcome of each.
+fn command_outcome_lines(outcome: CommandOutcome, query: &str) -> Vec<TermLine> {
+    let CommandOutcome {
+        disposition,
+        message,
+        diagnostics,
+        statements,
+        ..
+    } = outcome;
+    if !statements.is_empty() {
+        let mut lines = Vec::new();
+        for statement in statements {
+            lines.extend(statement_outcome_lines(statement, query));
         }
         return lines;
     }
-
-    match nervix_proto::CommandResultKind::try_from(result.kind).ok() {
-        Some(nervix_proto::CommandResultKind::NotLeader) => {
-            if !result.leader.is_empty() && !result.leader_grpc_uri.is_empty() {
-                lines.push(TermLine::info(format!(
-                    "topology: not-a-leader, retry on leader '{}' at {}",
-                    result.leader, result.leader_grpc_uri
-                )));
-            } else if !result.leader.is_empty() {
-                lines.push(TermLine::info(format!(
-                    "topology: not-a-leader, retry on leader '{}'",
-                    result.leader
-                )));
-            } else {
-                lines.push(TermLine::info("topology: not-a-leader"));
-            }
-        }
-        _ => lines.push(TermLine::error(result.message)),
+    match disposition {
+        CommandDisposition::Completed { .. } => completed_lines(message),
+        CommandDisposition::NotLeader(redirect) => not_leader_lines(&redirect, diagnostics, query),
+        CommandDisposition::Failed
+        | CommandDisposition::TransactionDetached { .. }
+        | CommandDisposition::TransactionTakenOver { .. }
+        | CommandDisposition::OutcomeUnknown(_)
+        | CommandDisposition::ExecutionReferenceConflict(_)
+        | CommandDisposition::ExecutionReferenceExpired
+        | CommandDisposition::PreviewStale { .. } => failed_lines(message, diagnostics, query),
     }
+}
 
-    if result.diagnostics.is_empty() {
-        lines.push(TermLine::output("- no diagnostics provided"));
-    } else {
-        lines.extend(
-            result
-                .diagnostics
-                .into_iter()
-                .map(|diagnostic| diagnostic_line(query, diagnostic)),
-        );
+/// The terminal lines of one statement of a command.
+fn statement_outcome_lines(statement: StatementOutcome, query: &str) -> Vec<TermLine> {
+    let StatementOutcome {
+        disposition,
+        message,
+        diagnostics,
+    } = statement;
+    match disposition {
+        StatementDisposition::Completed { .. } => completed_lines(message),
+        StatementDisposition::Failed => failed_lines(message, diagnostics, query),
+        StatementDisposition::NotLeader(redirect) => {
+            not_leader_lines(&redirect, diagnostics, query)
+        }
+    }
+}
+
+/// A completed outcome shows its message, when it has one.
+fn completed_lines(message: String) -> Vec<TermLine> {
+    if message.is_empty() {
+        return Vec::new();
+    }
+    vec![TermLine::output(message)]
+}
+
+/// A failed outcome shows its message as an error, followed by its diagnostics.
+fn failed_lines(message: String, diagnostics: Vec<Diagnostic>, query: &str) -> Vec<TermLine> {
+    let mut lines = vec![TermLine::error(message)];
+    lines.extend(diagnostic_lines(diagnostics, query));
+    lines
+}
+
+/// An outcome that needed the leader says where the leader is, followed by its diagnostics.
+fn not_leader_lines(
+    redirect: &LeaderRedirect,
+    diagnostics: Vec<Diagnostic>,
+    query: &str,
+) -> Vec<TermLine> {
+    let mut lines = vec![leader_redirect_line(redirect)];
+    lines.extend(diagnostic_lines(diagnostics, query));
+    lines
+}
+
+/// The diagnostics of an outcome that did not complete, or a line saying it carried none.
+fn diagnostic_lines(diagnostics: Vec<Diagnostic>, query: &str) -> Vec<TermLine> {
+    if diagnostics.is_empty() {
+        return vec![TermLine::output("- no diagnostics provided")];
+    }
+    let mut lines = Vec::with_capacity(diagnostics.len());
+    for diagnostic in diagnostics {
+        lines.push(diagnostic_line(query, diagnostic));
     }
     lines
+}
+
+/// Where the leader is, as far as the serving node knows.
+fn leader_redirect_line(redirect: &LeaderRedirect) -> TermLine {
+    let Some(leader) = &redirect.leader else {
+        return TermLine::info("topology: not-a-leader");
+    };
+    match &leader.grpc_uri {
+        Some(uri) => TermLine::info(format!(
+            "topology: not-a-leader, retry on leader '{}' at {uri}",
+            leader.node
+        )),
+        None => TermLine::info(format!(
+            "topology: not-a-leader, retry on leader '{}'",
+            leader.node
+        )),
+    }
+}
+
+/// What selecting a domain did.
+fn domain_selection_line(selection: DomainSelection) -> TermLine {
+    match selection {
+        DomainSelection::Selected(domain) => TermLine::info(format!("using domain '{domain}'")),
+        DomainSelection::NotFound(domain) => {
+            TermLine::error(format!("domain '{domain}' does not exist"))
+        }
+    }
+}
+
+/// Why a cancelled request ended, and what may still come of it.
+fn cancellation_reason(cancelled: RequestCancelled) -> String {
+    match cancelled.stage {
+        CancellationStage::BeforeAdmission => {
+            "the request was cancelled before it was admitted".to_string()
+        }
+        CancellationStage::AfterAdmission => "the request was cancelled after it was admitted, \
+                                              and its effects may still complete"
+            .to_string(),
+    }
 }
 
 fn append_subscription_tab_line(
@@ -1477,26 +2026,71 @@ fn append_subscription_tab_lines(
     });
 }
 
-fn append_subscription_event(
-    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
-    event: nervix_proto::SubscriptionEvent,
+/// Opens a tab and shows it, appending `lines` and, once the server opened its subscription, the
+/// stream it shows.
+fn open_subscription_tab(
+    signals: WebConsoleSignals,
+    tab_id: u64,
+    stream: Option<TabStream>,
+    lines: Vec<TermLine>,
 ) {
-    let line = TermLine::output(event.payload);
-    let relay = event.relay;
-    let subscription = event.subscription;
+    signals.subscription_tabs.update(|tabs| {
+        // Bounded by the subscription tabs the operator has open in this console.
+        let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if let Some(stream) = stream {
+            tab.stream = Some(stream);
+        }
+        tab.lines.extend(lines);
+        tab.state = SubscriptionTabState::Open;
+    });
+    signals.active_subscription_tab.set(Some(tab_id));
+}
+
+/// Shows a batch of a subscription's rows, one line per row, in the tabs that show the
+/// subscription.
+fn append_subscription_rows(
+    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
+    rows: &SubscriptionRows,
+) {
+    let batch = rows.batch();
     subscription_tabs.update(|tabs| {
-        let matching_tabs = tabs
-            .iter()
-            .enumerate()
-            .filter_map(|(index, tab)| {
-                (tab.relay == relay && tab.name == subscription).then_some(index)
-            })
-            .collect::<Vec<_>>();
-        for index in matching_tabs {
-            let Some(tab) = tabs.get_mut(index) else {
+        // Bounded by the subscription tabs the operator has open in this console.
+        for tab in tabs.iter_mut() {
+            let Some(schema) = tab.stream_schema(rows.subscription()) else {
                 continue;
             };
-            tab.lines.push(line.clone());
+            let lines = subscription_row_lines(&batch, schema);
+            tab.lines.extend(lines);
+        }
+    });
+}
+
+/// The display line of every row of a batch, or the reason the batch cannot be shown against the
+/// schema its subscription announced.
+fn subscription_row_lines(batch: &RowBatchView<'_>, schema: &RowSchema) -> Vec<TermLine> {
+    match batch.display_lines(schema) {
+        Ok(lines) => lines.into_iter().map(TermLine::output).collect(),
+        Err(error) => vec![TermLine::error(format!(
+            "rows do not match the subscription schema: {}",
+            error.current_context()
+        ))],
+    }
+}
+
+/// Shows a line about a subscription in the tabs that show it.
+fn append_subscription_line(
+    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
+    subscription: &SubscriptionHandle,
+    line: TermLine,
+) {
+    subscription_tabs.update(|tabs| {
+        // Bounded by the subscription tabs the operator has open in this console.
+        for tab in tabs.iter_mut() {
+            if tab.streams(subscription) {
+                tab.lines.push(line.clone());
+            }
         }
     });
 }
@@ -1519,10 +2113,6 @@ fn subscribe_session_command(
     }
     command.push(';');
     command
-}
-
-fn unsubscribe_session_command(name: &str) -> String {
-    format!("DELETE SUBSCRIPTION {name};")
 }
 
 fn subscription_tab_title(relay: &str, filter: &str) -> String {
@@ -1561,65 +2151,67 @@ fn domain_list_lines(domains: &[DomainView]) -> Vec<TermLine> {
         return vec![TermLine::output("no domains registered")];
     }
     std::iter::once(TermLine::output("domains:"))
-        .chain(domains.iter().map(|domain| {
-            TermLine::output(format!(
-                "{} pace={} status={}",
-                domain.id, domain.mode, domain.status
-            ))
-        }))
+        .chain(
+            domains
+                .iter()
+                .map(|domain| TermLine::output(domain.listing_line())),
+        )
         .collect()
 }
 
-/// Reads the dialog's versions from the same `DESCRIBE RESOURCE` description the REPL prints,
-/// attaching to each version the usages that pin it.
-fn resource_detail_from_result(result: nervix_proto::CommandResult) -> ResourceDetailView {
-    if !result.success {
-        return ResourceDetailView {
-            versions: Vec::new(),
-            status: result.message,
+impl ResourceDetailView {
+    /// Reads the dialog's versions from the same `DESCRIBE RESOURCE` description the REPL prints,
+    /// attaching to each version the usages that pin it. A description that did not complete
+    /// shows its message instead.
+    fn from_description(outcome: CommandOutcome) -> Self {
+        let CommandDisposition::Completed { .. } = outcome.disposition else {
+            return Self {
+                versions: Vec::new(),
+                status: outcome.message,
+            };
         };
-    }
-    let mut versions = Vec::<ResourceVersionView>::new();
-    let mut usages_by_version = BTreeMap::<u64, Vec<ResourceUsageView>>::new();
-    let mut section = ResourceDescribeSection::Summary;
-    for line in result.message.lines() {
-        if line == "version_details:" {
-            section = ResourceDescribeSection::VersionDetails;
-            continue;
-        }
-        if line == "usages:" {
-            section = ResourceDescribeSection::Usages;
-            continue;
-        }
-        match section {
-            ResourceDescribeSection::Summary => {}
-            ResourceDescribeSection::VersionDetails => {
-                if let Some(version) = parse_resource_version_detail(line) {
-                    versions.push(version);
-                } else if let Some(file) = parse_resource_file_detail(line)
-                    && let Some(version) = versions.last_mut()
-                {
-                    version.files.push(file);
+        let mut versions = Vec::<ResourceVersionView>::new();
+        let mut usages_by_version = BTreeMap::<u64, Vec<ResourceUsageView>>::new();
+        let mut section = ResourceDescribeSection::Summary;
+        for line in outcome.message.lines() {
+            if line == "version_details:" {
+                section = ResourceDescribeSection::VersionDetails;
+                continue;
+            }
+            if line == "usages:" {
+                section = ResourceDescribeSection::Usages;
+                continue;
+            }
+            match section {
+                ResourceDescribeSection::Summary => {}
+                ResourceDescribeSection::VersionDetails => {
+                    if let Some(version) = parse_resource_version_detail(line) {
+                        versions.push(version);
+                    } else if let Some(file) = parse_resource_file_detail(line)
+                        && let Some(version) = versions.last_mut()
+                    {
+                        version.files.push(file);
+                    }
+                }
+                ResourceDescribeSection::Usages => {
+                    if let Some(detail) = ResourceUsageDetail::parse(line) {
+                        usages_by_version
+                            .entry(detail.version)
+                            .or_default()
+                            .push(detail.usage);
+                    }
                 }
             }
-            ResourceDescribeSection::Usages => {
-                if let Some(detail) = ResourceUsageDetail::parse(line) {
-                    usages_by_version
-                        .entry(detail.version)
-                        .or_default()
-                        .push(detail.usage);
-                }
+        }
+        for version in &mut versions {
+            if let Some(usages) = usages_by_version.remove(&version.version) {
+                version.usages = usages;
             }
         }
-    }
-    for version in &mut versions {
-        if let Some(usages) = usages_by_version.remove(&version.version) {
-            version.usages = usages;
+        Self {
+            versions,
+            status: "ready".to_string(),
         }
-    }
-    ResourceDetailView {
-        versions,
-        status: "ready".to_string(),
     }
 }
 
@@ -1766,16 +2358,14 @@ fn resource_file_summary(file: &ResourceFileView) -> String {
 ///
 /// The query is whatever the operator has typed so far, so text that does not parse is the
 /// ordinary case rather than a failure; it simply names no domain yet.
-fn first_created_domain_from_query(query: &str) -> Option<String> {
-    parse_client_statements(query)
-        .ok()?
-        .into_iter()
-        .find_map(|statement| match statement {
-            ClientStatement::Server(Statement::CreateDomain(create)) => {
-                Some(create.id.as_str().to_string())
-            }
-            _ => None,
-        })
+fn first_created_domain_from_query(query: &str) -> Option<DomainName> {
+    let statements = parse_client_statements(query).ok()?;
+    for statement in statements {
+        if let ClientStatement::Server(Statement::CreateDomain(create)) = statement {
+            return Some(create.id.clone());
+        }
+    }
+    None
 }
 
 fn is_domainless_server_command(command: &str) -> bool {
@@ -1789,31 +2379,37 @@ fn is_domainless_server_command(command: &str) -> bool {
         || normalized.starts_with("CREATE IF NOT EXISTS USER ")
 }
 
-fn diagnostic_line(query: &str, diagnostic: nervix_proto::Diagnostic) -> TermLine {
-    let span_start = usize::try_from(diagnostic.span_start)
-        .assured("supported browser and test targets have at least 32-bit pointers");
-    let span_end = usize::try_from(diagnostic.span_end)
-        .assured("supported browser and test targets have at least 32-bit pointers");
-    if span_start < span_end && span_end <= query.len() {
-        TermLine::output(format!(
-            "- {} at {}..{}: {}",
-            &query[span_start..span_end],
-            diagnostic.span_start,
-            diagnostic.span_end,
-            diagnostic.message
-        ))
-    } else {
-        TermLine::output(format!("- {}", diagnostic.message))
+/// One diagnostic as the terminal shows it: the text its span covers in `query` and its message.
+///
+/// The span arrives from the server, so it is shown only when it is a non-empty range whose ends
+/// both lie within `query` on character boundaries; any other span shows the message alone.
+fn diagnostic_line(query: &str, diagnostic: Diagnostic) -> TermLine {
+    let Diagnostic { message, span } = diagnostic;
+    if let Some(span) = span {
+        let start = usize::try_from(span.start())
+            .assured("supported browser and test targets have at least 32-bit pointers");
+        let end = usize::try_from(span.end())
+            .assured("supported browser and test targets have at least 32-bit pointers");
+        // `str::get` answers `None` for a range outside the text or off a character boundary.
+        if start < end
+            && let Some(covered) = query.get(start..end)
+        {
+            return TermLine::output(format!(
+                "- {covered} at {}..{}: {message}",
+                span.start(),
+                span.end()
+            ));
+        }
     }
+    TermLine::output(format!("- {message}"))
 }
 
-fn server_event_line(event: nervix_proto::ServerEvent) -> TermLine {
-    match nervix_proto::ServerEventLevel::try_from(event.level).ok() {
-        Some(nervix_proto::ServerEventLevel::Error) => TermLine::error(event.message),
-        Some(nervix_proto::ServerEventLevel::Warn) => {
-            TermLine::info(format!("warn: {}", event.message))
-        }
-        _ => TermLine::info(event.message),
+/// A server notice as the terminal shows it.
+fn notice_line(notice: ServerNotice) -> TermLine {
+    match notice.level {
+        NoticeLevel::Error => TermLine::error(notice.message),
+        NoticeLevel::Warning => TermLine::info(format!("warn: {}", notice.message)),
+        NoticeLevel::Info => TermLine::info(notice.message),
     }
 }
 
@@ -1821,17 +2417,19 @@ fn server_event_line(event: nervix_proto::ServerEvent) -> TermLine {
 fn Header(
     active_theme: RwSignal<usize>,
     websocket_state: RwSignal<ConsoleConnectionState>,
-    active_domain: RwSignal<Option<String>>,
+    active_domain: RwSignal<Option<DomainName>>,
     domains: RwSignal<Vec<DomainView>>,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
     let theme_open = RwSignal::new(false);
     let selected_domain = move || {
-        let active = active_domain.get();
-        domains
-            .get()
-            .into_iter()
-            .find(|domain| Some(domain.id.clone()) == active)
+        let active = active_domain.get()?;
+        let listed_domains = domains.read();
+        // Bounded by the domains of the cluster, which the domain menu lists.
+        listed_domains
+            .iter()
+            .find(|candidate| candidate.domain == active)
+            .cloned()
     };
     view! {
         <header class="topbar">
@@ -1847,28 +2445,26 @@ fn Header(
                 </span>
                 <Show
                     when=move || selected_domain()
-                        .is_some_and(|domain| domain_can_toggle_state(&domain.status))
+                        .is_some_and(|domain| domain.state_command().is_some())
                     fallback=|| ()
                 >
                     <button
                         class="domain-state-button topbar-domain-state-button"
                         class:domain-state-start=move || selected_domain()
-                            .is_some_and(|domain| domain.status.eq_ignore_ascii_case("STOPPED"))
+                            .is_some_and(|domain| domain.status == DomainStatus::Stopped)
                         class:domain-state-stop=move || selected_domain()
-                            .is_some_and(|domain| domain.status.eq_ignore_ascii_case("RUNNING"))
+                            .is_some_and(|domain| domain.status == DomainStatus::Running)
                         type="button"
                         disabled=move || websocket_state.get() != ConsoleConnectionState::Connected
                         title=move || match selected_domain() {
-                            Some(domain) => domain_state_hint(
-                                &domain.status,
+                            Some(domain) => domain.state_hint(
                                 websocket_state.get() == ConsoleConnectionState::Connected,
                             )
                             .to_string(),
                             None => "Domain lifecycle".to_string(),
                         }
                         aria-label=move || match selected_domain() {
-                            Some(domain) => domain_state_hint(
-                                &domain.status,
+                            Some(domain) => domain.state_hint(
                                 websocket_state.get() == ConsoleConnectionState::Connected,
                             )
                             .to_string(),
@@ -1879,7 +2475,7 @@ fn Header(
                                 return;
                             }
                             if let Some(domain) = selected_domain()
-                                && let Some(command) = domain_state_command(&domain.status)
+                                && let Some(command) = domain.state_command()
                             {
                                 run_command(Some(command.to_string()));
                             }
@@ -1887,15 +2483,14 @@ fn Header(
                     >
                         <Show
                             when=move || selected_domain()
-                                .is_some_and(|domain| domain.status.eq_ignore_ascii_case("RUNNING"))
+                                .is_some_and(|domain| domain.status == DomainStatus::Running)
                             fallback=|| view! { <SidebarIcon kind="play" /> }
                         >
                             <SidebarIcon kind="stop" />
                         </Show>
                         <span class="domain-state-hint" aria-hidden="true">
                             {move || match selected_domain() {
-                                Some(domain) => domain_state_hint(
-                                    &domain.status,
+                                Some(domain) => domain.state_hint(
                                     websocket_state.get() == ConsoleConnectionState::Connected,
                                 )
                                 .to_string(),
@@ -1958,8 +2553,7 @@ fn Header(
 
 #[component]
 fn Sidebar(
-    active_domain: RwSignal<Option<String>>,
-    user_selected_domain: RwSignal<bool>,
+    active_domain: RwSignal<Option<DomainName>>,
     domains: RwSignal<Vec<DomainView>>,
     domains_loaded: RwSignal<bool>,
     active_graph: impl Fn() -> Option<GraphView> + Copy + Send + Sync + 'static,
@@ -1979,7 +2573,7 @@ fn Sidebar(
     let endpoints_open = RwSignal::new(true);
     let selected_resource = RwSignal::new(None::<String>);
     let upload_status = RwSignal::new(String::new());
-    let entities_for = move |kind: &'static str| {
+    let entities_for = move |kind: EntityKind| {
         active_entities()
             .into_iter()
             .filter(move |entity| entity.kind == kind)
@@ -1988,28 +2582,24 @@ fn Sidebar(
     let wire_schema_entities = move || {
         active_entities()
             .into_iter()
-            .filter(|entity| {
-                matches!(
-                    entity.kind.as_str(),
-                    "wire_json_schema" | "wire_cbor_schema" | "wire_avro_schema"
-                )
-            })
+            .filter(|entity| entity.kind.is_wire_schema())
             .collect::<Vec<_>>()
     };
     let selected_domain = move || {
-        let active = active_domain.get();
-        let found = domains
-            .get()
-            .into_iter()
-            .find(|domain| Some(domain.id.clone()) == active);
-        match found {
-            Some(domain) => Some(domain),
-            None => active.map(|id| DomainView {
-                id,
-                mode: "UNKNOWN".to_string(),
-                status: "UNKNOWN".to_string(),
-            }),
-        }
+        let active = active_domain.get()?;
+        let listed = {
+            let listed_domains = domains.read();
+            // Bounded by the domains of the cluster, which the domain menu lists.
+            listed_domains
+                .iter()
+                .find(|candidate| candidate.domain == active)
+                .cloned()
+        };
+        let domain = match listed {
+            Some(domain) => SidebarDomain::Listed(domain),
+            None => SidebarDomain::Unlisted(active),
+        };
+        Some(domain)
     };
     view! {
         <aside class="sidebar">
@@ -2023,7 +2613,7 @@ fn Sidebar(
                     <span class="status-dot"></span>
                     <span>{move || {
                         if let Some(domain) = selected_domain() {
-                            domain.id
+                            domain.name().to_string()
                         } else if domains_loaded.get() {
                             "no domain".to_string()
                         } else {
@@ -2032,7 +2622,7 @@ fn Sidebar(
                     }}</span>
                     <span class="domain-mode">{move || {
                         if let Some(domain) = selected_domain() {
-                            domain.mode
+                            domain.pace_label().to_string()
                         } else if domains_loaded.get() {
                             "NONE".to_string()
                         } else {
@@ -2044,13 +2634,13 @@ fn Sidebar(
                 <div class="popup-menu domain-menu" class:open=move || domain_open.get()>
                     <For
                         each=move || domains.get()
-                        key=|domain| domain.id.clone()
+                        key=|domain| domain.domain.clone()
                         children={move |domain| {
-                            let domain_id = domain.id.clone();
-                            let active_domain_id = domain.id.clone();
-                            let domain_label = domain.id.clone();
-                            let domain_mode = domain.mode.clone();
-                            let command_domain = domain.id.clone();
+                            let domain_id = domain.domain.to_string();
+                            let active_domain_id = domain.domain.clone();
+                            let domain_label = domain.domain.to_string();
+                            let domain_mode = domain.pace_label().to_string();
+                            let command_domain = domain.domain.clone();
                             view! {
                                 <button
                                     type="button"
@@ -2063,7 +2653,6 @@ fn Sidebar(
                                         }
                                     }
                                     on:click=move |_| {
-                                        user_selected_domain.set(true);
                                         active_domain.set(Some(command_domain.clone()));
                                         domain_open.set(false);
                                         run_command(Some(format!("USE {};", command_domain)));
@@ -2089,7 +2678,7 @@ fn Sidebar(
                         "live snapshot"
                     </span>
                     <strong>{move || match selected_domain() {
-                        Some(domain) => domain.status,
+                        Some(domain) => domain.status_label().to_string(),
                         None => "WAITING".to_string(),
                     }}</strong>
                 </div>
@@ -2109,10 +2698,10 @@ fn Sidebar(
                 </div>
             </div>
             <nav class="nav-list" aria-label="Console entities">
-                <NavHeader title="Schemas" count=move || entities_for("schema").len().to_string() kind="schemas" open=schemas_open />
+                <NavHeader title="Schemas" count=move || entities_for(EntityKind::Model(ModelKind::Schema)).len().to_string() kind="schemas" open=schemas_open />
                 <Show when=move || schemas_open.get() fallback=|| ()>
                     <For
-                        each=move || entities_for("schema")
+                        each=move || entities_for(EntityKind::Model(ModelKind::Schema))
                         key=|entity| entity.name.clone()
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="schemas" on_click=|| () /> }}
                     />
@@ -2121,31 +2710,31 @@ fn Sidebar(
                 <Show when=move || wire_open.get() fallback=|| ()>
                     <For
                         each=wire_schema_entities
-                        key=|entity| format!("{}:{}", entity.kind, entity.name)
+                        key=|entity| (entity.kind, entity.name.clone())
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="wire" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Codecs" count=move || entities_for("codec").len().to_string() kind="codecs" open=codecs_open />
+                <NavHeader title="Codecs" count=move || entities_for(EntityKind::Model(ModelKind::Codec)).len().to_string() kind="codecs" open=codecs_open />
                 <Show when=move || codecs_open.get() fallback=|| ()>
                     <For
-                        each=move || entities_for("codec")
+                        each=move || entities_for(EntityKind::Model(ModelKind::Codec))
                         key=|entity| entity.name.clone()
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="codecs" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Resources" count=move || entities_for("resource").len().to_string() kind="resources" open=resources_open />
+                <NavHeader title="Resources" count=move || entities_for(EntityKind::Resource).len().to_string() kind="resources" open=resources_open />
                 <Show when=move || resources_open.get() fallback=|| ()>
                     // A resource's detail is its latest completed version, which changes while the
                     // row is shown. A keyed list re-renders a row only when its key changes, so the
                     // row is keyed by everything it shows.
                     <For
-                        each=move || entities_for("resource")
+                        each=move || entities_for(EntityKind::Resource)
                         key=|entity| entity.clone()
                         children={move |entity| {
                             let name = entity.name.clone();
                             let describe_name = entity.name.clone();
                             let request_tx = web_console_session.request_tx;
-                            let describe_command = entity_describe_command("resource", &entity.name);
+                            let describe_command = entity.describe_command();
                             view! {
                                 <NavItem
                                     name=entity.name
@@ -2160,7 +2749,7 @@ fn Sidebar(
                                         request_resource_describe(
                                             request_tx,
                                             describe_name.clone(),
-                                            active_domain.get_untracked().unwrap_or_default(),
+                                            active_domain.get_untracked(),
                                         );
                                     }
                                 />
@@ -2168,29 +2757,29 @@ fn Sidebar(
                         }}
                     />
                 </Show>
-                <NavHeader title="Clients" count=move || entities_for("client").len().to_string() kind="resources" open=clients_open />
+                <NavHeader title="Clients" count=move || entities_for(EntityKind::Model(ModelKind::Client)).len().to_string() kind="resources" open=clients_open />
                 <Show when=move || clients_open.get() fallback=|| ()>
                     <For
-                        each=move || entities_for("client")
+                        each=move || entities_for(EntityKind::Model(ModelKind::Client))
                         key=|entity| entity.name.clone()
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="resources" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Vhosts" count=move || entities_for("vhost").len().to_string() kind="resources" open=vhosts_open />
+                <NavHeader title="Vhosts" count=move || entities_for(EntityKind::Model(ModelKind::Vhost)).len().to_string() kind="resources" open=vhosts_open />
                 <Show when=move || vhosts_open.get() fallback=|| ()>
                     <For
-                        each=move || entities_for("vhost")
+                        each=move || entities_for(EntityKind::Model(ModelKind::Vhost))
                         key=|entity| entity.name.clone()
                         children={|entity| view! { <NavItem name=entity.name meta=entity.detail kind="resources" on_click=|| () /> }}
                     />
                 </Show>
-                <NavHeader title="Endpoints" count=move || entities_for("endpoint").len().to_string() kind="resources" open=endpoints_open />
+                <NavHeader title="Endpoints" count=move || entities_for(EntityKind::Model(ModelKind::Endpoint)).len().to_string() kind="resources" open=endpoints_open />
                 <Show when=move || endpoints_open.get() fallback=|| ()>
                     <For
-                        each=move || entities_for("endpoint")
+                        each=move || entities_for(EntityKind::Model(ModelKind::Endpoint))
                         key=|entity| entity.name.clone()
                         children={move |entity| {
-                            let describe_command = entity_describe_command("endpoint", &entity.name);
+                            let describe_command = entity.describe_command();
                             view! {
                                 <NavItem
                                     name=entity.name
@@ -2226,38 +2815,6 @@ fn Sidebar(
                 />
             </Show>
         </aside>
-    }
-}
-
-fn domain_can_toggle_state(status: &str) -> bool {
-    domain_state_command(status).is_some()
-}
-
-fn domain_state_command(status: &str) -> Option<&'static str> {
-    if status.eq_ignore_ascii_case("RUNNING") {
-        Some("STOP;")
-    } else if status.eq_ignore_ascii_case("STOPPED") {
-        Some("START;")
-    } else {
-        None
-    }
-}
-
-fn domain_state_title(status: &str) -> &'static str {
-    if status.eq_ignore_ascii_case("RUNNING") {
-        "Stop domain"
-    } else if status.eq_ignore_ascii_case("STOPPED") {
-        "Start domain"
-    } else {
-        "Domain lifecycle"
-    }
-}
-
-fn domain_state_hint(status: &str, connected: bool) -> &'static str {
-    if connected {
-        domain_state_title(status)
-    } else {
-        "Waiting for connection"
     }
 }
 
@@ -2312,40 +2869,33 @@ fn NavItem(
 }
 
 fn request_resource_describe(
-    request_tx: RwSignal<Option<UnboundedSender<QueuedRequest>>>,
+    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
     resource: String,
-    domain: String,
+    domain: Option<DomainName>,
 ) {
-    let query = format!("DESCRIBE RESOURCE {resource};");
-    let request = nervix_proto::SessionRequest {
-        request: Some(nervix_proto::session_request::Request::Command(
-            nervix_proto::CommandRequest {
-                query,
-                domain,
-                execution_reference: command_execution_reference(),
-                expected_transaction_position: None,
-                expected_preview: None,
-            },
-        )),
+    let request = CommandRequest {
+        query: format!("DESCRIBE RESOURCE {resource};"),
+        domain,
+        execution_reference: command_execution_reference(),
+        expected_transaction_position: None,
+        expected_preview: None,
+    };
+    let queued = ConsoleRequest::Command {
+        request,
+        purpose: CommandPurpose::ResourceDescription { resource },
     };
     if let Some(tx) = request_tx.get_untracked() {
-        tx.unbounded_send(QueuedRequest::ResourceDescribe { resource, request })
+        tx.unbounded_send(queued)
             .means_shutdown("web console session");
     }
 }
 
 /// Durable command admission reads the creation time embedded in a UUIDv7 retry identity, so a
 /// persistent command sent from the console must carry one.
-fn command_execution_reference() -> String {
-    uuid::Uuid::now_v7().to_string()
-}
-
-fn entity_describe_command(kind: &str, name: &str) -> Option<String> {
-    match kind {
-        "endpoint" => Some(format!("DESCRIBE ENDPOINT {name};")),
-        "resource" => Some(format!("DESCRIBE RESOURCE {name};")),
-        _ => None,
-    }
+fn command_execution_reference() -> CommandExecutionReference {
+    CommandExecutionReference::parse(uuid::Uuid::now_v7().to_string()).assured(
+        "a hyphenated UUID is 36 ASCII hex digits and hyphens, which an execution reference admits",
+    )
 }
 
 #[component]
@@ -2355,8 +2905,8 @@ fn ResourceDialog(
     upload_status: RwSignal<String>,
     upload_base_url: RwSignal<Option<String>>,
     auth_token: RwSignal<Option<String>>,
-    request_tx: RwSignal<Option<UnboundedSender<QueuedRequest>>>,
-    active_domain: RwSignal<Option<String>>,
+    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    active_domain: RwSignal<Option<DomainName>>,
     close: impl Fn() + Copy + Send + 'static,
 ) -> impl IntoView {
     let file_input = NodeRef::<leptos::html::Input>::new();
@@ -2381,11 +2931,7 @@ fn ResourceDialog(
             .await;
             upload_status.set(message);
             uploading.set(false);
-            request_resource_describe(
-                request_tx,
-                resource_name,
-                active_domain.get_untracked().unwrap_or_default(),
-            );
+            request_resource_describe(request_tx, resource_name, active_domain.get_untracked());
         });
     };
     view! {
@@ -2554,7 +3100,7 @@ fn event_target_input(event: &ev::Event) -> web_sys::HtmlInputElement {
 
 async fn upload_resource_files(
     resource: String,
-    domain: String,
+    domain: DomainName,
     input: web_sys::HtmlInputElement,
     upload_base_url: Option<String>,
     auth_token: Option<String>,
@@ -2597,7 +3143,7 @@ async fn upload_resource_files(
     let url = web_console_resource_upload_url(
         upload_base_url.as_deref(),
         &resource,
-        &domain,
+        domain.as_str(),
         &upload_identity,
         auth_token.as_deref(),
     );
@@ -2789,7 +3335,7 @@ fn graph_edge_kind_from_label(label: &str) -> Option<DataflowEdgeKind> {
 
 #[component]
 fn GraphPanel(
-    active_domain: RwSignal<Option<String>>,
+    active_domain: RwSignal<Option<DomainName>>,
     domains: RwSignal<Vec<DomainView>>,
     websocket_state: RwSignal<ConsoleConnectionState>,
     domain: impl Fn() -> Option<GraphView> + Copy + Send + Sync + 'static,
@@ -2819,8 +3365,8 @@ fn GraphPanel(
     let snapshot_observed_at = RwSignal::new(js_sys::Date::now());
     let freshness_now = RwSignal::new(js_sys::Date::now());
     Effect::new(move |_| {
-        let selected_domain = active_domain.get().unwrap_or_default();
-        let next_graph = domain().filter(|graph| graph.id == selected_domain);
+        let selected_domain = active_domain.get();
+        let next_graph = domain().filter(|graph| graph.belongs_to(selected_domain.as_ref()));
         if let Some(graph) = &next_graph {
             let next_key = graph.topology_key();
             if topology_key_state.get_untracked().as_ref() != Some(&next_key) {
@@ -2851,15 +3397,15 @@ fn GraphPanel(
         }
     });
     let visible_graph = move || {
-        let selected_domain = active_domain.get().unwrap_or_default();
+        let selected_domain = active_domain.get();
         current_graph_state
             .get()
-            .filter(|graph| graph.id == selected_domain)
+            .filter(|graph| graph.belongs_to(selected_domain.as_ref()))
     };
     let visible_topology_graph = move || {
-        let selected_domain = active_domain.get().unwrap_or_default();
+        let selected_domain = active_domain.get();
         match topology_graph_state.get() {
-            Some(graph) if graph.id == selected_domain => Some(graph),
+            Some(graph) if graph.belongs_to(selected_domain.as_ref()) => Some(graph),
             _ => visible_graph(),
         }
     };
@@ -2875,12 +3421,15 @@ fn GraphPanel(
     };
     let active_graph_search = move || GraphSearch::parse(&graph_search.get());
     let domain_lifecycle = move || {
-        let selected_domain = active_domain.get().unwrap_or_default();
-        let domain = domains
-            .get()
-            .into_iter()
-            .find(|domain| domain.id == selected_domain);
-        match domain {
+        let Some(selected_domain) = active_domain.get() else {
+            return "STOPPED";
+        };
+        let listed_domains = domains.read();
+        // Bounded by the domains of the cluster, which the domain menu lists.
+        match listed_domains
+            .iter()
+            .find(|candidate| candidate.domain == selected_domain)
+        {
             Some(domain) => domain.lifecycle_label(),
             None => "STOPPED",
         }
@@ -3841,7 +4390,7 @@ fn ReplPanel(
     domain: impl Fn() -> String + Copy + Send + 'static,
     input: RwSignal<String>,
     terminal_lines: RwSignal<Vec<TermLine>>,
-    transaction_state: impl Fn() -> Option<nervix_proto::TransactionState> + Copy + Send + 'static,
+    transaction_state: impl Fn() -> Option<ActiveTransaction> + Copy + Send + 'static,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
     active_subscription_tab: RwSignal<Option<u64>>,
     stop_subscription: impl Fn(u64) + Copy + Send + 'static,
@@ -4000,13 +4549,11 @@ fn ReplPanel(
             }>
                 <span>{move || {
                     match transaction_state() {
-                        Some(nervix_proto::TransactionState::Open) => {
-                            format!("nervix[{} tx]>", domain())
-                        }
-                        Some(nervix_proto::TransactionState::Committing) => {
+                        Some(ActiveTransaction::Open) => format!("nervix[{} tx]>", domain()),
+                        Some(ActiveTransaction::Committing) => {
                             format!("nervix[{} committing]>", domain())
                         }
-                        _ => format!("nervix[{}]>", domain()),
+                        None => format!("nervix[{}]>", domain()),
                     }
                 }}</span>
                 <input
@@ -4300,6 +4847,14 @@ impl GraphView {
             groups,
             width: layout.width,
             height: layout.height,
+        }
+    }
+
+    /// Whether this is the graph of `domain`. No graph belongs to the absence of a domain.
+    fn belongs_to(&self, domain: Option<&DomainName>) -> bool {
+        match domain {
+            Some(domain) => self.id == domain.as_str(),
+            None => false,
         }
     }
 
@@ -5155,61 +5710,119 @@ impl DataflowEdgeKindView for DataflowEdgeKind {
     }
 }
 
+/// One domain as the domain list describes it.
 #[derive(Clone, PartialEq, Eq)]
 struct DomainView {
-    id: String,
-    mode: String,
-    status: String,
+    domain: DomainName,
+    pace: DomainPace,
+    status: DomainStatus,
 }
 
 impl DomainView {
-    /// The lifecycle the console reports for this domain, normalised to the three states a
-    /// domain can be in.
+    /// The lifecycle the console reports for this domain.
     fn lifecycle_label(&self) -> &'static str {
-        if self.status.eq_ignore_ascii_case("RUNNING") {
-            "RUNNING"
-        } else if self.status.eq_ignore_ascii_case("PAUSED") {
-            "PAUSED"
+        (&self.status).into()
+    }
+
+    /// How the domain paces its clock, as the domain menu and `LIST DOMAINS` name it.
+    fn pace_label(&self) -> &str {
+        self.pace.as_ref()
+    }
+
+    /// The line `LIST DOMAINS` prints for this domain.
+    fn listing_line(&self) -> String {
+        format!(
+            "{} pace={} status={}",
+            self.domain,
+            self.pace.as_ref(),
+            self.status.as_ref()
+        )
+    }
+
+    /// The statement that starts a stopped domain or stops a running one. A paused domain has
+    /// none.
+    fn state_command(&self) -> Option<&'static str> {
+        match self.status {
+            DomainStatus::Running => Some("STOP;"),
+            DomainStatus::Stopped => Some("START;"),
+            DomainStatus::Paused => None,
+        }
+    }
+
+    /// What the lifecycle button does for this domain.
+    fn state_title(&self) -> &'static str {
+        match self.status {
+            DomainStatus::Running => "Stop domain",
+            DomainStatus::Stopped => "Start domain",
+            DomainStatus::Paused => "Domain lifecycle",
+        }
+    }
+
+    /// The lifecycle button's hint, which says the button waits while the session is not
+    /// connected.
+    fn state_hint(&self, connected: bool) -> &'static str {
+        if connected {
+            self.state_title()
         } else {
-            "STOPPED"
+            "Waiting for connection"
         }
     }
 }
 
-impl From<nervix_proto::DomainInfo> for DomainView {
-    fn from(value: nervix_proto::DomainInfo) -> Self {
+impl From<DomainInfo> for DomainView {
+    fn from(info: DomainInfo) -> Self {
         Self {
-            id: value.id,
-            mode: value.pace,
-            status: value.status,
+            domain: info.domain,
+            pace: info.pace,
+            status: info.status,
         }
     }
 }
 
+/// The active domain as the sidebar shows it.
+#[derive(Clone)]
+enum SidebarDomain {
+    /// The domain list describes the active domain.
+    Listed(DomainView),
+    /// The domain list does not describe the active domain yet, so only its name is known.
+    Unlisted(DomainName),
+}
+
+impl SidebarDomain {
+    fn name(&self) -> &DomainName {
+        match self {
+            Self::Listed(domain) => &domain.domain,
+            Self::Unlisted(domain) => domain,
+        }
+    }
+
+    fn pace_label(&self) -> &str {
+        match self {
+            Self::Listed(domain) => domain.pace_label(),
+            Self::Unlisted(_) => "UNKNOWN",
+        }
+    }
+
+    fn status_label(&self) -> &str {
+        match self {
+            Self::Listed(domain) => domain.status.as_ref(),
+            Self::Unlisted(_) => "UNKNOWN",
+        }
+    }
+}
+
+/// The latest snapshot of one domain's graph and entities.
 #[derive(Clone, PartialEq)]
 struct DomainSnapshotView {
-    domain: String,
     dataflow_graph: DataflowGraph,
     entities: Vec<EntityView>,
 }
 
 impl DomainSnapshotView {
-    fn from_snapshot(
-        snapshot: nervix_proto::DomainSnapshot,
-        dataflow_graph: DataflowGraph,
-    ) -> Self {
-        let mut entities = snapshot
-            .entities
-            .into_iter()
-            .map(EntityView::from)
-            .collect::<Vec<_>>();
-        entities.sort_by(|left, right| {
-            left.kind
-                .cmp(&right.kind)
-                .then_with(|| left.name.cmp(&right.name))
-        });
+    fn new(entities: &[DomainEntity], dataflow_graph: DataflowGraph) -> Self {
+        let mut entities = entities.iter().map(EntityView::from).collect::<Vec<_>>();
+        entities.sort_by(EntityView::sidebar_order);
         Self {
-            domain: snapshot.domain,
             dataflow_graph,
             entities,
         }
@@ -5223,29 +5836,97 @@ struct ClusterCounters {
     relays: u64,
 }
 
-impl From<nervix_proto::ClusterSummary> for ClusterCounters {
-    fn from(summary: nervix_proto::ClusterSummary) -> Self {
+impl From<ClusterObserved> for ClusterCounters {
+    fn from(cluster: ClusterObserved) -> Self {
         Self {
-            running: summary.running_domains,
-            nodes: summary.nodes,
-            relays: summary.relays,
+            running: cluster.running_domains,
+            nodes: cluster.graph_nodes,
+            relays: cluster.relays,
         }
     }
 }
 
+/// What a sidebar entity is.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum EntityKind {
+    Model(ModelKind),
+    Resource,
+}
+
+impl EntityKind {
+    /// The kind as the vocabulary spells it.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Model(kind) => kind.as_str(),
+            Self::Resource => "resource",
+        }
+    }
+
+    /// Whether the entity is a wire schema of any encoding.
+    fn is_wire_schema(self) -> bool {
+        matches!(
+            self,
+            Self::Model(
+                ModelKind::WireJsonSchema | ModelKind::WireCborSchema | ModelKind::WireAvroSchema
+            )
+        )
+    }
+}
+
+/// One entity of the active domain, as the sidebar lists it.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct EntityView {
-    kind: String,
+    kind: EntityKind,
     name: String,
+    /// What the sidebar shows beside the name: a model's kind, or the latest completed version of
+    /// a resource.
     detail: String,
 }
 
-impl From<nervix_proto::DomainEntitySnapshot> for EntityView {
-    fn from(value: nervix_proto::DomainEntitySnapshot) -> Self {
-        Self {
-            kind: value.kind,
-            name: value.identifier,
-            detail: value.detail,
+impl EntityView {
+    /// The order the sidebar lists entities in: by kind name, then by name.
+    fn sidebar_order(&self, other: &Self) -> Ordering {
+        self.kind
+            .name()
+            .cmp(other.kind.name())
+            .then_with(|| self.name.cmp(&other.name))
+    }
+
+    /// The statement the sidebar runs when the entity is clicked, for the kinds that describe
+    /// themselves.
+    fn describe_command(&self) -> Option<String> {
+        match self.kind {
+            EntityKind::Model(ModelKind::Endpoint) => {
+                Some(format!("DESCRIBE ENDPOINT {};", self.name))
+            }
+            EntityKind::Resource => Some(format!("DESCRIBE RESOURCE {};", self.name)),
+            EntityKind::Model(_) => None,
+        }
+    }
+}
+
+impl From<&DomainEntity> for EntityView {
+    fn from(entity: &DomainEntity) -> Self {
+        match entity {
+            DomainEntity::Model(node) => Self {
+                kind: EntityKind::Model(node.kind),
+                name: node.identifier.as_str().to_string(),
+                detail: node.kind.as_str().replace('_', " ").to_ascii_uppercase(),
+            },
+            DomainEntity::Resource {
+                name,
+                latest_version,
+            } => {
+                let detail = match latest_version {
+                    Some(version) => format!("v{version}"),
+                    None => "catalog".to_string(),
+                };
+                Self {
+                    kind: EntityKind::Resource,
+                    name: name.as_str().to_string(),
+                    detail,
+                }
+            }
         }
     }
 }
@@ -5366,14 +6047,11 @@ struct TermLine {
 }
 
 impl TermLine {
-    fn prompt(
-        text: impl Into<String>,
-        transaction_state: Option<nervix_proto::TransactionState>,
-    ) -> Self {
-        let prompt = match transaction_state {
-            Some(nervix_proto::TransactionState::Open) => "nervix[tx]>",
-            Some(nervix_proto::TransactionState::Committing) => "nervix[committing]>",
-            _ => "nervix>",
+    fn prompt(text: impl Into<String>, transaction: Option<ActiveTransaction>) -> Self {
+        let prompt = match transaction {
+            Some(ActiveTransaction::Open) => "nervix[tx]>",
+            Some(ActiveTransaction::Committing) => "nervix[committing]>",
+            None => "nervix>",
         };
         Self {
             kind: TermLineKind::Prompt,
@@ -5424,47 +6102,230 @@ impl TermLineKind {
 
 #[cfg(test)]
 mod tests {
+    use nervix_client_wire::{DomainList, DomainsObserved, OutcomeOrigin, Reply, SourceSpan};
     use nervix_dataflow_graph::{
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
+    };
+    use nervix_models::{
+        DomainClockPeriod, DomainClockSkew, ModelName, NodeRef, ResourceName, TransactionPosition,
     };
 
     use super::*;
 
     #[test]
-    #[ignore = "CLIENT-WIRE-13 correlates websocket replies by typed request identity"]
     fn untracked_domain_push_cannot_discard_a_pending_websocket_request() {
-        let mut pending = VecDeque::from([PendingRequest::AttachTransaction {
-            request: nervix_proto::SessionRequest {
-                request: Some(nervix_proto::session_request::Request::AttachTransaction(
-                    nervix_proto::AttachTransactionRequest {
-                        id: "transaction".to_string(),
-                    },
-                )),
+        let mut requests = SessionRequests::new();
+        let attach = requests.issue(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
             },
-        }]);
+        ));
+        let attach = requests.dispatch(attach);
 
-        let command = take_domain_list_command(&mut pending, true);
+        let pushed = requests.route(ServerMessage::Event(ServerEvent::Domains(
+            DomainsObserved {
+                domains: Vec::new(),
+            },
+        )));
+        assert!(matches!(pushed, Routed::Event(_)));
+        let untracked = requests.route(reply(
+            request_id(99),
+            ReplyBody::DomainList(DomainList {
+                domains: Vec::new(),
+            }),
+        ));
+        assert!(matches!(untracked, Routed::Untracked));
 
-        assert!(command.is_none());
+        let Routed::Reply(answered) = requests.route(reply(attach.request_id, attached())) else {
+            panic!("an untracked websocket domain response discarded the pending attach");
+        };
+        assert!(matches!(
+            answered.request.request,
+            ConsoleRequest::AttachTransaction(_)
+        ));
+    }
+
+    #[test]
+    fn ordered_requests_wait_for_the_leader_and_keep_their_order_across_a_reconnect() {
+        let mut requests = SessionRequests::new();
+        let first = requests.issue(repl_command("CREATE SCHEMA first ( value I64 );"));
+        let second = requests.issue(repl_command("CREATE SCHEMA second ( value I64 );"));
+        assert!(
+            requests.accept(first).is_none(),
+            "an ordered request waits until the server confirms that it leads"
+        );
+        assert!(requests.accept(second).is_none());
+        let completion = requests.issue(suggest("CREATE "));
+        assert!(
+            requests.accept(completion).is_some(),
+            "a completion request is sent at once"
+        );
+
+        requests.confirm_leader();
+        let sent = requests.release_held();
         assert_eq!(
-            pending.len(),
-            1,
-            "an untracked websocket domain response discarded the pending attach"
+            sent_queries(&sent),
+            vec![
+                "CREATE SCHEMA first ( value I64 );",
+                "CREATE SCHEMA second ( value I64 );",
+            ]
+        );
+        assert_eq!(request_numbers(&sent), vec![2, 3]);
+
+        requests.end_connection();
+        assert!(
+            requests.release_held().is_empty(),
+            "the next connection waits for its own leader confirmation"
+        );
+        requests.confirm_leader();
+        let resent = requests.release_held();
+        assert_eq!(sent_queries(&resent), sent_queries(&sent));
+        assert_eq!(
+            request_numbers(&resent),
+            vec![1, 2],
+            "a new connection numbers its requests from one, and the completion request is not \
+             sent again"
+        );
+        assert_eq!(
+            execution_references(&resent),
+            execution_references(&sent),
+            "a command sent again keeps its execution reference"
         );
     }
 
     #[test]
-    fn successful_commands_without_output_add_no_terminal_line() {
-        let lines = command_result_lines(
-            nervix_proto::CommandResult {
-                success: true,
-                kind: i32::from(nervix_proto::CommandResultKind::Ok),
-                ..Default::default()
+    fn commands_held_for_an_attach_keep_their_issue_order_whatever_order_their_replies_take() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        let first = requests.issue(repl_command("first"));
+        let second = requests.issue(repl_command("second"));
+        let first = requests
+            .accept(first)
+            .assured("a ready session sends an ordered request at once");
+        let second = requests
+            .accept(second)
+            .assured("a ready session sends an ordered request at once");
+        for detached in [second.request_id, first.request_id] {
+            let Routed::Reply(answered) = requests.route(reply(detached, detached_command()))
+            else {
+                panic!("the reply answers a request in flight");
+            };
+            requests.hold_again(answered.request);
+        }
+
+        let attach = requests.issue(ConsoleRequest::AttachTransaction(
+            AttachTransactionRequest {
+                transaction_id: "transaction".to_string(),
             },
-            "CREATE DOMAIN quiet",
+        ));
+        let attach = requests.dispatch(attach);
+        assert!(
+            requests.release_held().is_empty(),
+            "held commands wait while the transaction is being attached"
         );
+        let third = requests.issue(repl_command("third"));
+        assert!(
+            requests.accept(third).is_none(),
+            "a command issued during the attach waits behind the held ones"
+        );
+        let attach_reply = requests.route(reply(attach.request_id, attached()));
+        assert!(matches!(attach_reply, Routed::Reply(_)));
+
+        let resent = requests.release_held();
+        assert_eq!(sent_queries(&resent), vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn only_the_latest_completion_request_is_awaited() {
+        let mut requests = SessionRequests::new();
+        let earlier = requests.issue(suggest("SH"));
+        let earlier = requests
+            .accept(earlier)
+            .assured("a completion request is sent at once");
+        let later = requests.issue(suggest("SHOW"));
+        let later = requests
+            .accept(later)
+            .assured("a completion request is sent at once");
+        let suggestions = || {
+            ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                suggestions: Vec::new(),
+            })
+        };
+
+        let stale = requests.route(reply(earlier.request_id, suggestions()));
+        assert!(matches!(stale, Routed::Untracked));
+        let latest = requests.route(reply(later.request_id, suggestions()));
+        assert!(matches!(latest, Routed::Reply(_)));
+    }
+
+    #[test]
+    fn successful_commands_without_output_add_no_terminal_line() {
+        let lines = command_outcome_lines(completed_outcome(""), "CREATE DOMAIN quiet");
 
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn a_command_of_several_statements_shows_the_outcome_of_each() {
+        let query = "CREATE SCHEMA a ( value I64 ); CREATE SCHEMA a ( value I64 );";
+        let mut outcome = completed_outcome("ignored for a command of several statements");
+        outcome.statements = vec![
+            StatementOutcome {
+                disposition: StatementDisposition::Completed {
+                    already_existed: false,
+                },
+                message: "created schema 'a'".to_string(),
+                diagnostics: Vec::new(),
+            },
+            StatementOutcome {
+                disposition: StatementDisposition::Failed,
+                message: "schema 'a' already exists".to_string(),
+                diagnostics: vec![diagnostic("duplicate schema", 45, 46)],
+            },
+            StatementOutcome {
+                disposition: StatementDisposition::NotLeader(LeaderRedirect { leader: None }),
+                message: String::new(),
+                diagnostics: Vec::new(),
+            },
+        ];
+
+        let lines = command_outcome_lines(outcome, query)
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec![
+                "created schema 'a'",
+                "error: schema 'a' already exists",
+                "- a at 45..46: duplicate schema",
+                "topology: not-a-leader",
+                "- no diagnostics provided",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_diagnostic_shows_the_text_of_a_span_only_on_character_boundaries_within_the_query() {
+        let query = "CREATE ü";
+
+        assert_eq!(
+            diagnostic_line(query, diagnostic("bad name", 7, 9)).text,
+            "- ü at 7..9: bad name"
+        );
+        for (start, end) in [(7, 8), (7, 42), (3, 3)] {
+            assert_eq!(
+                diagnostic_line(query, diagnostic("bad name", start, end)).text,
+                "- bad name",
+                "span {start}..{end}"
+            );
+        }
+        let unplaced = Diagnostic {
+            message: "bad name".to_string(),
+            span: None,
+        };
+        assert_eq!(diagnostic_line(query, unplaced).text, "- bad name");
     }
 
     #[test]
@@ -5486,12 +6347,7 @@ mod tests {
         ]
         .join("\n");
 
-        let detail = resource_detail_from_result(nervix_proto::CommandResult {
-            success: true,
-            kind: i32::from(nervix_proto::CommandResultKind::Ok),
-            message,
-            ..Default::default()
-        });
+        let detail = ResourceDetailView::from_description(completed_outcome(&message));
 
         let versions = detail
             .versions
@@ -6097,16 +6953,119 @@ mod tests {
 
     #[test]
     fn domain_lifecycle_reports_the_three_states() {
-        let domain = |status: &str| DomainView {
-            id: "demo".to_string(),
-            mode: "LIVE".to_string(),
-            status: status.to_string(),
+        let domain = |status: DomainStatus| DomainView {
+            domain: domain_name("demo"),
+            pace: DomainPace::Unpaced,
+            status,
         };
-        assert_eq!(domain("RUNNING").lifecycle_label(), "RUNNING");
-        assert_eq!(domain("running").lifecycle_label(), "RUNNING");
-        assert_eq!(domain("PAUSED").lifecycle_label(), "PAUSED");
-        assert_eq!(domain("STOPPED").lifecycle_label(), "STOPPED");
-        assert_eq!(domain("").lifecycle_label(), "STOPPED");
+        assert_eq!(domain(DomainStatus::Running).lifecycle_label(), "RUNNING");
+        assert_eq!(domain(DomainStatus::Paused).lifecycle_label(), "PAUSED");
+        assert_eq!(domain(DomainStatus::Stopped).lifecycle_label(), "STOPPED");
+    }
+
+    #[test]
+    fn domain_lifecycle_button_toggles_only_a_running_or_stopped_domain() {
+        let domain = |status: DomainStatus| DomainView {
+            domain: domain_name("demo"),
+            pace: DomainPace::Unpaced,
+            status,
+        };
+        assert_eq!(domain(DomainStatus::Running).state_command(), Some("STOP;"));
+        assert_eq!(
+            domain(DomainStatus::Stopped).state_command(),
+            Some("START;")
+        );
+        assert_eq!(domain(DomainStatus::Paused).state_command(), None);
+        assert_eq!(
+            domain(DomainStatus::Stopped).state_hint(false),
+            "Waiting for connection"
+        );
+    }
+
+    #[test]
+    fn domain_listing_names_the_pace_and_status_of_each_domain() {
+        let unpaced = DomainView {
+            domain: domain_name("demo"),
+            pace: DomainPace::Unpaced,
+            status: DomainStatus::Stopped,
+        };
+        let paced = DomainView {
+            domain: domain_name("demo_paced"),
+            pace: DomainPace::Paced {
+                period: DomainClockPeriod::try_from(Duration::from_secs(30))
+                    .assured("thirty seconds is a valid domain clock period"),
+                skew: DomainClockSkew::try_from(Duration::from_secs(1))
+                    .assured("one second is a valid domain clock skew"),
+            },
+            status: DomainStatus::Running,
+        };
+
+        let lines = domain_list_lines(&[unpaced, paced])
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            lines,
+            vec![
+                "domains:",
+                "demo pace=UNPACED status=STOPPED",
+                "demo_paced pace=PACED status=RUNNING",
+            ]
+        );
+    }
+
+    #[test]
+    fn sidebar_entities_show_the_model_kind_or_the_latest_completed_resource_version() {
+        let model = |kind: ModelKind, name: &str| {
+            let name = ModelName::parse(name).assured("the test names a valid model");
+            DomainEntity::Model(NodeRef::new(kind, name))
+        };
+        let resource = |name: &str, latest_version: Option<u64>| DomainEntity::Resource {
+            name: ResourceName::parse(name).assured("the test names a valid resource"),
+            latest_version: latest_version.and_then(NonZeroU64::new),
+        };
+        let snapshot = DomainSnapshotView::new(
+            &[
+                model(ModelKind::WireJsonSchema, "orders_json"),
+                resource("bundle", Some(2)),
+                model(ModelKind::WireAvroSchema, "orders_avro"),
+                resource("catalog_only", None),
+                model(ModelKind::Endpoint, "ingress"),
+            ],
+            DataflowGraph::new("demo"),
+        );
+
+        let entities = snapshot
+            .entities
+            .iter()
+            .map(|entity| format!("{} {}", entity.name, entity.detail))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entities,
+            vec![
+                "ingress ENDPOINT",
+                "bundle v2",
+                "catalog_only catalog",
+                "orders_avro WIRE AVRO SCHEMA",
+                "orders_json WIRE JSON SCHEMA",
+            ]
+        );
+        let describe = snapshot
+            .entities
+            .iter()
+            .map(EntityView::describe_command)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            describe,
+            vec![
+                Some("DESCRIBE ENDPOINT ingress;".to_string()),
+                Some("DESCRIBE RESOURCE bundle;".to_string()),
+                Some("DESCRIBE RESOURCE catalog_only;".to_string()),
+                None,
+                None,
+            ]
+        );
     }
 
     #[test]
@@ -6149,12 +7108,114 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unsubscribe_command_uses_only_the_session_subscription_name() {
-        assert_eq!(
-            unsubscribe_session_command("live_notifications"),
-            "DELETE SUBSCRIPTION live_notifications;"
-        );
+    fn request_id(id: u64) -> RequestId {
+        RequestId::new(NonZeroU64::new(id).assured("the test names a non-zero request identity"))
+    }
+
+    fn reply(request_id: RequestId, body: ReplyBody) -> ServerMessage {
+        ServerMessage::Reply(Reply { request_id, body })
+    }
+
+    fn attached() -> ReplyBody {
+        let status = TransactionStatus::new(
+            "transaction".to_string(),
+            domain_name("demo"),
+            TransactionLifecycle::Open,
+            TransactionPosition::new(2),
+            0,
+        )
+        .assured("no operation of the test transaction has applied");
+        ReplyBody::Attach(AttachOutcome {
+            disposition: AttachDisposition::Attached(status),
+            message: String::new(),
+            diagnostics: Vec::new(),
+        })
+    }
+
+    fn detached_command() -> ReplyBody {
+        let mut outcome = completed_outcome("");
+        outcome.disposition = CommandDisposition::TransactionDetached {
+            transaction_id: "transaction".to_string(),
+        };
+        ReplyBody::Command(Box::new(outcome))
+    }
+
+    fn domain_name(name: &str) -> DomainName {
+        DomainName::parse(name).assured("the test names a valid domain")
+    }
+
+    fn repl_command(query: &str) -> ConsoleRequest {
+        ConsoleRequest::Command {
+            request: CommandRequest {
+                query: query.to_string(),
+                domain: Some(domain_name("demo")),
+                execution_reference: command_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            purpose: CommandPurpose::Repl,
+        }
+    }
+
+    fn suggest(input: &str) -> ConsoleRequest {
+        let request = SuggestRequest::new(input.to_string(), input.len(), None)
+            .assured("the end of the input is a character boundary");
+        ConsoleRequest::Suggest(request)
+    }
+
+    fn completed_outcome(message: &str) -> CommandOutcome {
+        CommandOutcome {
+            execution_reference: command_execution_reference(),
+            origin: OutcomeOrigin::Executed,
+            disposition: CommandDisposition::Completed {
+                already_existed: false,
+            },
+            message: message.to_string(),
+            diagnostics: Vec::new(),
+            statements: Vec::new(),
+            transaction: None,
+            transaction_admission: None,
+            inspection: None,
+        }
+    }
+
+    fn diagnostic(message: &str, start: u32, end: u32) -> Diagnostic {
+        Diagnostic {
+            message: message.to_string(),
+            span: Some(SourceSpan::new(start, end).assured("the test span does not end first")),
+        }
+    }
+
+    fn sent_commands(messages: &[ClientMessage]) -> Vec<&CommandRequest> {
+        let mut commands = Vec::new();
+        for message in messages {
+            let ClientRequest::Command(command) = &message.request else {
+                panic!("the test sends only commands");
+            };
+            commands.push(command);
+        }
+        commands
+    }
+
+    fn sent_queries(messages: &[ClientMessage]) -> Vec<&str> {
+        sent_commands(messages)
+            .into_iter()
+            .map(|command| command.query.as_str())
+            .collect()
+    }
+
+    fn execution_references(messages: &[ClientMessage]) -> Vec<&CommandExecutionReference> {
+        sent_commands(messages)
+            .into_iter()
+            .map(|command| &command.execution_reference)
+            .collect()
+    }
+
+    fn request_numbers(messages: &[ClientMessage]) -> Vec<u64> {
+        messages
+            .iter()
+            .map(|message| message.request_id.get().get())
+            .collect()
     }
 
     fn site_branch() -> DataflowBranch {

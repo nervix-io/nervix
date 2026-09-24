@@ -43,6 +43,7 @@ use tokio::time::Duration;
 use tracing::warn;
 
 use super::{
+    command_result::CommandResult,
     describe_output::{
         append_metrics_lines, dataflow_node_status_from_envelope, dataflow_node_status_to_envelope,
         format_correlator_describe_output, format_deduplicator_describe_output,
@@ -58,7 +59,7 @@ use super::{
         placement_rule_endpoint_nodes, placement_rule_runtime_nodes,
         runtime_ingestor_describe_from_envelope, runtime_ingestor_describe_to_envelope,
     },
-    model_mutation::{command_error, command_ok},
+    model_mutation::{command_error, command_failure, command_ok},
     session_service::SessionServiceImpl,
     subscription::{
         SubscriptionTarget, branch_key_from_filter, parse_subscription_literal,
@@ -66,7 +67,6 @@ use super::{
     },
 };
 use crate::{
-    proto::{CommandResult, CommandResultKind, Diagnostic},
     registry::RegistryError,
     resource::{ResourceEntryContent, ResourceManifestEntry},
     runtime::IngestorDescribe as RuntimeIngestorDescribe,
@@ -115,34 +115,17 @@ impl SessionServiceImpl {
         {
             Ok(Some(target)) => target,
             Ok(None) => {
-                return CommandResult {
-                    success: false,
-                    message: format!(
+                return command_failure(
+                    format!(
                         "stream '{}' does not exist in domain '{}'",
                         describe.relay.as_str(),
                         domain.as_str()
                     ),
-                    diagnostics: vec![Diagnostic {
-                        message: format!("stream '{}' not found", describe.relay.as_str()),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
+                    format!("stream '{}' not found", describe.relay.as_str()),
+                );
             }
             Err(message) => {
-                return CommandResult {
-                    success: false,
-                    diagnostics: vec![Diagnostic {
-                        message: message.clone(),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    message,
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
+                return command_error(message);
             }
         };
 
@@ -178,33 +161,13 @@ impl SessionServiceImpl {
             match validate_subscription_bindings(&ack_model.name, &branching, &describe.bindings) {
                 Ok(filter) => filter,
                 Err(message) => {
-                    return CommandResult {
-                        success: false,
-                        diagnostics: vec![Diagnostic {
-                            message: message.clone(),
-                            span_start: 0,
-                            span_end: 0,
-                        }],
-                        message,
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
+                    return command_error(message);
                 }
             };
         let key = match branch_key_from_filter(&branching, &filter) {
             Ok(key) => key,
             Err(message) => {
-                return CommandResult {
-                    success: false,
-                    diagnostics: vec![Diagnostic {
-                        message: message.clone(),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    message,
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
+                return command_error(message);
             }
         };
 
@@ -220,17 +183,7 @@ impl SessionServiceImpl {
         {
             Ok(owner_nodes) => owner_nodes,
             Err(message) => {
-                return CommandResult {
-                    success: false,
-                    diagnostics: vec![Diagnostic {
-                        message: message.clone(),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    message,
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
+                return command_error(message);
             }
         };
 
@@ -244,17 +197,7 @@ impl SessionServiceImpl {
             {
                 Ok(local_exists) => exists |= local_exists,
                 Err(error) => {
-                    return CommandResult {
-                        success: false,
-                        diagnostics: vec![Diagnostic {
-                            message: error.to_string(),
-                            span_start: 0,
-                            span_end: 0,
-                        }],
-                        message: error.to_string(),
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
+                    return command_error(error.to_string());
                 }
             }
         }
@@ -283,17 +226,7 @@ impl SessionServiceImpl {
                     result: Err(failure),
                 }) => {
                     let message = failure.to_string();
-                    return CommandResult {
-                        success: false,
-                        diagnostics: vec![Diagnostic {
-                            message: message.clone(),
-                            span_start: 0,
-                            span_end: 0,
-                        }],
-                        message,
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
+                    return command_error(message);
                 }
                 Err(error) => {
                     warn!(
@@ -330,13 +263,7 @@ impl SessionServiceImpl {
         };
         lines.extend(metrics);
 
-        CommandResult {
-            success: true,
-            message: lines.join("\n"),
-            diagnostics: Vec::new(),
-            kind: i32::from(CommandResultKind::Ok),
-            ..Default::default()
-        }
+        command_ok(lines.join("\n"))
     }
 
     pub(in crate::application) async fn handle_describe_stream_request(
@@ -2311,17 +2238,16 @@ impl SessionServiceImpl {
 
 #[cfg(test)]
 mod tests {
+    use nervix_client_wire::CommandRequest;
     use nervix_models::{
         DomainConfig, DomainName, DomainPace, DomainState, DomainStatus, ResourceUploadIdentity,
         ResourceUploadKey, Timestamp, UserName,
     };
-    use tokio::sync::mpsc;
 
     use super::super::{
         subscription::SessionSubscriptions,
-        test_fixtures::{TestService, build_test_service, named},
+        test_fixtures::{TestService, build_test_service, named, test_execution_reference},
     };
-    use crate::proto::CommandRequest;
 
     #[tokio::test]
     async fn show_placements_reports_fully_overridden_effective_coverage() {
@@ -2330,10 +2256,9 @@ mod tests {
             registry: _registry,
             path,
         } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
         let configured = service
-            .process_command(
+            .test_command(
                 CommandRequest {
                     query: "BEGIN; CREATE SCHEMA placement_event ( id I64 ); CREATE RELAY \
                             placement_input SCHEMA placement_event UNBRANCHED; CREATE RELAY \
@@ -2347,24 +2272,26 @@ mod tests {
                             RANK 2; CREATE PLACEMENT strong_cut FROM corridor_source TO \
                             corridor_sink NEUTRAL RANK 1; COMMIT;"
                         .to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    domain: Some(named("default")),
+                    execution_reference: test_execution_reference(),
                     expected_transaction_position: None,
                     expected_preview: None,
                 },
-                &tx,
                 &mut subscriptions,
             )
             .await;
         assert!(
-            configured.success,
+            configured.succeeded(),
             "placement coverage fixture should configure: {configured:?}"
         );
 
         let output = service
             .show_placements(&DomainName::parse("default").expect("valid domain"))
             .await;
-        assert!(output.success, "SHOW PLACEMENTS should succeed: {output:?}");
+        assert!(
+            output.succeeded(),
+            "SHOW PLACEMENTS should succeed: {output:?}"
+        );
         assert!(
             output
                 .message
@@ -2514,24 +2441,26 @@ mod tests {
             )
             .await
             .expect("domain should persist");
-        let (tx, _rx) = mpsc::channel(16);
         let mut subscriptions = SessionSubscriptions::new();
 
         let result = service
-            .process_command(
+            .test_command(
                 CommandRequest {
                     query: "DESCRIBE RESOURCE fraud_model VERSION 1;".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    domain: Some(named("default")),
+                    execution_reference: test_execution_reference(),
                     expected_transaction_position: None,
                     expected_preview: None,
                 },
-                &tx,
                 &mut subscriptions,
             )
             .await;
 
-        assert!(result.success, "command must succeed: {}", result.message);
+        assert!(
+            result.succeeded(),
+            "command must succeed: {}",
+            result.message
+        );
         assert!(result.message.contains("resource: fraud_model@1"));
         assert!(result.message.contains(&format!(
             "- {} topology=alive state=ready incarnation={} checksum={}",
@@ -2552,20 +2481,23 @@ mod tests {
         );
 
         let result = service
-            .process_command(
+            .test_command(
                 CommandRequest {
                     query: "DESCRIBE RESOURCE fraud_model;".to_string(),
-                    domain: "default".to_string(),
-                    execution_reference: uuid::Uuid::now_v7().to_string(),
+                    domain: Some(named("default")),
+                    execution_reference: test_execution_reference(),
                     expected_transaction_position: None,
                     expected_preview: None,
                 },
-                &tx,
                 &mut subscriptions,
             )
             .await;
 
-        assert!(result.success, "command must succeed: {}", result.message);
+        assert!(
+            result.succeeded(),
+            "command must succeed: {}",
+            result.message
+        );
         assert!(result.message.contains("resource: fraud_model"));
         assert!(result.message.contains("latest: 2"));
         assert!(result.message.contains("versions: 1,2"));

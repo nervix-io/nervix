@@ -63,7 +63,6 @@ pub(crate) mod task_shutdown;
 
 #[cfg(feature = "testing")]
 pub use fault_injection::{FaultInjection, WasmStateResetRequestError};
-pub use nervix_proto as proto;
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;
 

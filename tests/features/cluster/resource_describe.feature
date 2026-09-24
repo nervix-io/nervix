@@ -359,11 +359,13 @@ Feature: Resource lifecycle
       """
       uploaded resource version 1
       """
+    And the last client upload installed version 1
     When client "uploader" uploads resource "proto" from "{{proto_dir}}" with identity "retry-one"
     Then the last command output contains
       """
       uploaded resource version 1
       """
+    And the last client upload recovered version 1 from an earlier upload
     When client "uploader" upload of resource "proto" from "{{different_proto_dir}}" with identity "retry-one" fails with "already assigned version 1 with digest"
     When client "uploader" executes these NSPL commands
       """

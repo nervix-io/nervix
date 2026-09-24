@@ -98,7 +98,7 @@ const KEYSPACE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone, Archive, Serialize, Deserialize)]
 #[repr(u8)]
 enum StateEncoding {
-    BoundedCommandExecutionHistory = 4,
+    TypedCommandOutcomes = 5,
 }
 
 #[derive(Debug)]
@@ -153,7 +153,7 @@ impl TryFrom<StateMetadataRecord> for StateMetadata {
 impl From<&StateMachineData> for StateMetadata {
     fn from(state: &StateMachineData) -> Self {
         Self {
-            encoding: StateEncoding::BoundedCommandExecutionHistory,
+            encoding: StateEncoding::TypedCommandOutcomes,
             last_applied_log_id: state.last_applied_log_id.clone(),
             last_membership: state.last_membership.clone(),
             runtime_revision: state.runtime_revision,
@@ -182,7 +182,7 @@ impl StateMetadata {
 impl StateMachineData {
     fn load(sm: &Keyspace, metadata: StateMetadata) -> io::Result<Self> {
         let StateMetadata {
-            encoding: StateEncoding::BoundedCommandExecutionHistory,
+            encoding: StateEncoding::TypedCommandOutcomes,
             last_applied_log_id,
             last_membership,
             runtime_revision,

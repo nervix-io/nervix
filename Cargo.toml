@@ -132,7 +132,6 @@ nervix-interconnect = { workspace = true }
 nervix-jaq = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true }
-nervix-proto = { workspace = true, features = ["client", "server"] }
 nervix-recovery = { workspace = true }
 nervix-roto = { workspace = true }
 nervix-vm = { workspace = true }
@@ -304,7 +303,6 @@ members = [
   "crates/nspl",
   "crates/nspl-format",
   "crates/models",
-  "crates/proto",
   "crates/recovery",
   "crates/test-environment",
   "crates/nervix-cli",
@@ -465,7 +463,6 @@ nervix-models = { package = "nervix-models", path = "crates/models" }
 nervix-nspl = { package = "nervix-nspl", path = "crates/nspl", features = [
   "server",
 ] }
-nervix-proto = { package = "nervix-proto", path = "crates/proto" }
 nervix-recovery = { package = "nervix-recovery", path = "crates/recovery" }
 nervix-roto = { package = "nervix-roto", path = "crates/nervix-roto" }
 nervix-test-environment = { package = "nervix-test-environment", path = "crates/test-environment" }
@@ -591,7 +588,6 @@ tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
-tonic-build = "0.13"
 tracing = "0.1"
 tracing-opentelemetry = "0.32"
 tracing-subscriber = "0.3"

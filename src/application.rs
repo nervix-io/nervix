@@ -89,6 +89,7 @@ use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecover
 use scheduling::{
     KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
 };
+use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
 use session_service::{
     RuntimeStateApplication, SESSION_EVENT_CAPACITY, SessionEvents, SessionServiceInner,
@@ -125,6 +126,7 @@ mod authentication;
 mod background_task;
 mod cluster_status;
 mod command_execution;
+mod command_result;
 mod completion;
 mod describe_output;
 mod domain_clock;
@@ -133,6 +135,7 @@ mod entity_gate;
 mod error;
 mod http_endpoint;
 mod interconnect_relay;
+mod leader_redirect;
 mod model_mutation;
 mod model_validation;
 mod observability_http;
@@ -145,6 +148,7 @@ mod runtime_admission;
 mod schedule_planning;
 mod scheduling;
 mod service_tasks;
+mod session;
 mod session_service;
 mod shutdown;
 mod startup;
@@ -174,7 +178,6 @@ use typed_builder::TypedBuilder;
 use crate::{
     ConfiguredFaultInjection, cluster,
     memory_pressure::{MemoryPressureConfig, MemoryPressureController},
-    proto::session_service_server::SessionServiceServer,
     resource::{ResourceStore, ResourceStoreLimits},
     runtime::{
         EntityGateLease, OwnershipHandoffError, OwnershipHandoffResult, Runtime, RuntimeEvent,
@@ -2637,7 +2640,7 @@ impl Application {
             let grpc_incoming =
                 AdmittingListener::new(grpc_listener, grpc_shutdown.clone()).into_connections();
             builder
-                .add_service(SessionServiceServer::new(grpc_service.clone()))
+                .add_service(SessionGrpcService::new(grpc_service.clone()))
                 .serve_with_incoming_shutdown(grpc_incoming, grpc_shutdown.cancelled_owned())
                 .await
                 .map_err(|e| Report::new(e).change_context(AppError::Serve))

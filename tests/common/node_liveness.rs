@@ -11,7 +11,7 @@
 use std::{fmt, future::Future, time::Duration};
 
 use error_stack::Report;
-use nervix_client_core::{CommandOutcomeKind, Diagnostic};
+use nervix_client_wire::{CommandDisposition, Diagnostic};
 use nervix_models::ClusterNodeName;
 use nervix_server::application::AppError;
 use thiserror::Error;
@@ -23,17 +23,43 @@ use super::{
     status_request::{StatusEndpoint, StatusRequestError},
 };
 
+/// What a node answered a readiness probe's status command with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponseKind {
+    Completed,
+    NotLeader,
+    Failed,
+    /// Any other disposition, which a status command is not expected to produce.
+    Other,
+}
+
+impl ResponseKind {
+    fn of(disposition: &CommandDisposition) -> Self {
+        match disposition {
+            CommandDisposition::Completed { .. } => Self::Completed,
+            CommandDisposition::NotLeader(_) => Self::NotLeader,
+            CommandDisposition::Failed => Self::Failed,
+            CommandDisposition::TransactionDetached { .. }
+            | CommandDisposition::TransactionTakenOver { .. }
+            | CommandDisposition::OutcomeUnknown(_)
+            | CommandDisposition::ExecutionReferenceConflict(_)
+            | CommandDisposition::ExecutionReferenceExpired
+            | CommandDisposition::PreviewStale { .. } => Self::Other,
+        }
+    }
+}
+
 /// Everything one readiness probe can observe.
 #[derive(Debug)]
 pub(crate) enum ReadinessProbeOutcome {
     Ready {
-        response_kind: CommandOutcomeKind,
+        response_kind: ResponseKind,
     },
     /// The status request ended without a command result, including the operation its deadline
     /// interrupted when the deadline passed.
     RequestFailed(Report<StatusRequestError>),
     UnsuccessfulResponse {
-        response_kind: CommandOutcomeKind,
+        response_kind: ResponseKind,
         message: String,
         diagnostics: Vec<Diagnostic>,
     },
@@ -47,16 +73,14 @@ impl ReadinessProbeOutcome {
             Ok(outcome) => outcome,
             Err(error) => return Self::RequestFailed(error),
         };
-        if outcome.success || outcome.kind == CommandOutcomeKind::NotLeader {
-            Self::Ready {
-                response_kind: outcome.kind,
-            }
-        } else {
-            Self::UnsuccessfulResponse {
-                response_kind: outcome.kind,
+        let response_kind = ResponseKind::of(&outcome.disposition);
+        match response_kind {
+            ResponseKind::Completed | ResponseKind::NotLeader => Self::Ready { response_kind },
+            ResponseKind::Failed | ResponseKind::Other => Self::UnsuccessfulResponse {
+                response_kind,
                 message: outcome.message,
                 diagnostics: outcome.diagnostics,
-            }
+            },
         }
     }
 
