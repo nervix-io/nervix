@@ -378,6 +378,18 @@ fn validate_window_input_scope(
             }
             Ok(())
         }
+        Expr::Membership { operand, set } => {
+            validate_window_input_scope(&operand.inner, inside_aggregate)?;
+            for element in set {
+                validate_window_input_scope(&element.inner, inside_aggregate)?;
+            }
+            Ok(())
+        }
+        Expr::Between { operand, low, high } => {
+            validate_window_input_scope(&operand.inner, inside_aggregate)?;
+            validate_window_input_scope(&low.inner, inside_aggregate)?;
+            validate_window_input_scope(&high.inner, inside_aggregate)
+        }
     }
 }
 
@@ -439,6 +451,17 @@ fn offset_expr_demand_references(expr: &mut Expr, offset: usize) {
                 offset_expr_demand_references(&mut else_result.inner, offset);
             }
         }
+        Expr::Membership { operand, set } => {
+            offset_expr_demand_references(&mut operand.inner, offset);
+            for element in set {
+                offset_expr_demand_references(&mut element.inner, offset);
+            }
+        }
+        Expr::Between { operand, low, high } => {
+            offset_expr_demand_references(&mut operand.inner, offset);
+            offset_expr_demand_references(&mut low.inner, offset);
+            offset_expr_demand_references(&mut high.inner, offset);
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
     }
 }
@@ -479,6 +502,17 @@ fn collect_expr_demand_references(expr: &Expr, counts: &mut [usize]) {
                 collect_expr_demand_references(&else_result.inner, counts);
             }
         }
+        Expr::Membership { operand, set } => {
+            collect_expr_demand_references(&operand.inner, counts);
+            for element in set {
+                collect_expr_demand_references(&element.inner, counts);
+            }
+        }
+        Expr::Between { operand, low, high } => {
+            collect_expr_demand_references(&operand.inner, counts);
+            collect_expr_demand_references(&low.inner, counts);
+            collect_expr_demand_references(&high.inner, counts);
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
     }
 }
@@ -515,6 +549,18 @@ fn validate_aggregate_expr(expr: &SpannedExpr) -> WindowAggregateResult<()> {
                 validate_aggregate_expr(else_result)?;
             }
             Ok(())
+        }
+        Expr::Membership { operand, set } => {
+            validate_aggregate_expr(operand)?;
+            for element in set {
+                validate_aggregate_expr(element)?;
+            }
+            Ok(())
+        }
+        Expr::Between { operand, low, high } => {
+            validate_aggregate_expr(operand)?;
+            validate_aggregate_expr(low)?;
+            validate_aggregate_expr(high)
         }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => Ok(()),
     }
@@ -650,6 +696,17 @@ fn contains_aggregate_call(expr: &Expr) -> bool {
                     .as_ref()
                     .is_some_and(|result| contains_aggregate_call(&result.inner))
         }
+        Expr::Membership { operand, set } => {
+            contains_aggregate_call(&operand.inner)
+                || set
+                    .iter()
+                    .any(|element| contains_aggregate_call(&element.inner))
+        }
+        Expr::Between { operand, low, high } => {
+            contains_aggregate_call(&operand.inner)
+                || contains_aggregate_call(&low.inner)
+                || contains_aggregate_call(&high.inner)
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
 }
@@ -743,6 +800,17 @@ fn assign_vm_expr_demands(expr: &mut SpannedExpr, demands: &mut Vec<WindowAggreg
                 assign_vm_expr_demands(else_result, demands);
             }
         }
+        Expr::Membership { operand, set } => {
+            assign_vm_expr_demands(operand, demands);
+            for element in set {
+                assign_vm_expr_demands(element, demands);
+            }
+        }
+        Expr::Between { operand, low, high } => {
+            assign_vm_expr_demands(operand, demands);
+            assign_vm_expr_demands(low, demands);
+            assign_vm_expr_demands(high, demands);
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => {}
     }
 }
@@ -830,6 +898,17 @@ fn collect_expr_field_refs<'a>(expr: &'a Expr, refs: &mut Vec<&'a FieldRef>) {
             if let Some(else_result) = else_result {
                 collect_expr_field_refs(&else_result.inner, refs);
             }
+        }
+        Expr::Membership { operand, set } => {
+            collect_expr_field_refs(&operand.inner, refs);
+            for element in set {
+                collect_expr_field_refs(&element.inner, refs);
+            }
+        }
+        Expr::Between { operand, low, high } => {
+            collect_expr_field_refs(&operand.inner, refs);
+            collect_expr_field_refs(&low.inner, refs);
+            collect_expr_field_refs(&high.inner, refs);
         }
         Expr::Literal(_) | Expr::InternalFieldRef(_) => {}
     }

@@ -60,6 +60,25 @@ pub enum Expression {
         #[rkyv(omit_bounds)]
         else_result: Option<Box<Self>>,
     },
+    /// `<operand> [NOT] IN (<element>, ...)`: whether the operand equals an element of a set of
+    /// constants. The set may be empty.
+    Membership {
+        operator: MembershipOperator,
+        #[rkyv(omit_bounds)]
+        operand: Box<Self>,
+        #[rkyv(omit_bounds)]
+        set: Vec<Self>,
+    },
+    /// `<operand> [NOT] BETWEEN <low> AND <high>`: whether the operand lies in an inclusive range.
+    Range {
+        operator: RangeOperator,
+        #[rkyv(omit_bounds)]
+        operand: Box<Self>,
+        #[rkyv(omit_bounds)]
+        low: Box<Self>,
+        #[rkyv(omit_bounds)]
+        high: Box<Self>,
+    },
     /// `TRY_CAST(expression AS target)`: the conversion `Cast` performs, except that a value the
     /// target type cannot hold becomes a typed null instead of failing the message.
     TryCast {
@@ -137,6 +156,19 @@ impl Expression {
                     else_result.visit_fields(visitor);
                 }
             }
+            Self::Membership { operand, set, .. } => {
+                operand.visit_fields(visitor);
+                for element in set {
+                    element.visit_fields(visitor);
+                }
+            }
+            Self::Range {
+                operand, low, high, ..
+            } => {
+                operand.visit_fields(visitor);
+                low.visit_fields(visitor);
+                high.visit_fields(visitor);
+            }
         }
     }
 
@@ -196,6 +228,19 @@ impl Expression {
                     else_result.visit_calls(visitor);
                 }
             }
+            Self::Membership { operand, set, .. } => {
+                operand.visit_calls(visitor);
+                for element in set {
+                    element.visit_calls(visitor);
+                }
+            }
+            Self::Range {
+                operand, low, high, ..
+            } => {
+                operand.visit_calls(visitor);
+                low.visit_calls(visitor);
+                high.visit_calls(visitor);
+            }
         }
     }
 
@@ -254,6 +299,19 @@ impl Expression {
                 if let Some(else_result) = else_result {
                     else_result.visit_udf_calls(visitor);
                 }
+            }
+            Self::Membership { operand, set, .. } => {
+                operand.visit_udf_calls(visitor);
+                for element in set {
+                    element.visit_udf_calls(visitor);
+                }
+            }
+            Self::Range {
+                operand, low, high, ..
+            } => {
+                operand.visit_udf_calls(visitor);
+                low.visit_udf_calls(visitor);
+                high.visit_udf_calls(visitor);
             }
         }
     }
@@ -398,6 +456,52 @@ pub enum BinaryOperator {
     LessThanOrEqual,
     And,
     Or,
+    /// `IS DISTINCT FROM`: inequality under which two nulls are equal and a null differs from
+    /// every value.
+    IsDistinctFrom,
+    /// `IS NOT DISTINCT FROM`: equality under which two nulls are equal and a null differs from
+    /// every value.
+    IsNotDistinctFrom,
+}
+
+/// Whether a membership test holds when the operand is an element of its set, `IN`, or when it is
+/// not, `NOT IN`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum MembershipOperator {
+    In,
+    NotIn,
+}
+
+/// Whether a range test holds when the operand lies inside its range, `BETWEEN`, or when it does
+/// not, `NOT BETWEEN`.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum RangeOperator {
+    Between,
+    NotBetween,
 }
 
 #[derive(

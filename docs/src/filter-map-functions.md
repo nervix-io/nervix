@@ -86,7 +86,7 @@ Every builtin follows these rules unless its own description says otherwise:
 | Property | Contract |
 | --- | --- |
 | Types | Arguments are never converted implicitly. A function that accepts several types, such as `abs` over every numeric type, takes each of them as it is. |
-| Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, and `is_null` define their own null handling. |
+| Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, `is_null`, `greatest`, and `least` define their own null handling. |
 | Sensitivity | A result is sensitive when any argument is sensitive, including results such as `length(...)`, `is_null(...)`, and `count(...)` that do not contain the argument's value. Only `leak_sensitive(...)` removes sensitivity. |
 | Volatility | Every builtin is deterministic except `now()`, which returns one value for an execution, and `uuid_v4()` and `uuid_v7()`, which return a new value for every message. |
 | Errors | A function that can fail reports a per-message error and yields null for that message. The error activates `ON MESSAGE ERROR`. Inside a conditional, only the selected arm can report one. |
@@ -140,7 +140,105 @@ operand makes the comparison null.
 - Floating-point comparisons follow IEEE 754. NaN is unequal to every value, including another
   NaN, so `=` is false, `!=` is true, and every ordering comparison with NaN is false. `0.0` and
   `-0.0` are equal.
-- `nullif(a, b)` and a simple `CASE <operand> WHEN <value>` decide equality exactly as `=` does.
+- `nullif(a, b)`, a simple `CASE <operand> WHEN <value>`, `IS [NOT] DISTINCT FROM`, and `IN` decide
+  equality exactly as `=` does.
+
+`a IS NOT DISTINCT FROM b` is equality under which two nulls are equal: it is true when both
+operands are null or both are present and `a = b`, and false otherwise. `a IS DISTINCT FROM b` is
+its negation, a null-safe `!=`. Neither is ever null, so a required `BOOL` field can hold either,
+and `input.region IS DISTINCT FROM input.home_region` is true where exactly one region is null,
+where `input.region != input.home_region` is null. Both operands must have the same exact type,
+which may be any numeric type, `BOOL`, `STRING`, or `DATETIME`. Present floats compare as `=` does,
+so NaN is distinct from every value, another NaN included, and `0.0` is not distinct from `-0.0`.
+
+`IN`, `BETWEEN`, and `IS [NOT] DISTINCT FROM` bind like the comparison operators and group from the
+left with them, so `a = b IN (TRUE)` tests whether `a = b` is in the set. Unary `NOT` binds more
+tightly than any comparison, so `NOT x IN (1, 2)` negates `x` before testing it; write
+`x NOT IN (1, 2)` or `NOT (x IN (1, 2))` instead. The words `IN`, `BETWEEN`, `IS`, `DISTINCT`, and
+`FROM` are reserved in expressions, including after a field scope such as `input.<field>`, like the
+[conditional keywords](#conditional-expressions).
+
+## Membership And Ranges
+
+`<value> IN (<element>, ...)` tests whether a value equals an element of a written set, and
+`<value> NOT IN (<element>, ...)` is its negation. `<value> BETWEEN <low> AND <high>` tests whether a
+value lies in an inclusive range, and `<value> NOT BETWEEN <low> AND <high>` is its negation.
+
+```nspl,ignore
+input.status IN ('open', 'held')
+input.priority NOT IN (1 AS I32, 2 AS I32)
+input.weight BETWEEN 1.0 AND 50.0
+input.observed_at NOT BETWEEN input.window_start AND input.window_end
+```
+
+### Sets
+
+A set lists its elements in parentheses, separated by commas. Every element is a constant: a
+literal, optionally negated with `-` or `NOT` and cast with `AS` or `TRY_CAST`, such as
+`-1 AS I32` or `'2026-01-01T00:00:00Z' AS DATETIME`. Each element is evaluated once, when the
+statement is applied, exactly as the same expression evaluates for a message, so an element that
+cannot be evaluated, such as `300 AS U8`, rejects the statement, and so does a `TRY_CAST` that
+cannot convert its literal, whose typed null is no valid element. So does an element that reads a
+field or calls a function; to test a value against other fields, compare it with `=` and combine
+the comparisons with `OR`.
+
+The operand may have any numeric type, `BOOL`, `STRING`, or `DATETIME`, and every element must have
+exactly the operand's type. Integer literals are `I64` and float literals `F64`, so a set tested
+against an `I32` or `F32` value casts each element: `input.priority IN (1 AS I32, 2 AS I32)`.
+
+A value is an element of a set when it equals one of its elements under `=`:
+
+- `NULL` is not a valid element, because no value equals it; test for null with `is_null(...)` or
+  `IS NOT DISTINCT FROM`.
+- An empty set is valid. No value is an element of it, a null one included, so `x IN ()` is false
+  and `x NOT IN ()` true for every message.
+- Otherwise a null operand makes both `IN` and `NOT IN` null, so a `WHERE` selects a message with a
+  null operand for neither.
+- Writing an element twice changes nothing.
+- NaN equals no value, so a NaN element matches nothing and a NaN operand is an element of no set,
+  while `0.0` and `-0.0` are the same element.
+
+A set is prepared once for its program rather than for every batch or message. A small set of
+numbers, `BOOL`, or `DATETIME` values is tested by comparing the value with each of its elements,
+while a larger set, and every set of `STRING` values, is looked up by key, so a set of thousands of
+elements still costs each message one lookup.
+
+### Ranges
+
+`x BETWEEN low AND high` is `x >= low AND x <= high` with `x` computed once, so an operand that fails
+reports its error once. The operand and both bounds must have one exact type: any numeric type,
+`STRING`, or `DATETIME`, the types `<` orders. Both bounds are inclusive, and a range whose low bound
+is above its high bound holds no value; the bounds are never swapped.
+
+Nulls follow `AND`: a null operand makes the result null, and a null bound makes it null unless the
+comparison with the other bound is false, which makes it false. NaN lies in no range, so `BETWEEN`
+is false for a NaN operand or bound and `NOT BETWEEN` is true. `NOT BETWEEN` negates `BETWEEN`; it is
+not `x < low OR x > high`, which is false for a NaN operand.
+
+The `AND` that closes a low bound belongs to the range, so `x BETWEEN 1 AND 5 AND y` is
+`(x BETWEEN 1 AND 5) AND y`. A bound that is itself a comparison needs parentheses.
+
+## Extrema
+
+| Function | Returns | Notes |
+| --- | --- | --- |
+| `greatest(a, ...)` | same type as inputs | The largest present argument, or a typed null when every argument is null |
+| `least(a, ...)` | same type as inputs | The smallest present argument, or a typed null when every argument is null |
+| `clamp(value, low, high)` | same type as inputs | `low` where `value < low`, `high` where `value > high`, and `value` otherwise |
+
+`greatest` and `least` take one or more arguments of one exact type: any numeric type, `BOOL`,
+`STRING`, or `DATETIME`. They skip null arguments, so their result is required when any argument
+is. They order values the way the window `MIN` and `MAX` aggregates do: `BOOL` orders `false` before
+`true`, `STRING` orders by Unicode code point, and floating-point values order NaN above every other
+value and treat both zeros as equal. Among equal values the earliest argument is returned, so
+`greatest(-0.0, 0.0)` is `-0.0` and `greatest(0.0, -0.0)` is `0.0`.
+
+`clamp` takes three arguments of one exact type: any numeric type, `STRING`, or `DATETIME`. It
+compares exactly as `<` and `>` do, so it returns a NaN value unchanged and keeps `-0.0` inside a
+range that starts at `0.0`. A null argument produces a null result. A message whose low bound is
+above its high bound, or whose floating-point bound is NaN, reports an `invalid_argument` error
+naming the invalid bounds and yields null, so give a route whose bounds can cross an
+`ON MESSAGE ERROR` policy. A message with a null argument is never failed.
 
 ## Arithmetic
 
@@ -865,6 +963,12 @@ SET normalized = lower(trim(input.raw)),
     price = round(input.price, 2),
     heading = degrees(atan2(input.north, input.east)),
     alert_flags = bitwise_and(input.flags, 255 AS U16),
+    peak = greatest(input.first_reading, input.second_reading),
+    bounded = clamp(input.score, 0, 100),
+    moved = input.region IS DISTINCT FROM input.home_region,
     retries = coalesce(TRY_CAST(input.retries_text AS I32), 0)
-WHERE output.active AND regexp_like(lower(trim(input.raw)), 'warn|error')
+WHERE output.active
+  AND regexp_like(lower(trim(input.raw)), 'warn|error')
+  AND input.status IN ('open', 'held')
+  AND input.amount BETWEEN 1 AND 1000
 ```

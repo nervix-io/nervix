@@ -39,6 +39,11 @@ pub enum Token {
     Then,
     Else,
     End,
+    In,
+    Between,
+    Is,
+    Distinct,
+    From,
     Udf,
     Identifier(String),
     Integer(i64),
@@ -89,6 +94,11 @@ fn classify_identifier(raw: &str) -> Token {
         "THEN" => Token::Then,
         "ELSE" => Token::Else,
         "END" => Token::End,
+        "IN" => Token::In,
+        "BETWEEN" => Token::Between,
+        "IS" => Token::Is,
+        "DISTINCT" => Token::Distinct,
+        "FROM" => Token::From,
         "UDF" => Token::Udf,
         _ => Token::Identifier(raw.to_string()),
     }
@@ -307,6 +317,28 @@ mod tests {
                 Token::TryCast,
                 Token::Identifier("try".to_string()),
                 Token::Identifier("cast".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_membership_range_and_distinctness_keywords_case_insensitively() {
+        let tokens = lex("in NOT Between is Distinct fRoM input from_unix")
+            .expect("comparison keywords must lex");
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(|token| token.token)
+                .collect::<Vec<_>>(),
+            vec![
+                Token::In,
+                Token::Not,
+                Token::Between,
+                Token::Is,
+                Token::Distinct,
+                Token::From,
+                Token::Identifier("input".to_string()),
+                Token::Identifier("from_unix".to_string()),
             ]
         );
     }

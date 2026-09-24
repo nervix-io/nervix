@@ -246,6 +246,19 @@ fn expression_contains_nondeterministic_or_side_effect_call(
                 expression_contains_nondeterministic_or_side_effect_call(result, models)
             })
         }
+        Expression::Membership { operand, set, .. } => {
+            expression_contains_nondeterministic_or_side_effect_call(operand, models)
+                || set.iter().any(|element| {
+                    expression_contains_nondeterministic_or_side_effect_call(element, models)
+                })
+        }
+        Expression::Range {
+            operand, low, high, ..
+        } => {
+            expression_contains_nondeterministic_or_side_effect_call(operand, models)
+                || expression_contains_nondeterministic_or_side_effect_call(low, models)
+                || expression_contains_nondeterministic_or_side_effect_call(high, models)
+        }
     }
 }
 

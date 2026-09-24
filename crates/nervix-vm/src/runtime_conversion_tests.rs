@@ -787,3 +787,40 @@ fn a_tolerant_cast_keeps_its_exact_target_type_and_the_sensitivity_of_its_operan
     .expect_err("the result has exactly the target type");
     assert_eq!(mismatch.code, "type_mismatch");
 }
+
+#[test]
+fn a_tolerant_set_element_is_its_converted_value_or_a_null_the_set_rejects() {
+    let input_schema = schema(vec![Field::new("number", DataType::Int64, true)]);
+    let compiled = compile(
+        "SET known = input.number IN (TRY_CAST('7' AS I64), 9)",
+        &input_schema,
+        vec![Field::new("known", DataType::Boolean, true)],
+    );
+    let batch = TypedBatch::try_new(
+        input_schema.clone(),
+        vec![TypedArray::Int64(Int64Array::from(vec![
+            Some(7),
+            Some(8),
+            Some(9),
+        ]))],
+    )
+    .expect("the batch must build");
+    let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+    assert_eq!(
+        output_column(&output, "known"),
+        &TypedArray::Boolean(BooleanArray::from(vec![
+            Some(true),
+            Some(false),
+            Some(true)
+        ]))
+    );
+
+    let error = compile_with(
+        "SET known = input.number IN (TRY_CAST('x' AS I64))",
+        &input_schema,
+        vec![Field::new("known", DataType::Boolean, true)],
+        CompileOptions::default(),
+    )
+    .expect_err("an element that does not convert is a typed null");
+    assert_eq!(error.code, "null_set_element");
+}

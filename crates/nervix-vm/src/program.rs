@@ -139,6 +139,19 @@ pub enum Expr {
         branches: Vec<CaseArm>,
         else_result: Option<Box<SpannedExpr>>,
     },
+    /// `IN`: whether the operand equals an element of a set of constants. `NOT IN` is the negation
+    /// of this test.
+    Membership {
+        operand: Box<SpannedExpr>,
+        set: Vec<SpannedExpr>,
+    },
+    /// `BETWEEN`: whether the operand lies in the inclusive range from `low` to `high`. `NOT
+    /// BETWEEN` is the negation of this test.
+    Between {
+        operand: Box<SpannedExpr>,
+        low: Box<SpannedExpr>,
+        high: Box<SpannedExpr>,
+    },
 }
 
 /// What a cast yields for a value its target type cannot hold.
@@ -268,6 +281,22 @@ impl Expr {
                 }
                 false
             }
+            Self::Membership { operand, set } => {
+                if operand.inner.may_answer_selected_rows_only() {
+                    return true;
+                }
+                for element in set {
+                    if element.inner.may_answer_selected_rows_only() {
+                        return true;
+                    }
+                }
+                false
+            }
+            Self::Between { operand, low, high } => {
+                operand.inner.may_answer_selected_rows_only()
+                    || low.inner.may_answer_selected_rows_only()
+                    || high.inner.may_answer_selected_rows_only()
+            }
         }
     }
 
@@ -281,6 +310,8 @@ impl Expr {
             Self::Cast { .. } => 5,
             Self::Call { .. } => 6,
             Self::Case { .. } => 7,
+            Self::Membership { .. } => 8,
+            Self::Between { .. } => 9,
         }
     }
 }
@@ -359,6 +390,31 @@ impl Ord for Expr {
             ) => cmp_spanned_option(left_operand.as_deref(), right_operand.as_deref())
                 .then_with(|| left_branches.cmp(right_branches))
                 .then_with(|| cmp_spanned_option(left_else.as_deref(), right_else.as_deref())),
+            (
+                Self::Membership {
+                    operand: left_operand,
+                    set: left_set,
+                },
+                Self::Membership {
+                    operand: right_operand,
+                    set: right_set,
+                },
+            ) => cmp_spanned(left_operand, right_operand)
+                .then_with(|| cmp_spanned_slice(left_set, right_set)),
+            (
+                Self::Between {
+                    operand: left_operand,
+                    low: left_low,
+                    high: left_high,
+                },
+                Self::Between {
+                    operand: right_operand,
+                    low: right_low,
+                    high: right_high,
+                },
+            ) => cmp_spanned(left_operand, right_operand)
+                .then_with(|| cmp_spanned(left_low, right_low))
+                .then_with(|| cmp_spanned(left_high, right_high)),
             _ => self.discriminant().cmp(&other.discriminant()),
         }
     }
@@ -441,6 +497,9 @@ pub enum FunctionName {
     ShiftLeft,
     ShiftRight,
     BitCount,
+    Greatest,
+    Least,
+    Clamp,
     Concat,
     Sum,
     Last,
@@ -932,6 +991,9 @@ impl FunctionName {
             "shift_left" => Self::ShiftLeft,
             "shift_right" => Self::ShiftRight,
             "bit_count" => Self::BitCount,
+            "greatest" => Self::Greatest,
+            "least" => Self::Least,
+            "clamp" => Self::Clamp,
             "concat" => Self::Concat,
             "sum" => Self::Sum,
             "last" => Self::Last,
@@ -1016,6 +1078,9 @@ impl FunctionName {
             Self::ShiftLeft => "shift_left",
             Self::ShiftRight => "shift_right",
             Self::BitCount => "bit_count",
+            Self::Greatest => "greatest",
+            Self::Least => "least",
+            Self::Clamp => "clamp",
             Self::Concat => "concat",
             Self::Sum => "sum",
             Self::Last => "last",
@@ -1112,6 +1177,10 @@ pub enum BinaryOp {
     LtEq,
     And,
     Or,
+    /// `IS DISTINCT FROM`: never null, and true unless both operands are null or both are equal.
+    IsDistinctFrom,
+    /// `IS NOT DISTINCT FROM`: never null, and true when both operands are null or both are equal.
+    IsNotDistinctFrom,
 }
 
 pub(crate) fn spanned<T>(inner: T, span: Span) -> SpannedNode<T> {

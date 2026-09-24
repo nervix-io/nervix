@@ -1539,18 +1539,62 @@ fn explicit_route_construction<'src>()
         .boxed()
 }
 
+/// The tokens of an expression region, up to the first `boundary` token outside every parenthesized
+/// or bracketed group.
+///
+/// A comma separates the relays of a `FROM` list, but inside an `IN` set or a call's arguments it
+/// belongs to the expression, so a boundary ends the region only at nesting depth zero.
+fn nested_expression_tokens<'src>(
+    boundary: fn(&Token) -> bool,
+) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
+    let group = recursive(|group| {
+        let inner = choice((
+            group,
+            any()
+                .filter(|token: &Token| {
+                    !token.is_group_delimiter() && !matches!(token, Token::Semicolon)
+                })
+                .map(|token| vec![token]),
+        ))
+        .repeated()
+        .collect::<Vec<Vec<Token>>>();
+        // The delimiters are matched without being named, like every other token of the region,
+        // so completion never offers a bracket as though it were a clause of the statement.
+        let delimiter = |expected: Token| any().filter(move |token: &Token| *token == expected);
+        choice((
+            delimiter(Token::LParen)
+                .then(inner.clone())
+                .then(delimiter(Token::RParen)),
+            delimiter(Token::LBracket)
+                .then(inner)
+                .then(delimiter(Token::RBracket)),
+        ))
+        .map(|((open, inner), close)| {
+            let mut tokens = vec![open];
+            tokens.extend(inner.into_iter().flatten());
+            tokens.push(close);
+            tokens
+        })
+        .boxed()
+    });
+    choice((
+        group,
+        any()
+            .filter(move |token: &Token| !boundary(token) && !token.is_group_delimiter())
+            .map(|token| vec![token]),
+    ))
+    .repeated()
+    .at_least(1)
+    .collect::<Vec<Vec<Token>>>()
+    .map(|runs| runs.into_iter().flatten().collect())
+    .boxed()
+}
+
 fn source_where_clause_with_boundary<'src>(
     boundary: fn(&Token) -> bool,
 ) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
     kw(Identifier::Where)
-        .ignore_then(
-            any()
-                .filter(move |token: &Token| !boundary(token))
-                .repeated()
-                .at_least(1)
-                .collect::<Vec<_>>()
-                .labelled("where_expression"),
-        )
+        .ignore_then(nested_expression_tokens(boundary).labelled("where_expression"))
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source)

@@ -63,6 +63,7 @@ use crate::{
         DatetimeOperation, FloatOperation, IntegerOperation, RowErrorMask, RowErrors, RuntimeError,
         SideError, SideErrorReason, TextOperation,
     },
+    extremum::{self, ClampBoundsDefect},
     ir::{
         AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
         InstructionKind, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType,
@@ -1500,43 +1501,18 @@ impl Instruction {
         op: UnaryOp,
         row_errors: &mut RowErrors,
     ) -> Result<TypedArray, RuntimeError> {
-        match op {
-            UnaryOp::Neg => match input.ty {
-                RegisterType::Int8 => Ok(TypedArray::Int8(execute_integer_negation(
-                    registers.column::<Int8Array>(input)?,
-                    row_errors,
-                    self.span,
-                ))),
-                RegisterType::Int16 => Ok(TypedArray::Int16(execute_integer_negation(
-                    registers.column::<Int16Array>(input)?,
-                    row_errors,
-                    self.span,
-                ))),
-                RegisterType::Int32 => Ok(TypedArray::Int32(execute_integer_negation(
-                    registers.column::<Int32Array>(input)?,
-                    row_errors,
-                    self.span,
-                ))),
-                RegisterType::Int64 => Ok(TypedArray::Int64(execute_integer_negation(
-                    registers.column::<Int64Array>(input)?,
-                    row_errors,
-                    self.span,
-                ))),
-                RegisterType::Float32 => Ok(TypedArray::Float32(numeric::float_negation(
-                    registers.column::<Float32Array>(input)?,
-                ))),
-                RegisterType::Float64 => Ok(TypedArray::Float64(numeric::float_negation(
-                    registers.column::<Float64Array>(input)?,
-                ))),
-                _ => Err(RuntimeError::InvalidRegisterType {
-                    reg: input,
-                    expected: "numeric array",
-                }),
-            },
-            UnaryOp::Not => Ok(TypedArray::Boolean(execute_not(
-                registers.column::<BooleanArray>(input)?,
-            ))),
+        let value = registers.read_array(input)?;
+        if let Some(output) = unary_kernel(op, &value, row_errors, self.span) {
+            return Ok(output);
         }
+        let expected = match op {
+            UnaryOp::Neg => "numeric array",
+            UnaryOp::Not => "BooleanArray",
+        };
+        Err(RuntimeError::InvalidRegisterType {
+            reg: input,
+            expected,
+        })
     }
 
     fn execute_binary(
@@ -1547,6 +1523,30 @@ impl Instruction {
         op: BinaryOp,
         row_errors: &mut RowErrors,
     ) -> Result<TypedArray, RuntimeError> {
+        if let BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom = op {
+            let left_operand = registers.any_operand(left)?;
+            let right_operand = registers.any_operand(right)?;
+            // Two present values are distinct exactly where `=` is false, so floats compare by IEEE
+            // 754 here as `=` does, rather than by the total order of the Arrow equality kernel.
+            let equal = match left.ty {
+                RegisterType::Float32 => Comparison::Eq.evaluate(
+                    registers.operand::<Float32Array>(left)?,
+                    registers.operand::<Float32Array>(right)?,
+                ),
+                RegisterType::Float64 => Comparison::Eq.evaluate(
+                    registers.operand::<Float64Array>(left)?,
+                    registers.operand::<Float64Array>(right)?,
+                ),
+                _ => eq(&left_operand, &right_operand)
+                    .map_err(|error| arrow_kernel_error("distinctness eq kernel failed", error))?,
+            };
+            return Ok(TypedArray::Boolean(execute_distinctness(
+                left_operand,
+                right_operand,
+                &equal,
+                op,
+            )));
+        }
         let operator = NumericBinary::of(op);
         match (left.ty, operator) {
             (RegisterType::UInt8, Some(operator)) => Ok(execute_integer_binary(
@@ -1678,9 +1678,36 @@ impl NumericBinary {
             BinaryOp::LtEq => Some(Self::Comparison(Comparison::LtEq)),
             BinaryOp::Gt => Some(Self::Comparison(Comparison::Gt)),
             BinaryOp::GtEq => Some(Self::Comparison(Comparison::GtEq)),
-            BinaryOp::And | BinaryOp::Or => None,
+            BinaryOp::And
+            | BinaryOp::Or
+            | BinaryOp::IsDistinctFrom
+            | BinaryOp::IsNotDistinctFrom => None,
         }
     }
+}
+
+/// `IS DISTINCT FROM`, or `IS NOT DISTINCT FROM` for its negation, over two operands and the
+/// equality `=` found between them.
+///
+/// Two nulls are not distinct, a null and a value are, and two values are distinct exactly where
+/// `equal` is false, so the result is never null. `equal` holds a meaningful bit only where both
+/// operands are present, which is the only place it is read.
+fn execute_distinctness(
+    left: Operand<'_, dyn Array>,
+    right: Operand<'_, dyn Array>,
+    equal: &BooleanArray,
+    op: BinaryOp,
+) -> BooleanArray {
+    let rows = equal.len();
+    let left_present = left.validity(rows);
+    let right_present = right.validity(rows);
+    let both_present = &left_present & &right_present;
+    let both_absent = &!&left_present & &!&right_present;
+    let not_distinct = &(&both_present & equal.values()) | &both_absent;
+    if let BinaryOp::IsDistinctFrom = op {
+        return BooleanArray::new(!&not_distinct, None);
+    }
+    BooleanArray::new(not_distinct, None)
 }
 
 fn execute_integer_binary<T>(
@@ -1749,6 +1776,84 @@ where
         SideErrorReason::IntegerOverflow(IntegerOperation::Negation)
     });
     checked.column
+}
+
+/// Computes a unary operator over every row of `input`, or `None` when the operator has no kernel
+/// for the input's type. Negation is defined for signed integers and floats, and `NOT` for `BOOL`.
+fn unary_kernel(
+    op: UnaryOp,
+    input: &TypedArray,
+    row_errors: &mut RowErrors,
+    span: Span,
+) -> Option<TypedArray> {
+    match (op, input) {
+        (UnaryOp::Neg, TypedArray::Int8(values)) => Some(TypedArray::Int8(
+            execute_integer_negation(values, row_errors, span),
+        )),
+        (UnaryOp::Neg, TypedArray::Int16(values)) => Some(TypedArray::Int16(
+            execute_integer_negation(values, row_errors, span),
+        )),
+        (UnaryOp::Neg, TypedArray::Int32(values)) => Some(TypedArray::Int32(
+            execute_integer_negation(values, row_errors, span),
+        )),
+        (UnaryOp::Neg, TypedArray::Int64(values)) => Some(TypedArray::Int64(
+            execute_integer_negation(values, row_errors, span),
+        )),
+        (UnaryOp::Neg, TypedArray::Float32(values)) => {
+            Some(TypedArray::Float32(numeric::float_negation(values)))
+        }
+        (UnaryOp::Neg, TypedArray::Float64(values)) => {
+            Some(TypedArray::Float64(numeric::float_negation(values)))
+        }
+        (UnaryOp::Not, TypedArray::Boolean(values)) => {
+            Some(TypedArray::Boolean(execute_not(values)))
+        }
+        _ => None,
+    }
+}
+
+/// The operation span of a constant computed while a program is compiled. Such a constant belongs
+/// to no route operation: a failure is reported as a statement error and never as a row error.
+const CONSTANT_SPAN: Span = Span { start: 0, end: 0 };
+
+/// Computes a unary operator over a one-row constant with the kernel execution applies to a row:
+/// the value, or the reason that row fails. `None` when the operator has no kernel for the
+/// constant's type.
+pub(crate) fn unary_constant(
+    op: UnaryOp,
+    value: &TypedArray,
+) -> Option<Result<TypedArray, SideErrorReason>> {
+    let mut row_errors = RowErrors::new(value.len());
+    let output = unary_kernel(op, value, &mut row_errors, CONSTANT_SPAN)?;
+    match row_errors.first() {
+        Some(failure) => Some(Err(failure.reason.clone())),
+        None => Some(Ok(output)),
+    }
+}
+
+/// Casts a one-row constant with the conversion `AS` applies to a row: the value, or the reason
+/// that row fails.
+pub(crate) fn cast_constant(
+    value: TypedArray,
+    target: RegisterType,
+) -> Result<TypedArray, SideErrorReason> {
+    if value.data_type() == target.data_type() {
+        return Ok(value);
+    }
+    let failed = SideErrorReason::CastFailed { target };
+    // A pair of types the cast kernel refuses converts no value, exactly as a value the target
+    // cannot hold does.
+    let Ok(cast) = cast_values(&value, target) else {
+        return Err(failed);
+    };
+    let Ok(cast) = array_ref_to_typed_array(cast) else {
+        return Err(failed);
+    };
+    // A value the target cannot hold casts to null.
+    if cast.null_count() > value.null_count() {
+        return Err(failed);
+    }
+    Ok(cast)
 }
 
 fn arrow_kernel_error(context: &str, error: ArrowError) -> RuntimeError {
@@ -1963,9 +2068,11 @@ fn compare_with_arrow_ord(
                 message: format!("{context} comparison helper received arithmetic operator {op:?}"),
             })
         }
-        BinaryOp::And | BinaryOp::Or => Err(RuntimeError::InvalidBatch {
-            message: format!("{context} comparison helper received boolean operator {op:?}"),
-        }),
+        BinaryOp::And | BinaryOp::Or | BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => {
+            Err(RuntimeError::InvalidBatch {
+                message: format!("{context} comparison helper received boolean operator {op:?}"),
+            })
+        }
     }
 }
 
@@ -2244,6 +2351,40 @@ fn execute_builtin(
             let values = columns()?;
             execute_shift(&values[0], &values[1], Shift::Right, row_errors, span)
                 .ok_or_else(|| unsupported_builtin_inputs(lowering, &values))
+        }
+        BuiltinLowering::Extremum(extremum) => {
+            let first = column(0)?;
+            let mut rest = Vec::with_capacity(inputs.len());
+            for input in &inputs[1..] {
+                rest.push(registers.any_operand(*input)?);
+            }
+            let selected = extremum
+                .select(&first, &rest)
+                .map_err(|error| arrow_kernel_error("extremum selection failed", error))?;
+            array_ref_to_typed_array(selected)
+        }
+        BuiltinLowering::Clamp => {
+            let value = column(0)?;
+            let clamped = extremum::clamp(
+                &value,
+                registers.any_operand(inputs[1])?,
+                registers.any_operand(inputs[2])?,
+            )
+            .map_err(|error| arrow_kernel_error("clamp failed", error))?;
+            row_errors.push_failures(clamped.nan_bound.set_indices(), span, |_| {
+                SideErrorReason::InvalidClampBounds(ClampBoundsDefect::NanBound)
+            });
+            row_errors.push_failures(clamped.lower_above_upper.set_indices(), span, |_| {
+                SideErrorReason::InvalidClampBounds(ClampBoundsDefect::LowerAboveUpper)
+            });
+            array_ref_to_typed_array(clamped.values)
+        }
+        BuiltinLowering::Membership(set) => {
+            let operand = column(0)?;
+            let Some(members) = set.evaluate(&operand) else {
+                return Err(unsupported_builtin_inputs(lowering, &[operand]));
+            };
+            Ok(TypedArray::Boolean(members))
         }
         BuiltinLowering::Datetime(function) => {
             let values = columns()?;
@@ -4159,11 +4300,23 @@ fn cast_typed_array(
         return Ok(input);
     }
 
+    let output = cast_values(&input, target)
+        .map_err(|error| arrow_kernel_error("cast kernel failed", error))?;
+    let output = array_ref_to_typed_array(output)?;
+    if on_failure.reports_error() {
+        annotate_cast_failures(&input, &output, target, row_errors, span);
+    }
+    Ok(output)
+}
+
+/// Converts every value of `input` to `target` as `AS` does. A value the target cannot hold becomes
+/// null, which the caller reports as that row's cast failure.
+fn cast_values(input: &TypedArray, target: RegisterType) -> Result<ArrayRef, ArrowError> {
     let cast_options = CastOptions {
         safe: true,
         format_options: FormatOptions::new().with_timestamp_tz_format(Some("%+")),
     };
-    let output: ArrayRef = match (&input, target) {
+    let output: ArrayRef = match (input, target) {
         (TypedArray::Float32(values), RegisterType::Utf8) => {
             StdArc::new(display_values_as_utf8(values.len(), values.iter()))
         }
@@ -4179,13 +4332,8 @@ fn cast_typed_array(
         (TypedArray::Datetime(values), RegisterType::Boolean) => {
             new_null_array(&target.data_type(), values.len())
         }
-        _ => cast_with_options(input.as_array(), &target.data_type(), &cast_options)
-            .map_err(|error| arrow_kernel_error("cast kernel failed", error))?,
+        _ => cast_with_options(input.as_array(), &target.data_type(), &cast_options)?,
     };
-    let output = array_ref_to_typed_array(output)?;
-    if on_failure.reports_error() {
-        annotate_cast_failures(&input, &output, target, row_errors, span);
-    }
     Ok(output)
 }
 
@@ -7828,6 +7976,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "runtime_comparison_tests.rs"]
+mod comparison_tests;
 #[cfg(test)]
 #[path = "runtime_conversion_tests.rs"]
 mod conversion_tests;

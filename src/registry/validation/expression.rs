@@ -304,6 +304,30 @@ fn rewrite_lookup_hash_map_expr(
 ) -> Result<SpannedExpr, Report<RegistryError>> {
     let inner = match &expr.inner {
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => expr.inner.clone(),
+        Expr::Membership { operand, set } => Expr::Membership {
+            operand: Box::new(rewrite_lookup_hash_map_expr(
+                domain, identifier, models, operand, calls, next_field,
+            )?),
+            set: set
+                .iter()
+                .map(|element| {
+                    rewrite_lookup_hash_map_expr(
+                        domain, identifier, models, element, calls, next_field,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        Expr::Between { operand, low, high } => Expr::Between {
+            operand: Box::new(rewrite_lookup_hash_map_expr(
+                domain, identifier, models, operand, calls, next_field,
+            )?),
+            low: Box::new(rewrite_lookup_hash_map_expr(
+                domain, identifier, models, low, calls, next_field,
+            )?),
+            high: Box::new(rewrite_lookup_hash_map_expr(
+                domain, identifier, models, high, calls, next_field,
+            )?),
+        },
         Expr::Unary { op, expr: inner } => Expr::Unary {
             op: *op,
             expr: Box::new(rewrite_lookup_hash_map_expr(
@@ -484,6 +508,17 @@ fn rewrite_lookup_hash_map_expr(
 fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>) {
     match &expr.inner {
         Expr::Literal(_) | Expr::InternalFieldRef(_) => {}
+        Expr::Membership { operand, set } => {
+            collect_expr_field_refs(operand, refs);
+            for element in set {
+                collect_expr_field_refs(element, refs);
+            }
+        }
+        Expr::Between { operand, low, high } => {
+            collect_expr_field_refs(operand, refs);
+            collect_expr_field_refs(low, refs);
+            collect_expr_field_refs(high, refs);
+        }
         Expr::FieldRef(field_ref) => {
             refs.push((field_ref.relay.clone(), field_ref.field.clone()));
         }
@@ -521,6 +556,14 @@ fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>)
 fn expr_uses_header_read(expr: &SpannedExpr) -> bool {
     match &expr.inner {
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
+        Expr::Membership { operand, set } => {
+            expr_uses_header_read(operand) || set.iter().any(expr_uses_header_read)
+        }
+        Expr::Between { operand, low, high } => {
+            expr_uses_header_read(operand)
+                || expr_uses_header_read(low)
+                || expr_uses_header_read(high)
+        }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expr_uses_header_read(expr),
         Expr::Binary { left, right, .. } => {
             expr_uses_header_read(left) || expr_uses_header_read(right)
