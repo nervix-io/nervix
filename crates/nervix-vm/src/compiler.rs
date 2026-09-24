@@ -32,6 +32,7 @@ use crate::{
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
         builtin_signature, cast_arm_execution, cast_descriptor, expr_semantics, unary_descriptor,
     },
+    text_search::ContainsAnyCall,
     url_component,
 };
 
@@ -498,6 +499,36 @@ impl Compiler {
         }
         let first_type = self.infer_expr_type(&args[0])?;
         match function {
+            WindowAggregateFunction::ApproxCountDistinct => {
+                if !Self::is_window_orderable(&first_type) {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
+                             argument, found {first_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[0].span,
+                    });
+                }
+                Ok(DataType::Int64)
+            }
+            WindowAggregateFunction::ApproxTopK => {
+                if !Self::is_window_orderable(&first_type) {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
+                             argument, found {first_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[0].span,
+                    });
+                }
+                Ok(DataType::List(Arc::new(Field::new(
+                    "item", first_type, false,
+                ))))
+            }
             WindowAggregateFunction::Count => Ok(DataType::Int64),
             WindowAggregateFunction::CountIf => {
                 if let Some(error) =
@@ -523,7 +554,8 @@ impl Compiler {
                 }
                 Ok(first_type)
             }
-            WindowAggregateFunction::Avg
+            WindowAggregateFunction::ApproxQuantile
+            | WindowAggregateFunction::Avg
             | WindowAggregateFunction::PercentileLinearHistogram
             | WindowAggregateFunction::StddevPop
             | WindowAggregateFunction::StddevSamp
@@ -1472,8 +1504,10 @@ impl Compiler {
                     // emits retains a row, so present arguments always contribute, except that
                     // sample statistics need two rows and a correlation needs variation.
                     let window_function = invocation.function;
-                    if let WindowAggregateFunction::Count | WindowAggregateFunction::CountIf =
-                        window_function
+                    if let WindowAggregateFunction::ApproxCountDistinct
+                    | WindowAggregateFunction::ApproxTopK
+                    | WindowAggregateFunction::Count
+                    | WindowAggregateFunction::CountIf = window_function
                     {
                         return Ok(false);
                     }
@@ -2230,6 +2264,34 @@ impl Compiler {
             .verified("type inference above rejected every data type that has no register type");
         if let BuiltinLowering::Regexp(call) = descriptor.lowering {
             return self.compile_regexp_call(call.function, args, output_type);
+        }
+        if let BuiltinLowering::ContainsAny(_) = descriptor.lowering
+            && let [text, set] = args
+            && let Expr::Call {
+                function: FunctionName::Vec | FunctionName::Array,
+                args: elements,
+            } = &set.inner
+        {
+            let mut patterns = Vec::with_capacity(elements.len());
+            let mut all_constant = true;
+            for element in elements {
+                match fold_constant_expr(element)? {
+                    Some(FoldedValue::NonNull(ScalarValue::Utf8(pattern))) => {
+                        patterns.push(pattern);
+                    }
+                    _ => {
+                        all_constant = false;
+                        break;
+                    }
+                }
+            }
+            if all_constant {
+                return Ok(BuiltinPlan {
+                    lowering: BuiltinLowering::ContainsAny(ContainsAnyCall::constant(patterns)),
+                    inputs: vec![self.compile_expr(text)?],
+                    output_type,
+                });
+            }
         }
         // A network that folds to a constant is parsed here, once for the program, and the call
         // reads only its address. A constant that is no network rejects the program.
@@ -3019,12 +3081,20 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Rtrim
         | FunctionName::CharLength
         | FunctionName::BitLength
+        | FunctionName::OctetLength
         | FunctionName::Ascii
         | FunctionName::Acos
         | FunctionName::Asin
         | FunctionName::Atan
         | FunctionName::Ceil
         | FunctionName::Concat
+        | FunctionName::ConcatWs
+        | FunctionName::Split
+        | FunctionName::Join
+        | FunctionName::Like
+        | FunctionName::ILike
+        | FunctionName::ContainsAny
+        | FunctionName::NormalizeNfc
         | FunctionName::Sum
         | FunctionName::Last
         | FunctionName::First
@@ -3066,6 +3136,7 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::RegexpLike
         | FunctionName::RegexpReplace
         | FunctionName::RegexpSubstr
+        | FunctionName::RegexpExtract
         | FunctionName::Repeat
         | FunctionName::Replace
         | FunctionName::Reverse
@@ -5431,3 +5502,7 @@ mod numeric_function_tests;
 #[cfg(test)]
 #[path = "compiler_collection_function_tests.rs"]
 mod collection_function_tests;
+
+#[cfg(test)]
+#[path = "compiler_text_search_tests.rs"]
+mod text_search_tests;

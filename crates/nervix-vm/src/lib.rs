@@ -50,6 +50,7 @@ mod regexp;
 mod runtime;
 mod semantics;
 mod text_column;
+mod text_search;
 mod url_component;
 pub mod window;
 

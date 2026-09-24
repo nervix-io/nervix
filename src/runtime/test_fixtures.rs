@@ -213,7 +213,7 @@ pub(super) fn window_plan(
     let aggregate = window_aggregate(set);
     let compiled =
         compile_window_aggregate_for_test(&aggregate, input_type, &test_schema(output_fields));
-    super::WindowAccumulatorPlan::new([&compiled.route])
+    super::WindowAccumulatorPlan::new([&compiled.route], None, None)
 }
 
 pub(super) fn branch_key(

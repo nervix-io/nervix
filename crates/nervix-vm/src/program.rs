@@ -448,6 +448,7 @@ pub enum FunctionName {
     Length,
     CharLength,
     BitLength,
+    OctetLength,
     Ascii,
     Coalesce,
     IsNull,
@@ -499,6 +500,13 @@ pub enum FunctionName {
     Round,
     Rpad,
     SplitPart,
+    Split,
+    Join,
+    ConcatWs,
+    Like,
+    ILike,
+    ContainsAny,
+    NormalizeNfc,
     Sqrt,
     Strpos,
     Substr,
@@ -546,6 +554,7 @@ pub enum FunctionName {
     RegexpLike,
     RegexpReplace,
     RegexpSubstr,
+    RegexpExtract,
     Datetime(DatetimeFunction),
     LeakSensitive,
     LookupHashMap,
@@ -836,6 +845,9 @@ impl DateBinWidth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsRefStr, EnumString)]
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum WindowAggregateFunction {
+    ApproxCountDistinct,
+    ApproxQuantile,
+    ApproxTopK,
     ArgMax,
     ArgMin,
     Avg,
@@ -910,6 +922,8 @@ impl WindowAggregateFunction {
     pub const fn expected_arity(self) -> usize {
         match self {
             Self::PercentileLinearHistogram => 6,
+            Self::ApproxQuantile | Self::ApproxTopK => 3,
+            Self::ApproxCountDistinct => 2,
             Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => 2,
             Self::Avg
             | Self::BoolAnd
@@ -934,6 +948,9 @@ impl WindowAggregateFunction {
         match self {
             Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => true,
             Self::Avg
+            | Self::ApproxCountDistinct
+            | Self::ApproxQuantile
+            | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
             | Self::Count
@@ -976,6 +993,7 @@ impl FunctionName {
             "length" => Self::Length,
             "char_length" => Self::CharLength,
             "bit_length" => Self::BitLength,
+            "octet_length" => Self::OctetLength,
             "ascii" => Self::Ascii,
             "coalesce" => Self::Coalesce,
             "is_null" => Self::IsNull,
@@ -1027,6 +1045,13 @@ impl FunctionName {
             "round" => Self::Round,
             "rpad" => Self::Rpad,
             "split_part" => Self::SplitPart,
+            "split" => Self::Split,
+            "join" => Self::Join,
+            "concat_ws" => Self::ConcatWs,
+            "like" => Self::Like,
+            "ilike" => Self::ILike,
+            "contains_any" => Self::ContainsAny,
+            "normalize_nfc" => Self::NormalizeNfc,
             "sqrt" => Self::Sqrt,
             "strpos" => Self::Strpos,
             "substr" | "substring" => Self::Substr,
@@ -1074,6 +1099,7 @@ impl FunctionName {
             "regexp_like" => Self::RegexpLike,
             "regexp_replace" => Self::RegexpReplace,
             "regexp_substr" => Self::RegexpSubstr,
+            "regexp_extract" => Self::RegexpExtract,
             "leak_sensitive" => Self::LeakSensitive,
             "lookup_hash_map" => Self::LookupHashMap,
             "read_header" => Self::ReadHeader,
@@ -1097,6 +1123,7 @@ impl FunctionName {
             Self::Length => "length",
             Self::CharLength => "char_length",
             Self::BitLength => "bit_length",
+            Self::OctetLength => "octet_length",
             Self::Ascii => "ascii",
             Self::Coalesce => "coalesce",
             Self::IsNull => "is_null",
@@ -1148,6 +1175,13 @@ impl FunctionName {
             Self::Round => "round",
             Self::Rpad => "rpad",
             Self::SplitPart => "split_part",
+            Self::Split => "split",
+            Self::Join => "join",
+            Self::ConcatWs => "concat_ws",
+            Self::Like => "like",
+            Self::ILike => "ilike",
+            Self::ContainsAny => "contains_any",
+            Self::NormalizeNfc => "normalize_nfc",
             Self::Sqrt => "sqrt",
             Self::Strpos => "strpos",
             Self::Substr => "substr",
@@ -1195,6 +1229,7 @@ impl FunctionName {
             Self::RegexpLike => "regexp_like",
             Self::RegexpReplace => "regexp_replace",
             Self::RegexpSubstr => "regexp_substr",
+            Self::RegexpExtract => "regexp_extract",
             Self::Datetime(function) => function.name().into(),
             Self::LeakSensitive => "leak_sensitive",
             Self::LookupHashMap => "lookup_hash_map",

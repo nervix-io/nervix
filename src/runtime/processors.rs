@@ -126,6 +126,7 @@ pub(super) enum BranchedProcessorOperationSpec {
         output_routes: BranchedProcessorOutputsSpec,
         width: WindowBound,
         step: WindowBound,
+        state_limit: nervix_models::WindowStateLimit,
     },
     Reorderer {
         output_routes: BranchedProcessorOutputsSpec,
