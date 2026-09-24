@@ -228,6 +228,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   a zero divisor, and a float or math result that is NaN or infinite fail only that message with a
   per-message error. Give a route whose operands can reach those values an `ON MESSAGE ERROR`
   policy, and cast to a wider type before arithmetic that can exceed the narrower one.
+- Build fixed arrays with `[a, b]` or `array(a, b)` and vectors with `vec(a, b)`; a direct `vec()`
+  assignment takes its empty vector type from the declared `VEC` field. Keep element types exact.
+  Use `slice`, `concat`, `contains`, `overlap`, `min`, `max`, `mean`, `dot`, and `distance` as specified
+  in `Filter-Map Functions` → `Array And Vector Functions`; equal lengths are required for `dot`
+  and `distance`.
 - Expect `round(x, digits)` to round a float's stored binary value exactly, so `round(2.675, 2)` is
   `2.67`. Test for NaN and infinities with `is_nan`, `is_finite`, and `is_infinite`, which accept
   only `F32` and `F64`. Give `bitwise_and`, `bitwise_or`, and `bitwise_xor` two arguments of one
