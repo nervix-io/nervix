@@ -21040,10 +21040,10 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         .run(SCENARIOS_PATH);
 
     // The run is bounded rather than awaited: a step, a teardown diagnostic or a node stop that
-    // never returns would otherwise keep the whole suite alive until the workflow job is killed,
-    // which uploads nothing. Cucumber's fail-fast is not this guarantee — it stops scheduling and
-    // leaves the scenarios already running exactly where they are — so the retry coverage below
-    // keeps running until the budget itself expires.
+    // never returns would otherwise keep the whole suite alive until the workflow job is killed
+    // mid-scenario, leaving logs without the suite's own diagnostic. Cucumber's fail-fast is not
+    // this guarantee — it stops scheduling and leaves the scenarios already running exactly where
+    // they are — so the retry coverage below keeps running until the budget itself expires.
     let writer = match watchdog.bound(run).await {
         SuiteRun::Completed(writer) => writer,
         SuiteRun::TimedOut(timeout) => {

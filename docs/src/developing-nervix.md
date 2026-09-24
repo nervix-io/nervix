@@ -196,12 +196,12 @@ just test-connectors <filter>
 ### The scenario suite's execution budget
 
 The Cucumber suite bounds its own run. A step, a teardown diagnostic or a node stop that never
-returns ends the whole run at the budget rather than leaving the process alive until CI kills the
-job, which would upload no diagnostics at all. When the budget expires the suite prints every
-scenario still active with its attempt, its phase, how long it has been in that phase and the
-cluster nodes it holds, asks every live node to stop, waits one bounded cleanup window for them,
-and exits with status `124`. A passing run still exits `0` and a failing one still panics, so a
-wedged suite is told apart from a failing one by the exit status alone.
+returns ends the whole run at the budget rather than leaving the process alive until CI cancels the
+job, which kills it mid-scenario with no record of what each scenario was doing. When the budget
+expires the suite prints every scenario still active with its attempt, its phase, how long it has
+been in that phase and the cluster nodes it holds, asks every live node to stop, waits one bounded
+cleanup window for them, and exits with status `124`. A passing run still exits `0` and a failing
+one still panics, so a wedged suite is told apart from a failing one by the exit status alone.
 
 The default budget leaves the workflow job time for the work that precedes the suite and for the
 artifact upload that follows a timeout. Give a run a budget of its own with `--suite-budget` or the
@@ -211,6 +211,16 @@ waiting out the suite's own budget:
 ```bash
 just test-scenarios --input tests/features/cluster/rejoin.feature --suite-budget 5s
 ```
+
+The focused regressions that hold the harness's startup, status, teardown and watchdog budgets run
+in seconds:
+
+```bash
+just test-harness-liveness
+```
+
+[Integration Test Lifecycle](./integration-test-lifecycle.md) defines every harness deadline, the
+phases a scenario reports, and how each failure reaches CI output.
 
 ## Building The Documentation
 

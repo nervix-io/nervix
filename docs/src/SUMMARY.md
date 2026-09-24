@@ -65,5 +65,6 @@
   - [Data-Plane Concurrency](./data-plane-concurrency.md)
   - [Relay](./relay.md)
   - [Shutdown And Recovery](./shutdown.md)
+  - [Integration Test Lifecycle](./integration-test-lifecycle.md)
 - [Developing Nervix](./developing-nervix.md)
 - [License](./license.md)
