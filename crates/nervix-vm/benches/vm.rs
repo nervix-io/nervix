@@ -1950,9 +1950,10 @@ struct ConditionalProgram {
     output: (&'static str, DataType),
 }
 
-/// One arm per kernel cost class: pattern matching and text parsing are narrowed to the selected
-/// rows, integer arithmetic runs over the batch, and a transcendental function is narrowed.
-const CONDITIONAL_PROGRAMS: [ConditionalProgram; 4] = [
+/// One arm per kernel cost class: pattern matching and text parsing, whether it reports a failure
+/// or yields null for one, are narrowed to the selected rows, integer arithmetic runs over the
+/// batch, and a transcendental function is narrowed.
+const CONDITIONAL_PROGRAMS: [ConditionalProgram; 5] = [
     ConditionalProgram {
         name: "regex_arm",
         source: "SET matched = CASE WHEN input.selected THEN regexp_like(input.text, \
@@ -1962,6 +1963,12 @@ const CONDITIONAL_PROGRAMS: [ConditionalProgram; 4] = [
     ConditionalProgram {
         name: "parse_arm",
         source: "SET parsed = CASE WHEN input.selected THEN (input.number_text AS I64) ELSE 0 END",
+        output: ("parsed", DataType::Int64),
+    },
+    ConditionalProgram {
+        name: "tolerant_parse_arm",
+        source: "SET parsed = CASE WHEN input.selected THEN TRY_CAST(input.number_text AS I64) \
+                 ELSE 0 END",
         output: ("parsed", DataType::Int64),
     },
     ConditionalProgram {

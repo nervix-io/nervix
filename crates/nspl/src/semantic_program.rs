@@ -129,205 +129,248 @@ where
     })
 }
 
+/// A postfix `AS <type>`, which converts the operand before it.
+fn cast_suffix<'src, I>() -> impl Parser<'src, I, ParseAsType, extra::Err<ParseError<'src>>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    keyword(Token::As).ignore_then(cast_type())
+}
+
+/// An operand followed by the postfix casts `suffix` reads, each converting everything before it.
+fn cast_chain<'src, I>(
+    operand: impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone + 'src,
+    suffix: impl Parser<'src, I, ParseAsType, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    operand
+        .then(suffix.repeated().collect::<Vec<_>>())
+        .map(|(value, casts)| {
+            casts
+                .into_iter()
+                .fold(value, |expression, target| Expression::Cast {
+                    expression: Box::new(expression),
+                    target,
+                })
+        })
+        .boxed()
+}
+
+/// The prefix, arithmetic, comparison and logical operators, from the tightest binding to the
+/// loosest, over the cast chains `cast_chain` reads.
+fn operator_ladder<'src, I>(
+    cast_chain: impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    let unary = choice((
+        keyword(Token::Minus).to(UnaryOperator::Negate),
+        keyword(Token::Not).to(UnaryOperator::Not),
+    ))
+    .repeated()
+    .collect::<Vec<_>>()
+    .then(cast_chain)
+    .map(|(operators, value)| {
+        operators
+            .into_iter()
+            .rev()
+            .fold(value, |expression, operator| Expression::Unary {
+                operator,
+                expression: Box::new(expression),
+            })
+    })
+    .boxed();
+    let multiplicative = unary
+        .clone()
+        .foldl(
+            choice((
+                keyword(Token::Star).to(BinaryOperator::Multiply),
+                keyword(Token::Slash).to(BinaryOperator::Divide),
+                keyword(Token::Percent).to(BinaryOperator::Remainder),
+            ))
+            .then(unary.clone())
+            .repeated(),
+            |left, (operator, right)| Expression::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+        .boxed();
+    let additive = multiplicative
+        .clone()
+        .foldl(
+            choice((
+                keyword(Token::Plus).to(BinaryOperator::Add),
+                keyword(Token::Minus).to(BinaryOperator::Subtract),
+            ))
+            .then(multiplicative.clone())
+            .repeated(),
+            |left, (operator, right)| Expression::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+        .boxed();
+    let comparison = additive
+        .clone()
+        .foldl(
+            choice((
+                keyword(Token::Eq).to(BinaryOperator::Equal),
+                keyword(Token::NotEq).to(BinaryOperator::NotEqual),
+                keyword(Token::GtEq).to(BinaryOperator::GreaterThanOrEqual),
+                keyword(Token::LtEq).to(BinaryOperator::LessThanOrEqual),
+                keyword(Token::Gt).to(BinaryOperator::GreaterThan),
+                keyword(Token::Lt).to(BinaryOperator::LessThan),
+            ))
+            .then(additive.clone())
+            .repeated(),
+            |left, (operator, right)| Expression::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+        .boxed();
+    let and = comparison
+        .clone()
+        .foldl(
+            keyword(Token::And)
+                .to(BinaryOperator::And)
+                .then(comparison.clone())
+                .repeated(),
+            |left, (operator, right)| Expression::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+        .boxed();
+    and.clone()
+        .foldl(
+            keyword(Token::Or)
+                .to(BinaryOperator::Or)
+                .then(and)
+                .repeated(),
+            |left, (operator, right)| Expression::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        )
+        .boxed()
+}
+
 fn expression<'src, I>() -> impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     recursive(|expression| {
-        let literal = choice((
-            select! { Token::Integer(value) => Expression::Literal(Literal::I64(value)) },
-            select! { Token::Float(value) => Expression::Literal(Literal::F64(Float64Literal::new(value))) },
-            keyword(Token::True).to(Expression::Literal(Literal::Bool(true))),
-            keyword(Token::False).to(Expression::Literal(Literal::Bool(false))),
-            keyword(Token::Null).to(Expression::Literal(Literal::Null)),
-            select! { Token::String(value) => Expression::Literal(Literal::String(value)) },
-        ));
-        let arguments = expression
-            .clone()
-            .separated_by(keyword(Token::Comma))
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(keyword(Token::LParen), keyword(Token::RParen));
-        let udf_call = keyword(Token::Udf)
-            .then_ignore(keyword(Token::DoubleColon))
-            .then(name(UdfName::parse))
-            .then(arguments.clone())
-            .map(|(((), function), arguments)| Expression::UdfCall {
-                function,
-                arguments,
-            });
-        let function_call =
-            name(BuiltinFunctionName::parse)
-                .then(arguments)
-                .map(|(function, arguments)| Expression::Call {
+        // A tolerant conversion is an atom whose operand is itself built from atoms, so atoms are
+        // recursive in their own right.
+        let atom = recursive(|atom| {
+            let literal = choice((
+                select! { Token::Integer(value) => Expression::Literal(Literal::I64(value)) },
+                select! { Token::Float(value) => Expression::Literal(Literal::F64(Float64Literal::new(value))) },
+                keyword(Token::True).to(Expression::Literal(Literal::Bool(true))),
+                keyword(Token::False).to(Expression::Literal(Literal::Bool(false))),
+                keyword(Token::Null).to(Expression::Literal(Literal::Null)),
+                select! { Token::String(value) => Expression::Literal(Literal::String(value)) },
+            ));
+            let arguments = expression
+                .clone()
+                .separated_by(keyword(Token::Comma))
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(keyword(Token::LParen), keyword(Token::RParen));
+            let udf_call = keyword(Token::Udf)
+                .then_ignore(keyword(Token::DoubleColon))
+                .then(name(UdfName::parse))
+                .then(arguments.clone())
+                .map(|(((), function), arguments)| Expression::UdfCall {
                     function,
                     arguments,
                 });
-        let array = expression
-            .clone()
-            .separated_by(keyword(Token::Comma))
-            .at_least(1)
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(keyword(Token::LBracket), keyword(Token::RBracket))
-            .map(Expression::Array);
-        let when_clause = keyword(Token::When)
-            .ignore_then(expression.clone())
-            .then_ignore(keyword(Token::Then))
-            .then(expression.clone())
-            .map(|(when, result)| CaseBranch { when, result });
-        let case_expression = keyword(Token::Case)
-            .ignore_then(expression.clone().or_not())
-            .then(when_clause.repeated().at_least(1).collect::<Vec<_>>())
-            .then(
-                keyword(Token::Else)
-                    .ignore_then(expression.clone())
-                    .or_not(),
-            )
-            .then_ignore(keyword(Token::End))
-            .map(|((operand, branches), else_result)| Expression::Case {
-                operand: operand.map(Box::new),
-                branches,
-                else_result: else_result.map(Box::new),
-            });
-        let if_expression = keyword(Token::If)
-            .ignore_then(expression.clone())
-            .then_ignore(keyword(Token::Then))
-            .then(expression.clone())
-            .then_ignore(keyword(Token::Else))
-            .then(expression.clone())
-            .then_ignore(keyword(Token::End))
-            .map(|((condition, then_result), else_result)| Expression::If {
-                condition: Box::new(condition),
-                then_result: Box::new(then_result),
-                else_result: Box::new(else_result),
-            });
-        let atom = choice((
-            literal,
-            udf_call,
-            function_call,
-            array,
-            if_expression,
-            case_expression,
-            field_reference().map(Expression::Field),
-            expression
+            let function_call =
+                name(BuiltinFunctionName::parse)
+                    .then(arguments)
+                    .map(|(function, arguments)| Expression::Call {
+                        function,
+                        arguments,
+                    });
+            let array = expression
                 .clone()
-                .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
-        ))
-        .boxed();
-        let cast = atom
-            .then(
-                keyword(Token::As)
-                    .ignore_then(cast_type())
-                    .repeated()
-                    .collect::<Vec<_>>(),
-            )
-            .map(|(value, casts)| {
-                casts
-                    .into_iter()
-                    .fold(value, |expression, target| Expression::Cast {
-                        expression: Box::new(expression),
-                        target,
-                    })
-            })
-            .boxed();
-        let unary = choice((
-            keyword(Token::Minus).to(UnaryOperator::Negate),
-            keyword(Token::Not).to(UnaryOperator::Not),
-        ))
-        .repeated()
-        .collect::<Vec<_>>()
-        .then(cast)
-        .map(|(operators, value)| {
-            operators
-                .into_iter()
-                .rev()
-                .fold(value, |expression, operator| Expression::Unary {
-                    operator,
+                .separated_by(keyword(Token::Comma))
+                .at_least(1)
+                .allow_trailing()
+                .collect::<Vec<_>>()
+                .delimited_by(keyword(Token::LBracket), keyword(Token::RBracket))
+                .map(Expression::Array);
+            let when_clause = keyword(Token::When)
+                .ignore_then(expression.clone())
+                .then_ignore(keyword(Token::Then))
+                .then(expression.clone())
+                .map(|(when, result)| CaseBranch { when, result });
+            let case_expression = keyword(Token::Case)
+                .ignore_then(expression.clone().or_not())
+                .then(when_clause.repeated().at_least(1).collect::<Vec<_>>())
+                .then(
+                    keyword(Token::Else)
+                        .ignore_then(expression.clone())
+                        .or_not(),
+                )
+                .then_ignore(keyword(Token::End))
+                .map(|((operand, branches), else_result)| Expression::Case {
+                    operand: operand.map(Box::new),
+                    branches,
+                    else_result: else_result.map(Box::new),
+                });
+            let if_expression = keyword(Token::If)
+                .ignore_then(expression.clone())
+                .then_ignore(keyword(Token::Then))
+                .then(expression.clone())
+                .then_ignore(keyword(Token::Else))
+                .then(expression.clone())
+                .then_ignore(keyword(Token::End))
+                .map(|((condition, then_result), else_result)| Expression::If {
+                    condition: Box::new(condition),
+                    then_result: Box::new(then_result),
+                    else_result: Box::new(else_result),
+                });
+            // `TRY_CAST(<operand> AS <type>)` converts the whole expression before its final
+            // `AS`. The operand reads every other postfix cast as its own and leaves the one the
+            // closing parenthesis follows to the conversion.
+            let conversion = keyword(Token::As)
+                .ignore_then(cast_type())
+                .then_ignore(keyword(Token::RParen));
+            let operand_cast_suffix = cast_suffix().and_is(conversion.clone().not());
+            let try_cast = keyword(Token::TryCast)
+                .ignore_then(keyword(Token::LParen))
+                .ignore_then(operator_ladder(cast_chain(atom, operand_cast_suffix)))
+                .then(conversion)
+                .map(|(expression, target)| Expression::TryCast {
                     expression: Box::new(expression),
-                })
-        })
-        .boxed();
-        let multiplicative = unary
-            .clone()
-            .foldl(
-                choice((
-                    keyword(Token::Star).to(BinaryOperator::Multiply),
-                    keyword(Token::Slash).to(BinaryOperator::Divide),
-                    keyword(Token::Percent).to(BinaryOperator::Remainder),
-                ))
-                .then(unary.clone())
-                .repeated(),
-                |left, (operator, right)| Expression::Binary {
-                    operator,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            )
-            .boxed();
-        let additive = multiplicative
-            .clone()
-            .foldl(
-                choice((
-                    keyword(Token::Plus).to(BinaryOperator::Add),
-                    keyword(Token::Minus).to(BinaryOperator::Subtract),
-                ))
-                .then(multiplicative.clone())
-                .repeated(),
-                |left, (operator, right)| Expression::Binary {
-                    operator,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            )
-            .boxed();
-        let comparison = additive
-            .clone()
-            .foldl(
-                choice((
-                    keyword(Token::Eq).to(BinaryOperator::Equal),
-                    keyword(Token::NotEq).to(BinaryOperator::NotEqual),
-                    keyword(Token::GtEq).to(BinaryOperator::GreaterThanOrEqual),
-                    keyword(Token::LtEq).to(BinaryOperator::LessThanOrEqual),
-                    keyword(Token::Gt).to(BinaryOperator::GreaterThan),
-                    keyword(Token::Lt).to(BinaryOperator::LessThan),
-                ))
-                .then(additive.clone())
-                .repeated(),
-                |left, (operator, right)| Expression::Binary {
-                    operator,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            )
-            .boxed();
-        let and = comparison
-            .clone()
-            .foldl(
-                keyword(Token::And)
-                    .to(BinaryOperator::And)
-                    .then(comparison.clone())
-                    .repeated(),
-                |left, (operator, right)| Expression::Binary {
-                    operator,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            )
-            .boxed();
-        and.clone()
-            .foldl(
-                keyword(Token::Or)
-                    .to(BinaryOperator::Or)
-                    .then(and)
-                    .repeated(),
-                |left, (operator, right)| Expression::Binary {
-                    operator,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            )
-            .boxed()
+                    target,
+                });
+            choice((
+                literal,
+                udf_call,
+                function_call,
+                array,
+                if_expression,
+                case_expression,
+                try_cast,
+                field_reference().map(Expression::Field),
+                expression
+                    .clone()
+                    .delimited_by(keyword(Token::LParen), keyword(Token::RParen)),
+            ))
+        });
+        operator_ladder(cast_chain(atom, cast_suffix()))
     })
 }
 
@@ -631,5 +674,158 @@ mod tests {
             Expression::Call { ref function, .. } if function.as_str() == "add_one"
         ));
         assert!(parse_expression("builtin::add_one(input.value)").is_err());
+    }
+
+    fn input(field: &str) -> Expression {
+        Expression::Field(FieldReference::scoped(
+            FieldScope::Input,
+            FieldName::parse(field).expect("test field names are valid"),
+        ))
+    }
+
+    fn cast(expression: Expression, target: ParseAsType) -> Expression {
+        Expression::Cast {
+            expression: Box::new(expression),
+            target,
+        }
+    }
+
+    fn try_cast(expression: Expression, target: ParseAsType) -> Expression {
+        Expression::TryCast {
+            expression: Box::new(expression),
+            target,
+        }
+    }
+
+    fn parsed(source: &str) -> Expression {
+        parse_expression(source).unwrap_or_else(|error| panic!("`{source}` must parse: {error}"))
+    }
+
+    #[test]
+    fn parses_a_tolerant_conversion_in_any_letter_case() {
+        let expected = try_cast(input("raw"), ParseAsType::I64);
+        assert_eq!(parsed("TRY_CAST(input.raw AS I64)"), expected);
+        assert_eq!(parsed("try_cast(input.raw as int64)"), expected);
+        assert_eq!(
+            parsed("TRY_CAST(input.raw AS DATETIME)"),
+            try_cast(input("raw"), ParseAsType::Datetime)
+        );
+    }
+
+    #[test]
+    fn a_tolerant_conversion_converts_the_whole_expression_before_its_final_as() {
+        let sum = Expression::Binary {
+            operator: BinaryOperator::Add,
+            left: Box::new(input("low")),
+            right: Box::new(input("high")),
+        };
+        assert_eq!(
+            parsed("TRY_CAST(input.low + input.high AS STRING)"),
+            try_cast(sum, ParseAsType::String)
+        );
+        assert_eq!(
+            parsed("TRY_CAST(-input.value AS I32)"),
+            try_cast(
+                Expression::Unary {
+                    operator: UnaryOperator::Negate,
+                    expression: Box::new(input("value")),
+                },
+                ParseAsType::I32,
+            )
+        );
+        // Every postfix cast but the last belongs to the operand.
+        assert_eq!(
+            parsed("TRY_CAST(input.raw AS I64 AS STRING)"),
+            try_cast(cast(input("raw"), ParseAsType::I64), ParseAsType::String)
+        );
+        // A cast the operand closes in its own parentheses or call stays with it.
+        assert_eq!(
+            parsed("TRY_CAST((input.raw AS I64) AS STRING)"),
+            try_cast(cast(input("raw"), ParseAsType::I64), ParseAsType::String)
+        );
+        assert_eq!(
+            parsed("TRY_CAST(abs(input.raw AS I64) AS U8)"),
+            try_cast(
+                Expression::Call {
+                    function: BuiltinFunctionName::parse("abs").expect("valid function name"),
+                    arguments: vec![cast(input("raw"), ParseAsType::I64)],
+                },
+                ParseAsType::U8,
+            )
+        );
+    }
+
+    #[test]
+    fn a_tolerant_conversion_composes_as_an_operand() {
+        assert_eq!(
+            parsed("TRY_CAST(input.raw AS I64) AS U8"),
+            cast(try_cast(input("raw"), ParseAsType::I64), ParseAsType::U8)
+        );
+        assert_eq!(
+            parsed("TRY_CAST(TRY_CAST(input.raw AS F64) AS I64)"),
+            try_cast(try_cast(input("raw"), ParseAsType::F64), ParseAsType::I64)
+        );
+        assert_eq!(
+            parsed("coalesce(TRY_CAST(input.raw AS I64), 0) + 1"),
+            Expression::Binary {
+                operator: BinaryOperator::Add,
+                left: Box::new(Expression::Call {
+                    function: BuiltinFunctionName::parse("coalesce").expect("valid function name"),
+                    arguments: vec![
+                        try_cast(input("raw"), ParseAsType::I64),
+                        Expression::Literal(Literal::I64(0)),
+                    ],
+                }),
+                right: Box::new(Expression::Literal(Literal::I64(1))),
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_tolerant_conversion_without_its_target_type() {
+        for source in [
+            "TRY_CAST(input.raw)",
+            "TRY_CAST(input.raw, I64)",
+            "TRY_CAST input.raw AS I64",
+            "TRY_CAST(input.raw AS I64",
+            "TRY_CAST((input.raw AS I64))",
+            "TRY_CAST(AS I64)",
+            "TRY_CAST()",
+        ] {
+            assert!(
+                parse_expression(source).is_err(),
+                "`{source}` must be rejected"
+            );
+        }
+        let error = parse_expression("TRY_CAST(input.raw AS NUMBER)")
+            .expect_err("an unknown target type must be rejected");
+        assert!(
+            error.to_string().contains("unsupported type 'NUMBER'"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reserves_the_tolerant_conversion_keyword_in_field_references() {
+        assert!(parse_expression("input.try_cast").is_err());
+        assert!(parse_expression("try_cast").is_err());
+        assert!(parse_expression("try_cast(input.raw)").is_err());
+    }
+
+    #[test]
+    fn a_rendered_tolerant_conversion_reparses_to_the_same_expression() {
+        for source in [
+            "TRY_CAST(input.low + input.high AS STRING)",
+            "TRY_CAST(input.raw AS I64 AS STRING)",
+            "TRY_CAST(input.raw AS I64) AS U8",
+            "TRY_CAST(NOT input.flag AS BOOL AS I64)",
+            "-TRY_CAST(input.raw AS I64) * 2",
+            "TRY_CAST(CASE WHEN input.flag THEN input.raw AS I64 END AS STRING)",
+        ] {
+            let expression = parsed(source);
+            let rendered = nervix_models::expression_to_nspl(&expression)
+                .unwrap_or_else(|error| panic!("`{source}` must render: {error}"));
+            assert_eq!(parsed(&rendered), expression, "`{rendered}` regrouped");
+        }
     }
 }

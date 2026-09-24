@@ -257,7 +257,8 @@ Emitter expressions use the same typed surface as other runtime nodes:
 
 - arithmetic: `+`, `-`, `*`, `/`, `%`
 - comparisons and boolean logic: `=`, `!=`, `>`, `<`, `>=`, `<=`, `AND`, `OR`, `NOT`
-- explicit casts: `expr AS TYPE`
+- explicit conversions: `expr AS TYPE`, and `TRY_CAST(expr AS TYPE)`, which yields a typed null
+  instead of failing the message
 - built-ins: string, null-handling, numeric, regex, and contextual functions such as `lower`, `coalesce`, `abs`, `regexp_substr`, `now`, and `uuid_v4`
 
 See [Filter-Map Functions](filter-map-functions.md) for the full function reference.

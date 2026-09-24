@@ -179,6 +179,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   consequence of changing the module, and it cannot select a branch.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
+- Choose a conversion by what a value that does not convert should do: `expr AS TYPE` fails the
+  message with `cast_failed` and activates `ON MESSAGE ERROR`, while `TRY_CAST(expr AS TYPE)`
+  yields a typed null. A `TRY_CAST` result is always optional, so write it to an `OPTIONAL` field or
+  wrap it in `coalesce(...)`. It suppresses only its own conversion: a failure inside its operand
+  still fails the message. Check `Filter-Map Functions` → `Conversions` for the values each
+  conversion rejects.
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
   result at one exact type; remember that omitted `CASE ELSE` yields a typed null and requires an
   optional destination. An arm is evaluated only for the messages that select it, so a `CASE`

@@ -17,14 +17,15 @@ use crate::{
         RegisterSpace, RegisterType, ScalarValue, SelectArm,
     },
     program::{
-        BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
-        Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
+        BinaryOp, CaseArm, CastFailure, Expr, FieldRef, FunctionName, InternalFieldNamespace,
+        InternalFieldRef, Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp,
+        WindowAggregateFunction,
     },
     regexp::{PatternSource, RegexpCall, RegexpFunction},
     semantics::{
-        BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
+        ArmExecution, BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
-        builtin_signature, cast_descriptor, expr_semantics, unary_descriptor,
+        builtin_signature, cast_arm_execution, cast_descriptor, expr_semantics, unary_descriptor,
     },
 };
 
@@ -206,6 +207,7 @@ enum ExprKey {
     Cast {
         expr: Box<ExprKey>,
         data_type: DataType,
+        on_failure: CastFailure,
     },
     Call {
         function: FunctionName,
@@ -768,13 +770,14 @@ impl Compiler {
     }
 
     /// Whether the register `expr` just compiled to may answer the same expression wherever it
-    /// appears again. A call out of the VM made under a conditional arm's selection answers the
-    /// selected rows only and leaves a null on every other row, so it is reusable only when it
-    /// was made for every row. Every other expression computes every row whatever arm it is in.
+    /// appears again. A call out of the VM, or a cast that yields null for a failure, made under a
+    /// conditional arm's selection may answer the selected rows only and leave a null on every
+    /// other row, so it is reusable only when it was made for every row. Every other expression
+    /// computes every row whatever arm it is in.
     fn register_is_reusable(&self, expr: &SpannedExpr) -> bool {
         match self.current_selection {
             None => true,
-            Some(_) => !expr.inner.calls_out_of_the_vm(),
+            Some(_) => !expr.inner.may_answer_selected_rows_only(),
         }
     }
 
@@ -1139,9 +1142,10 @@ impl Compiler {
             Expr::Cast {
                 expr: inner,
                 data_type,
+                on_failure,
             } => {
                 let input_type = self.infer_expr_type(inner)?;
-                cast_descriptor().validate(&input_type, data_type, expr.span)?;
+                cast_descriptor(*on_failure).validate(&input_type, data_type, expr.span)?;
                 Ok(data_type.clone())
             }
             Expr::Call { function, args } => {
@@ -1323,7 +1327,16 @@ impl Compiler {
                 let binding = self.validate_internal_field_ref(field_ref, expr.span)?;
                 Ok(binding.nullable)
             }
-            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => self.expr_may_be_null(expr),
+            Expr::Unary { expr, .. } => self.expr_may_be_null(expr),
+            // A cast that reports a value it cannot convert fails that row, so its result is null
+            // only where its operand is. One that yields null for such a value may be null for
+            // any row.
+            Expr::Cast {
+                expr, on_failure, ..
+            } => match on_failure {
+                CastFailure::Error => self.expr_may_be_null(expr),
+                CastFailure::Null => Ok(true),
+            },
             Expr::Binary { left, right, .. } => {
                 Ok(self.expr_may_be_null(left)? || self.expr_may_be_null(right)?)
             }
@@ -1720,13 +1733,22 @@ impl Compiler {
             Expr::Cast {
                 expr: inner,
                 data_type,
+                on_failure,
             } => {
                 let input = self.compile_expr(inner)?;
                 let target = RegisterType::from_data_type(data_type).verified(
                     "type inference above rejected every data type that has no register type",
                 );
                 let dst = self.alloc_temp(target);
-                self.emit(InstructionKind::Cast { dst, input, target }, expr.span);
+                self.emit(
+                    InstructionKind::Cast {
+                        dst,
+                        input,
+                        target,
+                        on_failure: *on_failure,
+                    },
+                    expr.span,
+                );
                 Ok(dst)
             }
             Expr::Call { function, args } => {
@@ -2169,9 +2191,14 @@ impl ExprKey {
                 left: Box::new(Self::from_expr(left.as_ref())),
                 right: Box::new(Self::from_expr(right.as_ref())),
             },
-            Expr::Cast { expr, data_type } => Self::Cast {
+            Expr::Cast {
+                expr,
+                data_type,
+                on_failure,
+            } => Self::Cast {
                 expr: Box::new(Self::from_expr(expr.as_ref())),
                 data_type: data_type.clone(),
+                on_failure: *on_failure,
             },
             Expr::Call { function, args } => Self::Call {
                 function: function.clone(),
@@ -3364,7 +3391,7 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
         InstructionKind::Binary { op, .. } => binary_descriptor(*op)
             .semantics
             .supports_common_subexpression_elimination(),
-        InstructionKind::Cast { .. } => cast_descriptor()
+        InstructionKind::Cast { on_failure, .. } => cast_descriptor(*on_failure)
             .semantics
             .supports_common_subexpression_elimination(),
         InstructionKind::Builtin { lowering, .. } => {
@@ -3378,11 +3405,24 @@ fn instruction_is_removable_if_dead(kind: &InstructionKind) -> bool {
 /// Whether a conditional arm confines this instruction to the rows it selects. An instruction
 /// that cannot report a per-row error and does not call out of the VM runs over the whole batch:
 /// its result on an unselected row is never observed, and nothing else it does is observable.
+/// A cast that yields null for a failure is the exception: when it parses or formats text, the
+/// arm confines it to the rows it selects so that no other row pays for the conversion.
 fn instruction_observes_selection(kind: &InstructionKind) -> bool {
     match kind {
         InstructionKind::Unary { op, .. } => unary_descriptor(*op).semantics.can_error,
         InstructionKind::Binary { op, .. } => binary_descriptor(*op).semantics.can_error,
-        InstructionKind::Cast { .. } => cast_descriptor().semantics.can_error,
+        InstructionKind::Cast {
+            input,
+            target,
+            on_failure,
+            ..
+        } => {
+            let converts_text = matches!(
+                cast_arm_execution(input.ty, *target),
+                ArmExecution::SelectedRows
+            );
+            cast_descriptor(*on_failure).semantics.can_error || converts_text
+        }
         InstructionKind::Builtin { lowering, .. } => {
             builtin_semantics_for_lowering(lowering).can_error
         }

@@ -296,6 +296,12 @@ pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNs
             operand_to_nspl(expression, PRECEDENCE_CAST)?,
             parse_as_to_keyword(target)
         )),
+        // The operand is the whole expression before the final `AS`, so it needs no parentheses.
+        Expression::TryCast { expression, target } => Ok(format!(
+            "TRY_CAST({} AS {})",
+            expression_to_nspl(expression)?,
+            parse_as_to_keyword(target)
+        )),
         Expression::Call {
             function,
             arguments,
@@ -5251,5 +5257,46 @@ mod tests {
         for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
             expression_to_nspl(&float_value(value)).expect_err("must not render");
         }
+    }
+
+    #[test]
+    fn renders_a_tolerant_conversion_around_its_whole_operand() {
+        let sum = Expression::Binary {
+            operator: BinaryOperator::Add,
+            left: Box::new(scoped_field(FieldScope::Input, "low")),
+            right: Box::new(scoped_field(FieldScope::Input, "high")),
+        };
+        let converted_sum = Expression::TryCast {
+            expression: Box::new(sum),
+            target: ParseAsType::String,
+        };
+        assert_eq!(
+            expression_to_nspl(&converted_sum).expect("must render"),
+            "TRY_CAST(input.low + input.high AS STRING)"
+        );
+
+        let reparsed = Expression::TryCast {
+            expression: Box::new(Expression::Cast {
+                expression: Box::new(scoped_field(FieldScope::Input, "raw")),
+                target: ParseAsType::I64,
+            }),
+            target: ParseAsType::String,
+        };
+        assert_eq!(
+            expression_to_nspl(&reparsed).expect("must render"),
+            "TRY_CAST(input.raw AS I64 AS STRING)"
+        );
+
+        let narrowed = Expression::Cast {
+            expression: Box::new(Expression::TryCast {
+                expression: Box::new(scoped_field(FieldScope::Input, "raw")),
+                target: ParseAsType::I64,
+            }),
+            target: ParseAsType::U8,
+        };
+        assert_eq!(
+            expression_to_nspl(&narrowed).expect("must render"),
+            "TRY_CAST(input.raw AS I64) AS U8"
+        );
     }
 }

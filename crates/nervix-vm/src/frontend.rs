@@ -22,7 +22,7 @@ use thiserror::Error;
 use crate::{
     datetime::{DatetimeFormat, DatetimeParser, FormatDefect, ParseFormat, ParserZoneMismatch},
     program::{
-        BinaryOp, CalendarUnit, CaseArm, DateBinWidth, DatePart, DatetimeFunction,
+        BinaryOp, CalendarUnit, CaseArm, CastFailure, DateBinWidth, DatePart, DatetimeFunction,
         DatetimeFunctionName, DatetimeUnit, Disambiguation, Expr, FieldRef, FixedTimeUnit,
         FunctionName, Invocation, Literal, Program, Span, SpannedExpr, SpannedInvocation,
         SpannedNode, UnaryOp, Zone, spanned,
@@ -1195,6 +1195,10 @@ fn resolve_expression(
             expression: Box::new(resolve_expression(expression, resolve_field)?),
             target: target.clone(),
         },
+        ModelExpression::TryCast { expression, target } => ModelExpression::TryCast {
+            expression: Box::new(resolve_expression(expression, resolve_field)?),
+            target: target.clone(),
+        },
         ModelExpression::Call {
             function,
             arguments,
@@ -1416,6 +1420,12 @@ fn lower_expression_with_span(
         ModelExpression::Cast { expression, target } => Expr::Cast {
             expr: Box::new(lower_expression_with_span(expression, scope_policy, span)?),
             data_type: scalar_data_type(target, span)?,
+            on_failure: CastFailure::Error,
+        },
+        ModelExpression::TryCast { expression, target } => Expr::Cast {
+            expr: Box::new(lower_expression_with_span(expression, scope_policy, span)?),
+            data_type: scalar_data_type(target, span)?,
+            on_failure: CastFailure::Null,
         },
         ModelExpression::Call {
             function,
@@ -2390,6 +2400,79 @@ mod tests {
         assert_frontend_error(
             lower_expression(
                 &ModelExpression::Cast {
+                    expression: Box::new(ModelExpression::Literal(ModelLiteral::I64(1))),
+                    target: target.clone(),
+                },
+                SemanticScopePolicy::read_only("input"),
+            ),
+            FrontendErrorKind::UnsupportedCollectionCast {
+                expected: CastTargetKind::Scalar,
+                found: target,
+            },
+        );
+    }
+
+    #[test]
+    fn lowers_a_tolerant_conversion_to_a_cast_that_yields_null_for_a_failure() {
+        let lowered = lower_expression(
+            &expression("TRY_CAST(input.raw AS I64) AS U8"),
+            SemanticScopePolicy::read_only("input"),
+        )
+        .assured("the conversion reads an input field");
+        let Expr::Cast {
+            expr: operand,
+            data_type: DataType::UInt8,
+            on_failure: CastFailure::Error,
+        } = &lowered.inner
+        else {
+            panic!("AS lowers to a cast that reports its failures, found {lowered:?}");
+        };
+        let Expr::Cast {
+            data_type: DataType::Int64,
+            on_failure: CastFailure::Null,
+            ..
+        } = &operand.inner
+        else {
+            panic!("TRY_CAST lowers to a cast that yields null, found {operand:?}");
+        };
+
+        let input = nullable_schema(&[("raw", DataType::Utf8)]);
+        let output = nullable_schema(&[("raw", DataType::Utf8), ("amount", DataType::Int64)]);
+        let route = lower_transforming_route(
+            &construction("SET amount = TRY_CAST(message.raw AS I64)"),
+            &input,
+            &output,
+        )
+        .assured("the working message holds the uninitialized input field");
+        let [(_, value)] = route.inner.set.as_slice() else {
+            panic!(
+                "the route lowers one assignment, found {:?}",
+                route.inner.set
+            );
+        };
+        let Expr::Cast {
+            expr: operand,
+            on_failure: CastFailure::Null,
+            ..
+        } = &value.inner
+        else {
+            panic!("TRY_CAST lowers to a cast that yields null, found {value:?}");
+        };
+        assert_eq!(
+            operand.inner,
+            Expr::FieldRef(FieldRef {
+                relay: "input".to_string(),
+                field: "raw".to_string(),
+            }),
+            "the operand reads the working message field from the input"
+        );
+
+        let target = ParseAsType::Vec {
+            element: Box::new(ParseAsType::I64),
+        };
+        assert_frontend_error(
+            lower_expression(
+                &ModelExpression::TryCast {
                     expression: Box::new(ModelExpression::Literal(ModelLiteral::I64(1))),
                     target: target.clone(),
                 },

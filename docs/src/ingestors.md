@@ -298,7 +298,8 @@ Common expression patterns include:
 - nested conditions such as `(active AND amount > 5) OR NOT flagged`
 - chained calls such as `lower(trim(raw))`
 - arithmetic expressions such as `(amount + fee) / divisor`
-- explicit casts such as `raw AS INT64`
+- explicit casts such as `raw AS INT64`, and tolerant conversions such as
+  `TRY_CAST(raw AS INT64)`, which yield a typed null instead of failing the message
 
 The expression type surface matches the full Nervix internal schema type set:
 

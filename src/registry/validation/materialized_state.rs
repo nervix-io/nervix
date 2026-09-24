@@ -186,7 +186,9 @@ fn expression_contains_nondeterministic_or_side_effect_call(
 ) -> bool {
     match expression {
         Expression::Literal(_) | Expression::Field(_) => false,
-        Expression::Unary { expression, .. } | Expression::Cast { expression, .. } => {
+        Expression::Unary { expression, .. }
+        | Expression::Cast { expression, .. }
+        | Expression::TryCast { expression, .. } => {
             expression_contains_nondeterministic_or_side_effect_call(expression, models)
         }
         Expression::Binary { left, right, .. } => {

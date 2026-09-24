@@ -24,7 +24,8 @@ belongs to a header-capable ingestor and the original source envelope was captur
 General rules:
 
 - function names are case-insensitive
-- there is no implicit cast insertion
+- there is no implicit cast insertion; `expr AS TYPE` and `TRY_CAST(expr AS TYPE)` convert
+  explicitly, as [Conversions](#conversions) describes
 - argument and result types are validated when the statement is applied
 - sensitive values retain their sensitivity through expression evaluation; internal relay and node outputs may assign them to a non-sensitive field only with an explicit `leak_sensitive(...)`
 - every sensitive value crossing an emitter boundary requires `leak_sensitive(...)` or explicit
@@ -170,6 +171,84 @@ result never depends on the other messages in its batch.
 The error's message names the failure, such as `integer addition overflowed`, `integer remainder by
 zero`, `integer left shift by a negative count`, or `floating-point operation produced a non-finite
 result`.
+
+## Conversions
+
+A value never changes its type implicitly. Two explicit forms convert it to another scalar type.
+They accept the same types and convert every value the same way, and differ only in what a value
+that does not convert does:
+
+| Form | Result | A value that does not convert |
+| --- | --- | --- |
+| `<expr> AS <type>` | `<type>`, optional exactly when `<expr>` is | Reports a per-message `cast_failed` error, such as `cannot cast value to Int64`, and yields null for that message, which activates `ON MESSAGE ERROR` |
+| `TRY_CAST(<expr> AS <type>)` | Optional `<type>` | Yields a typed null, and the message continues without an error |
+
+`<type>` is a scalar type written with the same spellings in both forms, such as `I64` or `INT64`,
+`F64` or `FLOAT64`, `BOOL`, `STRING`, and `DATETIME`; see [NSPL Overview](nspl-overview.md) for
+every spelling. A null operand is not a failure: it converts to a typed null in both forms, so
+`input.amount AS I64` over a message without an `amount` yields null and reports nothing. Test the
+operand to tell a missing value from one that did not convert:
+
+```nspl,ignore
+SET amount = TRY_CAST(input.amount AS I64),
+    amount_state = CASE
+      WHEN is_null(input.amount) THEN 'missing'
+      WHEN is_null(TRY_CAST(input.amount AS I64)) THEN 'malformed'
+      ELSE 'converted'
+    END
+```
+
+The result of `TRY_CAST` is optional even for a conversion that cannot fail, so it initializes a
+required field only through an expression that is never null, such as
+`coalesce(TRY_CAST(input.amount AS I64), 0)`, and a statement that assigns it to a required field
+directly is rejected when it is applied. It keeps the sensitivity of its operand, as every
+conversion does.
+
+`TRY_CAST` suppresses only the failure of the conversion it performs. Every other failure of its
+operand still fails the message with its own error:
+
+- `TRY_CAST(100 / input.divisor AS STRING)` reports `division_by_zero` for a zero divisor.
+- `TRY_CAST(input.raw AS I64 AS STRING)` converts `input.raw AS I64`, which reports `cast_failed`
+  for text that is not an integer.
+- A UDF called in the operand reports its own per-message errors, and a failure of the whole batch
+  still fails the batch.
+
+A conversion of a `TRY_CAST` result is an ordinary one: `TRY_CAST(input.raw AS I64) AS U8` fails a
+message whose number does not fit `U8`, and yields null without an error for one whose text is not
+an integer. Inside a conditional, a `TRY_CAST` converts only the messages that select its arm, as
+every operation does.
+
+The operand of `TRY_CAST` is the whole expression before its final `AS`, so
+`TRY_CAST(input.low + input.high AS STRING)` converts the sum, while in
+`input.low + input.high AS STRING` the `AS` applies to `input.high` alone. `TRY_CAST` is reserved
+in expressions in the same way as the [conditional keywords](#conditional-expressions).
+
+A conversion between scalar types succeeds for every value, except for the values the table
+below lists:
+
+- Every value converts to `STRING`. A float is written in decimal without an exponent, and a
+  `DATETIME` in RFC 3339 with a `+00:00` offset, such as `2024-02-29T12:00:00+00:00`.
+- A number converts to `BOOL` as `false` for zero and `true` for every other value, including NaN,
+  and a `BOOL` converts to a number as `0` or `1`.
+- A number converts to `F32` or `F64` as the nearest value of that type, so an `F64` beyond the
+  `F32` range becomes an infinity.
+- A `DATETIME` converts to `I64` as its count of nanoseconds since `1970-01-01T00:00:00Z`, and to
+  `F32` or `F64` as the nearest value to that count. An integer converts to the `DATETIME` that many
+  nanoseconds after that instant.
+
+| From | To | Fails for |
+| --- | --- | --- |
+| An integer type | Another integer type | A value outside the target type's range |
+| `U64` | `DATETIME` | A value above the largest `I64` |
+| `F32`, `F64` | An integer type | NaN, an infinity, and a value whose integer part, which it is rounded to toward zero, is outside the target type's range |
+| `F32`, `F64` | `DATETIME` | NaN, an infinity, and a value outside the `DATETIME` range when read as nanoseconds since `1970-01-01T00:00:00Z` |
+| `STRING` | An integer type | Text other than an optional `+` or `-` followed by decimal digits, and a number outside the target type's range |
+| `STRING` | `F32`, `F64` | Text other than a decimal number with an optional sign, fraction, and exponent, or `NaN`, `inf`, or `infinity` in any letter case. A number beyond the type's range reads as an infinity |
+| `STRING` | `BOOL` | Text other than `t`, `tr`, `tru`, `true`, `y`, `ye`, `yes`, `on`, or `1`, which read as `true`, and `f`, `fa`, `fal`, `fals`, `false`, `n`, `no`, `of`, `off`, or `0`, which read as `false`, in any letter case and with any surrounding whitespace |
+| `STRING` | `DATETIME` | Text that is not an RFC 3339 date and time with a UTC offset, such as `2024-02-29T12:00:00Z`, and an instant outside the `DATETIME` range |
+| `DATETIME` | An integer type other than `I64` | A count of nanoseconds since `1970-01-01T00:00:00Z` outside the target type's range |
+| `BOOL` | `DATETIME` | Every value |
+| `DATETIME` | `BOOL` | Every value |
 
 ## Header Functions
 
@@ -785,6 +864,7 @@ SET normalized = lower(trim(input.raw)),
     rooted = sqrt(input.score),
     price = round(input.price, 2),
     heading = degrees(atan2(input.north, input.east)),
-    alert_flags = bitwise_and(input.flags, 255 AS U16)
+    alert_flags = bitwise_and(input.flags, 255 AS U16),
+    retries = coalesce(TRY_CAST(input.retries_text AS I32), 0)
 WHERE output.active AND regexp_like(lower(trim(input.raw)), 'warn|error')
 ```

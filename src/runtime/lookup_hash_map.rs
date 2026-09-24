@@ -216,6 +216,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
         Expr::Cast {
             expr: inner,
             data_type,
+            on_failure,
         } => nervix_vm::program::SpannedNode {
             inner: Expr::Cast {
                 expr: Box::new(rewrite_lookup_hash_map_expr(
@@ -224,6 +225,7 @@ pub(super) fn rewrite_lookup_hash_map_expr(
                     pending_calls,
                 )?),
                 data_type: data_type.clone(),
+                on_failure: *on_failure,
             },
             span: expr.span,
         },
