@@ -55,7 +55,10 @@ pub enum ArmExecution {
     /// narrowing it.
     WholeBatch,
     /// The kernel runs over the selected rows only. Right for pattern matching, text parsing and
-    /// formatting, calendar arithmetic, transcendental functions and calls out of the VM.
+    /// formatting, calendar arithmetic, transcendental functions, UUID generation and calls out
+    /// of the VM, and required for a builtin that builds text of a length its arguments choose:
+    /// every row's text shares the one column's size limit, so text built for a row the arm did
+    /// not select could leave a selected row no room and fail it.
     SelectedRows,
 }
 
@@ -685,7 +688,6 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         // under a selection at all.
         BuiltinLowering::Now
         | BuiltinLowering::UuidV4
-        | BuiltinLowering::UuidV7
         | BuiltinLowering::Lower
         | BuiltinLowering::Upper
         | BuiltinLowering::Trim
@@ -713,14 +715,11 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::Floor
         | BuiltinLowering::Initcap
         | BuiltinLowering::Left
-        | BuiltinLowering::Lpad
         | BuiltinLowering::Md5
-        | BuiltinLowering::Repeat
         | BuiltinLowering::Replace
         | BuiltinLowering::Reverse
         | BuiltinLowering::Right
         | BuiltinLowering::Round
-        | BuiltinLowering::Rpad
         | BuiltinLowering::SplitPart
         | BuiltinLowering::Sqrt
         | BuiltinLowering::Strpos
@@ -741,8 +740,14 @@ pub const fn builtin_arm_execution(lowering: &BuiltinLowering) -> ArmExecution {
         | BuiltinLowering::ShiftLeft
         | BuiltinLowering::ShiftRight
         | BuiltinLowering::BitCount => ArmExecution::WholeBatch,
-        // Transcendental functions and pattern matching cost far more per row than narrowing.
-        BuiltinLowering::Acos
+        // Text sized by an argument must only spend its column's size limit on selected rows.
+        BuiltinLowering::Repeat | BuiltinLowering::Lpad | BuiltinLowering::Rpad => {
+            ArmExecution::SelectedRows
+        }
+        // Transcendental functions, pattern matching and UUID generation cost far more per row
+        // than narrowing.
+        BuiltinLowering::UuidV7
+        | BuiltinLowering::Acos
         | BuiltinLowering::Asin
         | BuiltinLowering::Atan
         | BuiltinLowering::Atan2
@@ -866,11 +871,19 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: false,
             null_propagation: NullPropagation::NeverNull,
         },
-        BuiltinLowering::UuidV4 | BuiltinLowering::UuidV7 => OperationSemantics {
+        BuiltinLowering::UuidV4 => OperationSemantics {
             volatility: Volatility::Volatile,
             dependency_scope: DependencyScope::ExecutionLocal,
             has_side_effects: false,
             can_error: false,
+            null_propagation: NullPropagation::NeverNull,
+        },
+        // A version 7 UUID has no encoding for an execution time before the Unix epoch.
+        BuiltinLowering::UuidV7 => OperationSemantics {
+            volatility: Volatility::Volatile,
+            dependency_scope: DependencyScope::ExecutionLocal,
+            has_side_effects: false,
+            can_error: true,
             null_propagation: NullPropagation::NeverNull,
         },
         BuiltinLowering::Lower
@@ -888,13 +901,10 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::EndsWith
         | BuiltinLowering::Initcap
         | BuiltinLowering::Left
-        | BuiltinLowering::Lpad
         | BuiltinLowering::Md5
-        | BuiltinLowering::Repeat
         | BuiltinLowering::Replace
         | BuiltinLowering::Reverse
         | BuiltinLowering::Right
-        | BuiltinLowering::Rpad
         | BuiltinLowering::SplitPart
         | BuiltinLowering::Strpos
         | BuiltinLowering::Substr
@@ -965,7 +975,11 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Sign
         | BuiltinLowering::Trunc
         | BuiltinLowering::ShiftLeft
-        | BuiltinLowering::ShiftRight => OperationSemantics {
+        | BuiltinLowering::ShiftRight
+        // A count can ask for more text than one STRING column holds.
+        | BuiltinLowering::Repeat
+        | BuiltinLowering::Lpad
+        | BuiltinLowering::Rpad => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
@@ -1953,6 +1967,17 @@ mod tests {
             builtin_arm_execution(&BuiltinLowering::Exp),
             ArmExecution::SelectedRows
         );
+        for sized_text in [
+            BuiltinLowering::Repeat,
+            BuiltinLowering::Lpad,
+            BuiltinLowering::Rpad,
+        ] {
+            assert_eq!(
+                builtin_arm_execution(&sized_text),
+                ArmExecution::SelectedRows,
+                "{sized_text:?} must spend its column's size limit on selected rows only"
+            );
+        }
         assert_eq!(
             builtin_arm_execution(&BuiltinLowering::Regexp(
                 RegexpCall::reading_pattern_argument(RegexpFunction::Like)
