@@ -182,6 +182,7 @@ impl RelayProcessorOperationNode {
                     width_duration,
                     step_duration,
                     aggregate,
+                    plan,
                     ..
                 },
                 RelayProcessorOperationTemplate::WindowProcessor {
@@ -191,6 +192,7 @@ impl RelayProcessorOperationNode {
                     width_duration: desired_width_duration,
                     step_duration: desired_step_duration,
                     aggregate: desired_aggregate,
+                    plan: desired_plan,
                     ..
                 },
             ) => {
@@ -199,6 +201,7 @@ impl RelayProcessorOperationNode {
                     || width_duration != desired_width_duration
                     || step_duration != desired_step_duration
                     || aggregate != desired_aggregate
+                    || plan != desired_plan
                 {
                     return Err(Report::new(ProcessorTemplateError::WindowStateShape));
                 }

@@ -297,6 +297,87 @@ impl ArgumentColumn {
     pub(super) fn slice(&self, row: usize) -> ArrayRef {
         self.array.slice(row, 1)
     }
+
+    /// A stable, type-separated byte key for a present sketch input. Floating-point zero has
+    /// one encoding regardless of sign. Non-finite values are refused before admission.
+    pub(super) fn sketch_key(&self, row: usize) -> Option<Vec<u8>> {
+        if !self.is_present(row) {
+            return None;
+        }
+        let mut key = Vec::new();
+        match &self.values {
+            ArgumentValues::UInt8(values) => {
+                key.push(1);
+                key.push(values.value(row));
+            }
+            ArgumentValues::Int8(values) => {
+                key.push(2);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::UInt16(values) => {
+                key.push(3);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::Int16(values) => {
+                key.push(4);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::UInt32(values) => {
+                key.push(5);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::Int32(values) => {
+                key.push(6);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::UInt64(values) => {
+                key.push(7);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::Int64(values) => {
+                key.push(8);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::Float32(values) => {
+                key.push(9);
+                key.extend_from_slice(
+                    &if values.value(row) == 0.0 {
+                        0.0_f32
+                    } else {
+                        values.value(row)
+                    }
+                    .to_bits()
+                    .to_le_bytes(),
+                );
+            }
+            ArgumentValues::Float64(values) => {
+                key.push(10);
+                key.extend_from_slice(
+                    &if values.value(row) == 0.0 {
+                        0.0_f64
+                    } else {
+                        values.value(row)
+                    }
+                    .to_bits()
+                    .to_le_bytes(),
+                );
+            }
+            ArgumentValues::Boolean(values) => {
+                key.push(11);
+                key.push(u8::from(values.value(row)));
+            }
+            ArgumentValues::Utf8(values) => {
+                key.push(12);
+                key.extend_from_slice(values.value(row).as_bytes());
+            }
+            ArgumentValues::Timestamp(values) => {
+                key.push(13);
+                key.extend_from_slice(&values.value(row).to_le_bytes());
+            }
+            ArgumentValues::Passthrough => return None,
+        }
+        Some(key)
+    }
 }
 
 /// The argument columns one evaluated input batch produced, one entry per demand of the window.
@@ -306,6 +387,44 @@ pub(in crate::runtime) struct WindowArgumentColumns {
 }
 
 impl WindowArgumentColumns {
+    /// Bound each demand's Arrow storage and one typed-key copy per value. Each top-k demand gets
+    /// its own charge, even when demands project the same input. The row allowance also covers a
+    /// snapshot rebuild as one value per retained row.
+    pub(in crate::runtime) fn allocated_bytes(&self) -> u128 {
+        let mut bytes = 0_u128;
+        for demand in &self.demands {
+            for column in demand.iter() {
+                let actual = u128::try_from(column.array.get_array_memory_size())
+                    .assured("an addressable Arrow array allocation fits u128");
+                let logical = u128::try_from(
+                    column
+                        .array
+                        .to_data()
+                        .get_slice_memory_size()
+                        .assured("a validated Arrow argument has bounded slice memory"),
+                )
+                .assured("an addressable Arrow slice fits u128");
+                let rows = u128::try_from(column.array.len())
+                    .assured("an addressable Arrow array length fits u128");
+                let payload = logical
+                    .checked_mul(2)
+                    .assured("an addressable Arrow slice's doubled size fits u128");
+                let headers = rows
+                    .checked_mul(32)
+                    .assured("an addressable Arrow array's row headers fit u128");
+                let charge = actual.max(
+                    payload
+                        .checked_add(headers)
+                        .assured("an addressable Arrow array and row headers fit u128"),
+                );
+                bytes = bytes
+                    .checked_add(charge)
+                    .assured("addressable argument arrays fit a u128 byte allowance");
+            }
+        }
+        bytes
+    }
+
     /// Check the arrays one batch of `rows` rows evaluated to, one entry per demand of `plan` in
     /// plan order, against the types the demands compiled to.
     pub(in crate::runtime) fn new(
@@ -471,5 +590,23 @@ impl WindowArgumentColumns {
             runtime_values_input_column(values.iter().map(Option::as_ref), rows.len(), &field)
                 .change_context(WindowProcessorError::RestoreSnapshotEntry)?;
         Ok(column.to_array_ref())
+    }
+}
+
+#[cfg(test)]
+mod sketch_key_tests {
+    use super::*;
+
+    #[test]
+    fn sketch_keys_separate_types_normalize_zero_and_ignore_null() {
+        let signed = ArgumentColumn::new(StdArc::new(Int64Array::from(vec![Some(7), None])));
+        let unsigned = ArgumentColumn::new(StdArc::new(UInt64Array::from(vec![7_u64])));
+        let text = ArgumentColumn::new(StdArc::new(StringArray::from(vec!["7"])));
+        assert_ne!(signed.sketch_key(0), unsigned.sketch_key(0));
+        assert_ne!(signed.sketch_key(0), text.sketch_key(0));
+        assert_eq!(signed.sketch_key(1), None);
+
+        let zeros = ArgumentColumn::new(StdArc::new(Float64Array::from(vec![0.0, -0.0])));
+        assert_eq!(zeros.sketch_key(0), zeros.sketch_key(1));
     }
 }
