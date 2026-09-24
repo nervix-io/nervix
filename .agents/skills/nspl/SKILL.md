@@ -193,6 +193,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
   aggregates over retained input rows.
+- Pass counts and positions as any integer type; they are read at full value. `repeat`, `lpad`,
+  and `rpad` fail only the message whose result would not fit the text one `STRING` column holds,
+  and `uuid_v7()` fails every message while domain time is before the Unix epoch. Give routes that
+  can reach either an `ON MESSAGE ERROR` policy for `overflow`.
 - Write datetime units, date parts, `date_bin` widths, time zones, formats, and disambiguations as
   literals. Units from `nanosecond` to `week` have fixed lengths; `month`, `quarter`, and `year` are
   calendar units that only `date_trunc`, `date_add`, and `date_diff` accept. `date_trunc`,

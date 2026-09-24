@@ -659,3 +659,82 @@ Feature: Domain clock contract regressions
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  @uuid_v7_epoch
+  Scenario Outline: uuid_v7 encodes paced logical time from the Unix epoch and fails before it
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA stamp_request (
+        sequence I64
+      );
+      CREATE SCHEMA stamped_request (
+        sequence I64,
+        id STRING
+      );
+      CREATE SCHEMA stamp_error (
+        sequence I64,
+        error_message STRING
+      );
+      CREATE WIRE JSON SCHEMA stamp_request_wire MODE STRICT (
+        sequence integer
+      );
+      CREATE CODEC stamp_request_codec
+        FROM WIRE JSON SCHEMA stamp_request_wire
+        TO SCHEMA stamp_request;
+      CREATE RELAY stamp_requests SCHEMA stamp_request UNBRANCHED;
+      CREATE RELAY stamped_requests SCHEMA stamped_request UNBRANCHED;
+      CREATE RELAY stamp_errors SCHEMA stamp_error UNBRANCHED;
+      CREATE VHOST edge uuid-clock-{{test_id}}.example.com;
+      CREATE ENDPOINT stamp_endpoint
+        ON edge
+        PATH '/stamp'
+        TYPE HTTP;
+      CREATE INGESTOR stamp_source
+        FROM ENDPOINT stamp_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING stamp_request_codec
+        TIMESTAMP NOW
+        TO stamp_requests
+          INHERIT ALL
+          UNBRANCHED
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE JUNCTION stamp
+        FROM stamp_requests
+        UNBRANCHED
+        TO stamped_requests
+          SET sequence = input.sequence,
+              id = uuid_v7()
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR SEND TO stamp_errors
+            SET sequence = input.sequence,
+                error_message = error.message;
+      CREATE SUBSCRIPTION stamped_requests_subscription TO stamped_requests;
+      CREATE SUBSCRIPTION stamp_errors_subscription TO stamp_errors;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      START AT '<logical_start>' TIME RATE 0.001;
+      """
+    And http payload is posted to host "uuid-clock-{{test_id}}.example.com" path "/stamp"
+      """
+      {"sequence":1}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      "sequence":1 | <outcome>
+      """
+    And the relay subscription does not receive a payload within "1s"
+
+    Examples:
+      | cluster_size | logical_start        | outcome                                                                                                           |
+      | 1            | 1970-01-01T00:00:00Z | "id":"00000000-                                                                                                   |
+      | 3            | 1970-01-01T00:00:00Z | "id":"00000000-                                                                                                   |
+      | 1            | 1969-12-31T23:59:59Z | "error_message":"junction 'stamp' FILTER-MAP side error overflow: uuid_v7 execution time is before the Unix epoch |
+      | 3            | 1969-12-31T23:59:59Z | "error_message":"junction 'stamp' FILTER-MAP side error overflow: uuid_v7 execution time is before the Unix epoch |

@@ -800,11 +800,19 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
             can_error: false,
             null_propagation: NullPropagation::NeverNull,
         },
-        BuiltinLowering::UuidV4 | BuiltinLowering::UuidV7 => OperationSemantics {
+        BuiltinLowering::UuidV4 => OperationSemantics {
             volatility: Volatility::Volatile,
             dependency_scope: DependencyScope::ExecutionLocal,
             has_side_effects: false,
             can_error: false,
+            null_propagation: NullPropagation::NeverNull,
+        },
+        // A version 7 UUID has no encoding for an execution time before the Unix epoch.
+        BuiltinLowering::UuidV7 => OperationSemantics {
+            volatility: Volatility::Volatile,
+            dependency_scope: DependencyScope::ExecutionLocal,
+            has_side_effects: false,
+            can_error: true,
             null_propagation: NullPropagation::NeverNull,
         },
         BuiltinLowering::Lower
@@ -822,13 +830,10 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::EndsWith
         | BuiltinLowering::Initcap
         | BuiltinLowering::Left
-        | BuiltinLowering::Lpad
         | BuiltinLowering::Md5
-        | BuiltinLowering::Repeat
         | BuiltinLowering::Replace
         | BuiltinLowering::Reverse
         | BuiltinLowering::Right
-        | BuiltinLowering::Rpad
         | BuiltinLowering::SplitPart
         | BuiltinLowering::Strpos
         | BuiltinLowering::Substr
@@ -903,7 +908,11 @@ pub const fn builtin_semantics_for_lowering(lowering: &BuiltinLowering) -> Opera
         | BuiltinLowering::Trunc
         | BuiltinLowering::ShiftLeft
         | BuiltinLowering::ShiftRight
-        | BuiltinLowering::Clamp => OperationSemantics {
+        | BuiltinLowering::Clamp
+        // A count can ask for more text than one STRING column holds.
+        | BuiltinLowering::Repeat
+        | BuiltinLowering::Lpad
+        | BuiltinLowering::Rpad => OperationSemantics {
             volatility: Volatility::Immutable,
             dependency_scope: DependencyScope::Constant,
             has_side_effects: false,
