@@ -6590,6 +6590,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.13.1",
+ "tracing",
  "triomphe",
  "url",
  "uuid",
