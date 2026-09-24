@@ -13,6 +13,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use crate::{
     batch::TypedArray,
     error::{CompileError, SideErrorReason},
+    ip_address::{self, IpNetwork, NetworkSource},
     ir::{
         AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
         InstructionKind, InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef,
@@ -31,6 +32,7 @@ use crate::{
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
         builtin_signature, cast_arm_execution, cast_descriptor, expr_semantics, unary_descriptor,
     },
+    url_component,
 };
 
 #[derive(Clone)]
@@ -1439,6 +1441,15 @@ impl Compiler {
                 if let FunctionName::ReadHeader = function {
                     return Ok(true);
                 }
+                // A URL can lack each of these components, whatever its arguments hold.
+                if let FunctionName::UrlHost
+                | FunctionName::UrlPort
+                | FunctionName::UrlQuery
+                | FunctionName::UrlFragment
+                | FunctionName::UrlQueryValue = function
+                {
+                    return Ok(true);
+                }
                 if let FunctionName::WindowAggregate(invocation) = function {
                     // An aggregate is null when no retained row contributed to it, and a row
                     // contributes only when every argument it reads is present. A window that
@@ -2175,6 +2186,33 @@ impl Compiler {
         if let BuiltinLowering::Regexp(call) = descriptor.lowering {
             return self.compile_regexp_call(call.function, args, output_type);
         }
+        // A network that folds to a constant is parsed here, once for the program, and the call
+        // reads only its address. A constant that is no network rejects the program.
+        if let BuiltinLowering::IpInNetwork(_) = descriptor.lowering
+            && let [address, network] = args
+            && let Some(FoldedValue::NonNull(ScalarValue::Utf8(text))) =
+                fold_constant_expr(network)?
+        {
+            let network = match text.parse::<IpNetwork>() {
+                Ok(network) => network,
+                Err(defect) => {
+                    return Err(CompileError {
+                        code: "invalid_ip_network",
+                        message: format!(
+                            "function '{}' network '{text}' {defect}",
+                            function.as_str()
+                        ),
+                        span,
+                    });
+                }
+            };
+            let address = self.compile_expr(address)?;
+            return Ok(BuiltinPlan {
+                lowering: BuiltinLowering::IpInNetwork(NetworkSource::Constant(network)),
+                inputs: vec![address],
+                output_type,
+            });
+        }
         let compiled_args = args
             .iter()
             .map(|arg| self.compile_expr(arg))
@@ -2905,6 +2943,22 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
                 string.ends_with(suffix),
             )))
         }
+        FunctionName::IsIpAddress => {
+            let [FoldedValue::NonNull(ScalarValue::Utf8(text))] = args else {
+                return None;
+            };
+            Some(FoldedValue::NonNull(ScalarValue::Boolean(
+                ip_address::is_address_text(text),
+            )))
+        }
+        FunctionName::IsUrl => {
+            let [FoldedValue::NonNull(ScalarValue::Utf8(text))] = args else {
+                return None;
+            };
+            Some(FoldedValue::NonNull(ScalarValue::Boolean(
+                url_component::is_url_text(text),
+            )))
+        }
         FunctionName::Udf(_)
         | FunctionName::Unknown(_)
         | FunctionName::WindowAggregate(_)
@@ -2948,6 +3002,21 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::HexDecode
         | FunctionName::Sha256
         | FunctionName::Xxh3_64
+        | FunctionName::IpFromString
+        | FunctionName::IpToString
+        | FunctionName::IpFamily
+        | FunctionName::IpTrunc
+        | FunctionName::IpInNetwork
+        | FunctionName::IpUnmap
+        | FunctionName::UrlScheme
+        | FunctionName::UrlHost
+        | FunctionName::UrlPort
+        | FunctionName::UrlPath
+        | FunctionName::UrlQuery
+        | FunctionName::UrlFragment
+        | FunctionName::UrlQueryValue
+        | FunctionName::UrlQueryValues
+        | FunctionName::UrlDecode
         | FunctionName::Pow
         | FunctionName::RegexpLike
         | FunctionName::RegexpReplace
