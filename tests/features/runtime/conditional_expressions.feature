@@ -442,7 +442,7 @@ Feature: Conditional expressions
       | 1            | 0             |
       | 3            | 0             |
 
-  Scenario Outline: A CASE arm reads ingestion headers only for the messages that select it
+  Scenario Outline: A CASE arm reads ingestion headers only for the messages that select it and a read outside it answers every message
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -458,7 +458,8 @@ Feature: Conditional expressions
       CREATE SCHEMA routed_note (
         id STRING,
         kind STRING,
-        route STRING
+        route STRING,
+        echoed STRING
       );
       CREATE WIRE JSON SCHEMA tagged_note_wire MODE STRICT (
         id string,
@@ -479,7 +480,12 @@ Feature: Conditional expressions
               route = CASE
                 WHEN input.kind = 'routed' THEN coalesce(read_header('route'), 'absent')
                 ELSE 'direct'
-              END
+              END,
+              echoed = coalesce(
+                CASE WHEN input.kind = 'routed' THEN read_header('route') END,
+                read_header('route'),
+                'absent'
+              )
           UNBRANCHED
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG
@@ -501,9 +507,9 @@ Feature: Conditional expressions
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "id":"first" | "route":"alpha"
-      "id":"second" | "route":"direct"
-      "id":"third" | "route":"gamma"
+      "id":"first" | "route":"alpha" | "echoed":"alpha"
+      "id":"second" | "route":"direct" | "echoed":"beta"
+      "id":"third" | "route":"gamma" | "echoed":"gamma"
       """
     And the relay subscription does not receive a payload within "1s"
 

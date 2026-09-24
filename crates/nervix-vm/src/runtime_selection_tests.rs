@@ -829,3 +829,82 @@ fn arms_that_hold_on_every_row_or_on_none_keep_first_match_order() {
         "when no arm holds on any row, every row takes ELSE"
     );
 }
+
+#[test]
+fn a_udf_call_repeated_outside_its_arm_is_made_for_every_row() {
+    let probe = StdArc::new(ProbeInjector::default());
+    let compiled = compile_with_probe(
+        "SET probed = CASE WHEN input.flag THEN udf::probe(input.value) ELSE 0 END + \
+         udf::probe(input.value)",
+        &flag_and_value_schema(),
+        vec![Field::new("probed", DataType::Int64, true)],
+        &probe,
+    );
+    let batch = flag_and_value_batch(
+        vec![Some(true), Some(false), Some(true)],
+        vec![Some(1), Some(5), Some(2)],
+    );
+
+    let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+    assert_eq!(
+        output_column(&output, "probed"),
+        &TypedArray::Int64(Int64Array::from(vec![Some(4), Some(6), Some(6)])),
+        "the call outside the arm answers the rows the arm did not select"
+    );
+    assert_eq!(
+        probe.calls(),
+        [
+            ProbeCall {
+                rows: RowSelection::Selected(vec![0, 2]),
+                values: vec![Some(1), Some(2)],
+            },
+            ProbeCall {
+                rows: RowSelection::All(3),
+                values: vec![Some(1), Some(5), Some(2)],
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_header_read_repeated_outside_its_arm_is_made_for_every_row() {
+    let headers = StdArc::new(ListingHeaderInjector::default());
+    let injector: Box<dyn FunctionInjector> = Box::new(StdArc::clone(&headers));
+    let input_schema = schema(vec![Field::new("flag", DataType::Boolean, true)]);
+    let compiled = compile(
+        "SET route = coalesce(CASE WHEN input.flag THEN first(read_headers('route')) END, \
+         first(read_headers('route')))",
+        &input_schema,
+        vec![Field::new("route", DataType::Utf8, true)],
+        CompileOptions {
+            allow_header_reads: true,
+            injector: Some(triomphe::Arc::new(injector)),
+            ..CompileOptions::default()
+        },
+    );
+    let batch = TypedBatch::try_new(
+        input_schema,
+        vec![TypedArray::Boolean(BooleanArray::from(vec![
+            Some(true),
+            Some(false),
+            Some(true),
+        ]))],
+    )
+    .expect("the batch must build");
+
+    let output = execute_program_sync(&compiled, &batch).expect("execution must succeed");
+
+    assert_eq!(
+        output_column(&output, "route"),
+        &TypedArray::Utf8(StringArray::from(vec!["route-0", "route-1", "route-2"])),
+        "the read outside the arm answers the row the arm did not select"
+    );
+    assert_eq!(
+        *headers
+            .calls
+            .lock()
+            .expect("the header call log is only locked by the test thread"),
+        [RowSelection::Selected(vec![0, 2]), RowSelection::All(3)]
+    );
+}

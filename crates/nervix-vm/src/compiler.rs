@@ -767,6 +767,17 @@ impl Compiler {
         });
     }
 
+    /// Whether the register `expr` just compiled to may answer the same expression wherever it
+    /// appears again. A call out of the VM made under a conditional arm's selection answers the
+    /// selected rows only and leaves a null on every other row, so it is reusable only when it
+    /// was made for every row. Every other expression computes every row whatever arm it is in.
+    fn register_is_reusable(&self, expr: &SpannedExpr) -> bool {
+        match self.current_selection {
+            None => true,
+            Some(_) => !expr.inner.calls_out_of_the_vm(),
+        }
+    }
+
     /// Compiles `compile` with every instruction it emits confined to the rows `selection` holds,
     /// or to every row when it is `None`.
     fn with_selection<T>(
@@ -1537,7 +1548,9 @@ impl Compiler {
                     return Ok(*reg);
                 }
                 let reg = self.compile_expr_uncached(expr)?;
-                self.expr_cache.insert(cache_key, reg);
+                if self.register_is_reusable(expr) {
+                    self.expr_cache.insert(cache_key, reg);
+                }
                 return Ok(reg);
             }
             return self.compile_expr_uncached(expr);
@@ -1570,7 +1583,9 @@ impl Compiler {
             }
 
             let reg = self.compile_expr_uncached(expr)?;
-            if let Some(cache_key) = cache_key {
+            if let Some(cache_key) = cache_key
+                && self.register_is_reusable(expr)
+            {
                 self.expr_cache.insert(cache_key, reg);
             }
             return Ok(reg);
