@@ -53,7 +53,6 @@ RUN apt-get update \
         make \
         perl \
         pkg-config \
-        protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -L --proto '=https' --tlsv1.2 -sSf \
@@ -105,7 +104,6 @@ COPY Cargo.toml Cargo.lock build.rs rust-toolchain.toml ./
 COPY benches/relay_interaction.rs ./benches/relay_interaction.rs
 COPY src ./src
 COPY crates ./crates
-COPY proto ./proto
 COPY tests/scenarios.rs ./tests/scenarios.rs
 COPY scripts/configure_kache_remote.sh ./scripts/configure_kache_remote.sh
 

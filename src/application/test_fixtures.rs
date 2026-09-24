@@ -18,30 +18,33 @@ use ahash::RandomState;
 use clap::Parser;
 use fjall::Database;
 use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_client_wire::{CommandRequest, SuggestRequest};
 use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
 use nervix_execution::sync::DashMap;
 use nervix_interconnect::{TlsConfigBundle, Transport};
 use nervix_models::{
-    AckMode, BranchSelection, ClusterNodeName, CreateDeduplicator, CreateEmitter, CreateIngestor,
-    CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig, DomainName, DomainPace,
-    DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource, KafkaOffsetMode, Model,
-    ModelKind, ModelName, NodeEndpoint, NodeRef, NodeServiceUrl, PlacementGroupSchedule,
-    ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint, WasmProcessorLimits,
+    AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
+    CreateEmitter, CreateIngestor, CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig,
+    DomainName, DomainPace, DomainStartPoint, DomainState, DomainStatus, EmitSink, IngestSource,
+    KafkaOffsetMode, Model, ModelKind, ModelName, NodeEndpoint, NodeRef, NodeServiceUrl,
+    PlacementGroupSchedule, ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
+    TransactionLifecycle, TransactionPosition, WasmProcessorLimits,
 };
 use nonzero_ext::nonzero;
 use rcgen::{
     BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
     SanType,
 };
-use tokio::{sync::mpsc, time::Duration};
+use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
-use tonic::Status;
 use triomphe::Arc;
 
 #[cfg(feature = "shuttle")]
 use super::shutdown::{ShutdownCoordinator, ShutdownPhaseOutcome, ShutdownRequest};
 use super::{
     Args,
+    command_result::{CommandResponse, CommandResult},
+    session::admission::RequestAdmission,
     session_service::{SessionEvents, SessionServiceImpl, SessionServiceInner},
     subscription::SessionSubscriptions,
     tls::HttpsListenerCertificates,
@@ -52,18 +55,17 @@ use super::{
     },
 };
 use crate::{
-    ConfiguredFaultInjection, cluster,
-    proto::{
-        CommandRequest, CommandResult, SessionResponse, SuggestRequest,
-        TransactionState as ApiTransactionState,
-    },
-    registry::Registry,
-    resource::ResourceStore,
-    runtime::Runtime,
-    runtime_schema,
+    ConfiguredFaultInjection, cluster, registry::Registry, resource::ResourceStore,
+    runtime::Runtime, runtime_schema,
 };
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+/// A fresh execution reference, as a client generates one for each command it sends.
+pub(in crate::application) fn test_execution_reference() -> CommandExecutionReference {
+    CommandExecutionReference::parse(uuid::Uuid::now_v7().to_string())
+        .assured("a UUIDv7 in its hyphenated form is a valid execution reference")
+}
 
 /// A session command request for `query` in `domain`, with its own execution reference.
 ///
@@ -72,10 +74,36 @@ static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
 pub(in crate::application) fn test_command_request(query: &str, domain: &str) -> CommandRequest {
     CommandRequest {
         query: query.to_string(),
-        domain: domain.to_string(),
-        execution_reference: uuid::Uuid::now_v7().to_string(),
+        domain: Some(named(domain)),
+        execution_reference: test_execution_reference(),
         expected_transaction_position: None,
         expected_preview: None,
+    }
+}
+
+impl SessionServiceImpl {
+    /// Serves `request` as one command of the session `subscriptions` holds, admitting it as soon
+    /// as it asks, and returns the result with where it came from.
+    pub(in crate::application) async fn test_command_response(
+        &self,
+        request: CommandRequest,
+        subscriptions: &mut SessionSubscriptions,
+    ) -> CommandResponse {
+        let admission = RequestAdmission::default();
+        self.process_command(request, subscriptions, &admission)
+            .await
+            .verified("no test cancels the admission it created above")
+    }
+
+    /// Serves `request` as one command of the session `subscriptions` holds.
+    pub(in crate::application) async fn test_command(
+        &self,
+        request: CommandRequest,
+        subscriptions: &mut SessionSubscriptions,
+    ) -> CommandResult {
+        self.test_command_response(request, subscriptions)
+            .await
+            .result
     }
 }
 
@@ -196,11 +224,9 @@ where
 
 pub(in crate::application) fn command_transaction_state(
     result: &CommandResult,
-) -> Option<ApiTransactionState> {
-    result
-        .transaction
-        .as_ref()
-        .and_then(|status| ApiTransactionState::try_from(status.state).ok())
+) -> Option<TransactionLifecycle> {
+    let status = result.transaction.as_ref()?;
+    Some(status.lifecycle().clone())
 }
 
 pub(in crate::application) fn string_branch_key(
@@ -564,17 +590,12 @@ pub(in crate::application) async fn suggestion_values(
     subscriptions: &SessionSubscriptions,
     input: &str,
 ) -> Vec<String> {
-    service
-        .process_suggest(
-            SuggestRequest {
-                input: input.to_string(),
-                cursor: u32::try_from(input.len())
-                    .assured("the test suggestion input is smaller than u32::MAX bytes"),
-                domain: "default".to_string(),
-            },
-            subscriptions,
-        )
-        .await
+    let request = SuggestRequest::new(input.to_string(), input.len(), Some(named("default")))
+        .assured("the end of the input is a character boundary");
+    let outcome = service
+        .process_suggest(request, &subscriptions.view())
+        .await;
+    outcome
         .suggestions
         .into_iter()
         .map(|suggestion| suggestion.value)
@@ -584,35 +605,27 @@ pub(in crate::application) async fn suggestion_values(
 pub(in crate::application) async fn queue_in_transaction(
     service: &SessionServiceImpl,
     subscriptions: &mut SessionSubscriptions,
-    tx: &mpsc::Sender<Result<SessionResponse, Status>>,
     query: &str,
 ) {
-    let result = service
-        .process_command(
-            CommandRequest {
-                query: query.to_string(),
-                domain: "default".to_string(),
-                execution_reference: uuid::Uuid::now_v7().to_string(),
-                expected_transaction_position: match subscriptions.transaction_id() {
-                    Some(transaction_id) => service
-                        .inner
-                        .consensus
-                        .current_transaction(transaction_id)
-                        .await
-                        .map(|transaction| {
-                            u64::try_from(transaction.pending_statement_count())
-                                .assured("the test transaction statement limit fits in u64")
-                        }),
-                    None => None,
-                },
-                expected_preview: None,
-            },
-            tx,
-            subscriptions,
-        )
-        .await;
+    let expected_transaction_position = match subscriptions.transaction_id() {
+        Some(transaction_id) => {
+            let transaction = service
+                .inner
+                .consensus
+                .current_transaction(transaction_id)
+                .await;
+            transaction
+                .map(|transaction| TransactionPosition::new(transaction.pending_statement_count()))
+        }
+        None => None,
+    };
+    let request = CommandRequest {
+        expected_transaction_position,
+        ..test_command_request(query, "default")
+    };
+    let result = service.test_command(request, subscriptions).await;
     assert!(
-        result.success,
+        result.succeeded(),
         "queueing {query:?} should succeed: {result:?}"
     );
 }

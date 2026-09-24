@@ -1,10 +1,9 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::PathBuf,
-    str::FromStr,
     sync::{Arc as StdArc, LazyLock, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
@@ -26,6 +25,7 @@ use lapin::{
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_client_core::{Client, ConnectOptions, TlsRequirement};
+use nervix_client_wire::UploadReply;
 use nervix_connector_kafka::testing_rdkafka::{
     admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication},
     client::DefaultClientContext,
@@ -43,8 +43,6 @@ use nervix_interconnect::{
     TransportOptions,
 };
 use nervix_models::ClusterNodeName;
-pub use nervix_proto as proto;
-use prost::Message as _;
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
@@ -60,10 +58,6 @@ use nervix_server::{
     runtime::{DEFAULT_DOMAIN_DRAIN_TIMEOUT, DEFAULT_TEMP_DIR, branch_task_stop_timeout},
 };
 use parking_lot::Mutex;
-use proto::{
-    CommandRequest, ServerEventLevel, SessionRequest, UploadResourceRequest, UploadResourceStart,
-    session_response::Event, session_service_client::SessionServiceClient,
-};
 use pulsar::{
     ConsumerOptions as PulsarConsumerOptions, Pulsar, SubType as PulsarSubType, TokioExecutor,
     consumer::InitialPosition as PulsarInitialPosition,
@@ -90,21 +84,17 @@ use tokio::{
     time::{sleep, timeout},
 };
 use tokio_rustls::TlsConnector;
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
+use tokio_stream::StreamExt;
 use tokio_tungstenite::{
     WebSocketStream, client_async, connect_async,
     tungstenite::{Message as WsMessage, client::IntoClientRequest, http::HeaderValue},
 };
 use tokio_util::sync::CancellationToken;
-use tonic::{
-    Request,
-    metadata::MetadataValue,
-    transport::{Certificate, ClientTlsConfig, Endpoint},
-};
 use triomphe::Arc;
 use uuid::Uuid;
 use zeromq::{PullSocket, PushSocket, Socket, SocketRecv, SocketSend};
 
+pub(crate) use super::raw_session::{TestSession, open_raw_session};
 use super::{
     cluster_teardown::{CLUSTER_TEARDOWN_BUDGET, ClusterTeardown, TeardownNode},
     dependencies::{
@@ -121,6 +111,7 @@ use super::{
     },
     phase_deadline::PhaseDeadline,
     port_pool::{next_ports, release_test_ports},
+    raw_session::{TestUpload, send_upload},
     scenario_phase::ScenarioIdentity,
     status_request::{
         STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, STATUS_WAIT_BUDGET, StatusEndpoint,
@@ -554,7 +545,7 @@ fn ensure_dev_tls_assets() -> io::Result<()> {
         .map_err(|error| io::Error::new(error.kind(), error.to_string()))
 }
 
-fn dev_tls_ca_pem() -> io::Result<Vec<u8>> {
+pub(crate) fn dev_tls_ca_pem() -> io::Result<Vec<u8>> {
     ensure_dev_tls_assets()?;
     nervix_interconnect::install_rustls_crypto_provider();
     std::fs::read(dev_tls_ca_path()?).map_err(io::Error::other)
@@ -1497,15 +1488,23 @@ impl Cluster {
         Ok(handle.spec.grpc_uri(handle.config.grpc_mode))
     }
 
+    /// Streams an upload that declares two bytes and carries one, so the server must refuse it.
     pub(crate) async fn send_incomplete_resource_upload(
         &self,
         node_id: &str,
         domain: &str,
         resource: &str,
         identity: &str,
-    ) -> io::Result<proto::UploadResourceResponse> {
+    ) -> io::Result<UploadReply> {
         let server = self.grpc_uri(node_id)?;
-        send_incomplete_resource_upload(&server, domain, resource, identity).await
+        let upload = TestUpload {
+            domain,
+            resource,
+            identity,
+            declared_bytes: 2,
+            chunks: vec![vec![0]],
+        };
+        send_upload(&server, upload).await
     }
 
     pub(crate) fn web_console_url(&self, node_id: &str) -> io::Result<String> {
@@ -3514,46 +3513,6 @@ struct ClusterStatus {
     interconnect: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct TestSubscriptionEvent {
-    pub payload: String,
-}
-
-#[derive(Debug)]
-pub(crate) struct TestCommandObservation {
-    pub(crate) result: proto::CommandResult,
-    pub(crate) request_protobuf_bytes: usize,
-    pub(crate) response_protobuf_bytes: usize,
-}
-
-#[derive(Debug)]
-pub(crate) struct RawTestSession {
-    domain: String,
-    transaction: Option<proto::TransactionStatus>,
-    request_tx: mpsc::Sender<SessionRequest>,
-    response: tonic::Streaming<proto::SessionResponse>,
-    pending_subscriptions: VecDeque<proto::SubscriptionEvent>,
-    pending_server_errors: VecDeque<TestServerEvent>,
-}
-
-pub(crate) enum TestSession {
-    Raw(Box<RawTestSession>),
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct TestServerEvent {
-    pub(crate) level: i32,
-    pub(crate) message: String,
-}
-
-impl std::fmt::Debug for TestSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Raw(_) => f.write_str("TestSession::Raw(..)"),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct BrokerMessage {
     pub(crate) payload: String,
@@ -3610,435 +3569,6 @@ impl Drop for BrokerObserver {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
-        }
-    }
-}
-
-impl TestSession {
-    pub(crate) fn set_domain(&mut self, domain: String) {
-        match self {
-            Self::Raw(session) => session.domain = domain,
-        }
-    }
-
-    pub(crate) async fn run_command(&mut self, query: &str) -> io::Result<String> {
-        match self {
-            Self::Raw(session) => session.run_command(query).await,
-        }
-    }
-
-    pub(crate) async fn run_command_result(
-        &mut self,
-        query: &str,
-    ) -> io::Result<proto::CommandResult> {
-        match self {
-            Self::Raw(session) => session.run_command_result(query).await,
-        }
-    }
-
-    pub(crate) async fn run_command_result_with_reference(
-        &mut self,
-        query: &str,
-        execution_reference: &str,
-    ) -> io::Result<proto::CommandResult> {
-        match self {
-            Self::Raw(session) => {
-                session
-                    .run_command_result_with_reference(query, execution_reference)
-                    .await
-            }
-        }
-    }
-
-    pub(crate) async fn run_command_result_with_reference_at_position(
-        &mut self,
-        query: &str,
-        execution_reference: &str,
-        expected_transaction_position: u64,
-    ) -> io::Result<proto::CommandResult> {
-        match self {
-            Self::Raw(session) => {
-                session
-                    .run_command_result_with_reference_at_position(
-                        query,
-                        execution_reference,
-                        expected_transaction_position,
-                    )
-                    .await
-            }
-        }
-    }
-
-    pub(crate) async fn send_command_request_with_reference(
-        &mut self,
-        query: &str,
-        execution_reference: &str,
-    ) -> io::Result<()> {
-        match self {
-            Self::Raw(session) => {
-                session
-                    .send_command_request_with_reference(query, execution_reference)
-                    .await
-            }
-        }
-    }
-
-    pub(crate) async fn observe_command(
-        &mut self,
-        query: &str,
-    ) -> io::Result<TestCommandObservation> {
-        match self {
-            Self::Raw(session) => session.observe_command(query).await,
-        }
-    }
-
-    pub(crate) async fn attach_transaction(
-        &mut self,
-        transaction_id: &str,
-    ) -> io::Result<proto::CommandResult> {
-        match self {
-            Self::Raw(session) => session.attach_transaction(transaction_id).await,
-        }
-    }
-
-    pub(crate) async fn try_next_subscription(
-        &mut self,
-        timeout_duration: Duration,
-    ) -> io::Result<Option<TestSubscriptionEvent>> {
-        match self {
-            Self::Raw(session) => session.try_next_subscription(timeout_duration).await,
-        }
-    }
-
-    pub(crate) async fn try_next_server_error(
-        &mut self,
-        timeout_duration: Duration,
-    ) -> io::Result<Option<TestServerEvent>> {
-        match self {
-            Self::Raw(session) => session.try_next_server_error(timeout_duration).await,
-        }
-    }
-}
-
-impl RawTestSession {
-    fn command_request(&self, query: &str, execution_reference: &str) -> SessionRequest {
-        let expected_transaction_position = match &self.transaction {
-            Some(transaction) if transaction.state == i32::from(proto::TransactionState::Open) => {
-                Some(transaction.pending_count)
-            }
-            Some(_) | None => None,
-        };
-        self.command_request_at_position(query, execution_reference, expected_transaction_position)
-    }
-
-    fn command_request_at_position(
-        &self,
-        query: &str,
-        execution_reference: &str,
-        expected_transaction_position: Option<u64>,
-    ) -> SessionRequest {
-        SessionRequest {
-            request: Some(proto::session_request::Request::Command(CommandRequest {
-                query: query.to_string(),
-                domain: self.domain.clone(),
-                execution_reference: execution_reference.to_string(),
-                expected_transaction_position,
-                expected_preview: None,
-            })),
-        }
-    }
-
-    async fn send_command_request_with_reference(
-        &mut self,
-        query: &str,
-        execution_reference: &str,
-    ) -> io::Result<()> {
-        let request = self.command_request(query, execution_reference);
-        self.request_tx
-            .send(request)
-            .await
-            .map_err(io::Error::other)
-    }
-
-    async fn attach_transaction(
-        &mut self,
-        transaction_id: &str,
-    ) -> io::Result<proto::CommandResult> {
-        self.request_tx
-            .send(SessionRequest {
-                request: Some(proto::session_request::Request::AttachTransaction(
-                    proto::AttachTransactionRequest {
-                        id: transaction_id.to_string(),
-                    },
-                )),
-            })
-            .await
-            .map_err(io::Error::other)?;
-
-        loop {
-            tokio::task::consume_budget().await;
-            match self.response.message().await.map_err(io::Error::other)? {
-                Some(proto::SessionResponse {
-                    event: Some(Event::Result(result)),
-                }) => {
-                    self.transaction = result.transaction.clone();
-                    return Ok(*result);
-                }
-                Some(proto::SessionResponse {
-                    event: Some(Event::Subscription(event)),
-                }) => self.pending_subscriptions.push_back(event),
-                Some(proto::SessionResponse {
-                    event: Some(Event::Server(event)),
-                }) => {
-                    if event.level == i32::from(ServerEventLevel::Error) {
-                        self.pending_server_errors.push_back(TestServerEvent {
-                            level: event.level,
-                            message: event.message,
-                        });
-                    }
-                }
-                Some(proto::SessionResponse {
-                    event: Some(Event::Suggest(_)),
-                })
-                | Some(proto::SessionResponse {
-                    event: Some(Event::Snapshot(_)),
-                })
-                | Some(proto::SessionResponse {
-                    event: Some(Event::Domains(_)),
-                })
-                | Some(proto::SessionResponse {
-                    event: Some(Event::Cluster(_)),
-                })
-                | Some(proto::SessionResponse { event: None }) => {}
-                None => {
-                    return Err(io::Error::other(
-                        "session relay closed before transaction attachment result",
-                    ));
-                }
-            }
-        }
-    }
-
-    async fn run_command(&mut self, query: &str) -> io::Result<String> {
-        let result = self.run_command_result(query).await?;
-        if result.success {
-            return Ok(flatten_command_messages(&result));
-        }
-        Err(io::Error::other(format!(
-            "command failed: {}\ndiagnostics: {:?}",
-            result.message, result.diagnostics
-        )))
-    }
-
-    async fn run_command_result(&mut self, query: &str) -> io::Result<proto::CommandResult> {
-        let execution_reference = uuid::Uuid::now_v7().to_string();
-        self.run_command_result_with_reference(query, &execution_reference)
-            .await
-    }
-
-    async fn run_command_result_with_reference(
-        &mut self,
-        query: &str,
-        execution_reference: &str,
-    ) -> io::Result<proto::CommandResult> {
-        Ok(self
-            .observe_command_with_reference(query, execution_reference)
-            .await?
-            .result)
-    }
-
-    async fn run_command_result_with_reference_at_position(
-        &mut self,
-        query: &str,
-        execution_reference: &str,
-        expected_transaction_position: u64,
-    ) -> io::Result<proto::CommandResult> {
-        let request = self.command_request_at_position(
-            query,
-            execution_reference,
-            Some(expected_transaction_position),
-        );
-        Ok(self.observe_command_request(request).await?.result)
-    }
-
-    async fn observe_command(&mut self, query: &str) -> io::Result<TestCommandObservation> {
-        let execution_reference = uuid::Uuid::now_v7().to_string();
-        self.observe_command_with_reference(query, &execution_reference)
-            .await
-    }
-
-    async fn observe_command_with_reference(
-        &mut self,
-        query: &str,
-        execution_reference: &str,
-    ) -> io::Result<TestCommandObservation> {
-        let request = self.command_request(query, execution_reference);
-        self.observe_command_request(request).await
-    }
-
-    async fn observe_command_request(
-        &mut self,
-        request: SessionRequest,
-    ) -> io::Result<TestCommandObservation> {
-        let request_protobuf_bytes = request.encoded_len();
-        self.request_tx
-            .send(request)
-            .await
-            .map_err(io::Error::other)?;
-
-        loop {
-            tokio::task::consume_budget().await;
-            let Some(response) = self.response.message().await.map_err(io::Error::other)? else {
-                return Err(io::Error::other(
-                    "session relay closed before command result",
-                ));
-            };
-            let response_protobuf_bytes = response.encoded_len();
-            match response.event {
-                Some(Event::Result(result)) => {
-                    self.transaction = result.transaction.clone();
-                    return Ok(TestCommandObservation {
-                        result: *result,
-                        request_protobuf_bytes,
-                        response_protobuf_bytes,
-                    });
-                }
-                Some(Event::Subscription(event)) => {
-                    self.pending_subscriptions.push_back(event);
-                }
-                Some(Event::Server(event)) => {
-                    if event.level == i32::from(ServerEventLevel::Error) {
-                        self.pending_server_errors.push_back(TestServerEvent {
-                            level: event.level,
-                            message: event.message,
-                        });
-                    }
-                }
-                Some(Event::Suggest(_))
-                | Some(Event::Snapshot(_))
-                | Some(Event::Domains(_))
-                | Some(Event::Cluster(_))
-                | None => {}
-            }
-        }
-    }
-
-    async fn try_next_subscription(
-        &mut self,
-        timeout_duration: Duration,
-    ) -> io::Result<Option<TestSubscriptionEvent>> {
-        if let Some(event) = self.pending_subscriptions.pop_front() {
-            return Ok(Some(TestSubscriptionEvent {
-                payload: event.payload,
-            }));
-        }
-
-        let deadline = sleep(timeout_duration);
-        tokio::pin!(deadline);
-        loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
-                _ = &mut deadline => return Ok(None),
-                message = self.response.message() => {
-                    match message.map_err(io::Error::other)? {
-                        Some(proto::SessionResponse {
-                            event: Some(Event::Subscription(event)),
-                        }) => {
-                            return Ok(Some(TestSubscriptionEvent {
-                                payload: event.payload,
-                            }));
-                        }
-                        Some(proto::SessionResponse {
-                            event: Some(Event::Server(event)),
-                        }) => {
-                            if event.level == i32::from(ServerEventLevel::Error) {
-                                self.pending_server_errors.push_back(TestServerEvent {
-                                    level: event.level,
-                                    message: event.message,
-                                });
-                            }
-                        }
-                        Some(proto::SessionResponse {
-                            event: Some(Event::Suggest(_)),
-                        })
-                        | Some(proto::SessionResponse {
-                            event: Some(Event::Snapshot(_)),
-                        })
-                        | Some(proto::SessionResponse {
-                            event: Some(Event::Domains(_)),
-                        })
-                        | Some(proto::SessionResponse {
-                            event: Some(Event::Cluster(_)),
-                        })
-                        | Some(proto::SessionResponse {
-                            event: Some(Event::Result(_)),
-                        })
-                        | Some(proto::SessionResponse { event: None }) => {}
-                        None => {
-                            return Err(io::Error::other(
-                                "session relay closed before subscription event",
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    async fn try_next_server_error(
-        &mut self,
-        timeout_duration: Duration,
-    ) -> io::Result<Option<TestServerEvent>> {
-        if let Some(event) = self.pending_server_errors.pop_front() {
-            return Ok(Some(event));
-        }
-        let deadline = sleep(timeout_duration);
-        tokio::pin!(deadline);
-        loop {
-            tokio::task::consume_budget().await;
-            tokio::select! {
-                _ = &mut deadline => return Ok(None),
-                message = self.response.message() => {
-                    match message.map_err(io::Error::other)? {
-                        Some(proto::SessionResponse {
-                            event: Some(Event::Server(event)),
-                        }) => {
-                            if event.level == i32::from(ServerEventLevel::Error) {
-                                return Ok(Some(TestServerEvent {
-                                    level: event.level,
-                                    message: event.message,
-                                }));
-                            }
-                        }
-                        Some(proto::SessionResponse {
-                            event: Some(Event::Subscription(event)),
-                        }) => {
-                            self.pending_subscriptions.push_back(event);
-                        }
-                        Some(proto::SessionResponse {
-                            event: Some(Event::Suggest(_)),
-                        })
-                        | Some(proto::SessionResponse {
-                            event: Some(Event::Snapshot(_)),
-                        })
-                        | Some(proto::SessionResponse {
-                            event: Some(Event::Domains(_)),
-                        })
-                        | Some(proto::SessionResponse {
-                            event: Some(Event::Cluster(_)),
-                        })
-                        | Some(proto::SessionResponse {
-                            event: Some(Event::Result(_)),
-                        })
-                        | Some(proto::SessionResponse { event: None }) => {}
-                        None => {
-                            return Err(io::Error::other(
-                                "session relay closed before server event",
-                            ));
-                        }
-                    }
-                }
-            }
         }
     }
 }
@@ -4126,27 +3656,30 @@ fn parse_interconnect_line(line: &str) -> Option<(String, String)> {
     Some((node_id.to_string(), status.to_string()))
 }
 
-/// Renders a batched command result as its aggregate message followed by every non-empty nested
-/// message. Transaction queue responses remain nested in a multi-command request, while COMMIT
-/// itself returns only its executed aggregate.
-fn flatten_command_messages(result: &proto::CommandResult) -> String {
-    let mut messages = vec![result.message.clone()];
-    messages.extend(result.results.iter().map(flatten_command_messages));
-    messages
-        .into_iter()
-        .filter(|message| !message.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+/// Renders a client outcome as its aggregate message followed by every non-empty statement
+/// message.
+pub(crate) fn flatten_outcome_messages(outcome: &nervix_client_core::CommandOutcome) -> String {
+    let mut messages = Vec::new();
+    if !outcome.message.is_empty() {
+        messages.push(outcome.message.clone());
+    }
+    for statement in &outcome.statements {
+        if !statement.message.is_empty() {
+            messages.push(statement.message.clone());
+        }
+    }
+    messages.join("\n")
 }
 
-fn flatten_outcome_messages(outcome: &nervix_client_core::CommandOutcome) -> String {
-    let mut messages = vec![outcome.message.clone()];
-    messages.extend(outcome.results.iter().map(flatten_outcome_messages));
-    messages
-        .into_iter()
-        .filter(|message| !message.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+/// A scenario domain as a client selects it; the empty text selects none.
+pub(crate) fn client_domain(domain: &str) -> Option<nervix_client_core::DomainName> {
+    if domain.is_empty() {
+        return None;
+    }
+    Some(
+        nervix_client_core::DomainName::parse(domain)
+            .expect("scenario domains are valid domain names"),
+    )
 }
 
 pub(crate) async fn run_command_via_client(
@@ -4154,15 +3687,18 @@ pub(crate) async fn run_command_via_client(
     domain: &str,
     query: &str,
 ) -> io::Result<String> {
-    let client =
-        Client::connect_with_options(server, domain.to_string(), client_connect_options(server)?)
-            .await
-            .map_err(io::Error::other)?;
+    let client = Client::connect_with_options(
+        server,
+        client_domain(domain),
+        client_connect_options(server)?,
+    )
+    .await
+    .map_err(io::Error::other)?;
     let outcome = client
         .execute(query.to_string())
         .await
         .map_err(io::Error::other)?;
-    if outcome.success {
+    if outcome.succeeded() {
         Ok(flatten_outcome_messages(&outcome))
     } else {
         Err(io::Error::other(format!(
@@ -4170,91 +3706,6 @@ pub(crate) async fn run_command_via_client(
             outcome.message, outcome.diagnostics
         )))
     }
-}
-
-pub(crate) async fn open_raw_session(server: &str, domain: &str) -> io::Result<TestSession> {
-    let mut endpoint = Endpoint::from_shared(server.to_string()).map_err(io::Error::other)?;
-    if server.starts_with("https://") {
-        endpoint = endpoint
-            .tls_config(
-                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(dev_tls_ca_pem()?)),
-            )
-            .map_err(io::Error::other)?;
-    }
-    let channel = endpoint.connect().await.map_err(io::Error::other)?;
-    let mut client = SessionServiceClient::new(channel);
-    let (request_tx, request_rx) = mpsc::channel(16);
-    let mut request = Request::new(ReceiverStream::new(request_rx));
-    let authorization =
-        MetadataValue::from_str(&test_basic_authorization()).map_err(io::Error::other)?;
-    request
-        .metadata_mut()
-        .insert("authorization", authorization);
-    let response = client
-        .session(request)
-        .await
-        .map_err(io::Error::other)?
-        .into_inner();
-
-    Ok(TestSession::Raw(Box::new(RawTestSession {
-        domain: domain.to_string(),
-        transaction: None,
-        request_tx,
-        response,
-        pending_subscriptions: VecDeque::new(),
-        pending_server_errors: VecDeque::new(),
-    })))
-}
-
-async fn send_incomplete_resource_upload(
-    server: &str,
-    domain: &str,
-    resource: &str,
-    identity: &str,
-) -> io::Result<proto::UploadResourceResponse> {
-    let mut endpoint = Endpoint::from_shared(server.to_string()).map_err(io::Error::other)?;
-    if server.starts_with("https://") {
-        endpoint = endpoint
-            .tls_config(
-                ClientTlsConfig::new().ca_certificate(Certificate::from_pem(dev_tls_ca_pem()?)),
-            )
-            .map_err(io::Error::other)?;
-    }
-    let channel = endpoint.connect().await.map_err(io::Error::other)?;
-    let mut client = SessionServiceClient::new(channel);
-    let (request_tx, request_rx) = mpsc::channel(2);
-    request_tx
-        .send(UploadResourceRequest {
-            event: Some(proto::upload_resource_request::Event::Start(
-                UploadResourceStart {
-                    name: resource.to_string(),
-                    total_bytes: 2,
-                    domain: domain.to_string(),
-                    upload_identity: identity.to_string(),
-                },
-            )),
-        })
-        .await
-        .map_err(io::Error::other)?;
-    request_tx
-        .send(UploadResourceRequest {
-            event: Some(proto::upload_resource_request::Event::Chunk(vec![0].into())),
-        })
-        .await
-        .map_err(io::Error::other)?;
-    drop(request_tx);
-
-    let mut request = Request::new(ReceiverStream::new(request_rx));
-    let authorization =
-        MetadataValue::from_str(&test_basic_authorization()).map_err(io::Error::other)?;
-    request
-        .metadata_mut()
-        .insert("authorization", authorization);
-    client
-        .upload_resource(request)
-        .await
-        .map(|response| response.into_inner())
-        .map_err(io::Error::other)
 }
 
 async fn publish_mqtt(

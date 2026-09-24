@@ -190,6 +190,7 @@ pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome
             operation: operation(1),
             preview: preview(1),
         }),
+        inspection: None,
     }
 }
 

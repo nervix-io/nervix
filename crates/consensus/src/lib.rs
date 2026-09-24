@@ -91,11 +91,12 @@ mod retention;
 mod snapshot;
 pub use command_execution::{
     CommandExecution, CommandExecutionAdmissionError, CommandExecutionAdmissionPolicy,
-    CommandExecutionChildResult, CommandExecutionDiagnostic, CommandExecutionEffect,
+    CommandExecutionDiagnostic, CommandExecutionDisposition, CommandExecutionEffect,
     CommandExecutionPreviewStale, CommandExecutionReconciliation, CommandExecutionRequestConflict,
-    CommandExecutionResult, CommandExecutionResultKind, CommandExecutionState,
-    CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
-    CommandExecutionTransactionStatus, CommandExecutionTransactionTarget,
+    CommandExecutionResult, CommandExecutionState, CommandExecutionStatementDisposition,
+    CommandExecutionStatementResult, CommandExecutionTransactionOperation,
+    CommandExecutionTransactionRequest, CommandExecutionTransactionStatus,
+    CommandExecutionTransactionTarget, DiagnosticSpan,
 };
 pub use domain_mutation::{DomainMutationLease, DomainMutationOwner, DomainMutationRecoveryFence};
 pub use retention::RaftRetentionPolicy;
@@ -5800,8 +5801,8 @@ mod tests {
 
     use super::{
         AppliedEntryContext, AutomaticScheduleFence, ClusterSchedule, CommandExecution,
-        CommandExecutionAdmissionPolicy, CommandExecutionEffect, CommandExecutionResult,
-        CommandExecutionResultKind, CommandExecutionState, ConsensusCommand, ConsensusResponse,
+        CommandExecutionAdmissionPolicy, CommandExecutionDisposition, CommandExecutionEffect,
+        CommandExecutionResult, CommandExecutionState, ConsensusCommand, ConsensusResponse,
         FjallLogReader, FjallStore, GossipNode, GossipState, LeaderTenure, MembershipMutation,
         MembershipSnapshot, ProtocolOriginError, ResourceRecords, StateMachineChanges,
         StateMachineData, TransactionApplicationOutcome, TransactionCommandResult,
@@ -6975,15 +6976,14 @@ mod tests {
         assert_identity_conflict(&mut state, conflicting, "position");
 
         let result = CommandExecutionResult {
-            success: true,
-            kind: CommandExecutionResultKind::Ok,
+            disposition: CommandExecutionDisposition::Completed {
+                already_existed: false,
+            },
             message: "created".to_string(),
             diagnostics: Vec::new(),
-            already_existed: false,
-            results: Vec::new(),
+            statements: Vec::new(),
             transaction: None,
             transaction_admission: None,
-            preview_stale: None,
         };
         for terminal in [result.clone(), result.clone()] {
             let response = apply_consensus_command(
@@ -7223,15 +7223,14 @@ mod tests {
                 request_digest: [1; 32],
                 at: Timestamp::from_unix_nanos(2),
                 result: Box::new(CommandExecutionResult {
-                    success: true,
-                    kind: CommandExecutionResultKind::Ok,
+                    disposition: CommandExecutionDisposition::Completed {
+                        already_existed: false,
+                    },
                     message: "finished".to_string(),
                     diagnostics: Vec::new(),
-                    already_existed: false,
-                    results: Vec::new(),
+                    statements: Vec::new(),
                     transaction: None,
                     transaction_admission: None,
-                    preview_stale: None,
                 }),
             },
         );

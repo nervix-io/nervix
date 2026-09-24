@@ -1,27 +1,23 @@
-//! The console listener and the session requests the browser drives through it.
+//! The console listener and the HTTP routes the browser drives through it.
 //!
 //! Layer: edges.
 //!
-//! - **Owns.** The console asset routes, its WebSocket session, its resource upload path, and the
-//!   snapshots it pushes to a connected browser.
-//! - **Depends on.** The session service for commands and the consensus observer for leadership.
-//! - **Must not know.** How a command is executed once the session service accepts it.
+//! - **Owns.** The console asset routes, authenticating and upgrading the console WebSocket, and
+//!   the multipart resource upload path.
+//! - **Depends on.** The session engine, which serves the upgraded WebSocket, and the resource
+//!   installation the upload path shares with every other upload.
+//! - **Must not know.** What a session request does once the WebSocket carries it.
 
 use std::{
-    collections::BTreeSet,
     convert::Infallible,
     io,
     net::SocketAddr,
     path::{Component, Path, PathBuf},
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+    sync::Arc as StdArc,
 };
 
-use arch_into::ArchInto;
 use error_stack::{Report, ResultExt};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Method, Request as HyperRequest, Response as HyperResponse, StatusCode,
@@ -36,52 +32,30 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use meticulous::ResultExt as _;
+use nervix_client_wire::SessionLimits;
 use nervix_consensus::ConsensusError;
-use nervix_dataflow_graph::DataflowGraph;
 use nervix_models::{
-    ClusterNodeName, DomainName, DomainStatus, NodeEndpoint, NodeServiceUrl,
-    NodeServiceUrlParseError, RelayName, ResourceName, ResourceUploadIdentity, ResourceUploadKey,
-    UserName,
+    DomainName, NodeEndpoint, NodeServiceUrl, NodeServiceUrlParseError, ResourceName,
+    ResourceUploadIdentity, ResourceUploadKey, UserName,
 };
-use nervix_nspl::client_statement::{ClientStatement, parse_client_statements};
-use parking_lot::RwLock;
-use prost::Message as _;
 use rustls::ServerConfig;
-use tokio::{
-    net::TcpListener,
-    sync::mpsc,
-    task::JoinSet,
-    time::{Duration, interval},
-};
+use tokio::{net::TcpListener, task::JoinSet};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{
     WebSocketStream,
-    tungstenite::{Message, handshake::derive_accept_key, protocol::Role},
+    tungstenite::{handshake::derive_accept_key, protocol::Role},
 };
 use tokio_util::sync::CancellationToken;
-use tonic::Status;
 use tracing::warn;
-use triomphe::Arc;
 
 use super::{
     AppError,
     authentication::{credentials_from_web_console_request, unauthorized_basic_response},
-    domain_lifecycle::ActiveDomainError,
     http_endpoint::{is_websocket_upgrade_request, response_with_bytes, text_response},
-    model_mutation::command_error,
-    observation::dataflow_metric_target,
+    session::websocket::console_websocket_config,
     session_service::SessionServiceImpl,
-    subscription::SessionSubscriptions,
 };
-use crate::{
-    proto,
-    proto::{
-        ClusterSummary, CommandRequest, CommandResult, CommandResultKind, Diagnostic,
-        DomainEntitySnapshot, DomainInfo, DomainList, DomainSnapshot, ServerEvent,
-        ServerEventLevel, SessionRequest, SessionResponse, SetActiveDomainRequest,
-    },
-    resource::{ResourceStoreError, StagedResourceArchive},
-};
+use crate::resource::{ResourceStoreError, StagedResourceArchive};
 
 const WEB_CONSOLE_INDEX: &[u8] = include_bytes!("../../crates/web-console/dist/index.html");
 
@@ -94,33 +68,11 @@ const WEB_CONSOLE_WASM: &[u8] =
 
 const WEB_CONSOLE_ICON: &[u8] = include_bytes!("../../crates/web-console/dist/nervix-icon.svg");
 
-const WEB_CONSOLE_SESSION_QUEUE_CAPACITY: usize = 16;
-
 const WEB_CONSOLE_WS_PATH: &str = "/console/ws";
 
 const WEB_CONSOLE_RESOURCE_UPLOAD_PATH: &str = "/console/resources/upload";
 
 pub(in crate::application) const WEB_CONSOLE_AUTH_QUERY_PARAM: &str = "auth";
-
-const WEB_CONSOLE_LEADERSHIP_CHECK_INTERVAL: Duration = Duration::from_millis(250);
-
-const WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500);
-
-struct WebConsoleSessionState {
-    active_domain: RwLock<Option<DomainName>>,
-    pending_commands: AtomicUsize,
-    clean_close: AtomicBool,
-}
-
-impl WebConsoleSessionState {
-    fn new() -> Self {
-        Self {
-            active_domain: RwLock::new(None),
-            pending_commands: AtomicUsize::new(0),
-            clean_close: AtomicBool::new(false),
-        }
-    }
-}
 
 fn web_console_upload_text_response(
     status: StatusCode,
@@ -206,281 +158,24 @@ async fn handle_web_console_request(
                 _ = service.inner.admission_shutdown.cancelled() => return,
                 upgraded = on_upgrade => upgraded,
             };
-            match upgraded {
-                Ok(upgraded) => {
-                    let io = TokioIo::new(upgraded);
-                    let mut websocket =
-                        WebSocketStream::from_raw_socket(io, Role::Server, None).await;
-                    let (tx, mut response_rx) = mpsc::channel(16);
-                    let (request_tx, request_rx) =
-                        mpsc::channel(WEB_CONSOLE_SESSION_QUEUE_CAPACITY);
-                    let (state_refresh_tx, mut state_refresh_rx) = mpsc::channel(1);
-                    let session_state = Arc::new(WebConsoleSessionState::new());
-                    let worker_service = service.clone();
-                    let worker_session_state = session_state.clone();
-                    let service_tasks = service.inner.service_tasks.clone();
-                    service_tasks.spawn(async move {
-                        worker_service
-                            .run_web_console_session(
-                                request_rx,
-                                tx,
-                                authenticated_user,
-                                worker_session_state,
-                                state_refresh_tx,
-                            )
-                            .await;
-                    });
-                    let mut leadership_check = interval(WEB_CONSOLE_LEADERSHIP_CHECK_INTERVAL);
-                    let mut graph_snapshot = interval(WEB_CONSOLE_GRAPH_SNAPSHOT_INTERVAL);
-                    let mut domains_rx = service.inner.consensus.subscribe_domains();
-                    leadership_check.tick().await;
-                    graph_snapshot.tick().await;
-                    let mut leader_connected = false;
-                    let mut state_refresh_open = true;
-
-                    loop {
-                        tokio::task::consume_budget().await;
-                        tokio::select! {
-                            biased;
-                            _ = service.inner.admission_shutdown.cancelled() => break,
-                            message = futures_util::StreamExt::next(&mut websocket) => {
-                                let Some(message) = message else {
-                                    break;
-                                };
-                                match message {
-                                    Ok(Message::Binary(payload)) => {
-                                        match proto::SessionRequest::decode(payload.as_ref()) {
-                                            Ok(request) => {
-                                                let is_command = matches!(
-                                                    request.request.as_ref(),
-                                                    Some(proto::session_request::Request::Command(_))
-                                                );
-                                                if is_command {
-                                                    session_state
-                                                        .pending_commands
-                                                        .fetch_update(
-                                                            Ordering::AcqRel,
-                                                            Ordering::Acquire,
-                                                            |pending| pending.checked_add(1),
-                                                        )
-                                                        .assured(
-                                                            "the bounded session queue keeps the pending command count below usize::MAX",
-                                                        );
-                                                }
-                                                let request_sent = tokio::select! {
-                                                    biased;
-                                                    _ = service.inner.admission_shutdown.cancelled() => false,
-                                                    result = request_tx.send(request) => {
-                                                        result.is_ok()
-                                                    }
-                                                };
-                                                if !request_sent {
-                                                    if is_command {
-                                                        session_state
-                                                            .pending_commands
-                                                            .fetch_update(
-                                                                Ordering::AcqRel,
-                                                                Ordering::Acquire,
-                                                                |pending| pending.checked_sub(1),
-                                                            )
-                                                            .assured(
-                                                                "this request incremented the pending command count",
-                                                            );
-                                                    }
-                                                    break;
-                                                }
-                                            }
-                                            Err(error) => {
-                                                warn!(
-                                                    error = %error,
-                                                    "failed to decode web console websocket protobuf request"
-                                                );
-                                                let response = web_console_server_error_response(
-                                                    format!(
-                                                        "failed to decode protobuf request: {error}"
-                                                    ),
-                                                );
-                                                if !send_web_console_session_response(
-                                                    &mut websocket,
-                                                    response,
-                                                )
-                                                .await
-                                                {
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Ok(Message::Ping(payload)) => {
-                                        if websocket.send(Message::Pong(payload)).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    Ok(Message::Close(_)) => {
-                                        session_state.clean_close.store(
-                                            session_state.pending_commands.load(Ordering::Acquire)
-                                                == 0,
-                                            Ordering::Release,
-                                        );
-                                        break;
-                                    }
-                                    Ok(_) => {}
-                                    Err(error) => {
-                                        warn!(error = %error, "web console websocket failed");
-                                        break;
-                                    }
-                                }
-                            }
-                            response = response_rx.recv() => {
-                                let Some(response) = response else {
-                                    break;
-                                };
-                                match response {
-                                    Ok(response) => {
-                                        if !send_web_console_session_response(
-                                            &mut websocket,
-                                            response,
-                                        )
-                                        .await
-                                        {
-                                            break;
-                                        }
-                                    }
-                                    Err(status) => {
-                                        let response = web_console_server_error_response(
-                                            status.message().to_string(),
-                                        );
-                                        if !send_web_console_session_response(
-                                            &mut websocket,
-                                            response,
-                                        )
-                                        .await
-                                        {
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            refresh = state_refresh_rx.recv(), if leader_connected && state_refresh_open => {
-                                if refresh.is_none() {
-                                    state_refresh_open = false;
-                                    continue;
-                                }
-                                let selected_domain = session_state.active_domain.read().clone();
-                                if !send_web_console_state_responses(
-                                    &mut websocket,
-                                    &service,
-                                    selected_domain.as_ref(),
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                            }
-                            _ = leadership_check.tick() => {
-                                let Some(response) = service
-                                    .web_console_leadership_response(leader_connected)
-                                    .await
-                                else {
-                                    continue;
-                                };
-                                let close_after_send =
-                                    response.event.as_ref().is_some_and(|event| {
-                                        if let proto::session_response::Event::Result(result) =
-                                            event
-                                        {
-                                            proto::CommandResultKind::try_from(result.kind).ok()
-                                                == Some(proto::CommandResultKind::NotLeader)
-                                        } else {
-                                            false
-                                        }
-                                    });
-                                let send_domain_snapshots =
-                                    !close_after_send && !leader_connected;
-                                if !send_web_console_session_response(
-                                    &mut websocket,
-                                    response,
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                                if close_after_send {
-                                    break;
-                                }
-                                if send_domain_snapshots {
-                                    leader_connected = true;
-                                    let domain_response = service.domain_list_response(false).await;
-                                    if !send_web_console_session_response(
-                                        &mut websocket,
-                                        domain_response,
-                                    )
-                                    .await
-                                    {
-                                        break;
-                                    }
-                                    let selected_domain = session_state.active_domain.read().clone();
-                                    if !send_web_console_state_responses(
-                                        &mut websocket,
-                                        &service,
-                                        selected_domain.as_ref(),
-                                    )
-                                    .await
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                            _ = graph_snapshot.tick(), if leader_connected => {
-                                let selected_domain = session_state.active_domain.read().clone();
-                                if !send_web_console_state_responses(
-                                    &mut websocket,
-                                    &service,
-                                    selected_domain.as_ref(),
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                            }
-                            changed = domains_rx.changed(), if leader_connected => {
-                                if changed.is_err() {
-                                    break;
-                                }
-                                let selected_domain = session_state.active_domain.read().clone();
-                                if let Some(domain) = selected_domain.as_ref()
-                                    && service.inner.consensus.current_domain(domain).await.is_none()
-                                {
-                                    *session_state.active_domain.write() = None;
-                                }
-                                let domain_response = service.domain_list_response(false).await;
-                                if !send_web_console_session_response(
-                                    &mut websocket,
-                                    domain_response,
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                                let selected_domain = session_state.active_domain.read().clone();
-                                if !send_web_console_state_responses(
-                                    &mut websocket,
-                                    &service,
-                                    selected_domain.as_ref(),
-                                )
-                                .await
-                                {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    drop(request_tx);
-                }
+            let upgraded = match upgraded {
+                Ok(upgraded) => upgraded,
                 Err(error) => {
                     warn!(error = %error, "web console websocket upgrade failed");
+                    return;
                 }
-            }
+            };
+            let limits = SessionLimits::DEFAULT;
+            let config = console_websocket_config(&limits);
+            let websocket = WebSocketStream::from_raw_socket(
+                TokioIo::new(upgraded),
+                Role::Server,
+                Some(config),
+            )
+            .await;
+            service
+                .serve_console_session(authenticated_user, limits, websocket)
+                .await;
         });
 
         return Ok(response);
@@ -542,55 +237,6 @@ async fn handle_web_console_request(
     };
 
     Ok(response)
-}
-
-async fn send_web_console_session_response<S>(
-    websocket: &mut WebSocketStream<S>,
-    response: SessionResponse,
-) -> bool
-where
-    WebSocketStream<S>: SinkExt<Message> + Unpin,
-{
-    websocket
-        .send(Message::Binary(response.encode_to_vec()))
-        .await
-        .is_ok()
-}
-
-async fn send_web_console_state_responses<S>(
-    websocket: &mut WebSocketStream<S>,
-    service: &SessionServiceImpl,
-    active_domain: Option<&DomainName>,
-) -> bool
-where
-    WebSocketStream<S>: SinkExt<Message> + Unpin,
-{
-    if !send_web_console_session_response(
-        websocket,
-        service.web_console_cluster_summary_response().await,
-    )
-    .await
-    {
-        return false;
-    }
-    for response in service
-        .web_console_domain_snapshot_responses(active_domain)
-        .await
-    {
-        if !send_web_console_session_response(websocket, response).await {
-            return false;
-        }
-    }
-    true
-}
-
-fn web_console_server_error_response(message: String) -> SessionResponse {
-    SessionResponse {
-        event: Some(proto::session_response::Event::Server(ServerEvent {
-            level: i32::from(ServerEventLevel::Error),
-            message,
-        })),
-    }
 }
 
 pub(in crate::application) fn web_console_query_param(
@@ -924,504 +570,17 @@ impl SessionServiceImpl {
 
         staging.finish().await.map_err(web_console_bundle_error)
     }
-
-    async fn process_web_console_request(
-        &self,
-        request: SessionRequest,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
-        subscriptions: &mut SessionSubscriptions,
-    ) -> SessionResponse {
-        match request.request {
-            Some(proto::session_request::Request::Command(command)) => {
-                let result = self
-                    .process_web_console_command(command, tx, subscriptions)
-                    .await;
-                SessionResponse {
-                    event: Some(proto::session_response::Event::Result(Box::new(result))),
-                }
-            }
-            Some(proto::session_request::Request::Suggest(suggest)) => {
-                let response = self.process_suggest(suggest, subscriptions).await;
-                SessionResponse {
-                    event: Some(proto::session_response::Event::Suggest(response)),
-                }
-            }
-            Some(proto::session_request::Request::ListDomains(_)) => {
-                self.domain_list_response(true).await
-            }
-            Some(proto::session_request::Request::SetActiveDomain(_)) => {
-                web_console_server_error_response(
-                    "active domain requests are handled by the websocket session".to_string(),
-                )
-            }
-            Some(proto::session_request::Request::AttachTransaction(request)) => {
-                let result = self.attach_transaction(request, subscriptions).await;
-                SessionResponse {
-                    event: Some(proto::session_response::Event::Result(Box::new(result))),
-                }
-            }
-            None => {
-                web_console_server_error_response("session request payload is missing".to_string())
-            }
-        }
-    }
-
-    async fn run_web_console_session(
-        self,
-        mut request_rx: mpsc::Receiver<SessionRequest>,
-        tx: mpsc::Sender<Result<SessionResponse, Status>>,
-        authenticated_user: UserName,
-        state: Arc<WebConsoleSessionState>,
-        state_refresh_tx: mpsc::Sender<()>,
-    ) {
-        let mut subscriptions = SessionSubscriptions::for_user(authenticated_user);
-        let shutdown = self.inner.admission_shutdown.clone();
-        loop {
-            tokio::task::consume_budget().await;
-            let request = tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => break,
-                request = request_rx.recv() => {
-                    let Some(request) = request else {
-                        break;
-                    };
-                    request
-                }
-            };
-            let is_command = matches!(
-                request.request.as_ref(),
-                Some(proto::session_request::Request::Command(_))
-            );
-            let active_domain_request = match request.request.as_ref() {
-                Some(proto::session_request::Request::SetActiveDomain(request)) => {
-                    Some(request.clone())
-                }
-                _ => None,
-            };
-            let processing = async {
-                if let Some(request) = active_domain_request {
-                    let mut selected_domain = state.active_domain.read().clone();
-                    match self
-                        .process_web_console_active_domain_request(request, &mut selected_domain)
-                        .await
-                    {
-                        Ok(response) => {
-                            *state.active_domain.write() = selected_domain;
-                            (response, true)
-                        }
-                        Err(error) => (web_console_server_error_response(error.to_string()), false),
-                    }
-                } else {
-                    (
-                        self.process_web_console_request(request, &tx, &mut subscriptions)
-                            .await,
-                        false,
-                    )
-                }
-            };
-            let processed = tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => None,
-                processed = processing => Some(processed),
-            };
-            let Some((response, refresh_state)) = processed else {
-                break;
-            };
-            if is_command {
-                state
-                    .pending_commands
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-                        pending.checked_sub(1)
-                    })
-                    .assured("every processed command was counted when its request was accepted");
-            }
-            let response_sent = tokio::select! {
-                biased;
-                _ = shutdown.cancelled() => false,
-                result = tx.send(Ok(response)) => result.is_ok(),
-            };
-            if !response_sent {
-                break;
-            }
-            if refresh_state {
-                let refresh_sent = tokio::select! {
-                    biased;
-                    _ = shutdown.cancelled() => false,
-                    result = state_refresh_tx.send(()) => result.is_ok(),
-                };
-                if !refresh_sent {
-                    break;
-                }
-            }
-        }
-
-        subscriptions.stop_all(&self).await;
-        if state.clean_close.load(Ordering::Acquire) {
-            self.clean_close_transaction(&mut subscriptions).await;
-        } else {
-            self.release_session_transaction_binding(&mut subscriptions);
-        }
-    }
-
-    async fn process_web_console_active_domain_request(
-        &self,
-        request: SetActiveDomainRequest,
-        active_domain: &mut Option<DomainName>,
-    ) -> Result<SessionResponse, ActiveDomainError> {
-        let domain = match DomainName::parse(request.domain.trim()) {
-            Ok(domain) => domain,
-            Err(_) => return Err(ActiveDomainError::Invalid),
-        };
-        if self.inner.consensus.current_domain(&domain).await.is_none() {
-            return Err(ActiveDomainError::NotFound { domain });
-        }
-        *active_domain = Some(domain.clone());
-        Ok(SessionResponse {
-            event: Some(proto::session_response::Event::Server(ServerEvent {
-                level: i32::from(ServerEventLevel::Info),
-                message: format!("using domain '{}'", domain.as_str()),
-            })),
-        })
-    }
-
-    async fn process_web_console_command(
-        &self,
-        req: CommandRequest,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
-        subscriptions: &mut SessionSubscriptions,
-    ) -> CommandResult {
-        if let Ok(statements) = parse_client_statements(&req.query)
-            && statements.iter().any(|statement| {
-                let ClientStatement::UploadResource(_) = statement else {
-                    return false;
-                };
-                true
-            })
-        {
-            return self
-                .command_with_transaction_status(
-                    command_error(
-                        "UPLOAD RESOURCE is not supported in the web console".to_string(),
-                    ),
-                    subscriptions,
-                )
-                .await;
-        }
-
-        self.process_command(req, tx, subscriptions).await
-    }
-}
-impl SessionServiceImpl {
-    async fn web_console_leadership_response(
-        &self,
-        already_connected_to_leader: bool,
-    ) -> Option<SessionResponse> {
-        let leader = self.inner.consensus.current_leader().await;
-        if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
-            let result = self.not_leader_response("", leader).await;
-            return Some(SessionResponse {
-                event: Some(proto::session_response::Event::Result(Box::new(result))),
-            });
-        }
-
-        if already_connected_to_leader {
-            return None;
-        }
-
-        Some(SessionResponse {
-            event: Some(proto::session_response::Event::Server(ServerEvent {
-                level: i32::from(ServerEventLevel::Info),
-                message: format!(
-                    "connected to leader '{}'",
-                    self.inner.consensus.local_node_id()
-                ),
-            })),
-        })
-    }
-
-    pub(in crate::application) async fn domain_list_response(
-        &self,
-        response_to_request: bool,
-    ) -> SessionResponse {
-        let domains = self
-            .inner
-            .consensus
-            .current_domains()
-            .await
-            .into_values()
-            .map(|domain| DomainInfo {
-                id: domain.id.as_str().to_string(),
-                pace: domain.config.pace.as_ref().to_string(),
-                status: domain.status.as_ref().to_string(),
-            })
-            .collect();
-        SessionResponse {
-            event: Some(proto::session_response::Event::Domains(DomainList {
-                domains,
-                response_to_request,
-            })),
-        }
-    }
-
-    async fn web_console_cluster_summary_response(&self) -> SessionResponse {
-        let running_domains = self
-            .inner
-            .consensus
-            .current_domains()
-            .await
-            .into_values()
-            .filter(|domain| domain.status == DomainStatus::Running)
-            .count();
-        let (nodes, relays) = self.inner.registry.active_graphs().into_iter().fold(
-            (0_usize, 0_usize),
-            |(nodes, relays), (_, graph)| {
-                let counts = graph.dataflow_graph_counts();
-                (nodes + counts.nodes, relays + counts.relays)
-            },
-        );
-        SessionResponse {
-            event: Some(proto::session_response::Event::Cluster(ClusterSummary {
-                running_domains: running_domains.arch_into(),
-                nodes: nodes.arch_into(),
-                relays: relays.arch_into(),
-            })),
-        }
-    }
-
-    async fn web_console_domain_snapshot_responses(
-        &self,
-        active_domain: Option<&DomainName>,
-    ) -> Vec<SessionResponse> {
-        let resources = self.inner.consensus.current_resources().await;
-        let domains = self.inner.consensus.current_domains().await;
-        let resource_entities = resources
-            .next_version_by_resource
-            .iter()
-            .filter(|counter| Some(&counter.domain) == active_domain)
-            .map(|counter| {
-                let latest = resources.uploads.resolve_completed_version(
-                    &counter.domain,
-                    &counter.identifier,
-                    nervix_models::RequestedResourceVersion::Latest,
-                );
-                let detail = match latest {
-                    Ok(id) => format!("v{}", id.version),
-                    Err(_) => "catalog".to_string(),
-                };
-                DomainEntitySnapshot {
-                    kind: "resource".to_string(),
-                    identifier: counter.identifier.as_str().to_string(),
-                    detail,
-                }
-            })
-            .collect::<Vec<_>>();
-        let active_graphs = self
-            .inner
-            .registry
-            .active_graphs()
-            .into_iter()
-            .filter(|(domain, _)| active_domain.is_none_or(|active| domain == active))
-            .collect::<Vec<_>>();
-        let active_graph_domains = active_graphs
-            .iter()
-            .map(|(domain, _)| domain.clone())
-            .collect::<BTreeSet<_>>();
-        let mut responses = Vec::new();
-        for (domain, graph) in active_graphs {
-            tokio::task::consume_budget().await;
-            if let Some(response) = self
-                .web_console_domain_snapshot_response(
-                    domain.clone(),
-                    graph.to_dataflow_graph(domain.as_str()),
-                    &resource_entities,
-                )
-                .await
-            {
-                responses.push(response);
-            }
-        }
-
-        for domain in domains.keys() {
-            tokio::task::consume_budget().await;
-            if active_domain.is_some_and(|active| active != domain)
-                || active_graph_domains.contains(domain)
-            {
-                continue;
-            }
-            if let Some(response) = self
-                .web_console_domain_snapshot_response(
-                    domain.clone(),
-                    DataflowGraph::new(domain.as_str()),
-                    &resource_entities,
-                )
-                .await
-            {
-                responses.push(response);
-            }
-        }
-        responses
-    }
-
-    async fn web_console_domain_snapshot_response(
-        &self,
-        domain: DomainName,
-        mut dataflow_graph: DataflowGraph,
-        resource_entities: &[DomainEntitySnapshot],
-    ) -> Option<SessionResponse> {
-        dataflow_graph.statistics = self.inner.runtime.dataflow_domain_statistics(&domain);
-        for node in &mut dataflow_graph.nodes {
-            let Some((kind, identifier)) = dataflow_metric_target(&node.id) else {
-                continue;
-            };
-            let health = self
-                .dataflow_node_status_for_graph(&domain, &kind, &identifier)
-                .await;
-            node.status = health.status;
-            node.status_detail = health.detail;
-            node.reconnect_wait_millis = health.reconnect_wait_millis;
-            if kind == "RELAY" {
-                node.statistics = self
-                    .inner
-                    .runtime
-                    .dataflow_relay_buffer_statistics(&domain, &RelayName::from(&identifier));
-                let existing = node
-                    .branches
-                    .iter()
-                    .map(|branch| branch.branch.clone())
-                    .collect::<BTreeSet<_>>();
-                node.branches.extend(
-                    self.inner
-                        .runtime
-                        .dataflow_relay_branch_statistics(&domain, &RelayName::from(&identifier))
-                        .into_iter()
-                        .filter(|branch| !existing.contains(&branch.branch)),
-                );
-            }
-        }
-        for edge in &mut dataflow_graph.edges {
-            let Some(metric) = edge.metric.as_ref() else {
-                continue;
-            };
-            edge.statistics = self.inner.runtime.dataflow_edge_statistics(&domain, metric);
-            edge.branches = self
-                .inner
-                .runtime
-                .dataflow_edge_branch_statistics(&domain, metric);
-        }
-        match dataflow_graph.serialize() {
-            Ok(graph_bytes) => Some(SessionResponse {
-                event: Some(proto::session_response::Event::Snapshot(DomainSnapshot {
-                    domain: domain.as_str().to_string(),
-                    dataflow_graph: graph_bytes.into(),
-                    entities: self
-                        .inner
-                        .registry
-                        .active_domain_entities(&domain)
-                        .into_iter()
-                        .map(|entity| DomainEntitySnapshot {
-                            kind: entity.kind.as_str().to_string(),
-                            identifier: entity.identifier.as_str().to_string(),
-                            detail: entity.kind.as_str().replace('_', " ").to_ascii_uppercase(),
-                        })
-                        .chain(resource_entities.iter().cloned())
-                        .collect(),
-                })),
-            }),
-            Err(error) => {
-                warn!(
-                    domain = domain.as_str(),
-                    error = %error,
-                    "failed to serialize web console domain snapshot"
-                );
-                None
-            }
-        }
-    }
-
-    pub(in crate::application) async fn consensus_error_response(
-        &self,
-        error: &ConsensusError,
-        message: String,
-    ) -> CommandResult {
-        match error {
-            ConsensusError::LeadershipLost { leader_id } => {
-                self.not_leader_response("", leader_id.clone()).await
-            }
-            _ => command_error(message),
-        }
-    }
-
-    pub(in crate::application) async fn not_leader_response(
-        &self,
-        query: &str,
-        leader: Option<ClusterNodeName>,
-    ) -> CommandResult {
-        let leader_node = match leader.as_ref() {
-            Some(leader_id) => self
-                .inner
-                .cluster
-                .gossip_state()
-                .await
-                .live_nodes
-                .into_iter()
-                .find(|node| node.node_id == *leader_id),
-            None => None,
-        };
-        // A redirect names the leader's advertised endpoints only where discovery has established
-        // them; an unavailable advertisement stays absent rather than becoming a guessed address.
-        let mut leader_grpc_uri = String::new();
-        let mut leader_web_console_uri = String::new();
-        if let Some(node) = leader_node {
-            if let Some(url) = node.client_url {
-                leader_grpc_uri = url.to_string();
-            }
-            if let Some(url) = node.console_url {
-                leader_web_console_uri = url.to_string();
-            }
-        }
-        let diagnostic = match leader.as_ref() {
-            Some(leader) => format!("retry this command on leader '{leader}'"),
-            None => "retry this command on the current leader".to_string(),
-        };
-        CommandResult {
-            success: false,
-            message: "not-a-leader".to_string(),
-            diagnostics: vec![Diagnostic {
-                message: diagnostic,
-                span_start: 0,
-                span_end: u32::try_from(query.len()).unwrap_or(0),
-            }],
-            kind: i32::from(CommandResultKind::NotLeader),
-            leader: match leader {
-                Some(leader) => leader.to_string(),
-                None => String::new(),
-            },
-            leader_grpc_uri,
-            leader_web_console_uri,
-            ..Default::default()
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::{CreateSchema, ModelName};
-    use tokio::sync::mpsc;
-
-    use super::{
-        super::test_fixtures::{TestService, build_test_service, named, test_addr},
-        *,
-    };
-    use crate::{
-        proto,
-        proto::{SessionRequest, SuggestRequest},
-    };
+    use super::{super::test_fixtures::test_addr, *};
 
     #[test]
     fn web_console_advertise_url_uses_https_listener_when_available() {
         assert_eq!(
             web_console_advertise_url(None, test_addr(17420), Some(test_addr(17443)))
-                .expect("a listen address forms a url")
+                .assured("a listen address forms a url")
                 .as_str(),
             "https://127.0.0.1:17443"
         );
@@ -1431,168 +590,15 @@ mod tests {
                 test_addr(17420),
                 Some(test_addr(17443))
             )
-            .expect("an advertised endpoint forms a url")
+            .assured("an advertised endpoint forms a url")
             .as_str(),
             "http://127.0.0.1:17420"
         );
         assert_eq!(
             web_console_advertise_url(None, test_addr(17420), None)
-                .expect("a listen address forms a url")
+                .assured("a listen address forms a url")
                 .as_str(),
             "http://127.0.0.1:17420"
         );
-    }
-
-    #[tokio::test]
-    async fn web_console_command_request_invokes_session_command_processor() {
-        let TestService {
-            service,
-            registry,
-            path,
-        } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions::new();
-
-        let response = service
-            .process_web_console_request(
-                SessionRequest {
-                    request: Some(proto::session_request::Request::Command(CommandRequest {
-                        query: "CREATE SCHEMA web_console_event ( user_id U32 );".to_string(),
-                        domain: "default".to_string(),
-                        execution_reference: uuid::Uuid::now_v7().to_string(),
-                        expected_transaction_position: None,
-                        expected_preview: None,
-                    })),
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-
-        let Some(proto::session_response::Event::Result(result)) = response.event else {
-            panic!("web console command should return a command result");
-        };
-        assert!(result.success, "expected command success: {result:?}");
-        let schema = registry
-            .get::<CreateSchema>(
-                &DomainName::parse("default").expect("valid domain"),
-                named::<ModelName>("web_console_event"),
-            )
-            .expect("registry get should succeed");
-        assert!(schema.is_some());
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[tokio::test]
-    async fn web_console_rejects_upload_and_supports_suggest_requests() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(true).await;
-        let (tx, _rx) = mpsc::channel(16);
-        let mut subscriptions = SessionSubscriptions::new();
-
-        let upload_response = service
-            .process_web_console_request(
-                SessionRequest {
-                    request: Some(proto::session_request::Request::Command(CommandRequest {
-                        query: "UPLOAD RESOURCE proto VERSION '/tmp/proto';".to_string(),
-                        domain: "default".to_string(),
-                        execution_reference: uuid::Uuid::now_v7().to_string(),
-                        expected_transaction_position: None,
-                        expected_preview: None,
-                    })),
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        let Some(proto::session_response::Event::Result(upload_result)) = upload_response.event
-        else {
-            panic!("web console upload rejection should return a command result");
-        };
-        assert!(!upload_result.success);
-        assert!(
-            upload_result
-                .message
-                .contains("not supported in the web console")
-        );
-
-        let suggest_response = service
-            .process_web_console_request(
-                SessionRequest {
-                    request: Some(proto::session_request::Request::Suggest(SuggestRequest {
-                        input: "SHOW ".to_string(),
-                        cursor: 5,
-                        domain: "default".to_string(),
-                    })),
-                },
-                &tx,
-                &mut subscriptions,
-            )
-            .await;
-        let Some(proto::session_response::Event::Suggest(suggest)) = suggest_response.event else {
-            panic!("web console suggest should return a suggestion response");
-        };
-        assert!(
-            suggest
-                .suggestions
-                .iter()
-                .any(|suggestion| suggestion.value == "CLUSTER"),
-            "expected CLUSTER suggestion, got: {:?}",
-            suggest.suggestions
-        );
-
-        subscriptions.stop_all(&service).await;
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
-    #[tokio::test]
-    async fn web_console_session_worker_stops_with_a_full_response_queue() {
-        let TestService {
-            service,
-            registry: _registry,
-            path,
-        } = build_test_service(true).await;
-        let (tx, _response_rx) = mpsc::channel(1);
-        tx.send(Ok(SessionResponse::default()))
-            .await
-            .assured("the response receiver remains open for this test");
-        let (request_tx, request_rx) = mpsc::channel(1);
-        request_tx
-            .send(SessionRequest {
-                request: Some(proto::session_request::Request::ListDomains(
-                    proto::ListDomainsRequest {},
-                )),
-            })
-            .await
-            .assured("the session worker request receiver remains open for this test");
-        drop(request_tx);
-        let (state_refresh_tx, _state_refresh_rx) = mpsc::channel(1);
-        let state = Arc::new(WebConsoleSessionState::new());
-        let worker_service = service.clone();
-        let worker = tokio::spawn(async move {
-            worker_service
-                .run_web_console_session(
-                    request_rx,
-                    tx,
-                    named::<UserName>("console_user"),
-                    state,
-                    state_refresh_tx,
-                )
-                .await;
-        });
-
-        tokio::task::yield_now().await;
-        service.inner.admission_shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(1), worker)
-            .await
-            .assured("shutdown interrupts a session worker blocked by response backpressure")
-            .assured("the session worker completes without panicking during shutdown");
-
-        let _ = std::fs::remove_dir_all(&path);
     }
 }

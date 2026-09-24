@@ -2,21 +2,29 @@
 //!
 //! Layer: control plane.
 //!
-//! - **Owns.** Subscription creation and deletion, the per-session subscription set, cluster-wide
-//!   subscription interest, and the sampling and delivery each subscription asks for.
-//! - **Depends on.** The registry for schemas and schedules, the runtime for relay receivers, and
-//!   the interconnect to make interest visible on every node.
+//! - **Owns.** Subscription creation and deletion, the per-session subscription set and the
+//!   generation each subscription is opened with, cluster-wide subscription interest, and the
+//!   filtering, sampling and Row delivery each subscription asks for.
+//! - **Depends on.** The registry for schemas and schedules, the runtime for relay receivers, the
+//!   interconnect to make interest visible on every node, and the Row encoder that writes selected
+//!   Arrow rows into client frames.
 //! - **Must not know.** Construction, inheritance, values or any other side effect a processor has.
 use std::{
     collections::{BTreeMap, BTreeSet},
+    num::{NonZeroU64, NonZeroUsize},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 use ahash::{HashMap, HashMapExt};
 use blake3::Hasher;
 use futures_util::{StreamExt, stream::FuturesUnordered};
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
+use nervix_client_wire::{
+    EncodedFrame, RowsSkippedCause, ServerFrame, SessionLimits, SubscriptionDeliveryLost,
+    SubscriptionEndReason, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
+    SubscriptionRowsSkipped,
+};
 use nervix_consensus::{
     CommandExecutionTransactionOperation, CommandExecutionTransactionRequest,
     CommandExecutionTransactionTarget, ReplicatedTransaction,
@@ -29,43 +37,58 @@ use nervix_models::{
     TransactionPreviewIdentity, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
-use nervix_recovery::NoReceiver;
+use nonzero_ext::nonzero;
 use sorted_vec::SortedSet;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
-use tonic::Status;
+use tracing::debug;
 use triomphe::Arc;
 
 #[cfg(test)]
 use super::authentication::DEFAULT_USER;
 use super::{
+    command_result::{CommandDiagnostic, CommandDisposition, CommandResult},
     model_mutation::{
         append_command_result, command_batch_result, command_error, command_ok,
         command_results_message,
     },
     session_service::SessionServiceImpl,
-    transaction::transaction_status,
+    transaction::{InspectingSession, transaction_status},
 };
 use crate::{
-    proto,
-    proto::{
-        CommandResult, CommandResultKind, Diagnostic, ServerEvent, ServerEventLevel,
-        SessionResponse,
-    },
     runtime::{
-        CompiledSubscriptionPredicate, RelayMessage, RelayRecordBatch, RelaySubscriptionReceiver,
+        BranchKey, CompiledSubscriptionPredicate, RelayRecordBatch, RelaySubscriptionReceiver,
         Runtime, SubscriptionPredicateCompileContext, compile_subscription_predicate,
         execute_subscription_predicate_on_record, scheduled_relay_owner_nodes,
     },
     runtime_schema,
+    subscription_row::{
+        SubscriptionBranchSchema, SubscriptionRowEncoder, SubscriptionRowFrame,
+        SubscriptionRowOpening, SubscriptionRowSelection, subscription_row_schema,
+    },
     task_shutdown::JoinShutdown,
 };
 
 static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// The most rows one frame of a subscription carries. A frame also stops at the session's frame
+/// limit, so this bounds the rows a client decodes per frame rather than the frame's size.
+const SUBSCRIPTION_ROWS_PER_FRAME: NonZeroUsize = nonzero!(256_usize);
+
+/// The frames a session sends its client, in the order they are queued.
+pub(in crate::application) type SessionOutbound = mpsc::Sender<EncodedFrame<ServerFrame>>;
+
+/// Where a session's subscriptions deliver their frames, and the limits those frames are held to.
+#[derive(Clone)]
+pub(in crate::application) struct SessionDelivery {
+    pub(in crate::application) outbound: SessionOutbound,
+    pub(in crate::application) limits: SessionLimits,
+}
+
 struct SessionSubscription {
+    handle: SubscriptionHandle,
     domain: DomainName,
     relay: RelayName,
     active: Arc<AtomicBool>,
@@ -89,6 +112,53 @@ pub(in crate::application) struct SessionSubscriptions {
     pub(in crate::application) user: UserName,
     pub(in crate::application) session_id: String,
     transaction_id: Option<String>,
+    /// The generation the next subscription of this session opens with. A name reused after
+    /// deletion gets a new one, so frames about the earlier subscription cannot be taken for it.
+    next_generation: NonZeroU64,
+}
+
+/// The transaction binding a session holds, as the checks on that binding read it.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::application) struct SessionBinding<'a> {
+    pub(in crate::application) session_id: &'a str,
+    pub(in crate::application) transaction_id: Option<&'a str>,
+}
+
+/// What a request that runs beside a session's ordered requests reads of that session: who it
+/// belongs to, the transaction it is bound to and the subscriptions it holds, as the ordered
+/// requests last left them.
+#[derive(Debug, Clone)]
+pub(in crate::application) struct SessionView {
+    pub(in crate::application) user: UserName,
+    pub(in crate::application) session_id: String,
+    pub(in crate::application) transaction_id: Option<String>,
+    pub(in crate::application) subscription_names: Vec<SubscriptionName>,
+}
+
+impl SessionView {
+    pub(in crate::application) fn binding(&self) -> SessionBinding<'_> {
+        SessionBinding {
+            session_id: &self.session_id,
+            transaction_id: self.transaction_id.as_deref(),
+        }
+    }
+
+    pub(in crate::application) fn inspecting(&self) -> InspectingSession<'_> {
+        InspectingSession {
+            user: &self.user,
+            attached_transaction: self.transaction_id.as_deref(),
+        }
+    }
+
+    /// The names of the session's subscriptions that start with `prefix`.
+    pub(in crate::application) fn matching_subscription_names(&self, prefix: &str) -> Vec<String> {
+        let prefix = prefix.to_ascii_lowercase();
+        self.subscription_names
+            .iter()
+            .filter(|name| prefix.is_empty() || name.as_str().starts_with(&prefix))
+            .map(ToString::to_string)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -97,13 +167,13 @@ pub(in crate::application) struct PendingSessionCommand {
     pub(in crate::application) expected_transaction_position: Option<usize>,
     pub(in crate::application) source: String,
     pub(in crate::application) statement: ClientStatement,
-    pub(in crate::application) domain: String,
+    pub(in crate::application) domain: Option<DomainName>,
 }
 
 #[derive(Debug)]
 pub(in crate::application) enum SessionCommandOperation {
     Begin {
-        domain: String,
+        domain: Option<DomainName>,
     },
     Queue(PendingSessionCommand),
     Commit {
@@ -115,15 +185,32 @@ pub(in crate::application) enum SessionCommandOperation {
     Execute(PendingSessionCommand),
 }
 
+/// A subscription the session opened. Its rows wait for the reply that announces it.
+pub(in crate::application) struct OpenedSubscription {
+    pub(in crate::application) opened: SubscriptionOpened,
+    pub(in crate::application) message: String,
+    /// Fired once the reply carrying `opened` is queued. The subscription's rows follow that
+    /// reply and never precede it; dropping this without firing ends the subscription unused.
+    pub(in crate::application) release: oneshot::Sender<()>,
+}
+
+/// A subscription the session deleted.
+pub(in crate::application) struct DeletedSubscription {
+    pub(in crate::application) handle: SubscriptionHandle,
+    pub(in crate::application) message: String,
+}
+
+/// Everything the delivery task of one subscription needs.
 struct SessionSubscriptionTaskConfig {
+    handle: SubscriptionHandle,
     predicate: Option<CompiledSubscriptionPredicate>,
-    sensitivity: nervix_vm::SchemaSensitivity,
-    branch_sensitivity: nervix_vm::SchemaSensitivity,
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<f64>,
     runtime: Runtime,
     receiver: RelaySubscriptionReceiver<RelayRecordBatch>,
-    tx: mpsc::Sender<Result<SessionResponse, Status>>,
+    encoder: SubscriptionRowEncoder,
+    delivery: SessionDelivery,
+    opened: oneshot::Receiver<()>,
 }
 
 impl SessionSubscriptions {
@@ -140,6 +227,7 @@ impl SessionSubscriptions {
             user,
             session_id: uuid::Uuid::now_v7().to_string(),
             transaction_id: None,
+            next_generation: NonZeroU64::MIN,
         }
     }
 
@@ -147,11 +235,42 @@ impl SessionSubscriptions {
         self.transaction_id.is_some()
     }
 
+    pub(in crate::application) fn binding(&self) -> SessionBinding<'_> {
+        SessionBinding {
+            session_id: &self.session_id,
+            transaction_id: self.transaction_id.as_deref(),
+        }
+    }
+
+    pub(in crate::application) fn inspecting(&self) -> InspectingSession<'_> {
+        InspectingSession {
+            user: &self.user,
+            attached_transaction: self.transaction_id.as_deref(),
+        }
+    }
+
+    /// The session as a request running beside its ordered requests reads it.
+    pub(in crate::application) fn view(&self) -> SessionView {
+        let mut subscription_names = self
+            .subscriptions
+            .keys()
+            .filter(|name| self.contains_name(name))
+            .cloned()
+            .collect::<Vec<_>>();
+        subscription_names.sort();
+        SessionView {
+            user: self.user.clone(),
+            session_id: self.session_id.clone(),
+            transaction_id: self.transaction_id.clone(),
+            subscription_names,
+        }
+    }
+
     pub(in crate::application) fn plan_commands(
         &self,
         statements: Vec<ParsedClientStatement>,
         query: &str,
-        request_domain: &str,
+        request_domain: Option<&DomainName>,
         execution_reference: &CommandExecutionReference,
         expected_transaction_position: Option<usize>,
         expected_preview: Option<TransactionPreviewIdentity>,
@@ -176,7 +295,7 @@ impl SessionSubscriptions {
                     transaction_position = Some(0);
                     preview_describes_transaction = false;
                     operations.push(SessionCommandOperation::Begin {
-                        domain: request_domain.to_string(),
+                        domain: request_domain.cloned(),
                     });
                 }
                 ClientStatement::CommitTransaction => {
@@ -209,7 +328,7 @@ impl SessionSubscriptions {
                         expected_transaction_position: transaction_position,
                         source: query[span].to_string(),
                         statement,
-                        domain: request_domain.to_string(),
+                        domain: request_domain.cloned(),
                     };
                     if inspects_transaction {
                         // An inspection reads the transaction instead of joining it, so it is
@@ -260,183 +379,36 @@ impl SessionSubscriptions {
         self.transaction_id.take()
     }
 
+    /// The handle the next subscription named `name` opens with.
+    fn next_handle(&mut self, name: SubscriptionName) -> SubscriptionHandle {
+        let generation = self.next_generation;
+        self.next_generation = generation
+            .checked_add(1)
+            .assured("a session cannot open 2^64 subscriptions");
+        SubscriptionHandle { name, generation }
+    }
+
     fn insert(
         &mut self,
-        name: SubscriptionName,
         domain: DomainName,
         relay: RelayName,
         config: SessionSubscriptionTaskConfig,
     ) {
-        let SessionSubscriptionTaskConfig {
-            predicate,
-            sensitivity,
-            branch_sensitivity,
-            delivery_behavior,
-            batch_sample_rate,
-            runtime,
-            receiver,
-            tx,
-        } = config;
-        let (stop_tx, mut stop_rx) = watch::channel(false);
+        let (stop_tx, stop_rx) = watch::channel(false);
         let active = Arc::new(AtomicBool::new(true));
         let task_active = active.clone();
+        let handle = config.handle.clone();
         let task_domain = domain.clone();
-        let event_name = name.clone();
-        let event_stream = relay.clone();
+        let task_relay = relay.clone();
         let task = tokio::spawn(async move {
-            let mut receiver = receiver;
-            'subscription_loop: loop {
-                tokio::task::consume_budget().await;
-                tokio::select! {
-                    batch = receiver.recv() => {
-                        match batch {
-                            Some(batch) => {
-                                let messages = match batch.try_into_messages() {
-                                    Ok(messages) => messages,
-                                    Err(error_and_batch) => {
-                                        let error = error_and_batch.error;
-                                        let event = SessionResponse {
-                                            event: Some(proto::session_response::Event::Server(
-                                                ServerEvent {
-                                                    level: i32::from(ServerEventLevel::Error),
-                                                    message: format!(
-                                                        "session subscription '{}' failed to expand relay batch: {}",
-                                                        event_name, error
-                                                    ),
-                                                },
-                                            )),
-                                        };
-                                        if tx.send(Ok(event)).await.is_err() {
-                                            break 'subscription_loop;
-                                        }
-                                        continue;
-                                    }
-                                };
-                                for message in messages {
-                                    tokio::task::consume_budget().await;
-                                    if let Some(predicate) = predicate.as_ref() {
-                                        let execution_snapshot = match runtime
-                                            .domain_execution_snapshot(&task_domain)
-                                        {
-                                            Ok(snapshot) => snapshot,
-                                            Err(error) => {
-                                                let event = SessionResponse {
-                                                    event: Some(proto::session_response::Event::Server(
-                                                        ServerEvent {
-                                                            level: i32::from(ServerEventLevel::Error),
-                                                            message: format!(
-                                                                "session subscription '{}' could not read domain execution time: {}",
-                                                                event_name, error
-                                                            ),
-                                                        },
-                                                    )),
-                                                };
-                                                if tx.send(Ok(event)).await.is_err() {
-                                                    break 'subscription_loop;
-                                                }
-                                                continue;
-                                            }
-                                        };
-                                        match execute_subscription_predicate_on_record(
-                                            predicate,
-                                            &message.record,
-                                            execution_snapshot.now(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(true) => {}
-                                            Ok(false) => continue,
-                                            Err(error) => {
-                                                let event = SessionResponse {
-                                                    event: Some(proto::session_response::Event::Server(
-                                                        ServerEvent {
-                                                            level: i32::from(ServerEventLevel::Error),
-                                                            message: format!(
-                                                                "session subscription '{}' predicate failed: {}",
-                                                                event_name, error
-                                                            ),
-                                                        },
-                                                    )),
-                                                };
-                                                if tx.send(Ok(event)).await.is_err() {
-                                                    break 'subscription_loop;
-                                                }
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                    if !subscription_sample_passes(batch_sample_rate, &message) {
-                                        continue;
-                                    }
-                                    let payload = format_stream_message(
-                                        &message,
-                                        &sensitivity,
-                                        &branch_sensitivity,
-                                    );
-                                    let event = SessionResponse {
-                                        event: Some(proto::session_response::Event::Subscription(
-                                            proto::SubscriptionEvent {
-                                                subscription: event_name.as_str().to_string(),
-                                                relay: event_stream.as_str().to_string(),
-                                                payload,
-                                            }
-                                        )),
-                                    };
-                                    match delivery_behavior {
-                                        SubscriptionDeliveryBehavior::Blocking => {
-                                            if tx.send(Ok(event)).await.is_err() {
-                                                break 'subscription_loop;
-                                            }
-                                        }
-                                        SubscriptionDeliveryBehavior::Dropping => {
-                                            match tx.try_send(Ok(event)) {
-                                                Ok(()) => {}
-                                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {}
-                                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                                    break 'subscription_loop;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            None => {
-                                let event = SessionResponse {
-                                    event: Some(proto::session_response::Event::Server(
-                                        ServerEvent {
-                                            level: i32::from(ServerEventLevel::Error),
-                                            message: format!(
-                                                "session subscription '{}' was dropped because \
-                                                 relay '{}' in domain '{}' was rebuilt after a \
-                                                 schema or execution change; recreate the \
-                                                 subscription against the current schema",
-                                                event_name,
-                                                event_stream,
-                                                task_domain,
-                                            ),
-                                        },
-                                    )),
-                                };
-                                tx.send(Ok(event))
-                                    .await
-                                    .means_peer_left("session subscription stream");
-                                break 'subscription_loop;
-                            }
-                        }
-                    }
-                    changed = stop_rx.changed() => {
-                        if changed.is_err() || *stop_rx.borrow() {
-                            break 'subscription_loop;
-                        }
-                    }
-                }
-            }
+            run_subscription_delivery(config, task_domain, task_relay, stop_rx).await;
             task_active.store(false, Ordering::Release);
         });
 
         self.subscriptions.insert(
-            name,
+            handle.name.clone(),
             SessionSubscription {
+                handle,
                 domain,
                 relay,
                 active,
@@ -460,26 +432,19 @@ impl SessionSubscriptions {
             .is_some_and(|subscription| subscription.active.load(Ordering::Acquire))
     }
 
-    pub(in crate::application) fn matching_names(&self, prefix: &str) -> Vec<String> {
-        let prefix = prefix.to_ascii_lowercase();
-        self.subscriptions
-            .keys()
-            .filter(|name| {
-                self.contains_name(name)
-                    && (prefix.is_empty() || name.as_str().starts_with(&prefix))
-            })
-            .map(ToString::to_string)
-            .collect()
-    }
-
-    async fn remove(&mut self, name: &SubscriptionName) -> Option<(DomainName, RelayName)> {
+    /// Stops and joins the subscription named `name`, returning what identified it.
+    async fn remove(&mut self, name: &SubscriptionName) -> Option<RemovedSubscription> {
         let subscription = self.subscriptions.remove(name)?;
         subscription.stop_tx.send_replace(true);
         subscription
             .task
             .join_after_shutdown("session subscription")
             .await;
-        Some((subscription.domain, subscription.relay))
+        Some(RemovedSubscription {
+            handle: subscription.handle,
+            domain: subscription.domain,
+            relay: subscription.relay,
+        })
     }
 
     pub(in crate::application) async fn stop_all(&mut self, service: &SessionServiceImpl) {
@@ -496,23 +461,322 @@ impl SessionSubscriptions {
     }
 }
 
-pub(in crate::application) fn format_stream_message(
-    message: &RelayMessage,
-    sensitivity: &nervix_vm::SchemaSensitivity,
-    branch_sensitivity: &nervix_vm::SchemaSensitivity,
-) -> String {
-    let payload = message
-        .record
-        .to_json_string_masking(sensitivity)
-        .unwrap_or_else(|error| format!("<invalid Arrow row: {error}>"));
-    match message.key.as_ref() {
-        Some(key) => format!(
-            "key={} payload={}",
-            key.to_json_string_masking(branch_sensitivity),
-            payload
-        ),
-        None => payload,
+/// A subscription taken out of its session, and the relay it read.
+struct RemovedSubscription {
+    handle: SubscriptionHandle,
+    domain: DomainName,
+    relay: RelayName,
+}
+
+/// Rows of one relay batch a subscription passed over, and why.
+struct SkippedRows {
+    cause: RowsSkippedCause,
+    rows: NonZeroU64,
+    message: String,
+}
+
+/// The rows of one relay batch a subscription delivers, and the rows it had to skip.
+struct SubscriptionSelection {
+    rows: Vec<usize>,
+    skipped: Option<SkippedRows>,
+}
+
+/// Queues one subscription's frames on its session.
+struct SubscriptionSender {
+    handle: SubscriptionHandle,
+    delivery: SessionDelivery,
+    behavior: SubscriptionDeliveryBehavior,
+    /// Rows a dropping subscription discarded that its client has not been told about yet.
+    dropped_rows: u64,
+}
+
+impl SubscriptionSender {
+    /// Queues a notice about the subscription, waiting for room. `false` means the session is
+    /// gone.
+    async fn send_notice(
+        &self,
+        frame: Result<
+            EncodedFrame<ServerFrame>,
+            error_stack::Report<nervix_client_wire::WireEncodeError>,
+        >,
+    ) -> bool {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                debug!(
+                    subscription = %self.handle.name,
+                    error = %error,
+                    "a subscription notice does not fit a session frame"
+                );
+                return true;
+            }
+        };
+        self.delivery.outbound.send(frame).await.is_ok()
     }
+
+    async fn report_skipped(&self, skipped: SkippedRows) -> bool {
+        let frame = SubscriptionRowsSkipped {
+            subscription: self.handle.clone(),
+            cause: skipped.cause,
+            skipped_rows: skipped.rows,
+            message: skipped.message,
+        }
+        .encode(&self.delivery.limits);
+        self.send_notice(frame).await
+    }
+
+    async fn report_end(&self, message: String) -> bool {
+        let frame = SubscriptionEnded {
+            subscription: self.handle.clone(),
+            reason: SubscriptionEndReason::RelayClosed,
+            message,
+        }
+        .encode(&self.delivery.limits);
+        self.send_notice(frame).await
+    }
+
+    /// Queues one frame of rows. A blocking subscription waits for room; a dropping one discards
+    /// the frame when the session is full and reports the loss before the next rows it delivers.
+    /// `false` means the session is gone.
+    async fn send_rows(&mut self, frame: SubscriptionRowFrame) -> bool {
+        let SubscriptionRowFrame { frame, rows } = frame;
+        let rows = u64::try_from(rows.get())
+            .assured("supported targets have a pointer width no larger than u64");
+        match self.behavior {
+            SubscriptionDeliveryBehavior::Blocking => {
+                self.delivery.outbound.send(frame).await.is_ok()
+            }
+            SubscriptionDeliveryBehavior::Dropping => {
+                if let Some(dropped_rows) = NonZeroU64::new(self.dropped_rows) {
+                    let lost = SubscriptionDeliveryLost {
+                        subscription: self.handle.clone(),
+                        dropped_rows,
+                    }
+                    .encode(&self.delivery.limits);
+                    match lost {
+                        Ok(lost) => match self.delivery.outbound.try_send(lost) {
+                            Ok(()) => self.dropped_rows = 0,
+                            // The loss is still unreported, so these rows cannot go ahead of it.
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                self.count_dropped(rows);
+                                return true;
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => return false,
+                        },
+                        Err(error) => {
+                            debug!(
+                                subscription = %self.handle.name,
+                                error = %error,
+                                "a subscription loss report does not fit a session frame"
+                            );
+                            self.dropped_rows = 0;
+                        }
+                    }
+                }
+                match self.delivery.outbound.try_send(frame) {
+                    Ok(()) => true,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        self.count_dropped(rows);
+                        true
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => false,
+                }
+            }
+        }
+    }
+
+    fn count_dropped(&mut self, rows: u64) {
+        self.dropped_rows = self.dropped_rows.checked_add(rows).assured(
+            "the count restarts at every report, and no session drops 2^64 rows between two: at a \
+             billion rows a second that takes centuries",
+        );
+    }
+}
+
+/// Delivers one subscription's rows until it is stopped, its relay closes or its session goes
+/// away.
+async fn run_subscription_delivery(
+    config: SessionSubscriptionTaskConfig,
+    domain: DomainName,
+    relay: RelayName,
+    mut stop_rx: watch::Receiver<bool>,
+) {
+    let SessionSubscriptionTaskConfig {
+        handle,
+        predicate,
+        delivery_behavior,
+        batch_sample_rate,
+        runtime,
+        mut receiver,
+        encoder,
+        delivery,
+        opened,
+    } = config;
+    // Rows follow the reply that opened the subscription and never precede it. A session that
+    // never queued that reply never announced the subscription, so it delivers nothing.
+    if opened.await.is_err() {
+        return;
+    }
+    let mut sender = SubscriptionSender {
+        handle,
+        delivery,
+        behavior: delivery_behavior,
+        dropped_rows: 0,
+    };
+    loop {
+        tokio::task::consume_budget().await;
+        tokio::select! {
+            batch = receiver.recv() => {
+                let Some(batch) = batch else {
+                    let message = format!(
+                        "session subscription '{}' was dropped because relay '{}' in domain '{}' \
+                         was rebuilt after a schema or execution change; recreate the \
+                         subscription against the current schema",
+                        sender.handle.name, relay, domain,
+                    );
+                    sender.report_end(message).await;
+                    return;
+                };
+                let selection = select_subscription_rows(
+                    &batch,
+                    predicate.as_ref(),
+                    batch_sample_rate,
+                    &runtime,
+                    &domain,
+                )
+                .await;
+                if let Some(skipped) = selection.skipped
+                    && !sender.report_skipped(skipped).await
+                {
+                    return;
+                }
+                if selection.rows.is_empty() {
+                    continue;
+                }
+                let frames = encoder.encode(
+                    batch.record_batch(),
+                    batch.branch_keys(),
+                    SubscriptionRowSelection::Rows(&selection.rows),
+                );
+                let frames = match frames {
+                    Ok(frames) => frames,
+                    Err(error) => {
+                        let rows = NonZeroU64::new(
+                            u64::try_from(selection.rows.len()).assured(
+                                "supported targets have a pointer width no larger than u64",
+                            ),
+                        )
+                        .verified("the empty selection above already continued");
+                        let skipped = SkippedRows {
+                            cause: RowsSkippedCause::EncodingFailed,
+                            rows,
+                            message: format!(
+                                "session subscription '{}' could not encode rows of relay '{}': \
+                                 {error}",
+                                sender.handle.name, relay,
+                            ),
+                        };
+                        if !sender.report_skipped(skipped).await {
+                            return;
+                        }
+                        continue;
+                    }
+                };
+                for frame in frames {
+                    tokio::task::consume_budget().await;
+                    if !sender.send_rows(frame).await {
+                        return;
+                    }
+                }
+            }
+            changed = stop_rx.changed() => {
+                if changed.is_err() || *stop_rx.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Which rows of one relay batch pass a subscription's filter and sampling.
+///
+/// The filter reads the domain's execution time once for the batch. A row the filter cannot
+/// evaluate is skipped and counted, and the first failure is reported for the batch.
+async fn select_subscription_rows(
+    batch: &RelayRecordBatch,
+    predicate: Option<&CompiledSubscriptionPredicate>,
+    batch_sample_rate: Option<f64>,
+    runtime: &Runtime,
+    domain: &DomainName,
+) -> SubscriptionSelection {
+    let row_count = batch.record_batch().num_rows();
+    let now = match predicate {
+        Some(_) => match runtime.domain_execution_snapshot(domain) {
+            Ok(snapshot) => Some(snapshot.now()),
+            Err(error) => {
+                let skipped = NonZeroU64::new(
+                    u64::try_from(row_count)
+                        .assured("supported targets have a pointer width no larger than u64"),
+                )
+                .map(|rows| SkippedRows {
+                    cause: RowsSkippedCause::DomainTimeUnavailable,
+                    rows,
+                    message: format!(
+                        "session subscription could not read domain execution time: {error}"
+                    ),
+                });
+                return SubscriptionSelection {
+                    rows: Vec::new(),
+                    skipped,
+                };
+            }
+        },
+        None => None,
+    };
+    let mut rows = Vec::with_capacity(row_count);
+    let mut failed_rows = 0_u64;
+    let mut first_failure = None;
+    for row in 0..row_count {
+        tokio::task::consume_budget().await;
+        if let (Some(predicate), Some(now)) = (predicate, now) {
+            let passed = match batch.runtime_row(row) {
+                Ok(record) => execute_subscription_predicate_on_record(predicate, &record, now)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            match passed {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    failed_rows = failed_rows
+                        .checked_add(1)
+                        .assured("a batch holds fewer than 2^64 rows");
+                    if first_failure.is_none() {
+                        first_failure = Some(error);
+                    }
+                    continue;
+                }
+            }
+        }
+        let key = batch
+            .branch_keys()
+            .get(row)
+            .verified("a relay batch carries one branch key per row");
+        if !subscription_sample_passes(batch_sample_rate, key.as_ref()) {
+            continue;
+        }
+        rows.push(row);
+    }
+    let skipped = match (NonZeroU64::new(failed_rows), first_failure) {
+        (Some(failed_rows), Some(error)) => Some(SkippedRows {
+            cause: RowsSkippedCause::FilterFailed,
+            rows: failed_rows,
+            message: format!("session subscription predicate failed: {error}"),
+        }),
+        _ => None,
+    };
+    SubscriptionSelection { rows, skipped }
 }
 
 pub(in crate::application) fn validate_subscription_bindings(
@@ -652,7 +916,7 @@ fn parse_subscription_batch_sample_rate(rate: Option<&str>) -> Result<Option<f64
     }
 }
 
-fn subscription_sample_passes(batch_sample_rate: Option<f64>, message: &RelayMessage) -> bool {
+fn subscription_sample_passes(batch_sample_rate: Option<f64>, key: Option<&BranchKey>) -> bool {
     let Some(rate) = batch_sample_rate else {
         return true;
     };
@@ -666,7 +930,7 @@ fn subscription_sample_passes(batch_sample_rate: Option<f64>, message: &RelayMes
     let counter = SESSION_SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let mut hasher = Hasher::new();
     hasher.update(&counter.to_le_bytes());
-    if let Some(key) = message.key.as_ref() {
+    if let Some(key) = key {
         hasher.update(key.as_str().as_bytes());
     }
     let hash = hasher.finalize();
@@ -907,8 +1171,7 @@ impl SessionServiceImpl {
     async fn process_pending_session_commands(
         &self,
         commands: Vec<PendingSessionCommand>,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
-        subscriptions: &mut SessionSubscriptions,
+        session: InspectingSession<'_>,
         explicit_batch: bool,
     ) -> CommandResult {
         let is_batch = explicit_batch || commands.len() > 1;
@@ -945,9 +1208,9 @@ impl SessionServiceImpl {
 
                     let mutation_query = sources.join("; ");
                     let result = self
-                        .process_model_mutation_batch(statements, &mutation_query, &domain)
+                        .process_model_mutation_batch(statements, &mutation_query, domain.as_ref())
                         .await;
-                    if !result.success {
+                    if !result.succeeded() {
                         return command_batch_result(results, result, is_batch);
                     }
                     append_command_result(&mut results, result);
@@ -957,12 +1220,11 @@ impl SessionServiceImpl {
                         .process_client_statement(
                             statement,
                             &command.source,
-                            &command.domain,
-                            tx,
-                            subscriptions,
+                            command.domain.as_ref(),
+                            session,
                         )
                         .await;
-                    if !result.success {
+                    if !result.succeeded() {
                         return command_batch_result(results, result, is_batch);
                     }
                     append_command_result(&mut results, result);
@@ -979,13 +1241,10 @@ impl SessionServiceImpl {
                 .verified("the empty check above already returned");
         }
 
+        let message = command_results_message(&results);
         CommandResult {
-            success: true,
-            message: command_results_message(&results),
-            diagnostics: Vec::new(),
-            kind: i32::from(CommandResultKind::Ok),
-            results,
-            ..Default::default()
+            statements: results,
+            ..command_ok(message)
         }
     }
 
@@ -1064,50 +1323,46 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         subscription: nervix_models::CreateSubscription,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
+        delivery: &SessionDelivery,
         subscriptions: &mut SessionSubscriptions,
-    ) -> CommandResult {
+    ) -> Result<OpenedSubscription, Box<CommandResult>> {
         if subscriptions.contains_name(&subscription.name) {
-            return CommandResult {
-                success: false,
-                message: format!(
-                    "session subscription '{}' already exists",
-                    subscription.name
-                ),
-                diagnostics: vec![Diagnostic {
-                    message: format!(
-                        "session subscription '{}' already exists",
-                        subscription.name
-                    ),
-                    span_start: 0,
-                    span_end: 0,
-                }],
-                kind: i32::from(CommandResultKind::Error),
-                ..Default::default()
-            };
+            return Err(Box::new(command_error(format!(
+                "session subscription '{}' already exists",
+                subscription.name
+            ))));
         }
 
         let batch_sample_rate =
             match parse_subscription_batch_sample_rate(subscription.batch_sample_rate.as_deref()) {
                 Ok(rate) => rate,
                 Err(err) => {
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "failed to subscribe session '{}': {err}",
-                            subscription.name
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: err,
-                            span_start: 0,
-                            span_end: 0,
-                        }],
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
+                    let diagnostic = CommandDiagnostic::unlocated(err.clone());
+                    return Err(Box::new(CommandResult {
+                        diagnostics: vec![diagnostic],
+                        ..CommandResult::new(
+                            CommandDisposition::Failed,
+                            format!("failed to subscribe session '{}': {err}", subscription.name),
+                        )
+                    }));
                 }
             };
 
+        let relay_missing = || {
+            let diagnostic = CommandDiagnostic::unlocated(format!(
+                "stream '{}' not found",
+                subscription.relay.as_str()
+            ));
+            let message = format!(
+                "stream '{}' does not exist in domain '{}'",
+                subscription.relay.as_str(),
+                domain.as_str()
+            );
+            CommandResult {
+                diagnostics: vec![diagnostic],
+                ..CommandResult::new(CommandDisposition::Failed, message)
+            }
+        };
         match self
             .inner
             .registry
@@ -1119,260 +1374,200 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(Some(_)) => {}
-                Ok(None) => {
-                    return CommandResult {
-                        success: false,
-                        message: format!(
-                            "stream '{}' does not exist in domain '{}'",
-                            subscription.relay.as_str(),
-                            domain.as_str()
-                        ),
-                        diagnostics: vec![Diagnostic {
-                            message: format!("stream '{}' not found", subscription.relay.as_str()),
-                            span_start: 0,
-                            span_end: 0,
-                        }],
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
-                }
+                Ok(None) => return Err(Box::new(relay_missing())),
                 Err(err) => {
-                    return CommandResult {
-                        success: false,
-                        message: format!("failed to resolve relay for subscription: {err}"),
-                        diagnostics: vec![Diagnostic {
-                            message: format!("failed to resolve relay for subscription: {err}"),
-                            span_start: 0,
-                            span_end: 0,
-                        }],
-                        kind: i32::from(CommandResultKind::Error),
-                        ..Default::default()
-                    };
+                    return Err(Box::new(command_error(format!(
+                        "failed to resolve relay for subscription: {err}"
+                    ))));
                 }
             },
             Err(err) => {
-                return CommandResult {
-                    success: false,
-                    message: format!("failed to resolve relay for subscription: {err}"),
-                    diagnostics: vec![Diagnostic {
-                        message: format!("failed to resolve relay for subscription: {err}"),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
+                return Err(Box::new(command_error(format!(
+                    "failed to resolve relay for subscription: {err}"
+                ))));
             }
         }
 
-        let (predicate, subscription_sensitivity) = match self
+        let payload_schema = match self
             .subscription_stream_schema(domain, &subscription.relay)
             .await
         {
-            Ok(Some(schema)) => {
-                let udfs = self.inner.runtime.udf_executor(domain);
-                let schema = runtime_schema::compile_schema(&schema);
-                let input_sensitivity = schema.vm_sensitivity();
-                let predicate = match subscription.where_clause.as_ref() {
-                    Some(expression) => match compile_subscription_predicate(
-                        domain,
-                        &subscription.name,
-                        expression,
-                        SubscriptionPredicateCompileContext::new(
-                            schema.arrow_schema(),
-                            input_sensitivity.clone(),
-                            udfs.as_ref(),
-                        ),
-                    ) {
-                        Ok(predicate) => Some(predicate),
-                        Err(err) => {
-                            return CommandResult {
-                                success: false,
-                                message: format!(
-                                    "failed to compile session subscription '{}': {err}",
-                                    subscription.name
-                                ),
-                                diagnostics: vec![Diagnostic {
-                                    message: format!(
-                                        "failed to compile session subscription '{}': {err}",
-                                        subscription.name
-                                    ),
-                                    span_start: 0,
-                                    span_end: 0,
-                                }],
-                                kind: i32::from(CommandResultKind::Error),
-                                ..Default::default()
-                            };
-                        }
-                    },
-                    None => None,
-                };
-                (predicate, input_sensitivity)
-            }
-            Ok(None) => {
-                return CommandResult {
-                    success: false,
-                    message: format!(
-                        "stream '{}' does not exist in domain '{}'",
-                        subscription.relay.as_str(),
-                        domain.as_str()
-                    ),
-                    diagnostics: vec![Diagnostic {
-                        message: format!("stream '{}' not found", subscription.relay.as_str()),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
-            }
+            Ok(Some(schema)) => schema,
+            Ok(None) => return Err(Box::new(relay_missing())),
             Err(err) => {
-                return CommandResult {
-                    success: false,
-                    message: format!("failed to resolve relay for subscription: {err}"),
-                    diagnostics: vec![Diagnostic {
-                        message: format!("failed to resolve relay for subscription: {err}"),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
+                return Err(Box::new(command_error(format!(
+                    "failed to resolve relay for subscription: {err}"
+                ))));
             }
         };
+        let predicate = match subscription.where_clause.as_ref() {
+            Some(expression) => {
+                let udfs = self.inner.runtime.udf_executor(domain);
+                let compiled = runtime_schema::compile_schema(&payload_schema);
+                let compiled_predicate = compile_subscription_predicate(
+                    domain,
+                    &subscription.name,
+                    expression,
+                    SubscriptionPredicateCompileContext::new(
+                        compiled.arrow_schema(),
+                        compiled.vm_sensitivity(),
+                        udfs.as_ref(),
+                    ),
+                );
+                match compiled_predicate {
+                    Ok(predicate) => Some(predicate),
+                    Err(err) => {
+                        return Err(Box::new(command_error(format!(
+                            "failed to compile session subscription '{}': {err}",
+                            subscription.name
+                        ))));
+                    }
+                }
+            }
+            None => None,
+        };
 
-        let branch_sensitivity = match self
+        let branching = match self
             .subscription_target_from_schedule(domain, &subscription.relay)
             .await
         {
-            Ok(Some(target)) => match target.branching.schema() {
-                Some(schema) => runtime_schema::compile_schema(schema).vm_sensitivity(),
-                None => nervix_vm::SchemaSensitivity::empty(),
-            },
+            Ok(Some(target)) => target.branching,
             Ok(None) => {
-                return command_error(format!(
+                return Err(Box::new(command_error(format!(
                     "stream '{}' has no scheduled branch declaration in domain '{}'",
                     subscription.relay.as_str(),
                     domain.as_str(),
-                ));
+                ))));
             }
             Err(error) => {
-                return command_error(format!(
+                return Err(Box::new(command_error(format!(
                     "failed to resolve branch declaration for relay '{}': {error}",
                     subscription.relay.as_str(),
-                ));
+                ))));
+            }
+        };
+        let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
+        let branch = match &branching {
+            nervix_models::ResolvedBranching::Unbranched => None,
+            nervix_models::ResolvedBranching::Branched { branch, schema } => {
+                Some(SubscriptionBranchSchema {
+                    name: branch,
+                    schema,
+                    fields: &branch_fields,
+                })
+            }
+        };
+        let row_schema = match subscription_row_schema(&payload_schema, branch) {
+            Ok(schema) => schema,
+            Err(error) => {
+                return Err(Box::new(command_error(format!(
+                    "failed to describe the rows of relay '{}': {error}",
+                    subscription.relay.as_str(),
+                ))));
+            }
+        };
+        let handle = subscriptions.next_handle(subscription.name.clone());
+        let opening = SubscriptionRowOpening::new(
+            handle.clone(),
+            row_schema,
+            delivery.limits,
+            SUBSCRIPTION_ROWS_PER_FRAME,
+        );
+        let opening = match opening {
+            Ok(opening) => opening,
+            Err(error) => {
+                return Err(Box::new(command_error(format!(
+                    "failed to describe the rows of relay '{}': {error}",
+                    subscription.relay.as_str(),
+                ))));
             }
         };
 
         let relay = subscription.relay.clone();
         let runtime_revision = self.inner.consensus.current_runtime_state().await.revision;
         if let Err(err) = self.wait_for_runtime_revision(runtime_revision).await {
-            return CommandResult {
-                success: false,
-                message: format!("failed to subscribe to relay '{}': {err}", relay.as_str()),
-                diagnostics: vec![Diagnostic {
-                    message: format!("failed to subscribe to relay '{}': {err}", relay.as_str()),
-                    span_start: 0,
-                    span_end: 0,
-                }],
-                kind: i32::from(CommandResultKind::Error),
-                ..Default::default()
-            };
+            return Err(Box::new(command_error(format!(
+                "failed to subscribe to relay '{}': {err}",
+                relay.as_str()
+            ))));
         }
         let receiver = match self.inner.runtime.subscribe_stream(domain, &relay).await {
             Ok(receiver) => receiver,
             Err(err) => {
-                return CommandResult {
-                    success: false,
-                    message: format!("failed to subscribe to relay '{}': {err}", relay.as_str()),
-                    diagnostics: vec![Diagnostic {
-                        message: format!(
-                            "failed to subscribe to relay '{}': {err}",
-                            relay.as_str()
-                        ),
-                        span_start: 0,
-                        span_end: 0,
-                    }],
-                    kind: i32::from(CommandResultKind::Error),
-                    ..Default::default()
-                };
+                return Err(Box::new(command_error(format!(
+                    "failed to subscribe to relay '{}': {err}",
+                    relay.as_str()
+                ))));
             }
         };
 
         if let Err(error) = self.register_subscription_interest(domain, &relay).await {
-            return command_error(format!(
+            return Err(Box::new(command_error(format!(
                 "failed to register subscription interest for relay '{}' in domain '{}': {error}",
                 relay.as_str(),
                 domain.as_str(),
-            ));
+            ))));
         }
+        let (opened, encoder) = opening.open(domain.clone(), relay.clone());
+        let (release, released) = oneshot::channel();
         subscriptions.insert(
-            subscription.name.clone(),
             domain.clone(),
-            relay.clone(),
+            relay,
             SessionSubscriptionTaskConfig {
+                handle,
                 predicate,
-                sensitivity: subscription_sensitivity,
-                branch_sensitivity,
                 delivery_behavior: subscription.delivery_behavior,
                 batch_sample_rate,
                 runtime: self.inner.runtime.clone(),
                 receiver,
-                tx: tx.clone(),
+                encoder,
+                delivery: delivery.clone(),
+                opened: released,
             },
         );
 
-        CommandResult {
-            success: true,
+        Ok(OpenedSubscription {
+            opened,
             message: format!(
                 "created subscription '{}' in domain '{}'",
                 subscription.name,
                 domain.as_str()
             ),
-            diagnostics: Vec::new(),
-            kind: i32::from(CommandResultKind::Ok),
-            ..Default::default()
-        }
+            release,
+        })
     }
 
     pub(in crate::application) async fn delete_subscription(
         &self,
         subscription: nervix_models::DeleteSubscription,
         subscriptions: &mut SessionSubscriptions,
-    ) -> CommandResult {
-        match subscriptions.remove(&subscription.name).await {
-            Some((subscription_domain, relay)) => {
-                if !subscriptions.contains_domain_stream(&subscription_domain, &relay.clone()) {
-                    self.unregister_subscription_interest(&subscription_domain, &relay.clone())
-                        .await;
-                }
-                CommandResult {
-                    success: true,
-                    message: format!(
-                        "deleted subscription '{}' from domain '{}'",
-                        subscription.name,
-                        subscription_domain.as_str()
-                    ),
-                    diagnostics: Vec::new(),
-                    kind: i32::from(CommandResultKind::Ok),
-                    ..Default::default()
-                }
-            }
-            None => CommandResult {
-                success: false,
-                message: format!(
-                    "session subscription '{}' does not exist",
-                    subscription.name
-                ),
-                diagnostics: vec![Diagnostic {
-                    message: format!("session subscription '{}' not found", subscription.name),
-                    span_start: 0,
-                    span_end: 0,
-                }],
-                kind: i32::from(CommandResultKind::Error),
-                ..Default::default()
-            },
+    ) -> Result<DeletedSubscription, Box<CommandResult>> {
+        let Some(removed) = subscriptions.remove(&subscription.name).await else {
+            let diagnostic = CommandDiagnostic::unlocated(format!(
+                "session subscription '{}' not found",
+                subscription.name
+            ));
+            let message = format!(
+                "session subscription '{}' does not exist",
+                subscription.name
+            );
+            return Err(Box::new(CommandResult {
+                diagnostics: vec![diagnostic],
+                ..CommandResult::new(CommandDisposition::Failed, message)
+            }));
+        };
+        if !subscriptions.contains_domain_stream(&removed.domain, &removed.relay) {
+            self.unregister_subscription_interest(&removed.domain, &removed.relay)
+                .await;
         }
+        Ok(DeletedSubscription {
+            message: format!(
+                "deleted subscription '{}' from domain '{}'",
+                subscription.name,
+                removed.domain.as_str()
+            ),
+            handle: removed.handle,
+        })
     }
 }
 
@@ -1417,7 +1612,7 @@ impl SessionServiceImpl {
             if result.transaction.is_some() {
                 transaction.clone_from(&result.transaction);
             }
-            if !result.success || !is_batch {
+            if !result.succeeded() || !is_batch {
                 return result;
             }
             append_command_result(&mut results, result);
@@ -1458,7 +1653,7 @@ impl SessionServiceImpl {
             if result.transaction.is_some() {
                 transaction.clone_from(&result.transaction);
             }
-            if !result.success {
+            if !result.succeeded() {
                 let mut result = command_batch_result(results, result, is_batch);
                 if result.transaction.is_none() {
                     result.transaction = transaction;
@@ -1474,21 +1669,17 @@ impl SessionServiceImpl {
         if results.is_empty() {
             return command_error("empty command".to_string());
         }
+        let message = command_results_message(&results);
         CommandResult {
-            success: true,
-            message: command_results_message(&results),
-            diagnostics: Vec::new(),
-            kind: i32::from(CommandResultKind::Ok),
-            results,
+            statements: results,
             transaction,
-            ..Default::default()
+            ..command_ok(message)
         }
     }
 
     pub(in crate::application) async fn process_session_command_operations(
         &self,
         operations: Vec<SessionCommandOperation>,
-        tx: &mpsc::Sender<Result<SessionResponse, Status>>,
         subscriptions: &mut SessionSubscriptions,
     ) -> CommandResult {
         let is_batch = operations.len() > 1;
@@ -1499,7 +1690,7 @@ impl SessionServiceImpl {
             tokio::task::consume_budget().await;
             let result = match operation {
                 SessionCommandOperation::Begin { domain } => {
-                    match self.resolve_transaction_domain(&domain).await {
+                    match self.resolve_transaction_domain(domain.as_ref()).await {
                         Err(message) => command_error(message),
                         Ok(domain) => {
                             let id = uuid::Uuid::now_v7().to_string();
@@ -1537,22 +1728,26 @@ impl SessionServiceImpl {
                         .await
                 }
                 SessionCommandOperation::Commit { expected_preview } => {
-                    self.commit_bound_transaction(tx, subscriptions, expected_preview)
+                    self.commit_bound_transaction(subscriptions, expected_preview)
                         .await
                 }
                 SessionCommandOperation::Revert => {
                     self.revert_bound_transaction(subscriptions).await
                 }
                 SessionCommandOperation::Execute(command) => {
-                    self.process_pending_session_commands(vec![command], tx, subscriptions, false)
-                        .await
+                    self.process_pending_session_commands(
+                        vec![command],
+                        subscriptions.inspecting(),
+                        false,
+                    )
+                    .await
                 }
             };
 
             if result.transaction.is_some() {
                 transaction.clone_from(&result.transaction);
             }
-            if !result.success {
+            if !result.succeeded() {
                 let mut result = command_batch_result(results, result, is_batch);
                 if result.transaction.is_none() {
                     result.transaction = transaction;
@@ -1568,29 +1763,75 @@ impl SessionServiceImpl {
         if results.is_empty() {
             return command_error("empty command".to_string());
         }
+        let message = command_results_message(&results);
         CommandResult {
-            success: true,
-            message: command_results_message(&results),
-            diagnostics: Vec::new(),
-            kind: i32::from(CommandResultKind::Ok),
-            results,
+            statements: results,
             transaction,
-            ..Default::default()
+            ..command_ok(message)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
-    use nervix_models::{DomainName, SubscriptionDeliveryBehavior};
+    use nervix_client_wire::{
+        RowSchema, ServerEvent, ServerMessage, SubscriptionEndReason, VerifiedFrame,
+    };
+    use nervix_models::{DomainName, SchemaField, SubscriptionDeliveryBehavior};
+    use nervix_recovery::Discarded as _;
     use tokio::{sync::mpsc, time::Duration};
 
     use super::{
         super::test_fixtures::{TestService, build_test_service, named, string_branch_key},
         *,
     };
-    use crate::{proto, proto::ServerEventLevel, runtime::Runtime};
+    use crate::runtime::Runtime;
+
+    /// The delivery task configuration of a subscription whose rows hold one `user_id` field, with
+    /// its opening reply already queued.
+    fn task_config(
+        subscriptions: &mut SessionSubscriptions,
+        name: &str,
+        receiver: RelaySubscriptionReceiver<RelayRecordBatch>,
+        outbound: SessionOutbound,
+    ) -> SessionSubscriptionTaskConfig {
+        let handle = subscriptions.next_handle(named(name));
+        let schema = RowSchema {
+            fields: vec![SchemaField {
+                name: named("user_id"),
+                ty: ParseAsType::U32,
+                optional: false,
+                sensitive: false,
+            }],
+            branch: None,
+        };
+        let (_, encoder) = SubscriptionRowOpening::new(
+            handle.clone(),
+            schema,
+            SessionLimits::DEFAULT,
+            SUBSCRIPTION_ROWS_PER_FRAME,
+        )
+        .assured("the test row limit fits the default collection limit")
+        .open(named("default"), named("events"));
+        let (release, opened) = oneshot::channel();
+        release
+            .send(())
+            .discarded("the configuration keeps the receiver until its task starts");
+        SessionSubscriptionTaskConfig {
+            handle,
+            predicate: None,
+            delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
+            batch_sample_rate: None,
+            runtime: Runtime::default(),
+            receiver,
+            encoder,
+            delivery: SessionDelivery {
+                outbound,
+                limits: SessionLimits::DEFAULT,
+            },
+            opened,
+        }
+    }
 
     #[test]
     fn parse_subscription_literal_enforces_declared_types() {
@@ -1633,56 +1874,65 @@ mod tests {
 
     #[test]
     fn subscription_sampling_respects_extreme_rates() {
-        let message = RelayMessage {
-            key: string_branch_key("tenant", "acme"),
-            record: runtime_schema::test_runtime_row([]),
-            acks: crate::runtime_ack::AckSet::empty(),
-        };
-        assert!(subscription_sample_passes(None, &message));
-        assert!(subscription_sample_passes(Some(1.0), &message));
-        assert!(!subscription_sample_passes(Some(0.0), &message));
+        let key = string_branch_key("tenant", "acme");
+        assert!(subscription_sample_passes(None, key.as_ref()));
+        assert!(subscription_sample_passes(Some(1.0), key.as_ref()));
+        assert!(!subscription_sample_passes(Some(0.0), key.as_ref()));
     }
 
     #[tokio::test]
-    async fn session_subscriptions_track_names_and_cleanup_tasks() {
+    async fn session_subscriptions_track_names_generations_and_cleanup_tasks() {
         let mut subscriptions = SessionSubscriptions::new();
-        let (tx, _rx) = mpsc::channel(4);
+        let (outbound, _frames) = mpsc::channel(4);
         let events = crate::runtime::RelayBroadcast::with_capacity(
             std::num::NonZeroUsize::new(4).expect("test relay capacity must be nonzero"),
         );
-        let events_rx = events.new_receiver();
+        let config = task_config(
+            &mut subscriptions,
+            "live_events",
+            events.new_receiver(),
+            outbound.clone(),
+        );
+        let first_generation = config.handle.generation;
         subscriptions.insert(
-            named("live_events"),
             DomainName::parse("default").expect("valid domain"),
             named("events"),
-            SessionSubscriptionTaskConfig {
-                predicate: None,
-                sensitivity: nervix_vm::SchemaSensitivity::default(),
-                branch_sensitivity: nervix_vm::SchemaSensitivity::default(),
-                delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
-                batch_sample_rate: None,
-                runtime: Runtime::default(),
-                receiver: events_rx,
-                tx,
-            },
+            config,
         );
         assert_eq!(
-            subscriptions.matching_names("LIVE"),
+            subscriptions.view().matching_subscription_names("LIVE"),
             vec!["live_events".to_string()]
         );
-        assert!(subscriptions.matching_names("missing").is_empty());
+        assert!(
+            subscriptions
+                .view()
+                .matching_subscription_names("missing")
+                .is_empty()
+        );
 
         let removed = subscriptions
             .remove(&named("live_events"))
             .await
             .expect("subscription should be removed");
-        assert_eq!(removed.0.as_str(), "default");
-        assert_eq!(removed.1.as_str(), "events");
+        assert_eq!(removed.domain.as_str(), "default");
+        assert_eq!(removed.relay.as_str(), "events");
+        assert_eq!(removed.handle.generation, first_generation);
         assert!(
             subscriptions
                 .remove(&named("missing_events"))
                 .await
                 .is_none()
+        );
+
+        let reused = task_config(
+            &mut subscriptions,
+            "live_events",
+            events.new_receiver(),
+            outbound,
+        );
+        assert!(
+            reused.handle.generation > first_generation,
+            "a reused name opens with a new generation"
         );
     }
 
@@ -1707,43 +1957,26 @@ mod tests {
             std::num::NonZeroUsize::new(4).assured("the test relay capacity is a nonzero literal"),
         );
         for name in ["first", "second"] {
-            let (tx, _rx) = mpsc::channel(4);
-            subscriptions.insert(
-                named(name),
-                domain.clone(),
-                relay.clone(),
-                SessionSubscriptionTaskConfig {
-                    predicate: None,
-                    sensitivity: nervix_vm::SchemaSensitivity::default(),
-                    branch_sensitivity: nervix_vm::SchemaSensitivity::default(),
-                    delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
-                    batch_sample_rate: None,
-                    runtime: Runtime::default(),
-                    receiver: events.new_receiver(),
-                    tx,
-                },
-            );
+            let (outbound, _frames) = mpsc::channel(4);
+            let config = task_config(&mut subscriptions, name, events.new_receiver(), outbound);
+            subscriptions.insert(domain.clone(), relay.clone(), config);
         }
 
         for name in ["first", "second"] {
-            let result = service
+            let deleted = service
                 .delete_subscription(
                     nervix_models::DeleteSubscription { name: named(name) },
                     &mut subscriptions,
                 )
                 .await;
-            assert!(
-                result.success,
-                "subscription '{name}' deletion failed: {}",
-                result.message
-            );
+            assert!(deleted.is_ok(), "subscription '{name}' deletion failed");
         }
         let leaked = service
             .inner
             .subscription_interest_counts
             .contains_key(&key);
         drop(service);
-        let _ = std::fs::remove_dir_all(path);
+        std::fs::remove_dir_all(path).discarded("the test directory is disposable");
 
         assert!(
             !leaked,
@@ -1752,48 +1985,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuilt_relay_drops_subscription_with_clear_session_error() {
+    async fn rebuilt_relay_ends_the_subscription_with_a_typed_reason() {
         let mut subscriptions = SessionSubscriptions::new();
-        let (tx, mut rx) = mpsc::channel(4);
+        let (outbound, mut frames) = mpsc::channel(4);
         let events = crate::runtime::RelayBroadcast::with_capacity(
             std::num::NonZeroUsize::new(4).expect("test relay capacity must be nonzero"),
         );
+        let config = task_config(
+            &mut subscriptions,
+            "live_events",
+            events.new_receiver(),
+            outbound,
+        );
+        let handle = config.handle.clone();
         subscriptions.insert(
-            named("live_events"),
             DomainName::parse("default").expect("valid domain"),
             named("events"),
-            SessionSubscriptionTaskConfig {
-                predicate: None,
-                sensitivity: nervix_vm::SchemaSensitivity::default(),
-                branch_sensitivity: nervix_vm::SchemaSensitivity::default(),
-                delivery_behavior: SubscriptionDeliveryBehavior::Blocking,
-                batch_sample_rate: None,
-                runtime: Runtime::default(),
-                receiver: events.new_receiver(),
-                tx,
-            },
+            config,
         );
 
         drop(events);
-        let response = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        let frame = tokio::time::timeout(Duration::from_secs(1), frames.recv())
             .await
-            .expect("subscription close error should arrive")
-            .expect("session channel should remain open")
-            .expect("session response should succeed");
-        let Some(proto::session_response::Event::Server(event)) = response.event else {
-            panic!("expected server error event");
+            .expect("the subscription end should arrive")
+            .expect("the session channel should remain open");
+        let frame = VerifiedFrame::verify(frame.into_bytes(), &SessionLimits::DEFAULT)
+            .assured("the server encodes frames the session limits admit");
+        let ServerMessage::Event(ServerEvent::SubscriptionEnded(ended)) =
+            ServerMessage::decode(&frame).assured("a server frame decodes")
+        else {
+            panic!("the relay close ends the subscription");
         };
-        assert_eq!(event.level, i32::from(ServerEventLevel::Error));
+        assert_eq!(ended.subscription, handle);
+        assert_eq!(ended.reason, SubscriptionEndReason::RelayClosed);
         assert!(
-            event
+            ended
                 .message
                 .contains("subscription 'live_events' was dropped")
         );
-        assert!(event.message.contains("recreate the subscription"));
+        assert!(ended.message.contains("recreate the subscription"));
         tokio::task::yield_now().await;
         assert!(!subscriptions.contains_name(&named("live_events")));
 
-        let _ = subscriptions
+        subscriptions
             .remove(&named("live_events"))
             .await
             .expect("closed subscription metadata should remain removable");

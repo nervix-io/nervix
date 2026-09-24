@@ -8,11 +8,12 @@
 //! Layer: edges.
 //!
 //! - **Owns.** The session schema, frame verification and ownership, the typed requests, replies,
-//!   transfers, events and rows the schema describes, the session limits, and how frames travel
-//!   over gRPC and WebSocket messages.
+//!   transfers, events and rows the schema describes, the text every client displays a row as,
+//!   the session limits, and how frames travel over gRPC and WebSocket messages.
 //! - **Depends on.** `flatbuffers`, the vocabulary for names, timestamps, schema fields, the
 //!   transaction impact report and the status, inspection envelope and preview identity a session
-//!   exchanges, and tonic's codec traits for the gRPC transport.
+//!   exchanges, `serde_json` to write a row's display text, and tonic's codec traits for the gRPC
+//!   transport.
 //! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow, or any
 //!   client's dispatch, reconnection or subscription state.
 
@@ -33,6 +34,7 @@ mod limits;
 mod reply;
 mod request;
 mod row;
+mod row_text;
 mod server;
 mod subscription;
 mod transaction;

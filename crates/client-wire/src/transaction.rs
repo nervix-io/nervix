@@ -1,4 +1,5 @@
-//! Encoding the transaction status, preview identity and inspection target of the vocabulary.
+//! Encoding the transaction status, preview identity, inspection target and inspection read of the
+//! vocabulary.
 
 use std::num::NonZeroUsize;
 
@@ -6,12 +7,13 @@ use error_stack::Report;
 use flatbuffers::WIPOffset;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    ImpactPlanningBasis, TransactionInspectionTarget, TransactionLifecycle,
+    ImpactPlanningBasis, TransactionInspection, TransactionInspectionTarget, TransactionLifecycle,
     TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_size},
+    impact::{decode_report, encode_report},
     wire,
 };
 
@@ -189,6 +191,46 @@ pub(crate) fn decode_preview_identity(
         transaction_id,
         position: TransactionPosition::new(position),
         planning_basis,
+    })
+}
+
+/// Encodes one inspection read: the inspected status, the selected operation and the report.
+pub(crate) fn encode_inspection<'fbb>(
+    encoder: &mut Encoder<'fbb>,
+    inspection: &TransactionInspection,
+) -> Result<WIPOffset<wire::TransactionInspected<'fbb>>, Report<WireEncodeError>> {
+    let transaction = encode_transaction_status(encoder, &inspection.transaction)?;
+    let report = encode_report(encoder, &inspection.report)?;
+    let operation = inspection.operation.map(encode_operation_number);
+    Ok(wire::TransactionInspected::create(
+        encoder.fbb(),
+        &wire::TransactionInspectedArgs {
+            transaction: Some(transaction),
+            operation,
+            report: Some(report),
+        },
+    ))
+}
+
+/// Decodes one inspection read.
+pub(crate) fn decode_inspection(
+    decoder: Decoder<'_>,
+    inspected: wire::TransactionInspected<'_>,
+) -> Result<TransactionInspection, Report<WireDecodeError>> {
+    let transaction = decode_transaction_status(decoder, inspected.transaction())?;
+    let operation = match inspected.operation() {
+        Some(operation) => Some(decode_operation_number(
+            decoder,
+            "TransactionInspected.operation",
+            operation,
+        )?),
+        None => None,
+    };
+    let report = decode_report(decoder, inspected.report())?;
+    Ok(TransactionInspection {
+        transaction,
+        operation,
+        report,
     })
 }
 

@@ -1849,15 +1849,14 @@ async fn reclaimed_command_retry_fence_survives_snapshot_installation() -> TestR
                 request_digest: [0; 32],
                 at: nervix_models::Timestamp::from_unix_nanos(1_700_000_011_000_000_000),
                 result: Box::new(crate::CommandExecutionResult {
-                    success: true,
-                    kind: crate::CommandExecutionResultKind::Ok,
+                    disposition: crate::CommandExecutionDisposition::Completed {
+                        already_existed: false,
+                    },
                     message: "created".to_string(),
                     diagnostics: Vec::new(),
-                    already_existed: false,
-                    results: Vec::new(),
+                    statements: Vec::new(),
                     transaction: None,
                     transaction_admission: None,
-                    preview_stale: None,
                 }),
             },
         )

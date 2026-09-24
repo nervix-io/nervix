@@ -29,6 +29,7 @@ use tracing::{info, warn};
 
 use super::{
     background_task::BackgroundTask,
+    command_result::CommandResult,
     describe_output::{format_placement_runtime_nodes, placement_group_members_equal},
     model_mutation::{command_error, command_ok, quiesce_level_message},
     ownership_handoff::{
@@ -40,7 +41,7 @@ use super::{
     session_service::SessionServiceImpl,
     shutdown::{ShutdownDeadline, ShutdownPhaseOutcome},
 };
-use crate::{proto::CommandResult, registry::ActiveGraph, runtime::LocalGraphDrainOutcome};
+use crate::{registry::ActiveGraph, runtime::LocalGraphDrainOutcome};
 
 pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
     Duration::from_secs(1);
@@ -114,7 +115,7 @@ impl RemoteShutdownDrainLeader {
     async fn drain(&self, local_node_id: &ClusterNodeName) -> ShutdownPhaseOutcome {
         let drain = self.client.execute(format!("DRAIN NODE {local_node_id};"));
         match drain.await {
-            Ok(outcome) if outcome.success => {
+            Ok(outcome) if outcome.succeeded() => {
                 info!(
                     node_id = %local_node_id,
                     leader = %self.leader_id,
@@ -944,7 +945,7 @@ impl SessionServiceImpl {
         };
         let client = NervixClient::connect_with_options(
             &leader_grpc_uri,
-            "default",
+            None,
             grpc_client_connect_options(
                 &leader_grpc_uri,
                 self.inner.configured_basic_auth.as_ref(),
@@ -973,7 +974,7 @@ impl SessionServiceImpl {
         local_node_id: &ClusterNodeName,
     ) -> ShutdownPhaseOutcome {
         let result = self.drain_node(local_node_id.clone(), None).await;
-        if result.success {
+        if result.succeeded() {
             info!(
                 node_id = %local_node_id,
                 message = result.message,
@@ -1040,7 +1041,7 @@ impl SessionServiceImpl {
             };
             let client = NervixClient::connect_with_options(
                 &leader_grpc_uri,
-                "default",
+                None,
                 grpc_client_connect_options(
                     &leader_grpc_uri,
                     self.inner.configured_basic_auth.as_ref(),
@@ -1063,7 +1064,7 @@ impl SessionServiceImpl {
                 .execute(format!("UNCORDON NODE {local_node_id};"))
                 .await
             {
-                Ok(outcome) if outcome.success => {
+                Ok(outcome) if outcome.succeeded() => {
                     info!(
                         node_id = %local_node_id,
                         leader = %leader_id,

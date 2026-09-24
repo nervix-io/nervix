@@ -193,6 +193,7 @@ fn answer(frame: &VerifiedFrame<ClientFrame>) -> Option<Reply> {
             statements: Vec::new(),
             transaction: None,
             transaction_admission: None,
+            inspection: None,
         })),
         ClientRequest::InspectTransaction(_) => ReplyBody::Inspection(inspection()),
         _ => ReplyBody::Rejected(RequestRejected {

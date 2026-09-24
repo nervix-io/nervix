@@ -20,6 +20,7 @@ use thiserror::Error;
 use tokio::time::{Duration, interval};
 
 use super::{
+    command_result::CommandResult,
     domain_clock::current_timestamp,
     entity_gate::DrainOutstanding,
     model_mutation::{
@@ -29,7 +30,6 @@ use super::{
     session_service::SessionServiceImpl,
     transaction::{QuiescenceAttempt, TransactionStepImpactRecorder},
 };
-use crate::proto::CommandResult;
 #[derive(Debug, Error)]
 pub(in crate::application) enum DomainAlterError {
     #[error("domain '{domain}' already has a model alteration in progress")]
@@ -66,14 +66,6 @@ pub(in crate::application) enum DomainAlterError {
     RestoreIngestion { domain: DomainName, reason: String },
     #[error("failed to roll back model alteration in domain '{domain}': {reason}")]
     Rollback { domain: DomainName, reason: String },
-}
-
-#[derive(Debug, Error)]
-pub(in crate::application) enum ActiveDomainError {
-    #[error("invalid active domain")]
-    Invalid,
-    #[error("domain '{domain}' does not exist")]
-    NotFound { domain: DomainName },
 }
 
 pub(in crate::application) struct ResolvedDomainStart {
@@ -898,8 +890,8 @@ mod tests {
                 false,
             ))
             .await;
-        assert!(first.success);
-        assert!(!first.already_existed);
+        assert!(first.succeeded());
+        assert!(!first.found_existing());
 
         let duplicate = service
             .create_domain(CreateStatement::new(
@@ -913,8 +905,8 @@ mod tests {
                 true,
             ))
             .await;
-        assert!(duplicate.success);
-        assert!(duplicate.already_existed);
+        assert!(duplicate.succeeded());
+        assert!(duplicate.found_existing());
         assert!(duplicate.message.contains("already exists"));
 
         let _ = std::fs::remove_dir_all(&path);
@@ -943,7 +935,7 @@ mod tests {
         let first = service
             .apply_persistent_domain_creation(false, false, state.clone(), None)
             .await;
-        assert!(first.success, "{first:?}");
+        assert!(first.succeeded(), "{first:?}");
         let resumed = service
             .apply_persistent_domain_creation(false, false, state, None)
             .await;
@@ -970,7 +962,10 @@ mod tests {
             )
             .await;
 
-        assert!(result.success, "placement alteration failed: {result:?}");
+        assert!(
+            result.succeeded(),
+            "placement alteration failed: {result:?}"
+        );
         assert_eq!(
             service
                 .inner
