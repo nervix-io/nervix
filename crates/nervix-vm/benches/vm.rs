@@ -13,7 +13,7 @@ use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, ExecutionContext, OutputMode, RuntimeError,
-    SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
+    SMALL_SET_CAPACITY, SPAWN_BLOCKING_ROW_THRESHOLD, SemanticScopePolicy, TypedArray, TypedBatch,
     compile_program_with_options_for_bindings, execute_program_in_context,
     lower_route_construction,
     program::{Program, SpannedNode},
@@ -1904,6 +1904,130 @@ fn calendar_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// Rows in every membership benchmark batch. It stays at the blocking threshold so no batch pays
+/// the blocking hop.
+const MEMBERSHIP_KERNEL_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+
+/// Set sizes on both sides of `SMALL_SET_CAPACITY`, where a set stops comparing a value with each
+/// element and looks it up by key instead.
+const MEMBERSHIP_SET_SIZES: [usize; 5] = [4, SMALL_SET_CAPACITY, SMALL_SET_CAPACITY + 1, 64, 1_024];
+
+fn membership_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("code", DataType::Int64, true),
+        Field::new("label", DataType::Utf8, true),
+        Field::new("reading", DataType::Float64, true),
+        Field::new("low", DataType::Float64, true),
+        Field::new("high", DataType::Float64, true),
+    ]))
+}
+
+/// Codes and labels cycle through the smallest set twice over, so every set holds about half of the
+/// rows; one row in ten is null, and readings straddle their bounds.
+fn membership_batch() -> TypedBatch {
+    let rows = 0..MEMBERSHIP_KERNEL_ROWS;
+    let code = Int64Array::from_iter(rows.clone().map(|row| {
+        if row % 10 == 9 {
+            return None;
+        }
+        Some(benchmark_row_i64(row % 8))
+    }));
+    let label = StringArray::from_iter(rows.clone().map(|row| {
+        if row % 10 == 9 {
+            return None;
+        }
+        Some(format!("label-{}", row % 8))
+    }));
+    let reading =
+        Float64Array::from_iter(rows.clone().map(|row| Some(benchmark_row_f64(row % 50))));
+    let low = Float64Array::from_iter(rows.clone().map(|row| Some(benchmark_row_f64(row % 20))));
+    let high = Float64Array::from_iter(rows.map(|row| Some(benchmark_row_f64(row % 40))));
+    TypedBatch::try_new(
+        membership_schema(),
+        vec![
+            TypedArray::Int64(code),
+            TypedArray::Utf8(label),
+            TypedArray::Float64(reading),
+            TypedArray::Float64(low),
+            TypedArray::Float64(high),
+        ],
+    )
+    .expect("membership benchmark batch must build")
+}
+
+/// `IN` over sets of each size, and the range, distinctness and extremum operations over the same
+/// batch.
+fn membership_kernel_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let batch = membership_batch();
+    let mut group = c.benchmark_group("membership_kernels");
+    group.throughput(Throughput::Elements(MEMBERSHIP_KERNEL_ROWS.arch_into()));
+    for size in MEMBERSHIP_SET_SIZES {
+        let codes = (0..size)
+            .map(|code| code.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let labels = (0..size)
+            .map(|code| format!("'label-{code}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let programs = [
+            ("in_i64", format!("SET hit = input.code IN ({codes})")),
+            ("in_utf8", format!("SET hit = input.label IN ({labels})")),
+        ];
+        for (name, source) in programs {
+            let compiled = compile_numeric_program(
+                &source,
+                membership_schema(),
+                &[("hit", DataType::Boolean)],
+            );
+            group.bench_with_input(BenchmarkId::new(name, size), &batch, |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&compiled),
+                        black_box(batch),
+                    ))
+                })
+            });
+        }
+    }
+    let operations = [
+        (
+            "between_f64",
+            "SET hit = input.reading BETWEEN input.low AND input.high",
+            DataType::Boolean,
+        ),
+        (
+            "distinct_utf8",
+            "SET hit = input.label IS DISTINCT FROM 'label-3'",
+            DataType::Boolean,
+        ),
+        (
+            "greatest_f64",
+            "SET hit = greatest(input.reading, input.low, input.high)",
+            DataType::Float64,
+        ),
+        (
+            "clamp_f64",
+            "SET hit = clamp(input.reading, 10.0, 40.0)",
+            DataType::Float64,
+        ),
+    ];
+    for (name, source, output_type) in operations {
+        let compiled =
+            compile_numeric_program(source, membership_schema(), &[("hit", output_type)]);
+        group.bench_with_input(BenchmarkId::new(name, "columns"), &batch, |b, batch| {
+            b.iter(|| {
+                runtime.block_on(execute_benchmark_program(
+                    black_box(&compiled),
+                    black_box(batch),
+                ))
+            })
+        });
+    }
+    group.finish();
+}
+
 fn benchmark_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .build()
@@ -2184,6 +2308,7 @@ criterion_group!(
     batch_size_sweep_benches,
     numeric_kernel_benches,
     datetime_kernel_benches,
-    calendar_kernel_benches
+    calendar_kernel_benches,
+    membership_kernel_benches
 );
 criterion_main!(benches);

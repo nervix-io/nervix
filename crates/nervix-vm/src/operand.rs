@@ -81,6 +81,24 @@ impl<A: Array + ?Sized> Operand<'_, A> {
     pub(crate) fn is_null(self, row: usize) -> bool {
         self.array().is_null(self.index(row))
     }
+
+    /// Which of a batch's `rows` rows hold a value: the valid rows of a column, and every row or
+    /// none for a scalar.
+    pub(crate) fn validity(self, rows: usize) -> BooleanBuffer {
+        match self {
+            Self::Column(array) => match array.logical_nulls() {
+                Some(nulls) => nulls.inner().clone(),
+                None => BooleanBuffer::new_set(rows),
+            },
+            Self::Scalar(array) => {
+                if array.is_null(0) {
+                    BooleanBuffer::new_unset(rows)
+                } else {
+                    BooleanBuffer::new_set(rows)
+                }
+            }
+        }
+    }
 }
 
 impl<'a> Operand<'a, dyn Array> {

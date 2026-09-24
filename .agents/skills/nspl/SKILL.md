@@ -182,6 +182,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
   result at one exact type; remember that omitted `CASE ELSE` yields a typed null and requires an
   optional destination.
+- Write `IN` sets as constants of the operand's exact type, casting literals for narrower types:
+  `input.priority IN (1 AS I32, 2 AS I32)`. A set cannot hold `NULL` or read a field, and an empty
+  set is false for every message. `IN`, `NOT IN`, and `BETWEEN` are null for a null operand, so use
+  `IS [NOT] DISTINCT FROM` where nulls must compare; `IN`, `BETWEEN`, `IS`, `DISTINCT`, and `FROM`
+  are reserved in expressions. `greatest` and `least` skip nulls and order NaN highest, and `clamp`
+  fails a message whose low bound is above its high bound, so give such routes an
+  `ON MESSAGE ERROR` policy.
 - Count string positions in `substr`, `split_part`, and `strpos` from 1, but `nth(list, index)`
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window

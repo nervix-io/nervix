@@ -292,6 +292,19 @@ pub(super) fn expression_reads_sensitive_source(
                     expression_reads_sensitive_source(else_result, sensitivity)
                 })
         }
+        nervix_models::Expression::Membership { operand, set, .. } => {
+            expression_reads_sensitive_source(operand, sensitivity)
+                || set
+                    .iter()
+                    .any(|element| expression_reads_sensitive_source(element, sensitivity))
+        }
+        nervix_models::Expression::Range {
+            operand, low, high, ..
+        } => {
+            expression_reads_sensitive_source(operand, sensitivity)
+                || expression_reads_sensitive_source(low, sensitivity)
+                || expression_reads_sensitive_source(high, sensitivity)
+        }
     }
 }
 

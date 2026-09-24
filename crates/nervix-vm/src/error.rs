@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::{
     datetime::{UnreadableText, Zone},
+    extremum::ClampBoundsDefect,
     ir::{RegisterRef, RegisterType},
     program::Span,
 };
@@ -72,6 +73,9 @@ pub enum SideErrorReason {
     /// A `parse_datetime` input naming a local time that its zone repeats.
     #[error("parse_datetime local time is ambiguous in {zone}")]
     RepeatedLocalTime { zone: Zone },
+    /// A `clamp` whose bounds bound no value.
+    #[error("{0}")]
+    InvalidClampBounds(ClampBoundsDefect),
     /// A failure an injected function reported, with the code and text that function chose.
     #[error("{message}")]
     Injected { code: ErrorCode, message: String },
@@ -88,7 +92,8 @@ impl SideErrorReason {
             | Self::NonFiniteResult(_)
             | Self::InvalidRegularExpression(_)
             | Self::SkippedLocalTime { .. }
-            | Self::RepeatedLocalTime { .. } => ErrorCode::InvalidArgument,
+            | Self::RepeatedLocalTime { .. }
+            | Self::InvalidClampBounds(_) => ErrorCode::InvalidArgument,
             Self::CastFailed { .. } | Self::UnreadableDatetime(_) => ErrorCode::CastFailed,
             Self::Injected { code, .. } => *code,
         }
