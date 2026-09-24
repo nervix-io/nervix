@@ -239,6 +239,14 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   contributes nothing while `COUNT` counts every row, and an aggregate that can be null (sample
   statistics, `CORR`, anything over an `OPTIONAL` argument) needs an `OPTIONAL` output field or
   `COALESCE`.
+- For bounded approximate window statistics, use `APPROX_COUNT_DISTINCT(value, precision)`
+  (precision 4–16), `APPROX_QUANTILE(value, percentile, capacity)` (percentile 0–100, capacity
+  32–4096), or `APPROX_TOP_K(value, k, capacity)` (`1 <= k <= capacity <= 4096`). Put
+  `MAX STATE SIZE <bytes>` after duration `WIDTH` and `STEP`. A branched sketch window also needs
+  `MAX INSTANCES <n> EVICT LRU` on its branch. Null values are ignored, non-finite floats are
+  message errors, and results are approximate; choose precision and capacity for the desired
+  error and memory cost. See `Processors` → `Window aggregate functions` for result types and
+  bounds.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,

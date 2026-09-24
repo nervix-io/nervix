@@ -153,6 +153,54 @@ pub(crate) enum RegistryError {
         demand: usize,
         argument: usize,
     },
+    #[error(
+        "window processor '{processor}' in domain '{domain}' route '{route}' uses a sketch and \
+         requires MAX STATE SIZE"
+    )]
+    WindowSketchMissingStateLimit {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+    },
+    #[error(
+        "window processor '{processor}' in domain '{domain}' route '{route}' uses a sketch and \
+         requires duration WIDTH and STEP"
+    )]
+    WindowSketchRequiresTimePanes {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+    },
+    #[error(
+        "window processor '{processor}' in domain '{domain}' route '{route}' uses a sketch and \
+         requires its branch to declare MAX INSTANCES"
+    )]
+    WindowSketchRequiresBranchLimit {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+    },
+    #[error(
+        "window processor '{processor}' in domain '{domain}' route '{route}' requires {required} \
+         bytes for {panes} sketch panes, above MAX STATE SIZE {limit} bytes"
+    )]
+    WindowSketchStateBudget {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+        panes: u64,
+        required: u128,
+        limit: u64,
+    },
+    #[error(
+        "window processor '{processor}' in domain '{domain}' route '{route}' has a sketch pane \
+         budget that cannot be represented"
+    )]
+    WindowSketchBudgetOverflow {
+        domain: DomainName,
+        processor: ModelName,
+        route: RelayName,
+    },
     #[error("failed to decode key")]
     DecodeKey,
     #[error("failed to persist model batch")]

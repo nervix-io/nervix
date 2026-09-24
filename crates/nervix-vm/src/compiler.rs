@@ -496,6 +496,36 @@ impl Compiler {
         }
         let first_type = self.infer_expr_type(&args[0])?;
         match function {
+            WindowAggregateFunction::ApproxCountDistinct => {
+                if !Self::is_window_orderable(&first_type) {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
+                             argument, found {first_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[0].span,
+                    });
+                }
+                Ok(DataType::Int64)
+            }
+            WindowAggregateFunction::ApproxTopK => {
+                if !Self::is_window_orderable(&first_type) {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "function '{}' requires a scalar numeric, BOOL, STRING or DATETIME \
+                             argument, found {first_type:?}",
+                            function.nspl_name()
+                        ),
+                        span: args[0].span,
+                    });
+                }
+                Ok(DataType::List(Arc::new(Field::new(
+                    "item", first_type, false,
+                ))))
+            }
             WindowAggregateFunction::Count => Ok(DataType::Int64),
             WindowAggregateFunction::CountIf => {
                 if let Some(error) =
@@ -521,7 +551,8 @@ impl Compiler {
                 }
                 Ok(first_type)
             }
-            WindowAggregateFunction::Avg
+            WindowAggregateFunction::ApproxQuantile
+            | WindowAggregateFunction::Avg
             | WindowAggregateFunction::PercentileLinearHistogram
             | WindowAggregateFunction::StddevPop
             | WindowAggregateFunction::StddevSamp
@@ -1445,8 +1476,10 @@ impl Compiler {
                     // emits retains a row, so present arguments always contribute, except that
                     // sample statistics need two rows and a correlation needs variation.
                     let window_function = invocation.function;
-                    if let WindowAggregateFunction::Count | WindowAggregateFunction::CountIf =
-                        window_function
+                    if let WindowAggregateFunction::ApproxCountDistinct
+                    | WindowAggregateFunction::ApproxTopK
+                    | WindowAggregateFunction::Count
+                    | WindowAggregateFunction::CountIf = window_function
                     {
                         return Ok(false);
                     }

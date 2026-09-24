@@ -810,6 +810,9 @@ impl DateBinWidth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsRefStr, EnumString)]
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum WindowAggregateFunction {
+    ApproxCountDistinct,
+    ApproxQuantile,
+    ApproxTopK,
     ArgMax,
     ArgMin,
     Avg,
@@ -884,6 +887,8 @@ impl WindowAggregateFunction {
     pub const fn expected_arity(self) -> usize {
         match self {
             Self::PercentileLinearHistogram => 6,
+            Self::ApproxQuantile | Self::ApproxTopK => 3,
+            Self::ApproxCountDistinct => 2,
             Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => 2,
             Self::Avg
             | Self::BoolAnd
@@ -908,6 +913,9 @@ impl WindowAggregateFunction {
         match self {
             Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => true,
             Self::Avg
+            | Self::ApproxCountDistinct
+            | Self::ApproxQuantile
+            | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
             | Self::Count

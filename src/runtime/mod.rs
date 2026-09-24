@@ -122,7 +122,8 @@ use nervix_vm::{
         CompiledWindowDemand, CompiledWindowExpr, CompiledWindowRoute, WINDOW_ARGUMENT_NAMESPACE,
         WindowAggregateFunction, WindowAggregateInvocation, WindowAggregateProgram,
         WindowAggregateStorageKind, WindowArgumentColumn, WindowArguments,
-        WindowLinearHistogramConfig, lower_window_assignments,
+        WindowLinearHistogramConfig, WindowPaneLayout, WindowSketchConfig,
+        lower_window_assignments,
     },
 };
 use nervix_wasm::{
