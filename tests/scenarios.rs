@@ -21010,6 +21010,10 @@ fn main() {
     outcome.end_process();
 }
 
+/// Holds one dependency container open until the parent scenario kills this process.
+///
+/// The helper never finishes on its own, so it never produces an outcome: the pending future
+/// carries the caller's return type rather than a value this function could never reach.
 async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     let mut dependencies = TestDependencies::default();
     dependencies
@@ -21026,8 +21030,7 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::io::stdout()
         .flush()
         .expect("lifecycle helper marker should flush");
-    std::future::pending::<()>().await;
-    None
+    std::future::pending::<SuiteOutcome>().await
 }
 
 /// Everything a scenario run may be configured with beyond cucumber's own options.
