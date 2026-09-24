@@ -68,6 +68,9 @@ only through an opaque host handle, so neither runtime types nor ACK maps cross 
 Every record sink implements this contract in its own crate under `crates/connectors`: Kafka,
 Pulsar, RabbitMQ, NATS, MQTT, Redis, ZeroMQ, Syslog, SQS, and Sentry. Each crate owns its driver
 and the raw client configuration that driver reads, neither of which belongs to the server runtime.
+The server's production manifest names the connector crates and contract, while each driver
+dependency belongs to its connector crate. The server test harness may depend on those drivers
+separately to provision and inspect external systems.
 
 The source side has the same shape. A broker source implements the source contract in the crate
 its sink already occupies: Kafka, Pulsar, RabbitMQ, NATS, MQTT, Redis Pub/Sub, ZeroMQ, and SQS,
