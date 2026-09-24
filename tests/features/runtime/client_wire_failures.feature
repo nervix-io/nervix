@@ -1,4 +1,32 @@
 Feature: Client wire failure regressions
+  @client_wire_native_reconnect
+  Scenario: The Rust client reconnects through its original seed after the leader stops
+    Given a 3 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "old_leader"
+    And a node other than placeholder "old_leader" is saved as placeholder "seed"
+    Given client "recovering" is connected to node "{{seed}}"
+    When client "recovering" executes these NSPL commands
+      """
+      CREATE SCHEMA recovered_client_record (value STRING);
+      """
+    And node "{{old_leader}}" is stopped
+    Then node "{{seed}}" eventually observes a stable leader
+    When client "recovering" executes these NSPL commands
+      """
+      SHOW CREATE SCHEMA recovered_client_record;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA recovered_client_record (
+        value STRING
+      );
+      """
+
   @client_wire_durable_admission
   Scenario: A command lost after durable admission is recovered by its request identity
     Given a 1 node nervix cluster is started

@@ -13,7 +13,7 @@
 //! - **Must not know.** What a request means, how its outcome is routed, or how a lost exchange is
 //!   recovered.
 
-use std::{fmt::Display, num::NonZeroU64};
+use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
 
 use ahash::HashMap;
 use meticulous::OptionExt as _;
@@ -25,6 +25,7 @@ use nervix_client_wire::{
 };
 use nervix_models::RelayName;
 use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
+use parking_lot::Mutex as SyncMutex;
 use tokio::{
     sync::{Mutex, mpsc, oneshot, watch},
     task::JoinHandle,
@@ -45,17 +46,168 @@ pub(crate) const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
 /// Request frames queued for an exchange before a sender waits for the transport.
 const REQUEST_FRAME_CAPACITY: usize = 32;
 
-/// Subscription events queued for the caller before the exchange waits for it to read them.
+/// Subscription events retained for one exchange, bounded both by records and retained bytes.
 const SUBSCRIPTION_EVENT_CAPACITY: usize = 128;
+pub(crate) const SUBSCRIPTION_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
-/// Server notices queued for the caller before the exchange waits for it to read them.
+/// Server notices retained for one exchange, bounded both by records and retained bytes.
 const SERVER_NOTICE_CAPACITY: usize = 128;
+pub(crate) const SERVER_NOTICE_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum EventQueueError {
+    #[error("the event stream exceeded its queue")]
+    Overflow,
+    #[error("the event stream closed")]
+    Closed,
+}
+
+struct QueuedEvent<T> {
+    value: T,
+    bytes: usize,
+}
+
+struct EventQueueState<T> {
+    generation: Arc<()>,
+    events: VecDeque<QueuedEvent<T>>,
+    bytes: usize,
+    terminal: Option<EventQueueError>,
+}
+
+struct EventQueueInner<T> {
+    state: SyncMutex<EventQueueState<T>>,
+    changed: watch::Sender<()>,
+    max_records: usize,
+    max_bytes: usize,
+}
+
+/// A generation-scoped event queue. An unread consumer cannot hold the exchange reader; if its
+/// bounded queue fills, that generation fails visibly and the reader still routes replies.
+pub(crate) struct EventQueue<T> {
+    inner: Arc<EventQueueInner<T>>,
+}
+
+impl<T> Clone for EventQueue<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T> EventQueue<T> {
+    pub(crate) fn new(max_records: usize, max_bytes: usize) -> Self {
+        let (changed, _) = watch::channel(());
+        Self {
+            inner: Arc::new(EventQueueInner {
+                state: SyncMutex::new(EventQueueState {
+                    generation: Arc::new(()),
+                    events: VecDeque::new(),
+                    bytes: 0,
+                    terminal: None,
+                }),
+                changed,
+                max_records,
+                max_bytes,
+            }),
+        }
+    }
+
+    fn begin(&self, generation: &Arc<()>) {
+        let mut state = self.inner.state.lock();
+        state.generation = generation.clone();
+        state.events.clear();
+        state.bytes = 0;
+        state.terminal = None;
+        drop(state);
+        self.inner.changed.send_replace(());
+    }
+
+    fn close(&self, generation: &Arc<()>) {
+        let mut state = self.inner.state.lock();
+        if !Arc::ptr_eq(&state.generation, generation) {
+            return;
+        }
+        state.events.clear();
+        state.bytes = 0;
+        state.terminal = Some(EventQueueError::Closed);
+        drop(state);
+        self.inner.changed.send_replace(());
+    }
+
+    /// Retains one event without waiting on its consumer. Overflow closes only this event stream.
+    pub(crate) fn push(&self, generation: &Arc<()>, value: T, bytes: usize) {
+        let mut state = self.inner.state.lock();
+        if !Arc::ptr_eq(&state.generation, generation) || state.terminal.is_some() {
+            return;
+        }
+        let next_bytes = state.bytes.checked_add(bytes);
+        let exceeds_bytes = match next_bytes {
+            Some(next) => next > self.inner.max_bytes,
+            None => true,
+        };
+        if state.events.len() >= self.inner.max_records || exceeds_bytes {
+            state.events.clear();
+            state.bytes = 0;
+            state.terminal = Some(EventQueueError::Overflow);
+        } else if let Some(next_bytes) = next_bytes {
+            state.bytes = next_bytes;
+            state.events.push_back(QueuedEvent { value, bytes });
+        }
+        drop(state);
+        self.inner.changed.send_replace(());
+    }
+
+    pub(crate) async fn next(&self) -> error_stack::Result<T, EventQueueError> {
+        let mut changed = self.inner.changed.subscribe();
+        let generation = self.inner.state.lock().generation.clone();
+        loop {
+            tokio::task::consume_budget().await;
+            {
+                let mut state = self.inner.state.lock();
+                if !Arc::ptr_eq(&state.generation, &generation) {
+                    return Err(error_stack::Report::new(EventQueueError::Closed));
+                }
+                if let Some(terminal) = state.terminal {
+                    return Err(error_stack::Report::new(terminal));
+                }
+                if let Some(event) = state.events.pop_front() {
+                    state.bytes = state
+                        .bytes
+                        .checked_sub(event.bytes)
+                        .assured("queued bytes include every retained event until it is removed");
+                    return Ok(event.value);
+                }
+            }
+            if changed.changed().await.is_err() {
+                return Err(error_stack::Report::new(EventQueueError::Closed));
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_next(&self) -> Option<T> {
+        let mut state = self.inner.state.lock();
+        let event = state.events.pop_front()?;
+        state.bytes = state
+            .bytes
+            .checked_sub(event.bytes)
+            .assured("queued bytes include every retained event until it is removed");
+        Some(event.value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_current(&self) {
+        let generation = self.inner.state.lock().generation.clone();
+        self.close(&generation);
+    }
+}
 
 /// Where the unsolicited messages of every exchange of one client go.
 #[derive(Clone)]
 pub(crate) struct EventSinks {
-    pub(crate) subscriptions: mpsc::Sender<SubscriptionEvent>,
-    pub(crate) notices: mpsc::Sender<ServerEvent>,
+    pub(crate) subscriptions: EventQueue<SubscriptionEvent>,
+    pub(crate) notices: EventQueue<ServerEvent>,
     /// The latest leadership observation. It is replaced rather than queued, so an observation
     /// nobody read can never hold the exchange up.
     pub(crate) leadership: watch::Sender<Option<Leadership>>,
@@ -63,30 +215,40 @@ pub(crate) struct EventSinks {
     pub(crate) domains: watch::Sender<Option<Vec<DomainInfo>>>,
 }
 
+impl EventSinks {
+    pub(crate) fn begin_generation(&self) -> Arc<()> {
+        let generation = Arc::new(());
+        self.subscriptions.begin(&generation);
+        self.notices.begin(&generation);
+        generation
+    }
+
+    pub(crate) fn close_generation(&self, generation: &Arc<()>) {
+        self.subscriptions.close(generation);
+        self.notices.close(generation);
+    }
+}
+
 /// The client's event sinks together with the receiving ends its callers read.
 pub(crate) struct SessionEvents {
     pub(crate) sinks: EventSinks,
-    pub(crate) subscriptions: Mutex<mpsc::Receiver<SubscriptionEvent>>,
-    pub(crate) notices: Mutex<mpsc::Receiver<ServerEvent>>,
     pub(crate) leadership: watch::Receiver<Option<Leadership>>,
     pub(crate) domains: Mutex<watch::Receiver<Option<Vec<DomainInfo>>>>,
 }
 
 impl SessionEvents {
     pub(crate) fn new() -> Self {
-        let (subscriptions, subscription_events) = mpsc::channel(SUBSCRIPTION_EVENT_CAPACITY);
-        let (notices, server_notices) = mpsc::channel(SERVER_NOTICE_CAPACITY);
+        let subscriptions = EventQueue::new(SUBSCRIPTION_EVENT_CAPACITY, SUBSCRIPTION_EVENT_BYTES);
+        let notices = EventQueue::new(SERVER_NOTICE_CAPACITY, SERVER_NOTICE_BYTES);
         let (leadership, observed_leadership) = watch::channel(None);
         let (domains, observed_domains) = watch::channel(None);
         Self {
             sinks: EventSinks {
-                subscriptions,
-                notices,
+                subscriptions: subscriptions.clone(),
+                notices: notices.clone(),
                 leadership,
                 domains,
             },
-            subscriptions: Mutex::new(subscription_events),
-            notices: Mutex::new(server_notices),
             leadership: observed_leadership,
             domains: Mutex::new(observed_domains),
         }
@@ -98,6 +260,8 @@ pub(crate) struct Exchange {
     pub(crate) requests: Arc<ExchangeRequests>,
     /// The task routing the exchange's frames. Dropping the exchange aborts it.
     pub(crate) reader: JoinHandle<()>,
+    pub(crate) sinks: EventSinks,
+    pub(crate) generation: Arc<()>,
 }
 
 /// What a request needs of the exchange it is sent on.
@@ -105,9 +269,42 @@ pub(crate) struct ExchangeRequests {
     pub(crate) frames: mpsc::Sender<EncodedFrame<ClientFrame>>,
     /// The waiters of the exchange's requests. The exchange's reader shares the registry: it
     /// completes each waiter as its reply arrives and closes the registry when the exchange ends.
-    pub(crate) pending: Arc<Mutex<PendingReplies>>,
+    pub(crate) pending: Arc<SyncMutex<PendingReplies>>,
     /// The channel the exchange runs on, which resource uploads share.
     pub(crate) channel: Channel,
+}
+
+impl ExchangeRequests {
+    /// Registers a request whose waiter is removed if its awaiting future is cancelled.
+    pub(crate) fn register(&self) -> Option<PendingRequest> {
+        let registered = self.pending.lock().register()?;
+        Some(PendingRequest {
+            request_id: registered.request_id,
+            reply: registered.reply,
+            pending: self.pending.clone(),
+        })
+    }
+}
+
+pub(crate) struct PendingRequest {
+    pub(crate) request_id: RequestId,
+    reply: oneshot::Receiver<ReplyBody>,
+    pending: Arc<SyncMutex<PendingReplies>>,
+}
+
+impl PendingRequest {
+    pub(crate) async fn receive(&mut self) -> Option<ReplyBody> {
+        (&mut self.reply).await.ok()
+    }
+}
+
+impl Drop for PendingRequest {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .take(self.request_id)
+            .discarded("the request completed or its waiter was cancelled");
+    }
 }
 
 impl Exchange {
@@ -120,20 +317,25 @@ impl Exchange {
         let mut client = tonic::client::Grpc::new(channel.clone())
             .max_decoding_message_size(SESSION_LIMITS.frame_bytes())
             .max_encoding_message_size(SESSION_LIMITS.frame_bytes());
-        client.ready().await.map_err(ClientError::ConnectServer)?;
         let (frames, outbound) = mpsc::channel(REQUEST_FRAME_CAPACITY);
         let mut request = Request::new(ReceiverStream::new(outbound));
         connector.authorize(&mut request);
-        let response = client
-            .streaming(
-                request,
-                PathAndQuery::from_static(EXCHANGE_PATH),
-                ClientExchangeCodec::new(SESSION_LIMITS),
-            )
-            .await
-            .map_err(|status| ClientError::StartSession(Box::new(status)))?;
-        let pending = Arc::new(Mutex::new(PendingReplies::new()));
-        let reader = ExchangeReader::new(pending.clone(), sinks);
+        let response = tokio::time::timeout(connector.connect_timeout(), async {
+            client.ready().await.map_err(ClientError::ConnectServer)?;
+            client
+                .streaming(
+                    request,
+                    PathAndQuery::from_static(EXCHANGE_PATH),
+                    ClientExchangeCodec::new(SESSION_LIMITS),
+                )
+                .await
+                .map_err(|status| ClientError::StartSession(Box::new(status)))
+        })
+        .await
+        .map_err(|_| ClientError::SessionOpenDeadline)??;
+        let pending = Arc::new(SyncMutex::new(PendingReplies::new()));
+        let generation = sinks.begin_generation();
+        let reader = ExchangeReader::new(pending.clone(), sinks.clone(), generation.clone());
         let reader = tokio::spawn(reader.run(response.into_inner()));
         Ok(Self {
             requests: Arc::new(ExchangeRequests {
@@ -142,6 +344,8 @@ impl Exchange {
                 channel,
             }),
             reader,
+            sinks,
+            generation,
         })
     }
 
@@ -152,7 +356,8 @@ impl Exchange {
 
     /// Ends the exchange. Every request still waiting on it observes the closed session.
     pub(crate) async fn close(self) {
-        self.requests.pending.lock().await.close();
+        self.requests.pending.lock().close();
+        self.sinks.close_generation(&self.generation);
     }
 }
 
@@ -174,7 +379,7 @@ pub(crate) enum PendingReplies {
     },
     /// The exchange ended. Its waiters were dropped, so each observed the closed session once,
     /// and a request registered now would never be answered.
-    Closed,
+    Closed(Option<Status>),
 }
 
 /// A request registered with its exchange, before its frame is sent.
@@ -184,6 +389,10 @@ pub(crate) struct RegisteredRequest {
 }
 
 impl PendingReplies {
+    pub(crate) fn is_open(&self) -> bool {
+        matches!(self, Self::Open { .. })
+    }
+
     pub(crate) fn new() -> Self {
         Self::Open {
             next_request_id: Some(RequestId::new(NonZeroU64::MIN)),
@@ -216,14 +425,28 @@ impl PendingReplies {
     pub(crate) fn take(&mut self, request_id: RequestId) -> Option<oneshot::Sender<ReplyBody>> {
         match self {
             Self::Open { waiters, .. } => waiters.remove(&request_id),
-            Self::Closed => None,
+            Self::Closed(_) => None,
         }
     }
 
     /// Ends the exchange's requests. Every waiter is dropped, so each observes the closed session
     /// exactly once.
     pub(crate) fn close(&mut self) {
-        *self = Self::Closed;
+        self.close_with(None);
+    }
+
+    pub(crate) fn close_with(&mut self, status: Option<Status>) {
+        if let Self::Closed(_) = self {
+            return;
+        }
+        *self = Self::Closed(status);
+    }
+
+    pub(crate) fn failure(&self) -> ClientError {
+        match self {
+            Self::Closed(Some(status)) => ClientError::Transport(Box::new(status.clone())),
+            Self::Open { .. } | Self::Closed(None) => ClientError::SessionClosed,
+        }
     }
 }
 
@@ -237,17 +460,23 @@ pub(crate) enum ReaderFlow {
 /// Routes the frames of one exchange: each reply to the request that waits for it, each transfer
 /// part into the reply it reassembles, and each unsolicited message to the client's event sinks.
 pub(crate) struct ExchangeReader {
-    pending: Arc<Mutex<PendingReplies>>,
+    pending: Arc<SyncMutex<PendingReplies>>,
     sinks: EventSinks,
+    generation: Arc<()>,
     subscriptions: SubscriptionRegistry,
     transfers: HashMap<RequestId, TransferAssembly>,
 }
 
 impl ExchangeReader {
-    pub(crate) fn new(pending: Arc<Mutex<PendingReplies>>, sinks: EventSinks) -> Self {
+    pub(crate) fn new(
+        pending: Arc<SyncMutex<PendingReplies>>,
+        sinks: EventSinks,
+        generation: Arc<()>,
+    ) -> Self {
         Self {
             pending,
             sinks,
+            generation,
             subscriptions: SubscriptionRegistry::default(),
             transfers: HashMap::default(),
         }
@@ -258,13 +487,15 @@ impl ExchangeReader {
     where
         S: Stream<Item = Result<VerifiedFrame<ServerFrame>, Status>> + Unpin,
     {
+        let mut failure = None;
         loop {
             tokio::task::consume_budget().await;
             let received = frames.next().await;
             let frame = match received {
                 Some(Ok(frame)) => frame,
                 Some(Err(status)) => {
-                    Result::<(), _>::Err(status).reported("reading the session exchange");
+                    Result::<(), _>::Err(status.clone()).reported("reading the session exchange");
+                    failure = Some(status);
                     break;
                 }
                 // The server ended the exchange.
@@ -274,7 +505,8 @@ impl ExchangeReader {
                 break;
             }
         }
-        self.pending.lock().await.close();
+        self.pending.lock().close_with(failure);
+        self.sinks.close_generation(&self.generation);
     }
 
     /// Routes one frame of the exchange.
@@ -304,7 +536,7 @@ impl ExchangeReader {
     /// Completes the waiter of the request a reply answers.
     async fn deliver(&mut self, reply: Reply) {
         self.subscriptions.track(&reply.body);
-        let waiter = self.pending.lock().await.take(reply.request_id);
+        let waiter = self.pending.lock().take(reply.request_id);
         let Some(waiter) = waiter else {
             // No request of this exchange waits under the identity, so no one is owed the reply.
             return;
@@ -342,7 +574,7 @@ impl ExchangeReader {
     /// Delivers an unsolicited message to the client's event sinks.
     async fn publish(&mut self, event: wire::ServerEvent) -> ReaderFlow {
         match event {
-            wire::ServerEvent::Notice(notice) => self.notify(ServerEvent::from(notice)).await,
+            wire::ServerEvent::Notice(notice) => self.notify(ServerEvent::from(notice)),
             wire::ServerEvent::Leadership(observed) => {
                 self.sinks
                     .leadership
@@ -367,25 +599,25 @@ impl ExchangeReader {
                     schema: stream.schema.clone(),
                     rows,
                 });
-                self.forward(event).await
+                self.forward(event)
             }
             wire::ServerEvent::SubscriptionDeliveryLost(lost) => {
                 if !self.subscriptions.holds(&lost.subscription) {
                     return ReaderFlow::Continue;
                 }
-                self.forward(SubscriptionEvent::DeliveryLost(lost)).await
+                self.forward(SubscriptionEvent::DeliveryLost(lost))
             }
             wire::ServerEvent::SubscriptionRowsSkipped(skipped) => {
                 if !self.subscriptions.holds(&skipped.subscription) {
                     return ReaderFlow::Continue;
                 }
-                self.forward(SubscriptionEvent::RowsSkipped(skipped)).await
+                self.forward(SubscriptionEvent::RowsSkipped(skipped))
             }
             wire::ServerEvent::SubscriptionEnded(ended) => {
                 if !self.subscriptions.close(&ended.subscription) {
                     return ReaderFlow::Continue;
                 }
-                self.forward(SubscriptionEvent::Ended(ended)).await
+                self.forward(SubscriptionEvent::Ended(ended))
             }
             // No reply follows for any request still in flight; the waiters observe the closed
             // session when the exchange ends.
@@ -393,23 +625,20 @@ impl ExchangeReader {
         }
     }
 
-    /// Hands a subscription event to the caller, waiting while its queue is full.
-    async fn forward(&self, event: SubscriptionEvent) -> ReaderFlow {
-        match self.sinks.subscriptions.send(event).await {
-            Ok(()) => ReaderFlow::Continue,
-            // The client holds the receiver for as long as it holds the exchange, so the send
-            // finds none only once the client is gone, and the exchange ends with it.
-            Err(_) => ReaderFlow::End,
-        }
+    /// Hands a subscription event to its bounded queue without delaying another reply.
+    fn forward(&self, event: SubscriptionEvent) -> ReaderFlow {
+        let bytes = event.queued_bytes();
+        self.sinks
+            .subscriptions
+            .push(&self.generation, event, bytes);
+        ReaderFlow::Continue
     }
 
-    /// Hands a server notice to the caller, waiting while its queue is full.
-    async fn notify(&self, notice: ServerEvent) -> ReaderFlow {
-        match self.sinks.notices.send(notice).await {
-            Ok(()) => ReaderFlow::Continue,
-            // As for subscription events, only a client that is gone leaves no receiver.
-            Err(_) => ReaderFlow::End,
-        }
+    /// Hands a notice to its bounded queue without delaying another reply.
+    fn notify(&self, notice: ServerEvent) -> ReaderFlow {
+        let bytes = notice.queued_bytes();
+        self.sinks.notices.push(&self.generation, notice, bytes);
+        ReaderFlow::Continue
     }
 }
 

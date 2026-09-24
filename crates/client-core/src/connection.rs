@@ -5,7 +5,7 @@
 //! - **Depends on.** tonic's transport and rustls.
 //! - **Must not know.** What the calls on a channel carry.
 
-use std::str::FromStr as _;
+use std::{str::FromStr as _, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use indexmap::IndexSet;
@@ -20,18 +20,55 @@ use url::Url;
 
 use crate::error::ClientError;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum EndpointValidationError {
+    #[error("the server URL is not a plain HTTP or HTTPS origin")]
+    InvalidOrigin,
+    #[error("the server URL does not satisfy the TLS requirement")]
+    TlsRequired,
+}
+
+impl From<error_stack::Report<EndpointValidationError>> for ClientError {
+    fn from(report: error_stack::Report<EndpointValidationError>) -> Self {
+        match report.current_context() {
+            EndpointValidationError::InvalidOrigin => Self::InvalidServerEndpoint,
+            EndpointValidationError::TlsRequired => Self::TlsRequired,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlsRequirement {
     Preferred,
     Required,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ConnectOptions {
     pub tls_requirement: Option<TlsRequirement>,
     pub ca_certificate_pem: Option<Vec<u8>>,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// Additional configured gRPC endpoints available for initial connection and recovery.
+    pub seed_servers: Vec<Url>,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub retry_timeout: Duration,
+}
+
+impl Default for ConnectOptions {
+    fn default() -> Self {
+        Self {
+            tls_requirement: None,
+            ca_certificate_pem: None,
+            username: None,
+            password: None,
+            seed_servers: Vec::new(),
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(120),
+            retry_timeout: Duration::from_secs(120),
+        }
+    }
 }
 
 impl ConnectOptions {
@@ -74,16 +111,11 @@ impl GrpcConnector {
     }
 
     pub(crate) async fn connect(&self, server: &Url) -> Result<Channel, ClientError> {
-        let tls_requirement = self
-            .options
-            .tls_requirement
-            .unwrap_or(TlsRequirement::Preferred);
+        self.validate_server(server)?;
         let is_https = server.scheme() == "https";
-        if tls_requirement == TlsRequirement::Required && !is_https {
-            return Err(ClientError::TlsRequired);
-        }
         let mut endpoint = Channel::from_shared(server.as_str().to_string())
             .map_err(ClientError::InvalidServerUri)?;
+        endpoint = endpoint.connect_timeout(self.options.connect_timeout);
         if is_https {
             aws_lc_rs::default_provider().install_default().discarded(
                 "a provider another client installed first is the one this client would have \
@@ -100,6 +132,48 @@ impl GrpcConnector {
         endpoint.connect().await.map_err(ClientError::ConnectServer)
     }
 
+    pub(crate) fn validate_server(
+        &self,
+        server: &Url,
+    ) -> error_stack::Result<(), EndpointValidationError> {
+        if !matches!(server.scheme(), "http" | "https")
+            || !server.has_host()
+            || !server.username().is_empty()
+            || server.password().is_some()
+            || server.path() != "/"
+            || server.query().is_some()
+            || server.fragment().is_some()
+        {
+            return Err(error_stack::Report::new(
+                EndpointValidationError::InvalidOrigin,
+            ));
+        }
+        if self.options.tls_requirement == Some(TlsRequirement::Required)
+            && server.scheme() != "https"
+        {
+            return Err(error_stack::Report::new(
+                EndpointValidationError::TlsRequired,
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn request_timeout(&self) -> Duration {
+        self.options.request_timeout
+    }
+
+    pub(crate) fn connect_timeout(&self) -> Duration {
+        self.options.connect_timeout
+    }
+
+    pub(crate) fn retry_timeout(&self) -> Duration {
+        self.options.retry_timeout
+    }
+
+    pub(crate) fn seed_servers(&self) -> &[Url] {
+        &self.options.seed_servers
+    }
+
     /// Presents the client's credentials on a call.
     pub(crate) fn authorize<T>(&self, request: &mut Request<T>) {
         if let Some(authorization) = &self.authorization {
@@ -110,28 +184,46 @@ impl GrpcConnector {
     }
 }
 
-/// The servers a client knows about: the one its exchange runs on, and every server it connected
-/// to or was redirected to, in the order it learned them.
+/// The configured seeds and bounded discovered endpoints a client can reconnect to.
 #[derive(Debug, Default)]
 pub(crate) struct ServerDirectory {
     current: Option<Url>,
-    known: IndexSet<Url>,
+    seeds: IndexSet<Url>,
+    discovered: IndexSet<Url>,
 }
 
 impl ServerDirectory {
+    const MAX_DISCOVERED_ENDPOINTS: usize = 32;
+
     /// A directory whose only server is the one the first exchange runs on, when it is known.
     pub(crate) fn connected_to(server: Option<Url>) -> Self {
         let mut directory = Self::default();
         if let Some(server) = server {
-            directory.connected(&server);
+            directory.seeds.insert(server.clone());
+            directory.current = Some(server);
+        }
+        directory
+    }
+
+    pub(crate) fn with_seeds(primary: Url, seeds: &[Url]) -> Self {
+        let mut directory = Self::default();
+        directory.seeds.insert(primary);
+        for seed in seeds {
+            directory.seeds.insert(seed.clone());
         }
         directory
     }
 
     pub(crate) fn remember(&mut self, server: &Url) {
-        if !self.known.contains(server) {
-            self.known.insert(server.clone());
+        if self.seeds.contains(server) || self.discovered.contains(server) {
+            return;
         }
+        if self.discovered.len() == Self::MAX_DISCOVERED_ENDPOINTS {
+            self.discovered
+                .shift_remove_index(0)
+                .discarded("the oldest discovered endpoint gives way to a fresh one");
+        }
+        self.discovered.insert(server.clone());
     }
 
     /// Records that the exchange now runs on `server`.
@@ -143,8 +235,8 @@ impl ServerDirectory {
     /// The servers to try when the exchange is lost: every known server other than the current
     /// one, in the order they were learned, and then the current one.
     pub(crate) fn reconnect_candidates(&self) -> Vec<Url> {
-        let mut candidates = Vec::with_capacity(self.known.len());
-        for server in &self.known {
+        let mut candidates = Vec::with_capacity(self.seeds.len() + self.discovered.len());
+        for server in self.seeds.iter().chain(&self.discovered) {
             if self.current.as_ref() != Some(server) {
                 candidates.push(server.clone());
             }
