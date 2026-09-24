@@ -44,7 +44,7 @@ use crate::{
     RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
     SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
-    WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode,
+    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -1965,6 +1965,9 @@ impl CreateWindowProcessor {
             "STEP {}",
             window_bound_to_nspl(&self.step)
         )));
+        if let WindowStateLimit::MaxBytes(bytes) = self.state_limit {
+            clauses.push(Clause::line(format!("MAX STATE SIZE {}B", bytes.get())));
+        }
         clauses.extend(processor_tail_clauses(
             &self.branched_by,
             &self.materialized_state,
@@ -3705,7 +3708,8 @@ mod tests {
         RedisPubSubIngestMode, RelayBranching, RetryPolicy, RouteConstruction, SchemaField,
         SentryConfigEntry, SignalingProtobufConfig, SignalingStep, SignalingWaitStep,
         SignalingWireFormat, SqsIngestMode, UdfArgument, UdfLanguage, UdfReturn,
-        WebsocketsIngestMode, WindowBound, WireSchemaField, ZeroMqIngestMode, expression_to_nspl,
+        WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
+        expression_to_nspl,
     };
 
     fn named<N>(raw: &str) -> N
@@ -4542,6 +4546,7 @@ mod tests {
                 messages: Some(10),
                 duration: Some("1s".to_string()),
             },
+            state_limit: WindowStateLimit::Unbounded,
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),

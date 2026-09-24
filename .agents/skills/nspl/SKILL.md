@@ -200,6 +200,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
   aggregates over retained input rows.
+- For text, use `octet_length` for UTF-8 bytes and `length` for Unicode scalar values;
+  `normalize_nfc` for canonical composition; `split` and `join` for string vectors;
+  `like`/`ilike` for wildcards, `contains_any` for literal substring sets, and
+  `regexp_extract` for numbered captures. Read `Filter-Map Functions` → `String Functions`,
+  `String Predicates`, and `Regular Expressions` for their exact Unicode, null, and size rules.
 - Pass counts and positions as any integer type; they are read at full value. `repeat`, `lpad`,
   and `rpad` fail only the message whose result would not fit the text one `STRING` column holds,
   and `uuid_v7()` fails every message while domain time is before the Unix epoch. Give routes that
@@ -244,6 +249,14 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   contributes nothing while `COUNT` counts every row, and an aggregate that can be null (sample
   statistics, `CORR`, anything over an `OPTIONAL` argument) needs an `OPTIONAL` output field or
   `COALESCE`.
+- For bounded approximate window statistics, use `APPROX_COUNT_DISTINCT(value, precision)`
+  (precision 4–16), `APPROX_QUANTILE(value, percentile, capacity)` (percentile 0–100, capacity
+  32–4096), or `APPROX_TOP_K(value, k, capacity)` (`1 <= k <= capacity <= 4096`). Put
+  `MAX STATE SIZE <bytes>` after duration `WIDTH` and `STEP`. A branched sketch window also needs
+  `MAX INSTANCES <n> EVICT LRU` on its branch. Null values are ignored, non-finite floats are
+  message errors, and results are approximate; choose precision and capacity for the desired
+  error and memory cost. See `Processors` → `Window aggregate functions` for result types and
+  bounds.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,

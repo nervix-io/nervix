@@ -296,6 +296,7 @@ CREATE WINDOW PROCESSOR latency_windows
   FILTER WHERE input.latency >= 0
   WIDTH 5m DURATION
   STEP 1m DURATION
+  MAX STATE SIZE 1MiB
   BRANCHED BY by_tenant
   TO latency_summary
     SET count = COUNT(input.latency),
@@ -310,6 +311,19 @@ CREATE WINDOW PROCESSOR latency_windows
 Aggregate calls may participate in larger scalar expressions and may combine with constants,
 initialized `output`, `branch`, and declared `relay_state` values. Route `WHERE` cannot read live
 input rows. Windows use `WIDTH` and `STEP`, never `FLUSH`.
+
+`MAX STATE SIZE <bytes>` caps the live state of each concrete branch. It charges retained Arrow
+input and argument allocations, row handles, branch keys, and the reserved capacity of every
+sketch in every active pane. A row that would exceed the cap is rejected through the route's
+message-error policy before it changes the window. Sketches require this clause, duration `WIDTH`
+and `STEP`, and a bounded `MAX INSTANCES ... EVICT LRU` branch when branched. Thus the configured
+worst-case live sketch state across branches is bounded by `MAX STATE SIZE * MAX INSTANCES`;
+unbranched windows have one state. A sketch's pane size is the greatest common divisor of its
+width and step, aligned to the Unix epoch. Each pane includes its starting timestamp and excludes
+the next pane's starting timestamp. Stepping removes records strictly before the step cutoff;
+records exactly at that cutoff remain. Panes are merged only from rows still in the active
+window and are rebuilt after stepping. Published branch snapshots carry retained rows and restore
+the same sketches when ownership moves or a node recovers.
 
 In a window route, `COUNT`, `SUM`, `FIRST`, and `LAST` always name window aggregates. The
 [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same names
@@ -338,6 +352,22 @@ is applied.
 | `COVAR_SAMP(first, second)` | numeric, numeric | `F64` | fewer than two rows have both values |
 | `CORR(first, second)` | numeric, numeric | `F64` | fewer than two rows have both values, or either variable is constant across them |
 | `PERCENTILE_LINEAR_HISTOGRAM(value, percentile, buckets, min, max, delay)` | numeric value, then constants | `F64` | the histogram counts no value |
+| `APPROX_COUNT_DISTINCT(value, precision)` | numeric, `BOOL`, `STRING`, or `DATETIME`; constant precision 4–16 | `I64` | never; zero when no row contributes |
+| `APPROX_QUANTILE(value, percentile, capacity)` | numeric; constant percentile 0–100 and capacity 32–4096 | `F64` | no row has a value |
+| `APPROX_TOP_K(value, k, capacity)` | numeric, `BOOL`, `STRING`, or `DATETIME`; constants `1 <= k <= capacity <= 4096` | `VEC<value type>` | never; empty when no row contributes |
+
+The sketches ignore nulls and refuse non-finite floating-point values as per-message errors.
+Distinct uses HyperLogLog registers with a stable type-tagged BLAKE3 key; its approximate relative
+standard error is about `1.04 / sqrt(2^precision)`. Quantile uses a bounded t-digest with at most
+`capacity` centroids, with smaller centroids near the tails. It returns an interpolated value at
+the requested percentile; t-digest has no distribution-independent worst-case rank bound, so
+accuracy depends on the distribution and capacity. Top-k uses Misra-Gries frequency candidates
+with at most `capacity` keys and returns up to `k` values ordered by estimated frequency, then by
+stable key bytes to break ties. Its counts are internal;
+values near the frequency cutoff may differ from an exact top-k. Any value occurring more than
+`N / (capacity + 1)` times in the active window remains a candidate. Each pane's sketch is mergeable;
+expired rows never contribute to later results. The sketches are deterministic for the same
+ordered inputs, pane layout, and configuration.
 
 **Nulls.** A row contributes to an aggregate only when every argument that aggregate reads is
 present, so a null argument contributes nothing. `COUNT` is the exception: it counts every retained

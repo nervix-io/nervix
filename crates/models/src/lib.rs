@@ -176,7 +176,7 @@ pub use statement::{
     SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,
     UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
     WasmRejectedStatePolicy, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

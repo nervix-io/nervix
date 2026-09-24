@@ -616,6 +616,7 @@ pub(in crate::registry) fn window_processor(
             messages: Some(5),
             duration: None,
         },
+        state_limit: nervix_models::WindowStateLimit::Unbounded,
         mode: AckMode::Attached,
         filter_where: None,
         materialized_state: Vec::new(),
