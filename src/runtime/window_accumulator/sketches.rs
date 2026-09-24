@@ -46,6 +46,29 @@ impl WindowSketch {
         }
     }
 
+    fn admit(&mut self, argument: &ArgumentColumn, row: usize) {
+        match self {
+            Self::Distinct(hll) => {
+                let key = argument
+                    .sketch_key(row)
+                    .verified("distinct accepts only scalar typed arguments");
+                hll.admit(&key);
+            }
+            Self::Quantile(quantile) => {
+                let value = argument
+                    .number_at(row)
+                    .verified("quantile accepts only present numeric arguments");
+                quantile.admit(value);
+            }
+            Self::TopK(top) => {
+                let key = argument
+                    .sketch_key(row)
+                    .verified("top-k accepts only scalar typed arguments");
+                top.admit(key);
+            }
+        }
+    }
+
     fn merge(&mut self, other: &Self) {
         let merged = match (self, other) {
             (Self::Distinct(left), Self::Distinct(right)) => {
@@ -92,29 +115,12 @@ impl PaneSketches {
                 continue;
             }
             let pane = self.layout.pane_of(retained.timestamp.unix_nanos());
-            let sketch = self
-                .panes
-                .entry(pane)
-                .or_insert_with(|| WindowSketch::new(self.config));
-            match sketch {
-                WindowSketch::Distinct(hll) => {
-                    let key = argument
-                        .sketch_key(retained.row)
-                        .verified("distinct accepts only scalar typed arguments");
-                    hll.admit(&key);
-                }
-                WindowSketch::Quantile(quantile) => {
-                    let value = argument
-                        .number_at(retained.row)
-                        .verified("quantile accepts only present numeric arguments");
-                    quantile.admit(value);
-                }
-                WindowSketch::TopK(top) => {
-                    let key = argument
-                        .sketch_key(retained.row)
-                        .verified("top-k accepts only scalar typed arguments");
-                    top.admit(key);
-                }
+            if let Some(sketch) = self.panes.get_mut(&pane) {
+                sketch.admit(argument, retained.row);
+            } else {
+                let mut sketch = WindowSketch::new(self.config);
+                sketch.admit(argument, retained.row);
+                self.panes.insert(pane, sketch);
             }
         }
     }
