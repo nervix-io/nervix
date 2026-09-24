@@ -270,6 +270,24 @@ test-coverage: tests-deps
     cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
 
+# Measure changed server lines against its unit tests and selected Cucumber features while iterating.
+# The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.
+test-coverage-feature feature additional_feature="": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    feature={{ quote(feature) }}
+    additional_feature={{ quote(additional_feature) }}
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib
+    cargo llvm-cov --no-report --features testing --package nervix-server \
+        --test scenarios -- --input "${feature}" --concurrency 1
+    if [[ -n "${additional_feature}" ]]; then
+        cargo llvm-cov --no-report --features testing --package nervix-server \
+            --test scenarios -- --input "${additional_feature}" --concurrency 1
+    fi
+    cargo llvm-cov report --lcov --output-path lcov.info
+
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
 # `just bench --test` to execute each benchmark body once without recording runner timings.
 # The server benches link the console the server serves, so the console is built first rather than

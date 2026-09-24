@@ -1290,6 +1290,11 @@ impl Runtime {
             ingested_at,
             collector,
         } = dispatch;
+        #[cfg(feature = "testing")]
+        self.inner
+            .fault_injection
+            .pause_ingestor_dispatch_if_armed(domain, ingestor)
+            .await;
         collector
             .collect(IngestGroupContribution {
                 domain,
