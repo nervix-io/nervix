@@ -80,16 +80,7 @@ impl BranchKey {
 
     /// The non-sensitive identity the control plane names this concrete branch by.
     pub(crate) fn fingerprint(&self) -> BranchKeyFingerprint {
-        Self::fingerprint_of_canonical_text(self.as_str())
-    }
-
-    /// The identity of the concrete branch whose canonical key text is `text`. A stored runtime
-    /// state key carries that text, so its branch is identified without decoding a key.
-    pub(in crate::runtime) fn fingerprint_of_canonical_text(text: &str) -> BranchKeyFingerprint {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"nervix/branch-key");
-        hasher.update(text.as_bytes());
-        BranchKeyFingerprint::new(*hasher.finalize().as_bytes())
+        BranchKeyFingerprint::of_canonical_text(self.as_str())
     }
 }
 
@@ -131,7 +122,7 @@ mod tests {
 
         assert_eq!(
             acme.fingerprint(),
-            BranchKey::fingerprint_of_canonical_text(acme.as_str())
+            BranchKeyFingerprint::of_canonical_text(acme.as_str())
         );
         assert_ne!(acme.fingerprint(), tenant("beta").fingerprint());
     }

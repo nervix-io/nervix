@@ -12,20 +12,20 @@ use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActivationAction, ActivationImpact, ActualExecutionStepImpact, AffectedTopology,
-    AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, ConfigurationImpact,
-    ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
-    DomainSchedule, DomainState as ControlDomainState, DomainStatus, DynamicModelUpdate,
-    ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution, ImpactDiagnostic,
-    ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
+    AttributedGateBoundary, AttributedImpactNode, CanonicalImpactSet, CommandExecutionReference,
+    ConfigurationImpact, ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact,
+    DomainName, DomainSchedule, DomainState as ControlDomainState, DomainStatus,
+    DynamicModelUpdate, ExecutionStepImpactReport, ForceFlushImpact, ImpactAttribution,
+    ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage, ImpactPlanningBasis,
     ImpactReportCompleteness, ImpactReportError, ImpactTopology, ImpactTopologyEdge,
     ModelChangeAspect, ModelIndex, NodeRef, OperationImpactReason, OperationImpactReport,
     OwnershipMoveImpact, PauseRequirement, PlacementPolicy, PlannedExecutionStepImpact,
     QuiesceLevel, QuiesceSubgraph, RebuildImpact, RebuildReason, RequestedResourceVersion,
-    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName,
-    ResourceUploads, ResourceVersionResolutionError, StateResetImpact, Statement,
-    TransactionCommitPlanStep, TransactionCommitStepKind, TransactionImpactReport,
-    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
-    TransactionPosition,
+    ResetWasmState, ResetWasmStateSelectionError, ResourceBindingImpact, ResourceCatalogAction,
+    ResourceCatalogImpact, ResourceName, ResourceUploads, ResourceVersionResolutionError,
+    StateResetImpact, Statement, TransactionCommitPlanStep, TransactionCommitStepKind,
+    TransactionImpactReport, TransactionOperation, TransactionOperationNumber,
+    TransactionOperationRange, TransactionPosition,
 };
 use thiserror::Error;
 
@@ -37,6 +37,7 @@ use crate::registry::{
 
 mod commit_plan;
 mod rebind;
+mod reset;
 
 use rebind::plan_resource_rebind;
 
@@ -52,6 +53,7 @@ pub(crate) struct TransactionPlanningSnapshot {
     pub(crate) resource_uploads: ResourceUploads,
     pub(crate) schedule: Option<DomainSchedule>,
     pub(crate) basis: ImpactPlanningBasis,
+    pub(crate) operation_references: Vec<CommandExecutionReference>,
 }
 
 /// The schedule decision supplied to the ordered planner from the same captured topology inputs.
@@ -83,6 +85,11 @@ pub(crate) enum PlannedTransactionStepKind {
     CreateResource {
         resource: ResourceName,
         already_existed: bool,
+    },
+    ResetWasmState {
+        reset: ResetWasmState,
+        request: CommandExecutionReference,
+        schedule: DomainSchedule,
     },
 }
 
@@ -195,6 +202,36 @@ pub(crate) enum TransactionPlanningError {
         node: NodeRef,
         resource: ResourceName,
     },
+    #[error(
+        "WASM state reset names domain '{requested}', but the transaction is bound to '{domain}'"
+    )]
+    ResetDomainMismatch {
+        domain: DomainName,
+        requested: DomainName,
+    },
+    #[error("WASM processor '{processor}' does not exist in domain '{domain}'")]
+    ResetProcessorNotFound {
+        domain: DomainName,
+        processor: nervix_models::WasmProcessorName,
+    },
+    #[error("WASM processor '{processor}' has no active execution in domain '{domain}'")]
+    ResetProcessorNotRunning {
+        domain: DomainName,
+        processor: nervix_models::WasmProcessorName,
+    },
+    #[error("WASM processor '{processor}' reset has invalid branch scope: {error}")]
+    ResetInvalidScope {
+        processor: nervix_models::WasmProcessorName,
+        error: Report<ResetWasmStateSelectionError>,
+    },
+    #[error("WASM processor '{processor}' is publishing another reset")]
+    ResetInProgress {
+        processor: nervix_models::WasmProcessorName,
+    },
+    #[error("transaction operation {operation} has no durable reset request identity")]
+    ResetIdentityMissing {
+        operation: TransactionOperationNumber,
+    },
     #[error("transaction operation {operation} is not valid transaction content")]
     InvalidOperation {
         operation: TransactionOperationNumber,
@@ -233,6 +270,7 @@ impl TransactionPlanningError {
             | Self::ModelPreflight { operation, .. }
             | Self::ExternalModelValidation { operation }
             | Self::UdfPreparation { operation } => Some(*operation),
+            Self::ResetIdentityMissing { operation } => Some(*operation),
             Self::DomainNotFound { .. }
             | Self::DomainPaused { .. }
             | Self::ConcurrentDomainAlter { .. }
@@ -243,6 +281,11 @@ impl TransactionPlanningError {
             | Self::ResourceNotFound { .. }
             | Self::RebindMemberNotFound { .. }
             | Self::RebindMemberDoesNotBind { .. }
+            | Self::ResetDomainMismatch { .. }
+            | Self::ResetProcessorNotFound { .. }
+            | Self::ResetProcessorNotRunning { .. }
+            | Self::ResetInvalidScope { .. }
+            | Self::ResetInProgress { .. }
             | Self::InvalidImpactReport { .. }
             | Self::PlanningBasisEncoding
             | Self::PartialPlanHasNoTransactionReport { .. } => None,
@@ -418,6 +461,15 @@ impl Registry {
                 resource,
                 already_existed,
             },
+            TransactionCommitStepKind::ResetWasmState {
+                reset,
+                request,
+                schedule,
+            } => PlannedTransactionStepKind::ResetWasmState {
+                reset: *reset,
+                request,
+                schedule: *schedule,
+            },
         };
         Ok(PlannedTransactionStep {
             impact: step.impact,
@@ -448,6 +500,7 @@ impl Registry {
         let mut resources = snapshot.resources;
         let resource_uploads = snapshot.resource_uploads;
         let mut current_schedule = snapshot.schedule;
+        let operation_references = snapshot.operation_references;
         let mut operations = Vec::with_capacity(statements.len());
         let mut steps = Vec::new();
         let mut operation_offset = 0usize;
@@ -682,6 +735,33 @@ impl Registry {
                         already_existed,
                     };
                     pause = PauseRequirement::NoPause;
+                }
+                Statement::ResetWasmState(reset) => {
+                    ensure_domain_not_paused(&domain_state)?;
+                    let request = operation_references.get(absolute_index).ok_or_else(|| {
+                        Report::new(TransactionPlanningError::ResetIdentityMissing {
+                            operation: number,
+                        })
+                    })?;
+                    let planned = Self::plan_wasm_state_reset(
+                        reset,
+                        &domain,
+                        domain_state.status.clone(),
+                        &models,
+                        current_schedule.as_ref(),
+                        request,
+                        &attribution,
+                    )?;
+                    operation = planned.operation;
+                    reasons = planned.reasons;
+                    contribution = planned.effects;
+                    pause = planned.pause;
+                    current_schedule = Some(planned.schedule.clone());
+                    kind = PlannedTransactionStepKind::ResetWasmState {
+                        reset: reset.clone(),
+                        request: request.clone(),
+                        schedule: planned.schedule,
+                    };
                 }
                 _ => {
                     return Err(Report::new(TransactionPlanningError::InvalidOperation {

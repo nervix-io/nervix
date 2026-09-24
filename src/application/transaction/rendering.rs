@@ -255,6 +255,13 @@ fn transaction_operation_text(operation: &TransactionOperation) -> String {
             "{action} resource={} version={version} requested={requested}",
             resource.as_str()
         ),
+        TransactionOperation::ResetWasmState { domain, processor } => {
+            format!(
+                "{action} domain={} processor={}",
+                domain.as_str(),
+                processor.as_str()
+            )
+        }
     }
 }
 
@@ -280,6 +287,9 @@ fn reason_text(reason: &OperationImpactReason) -> String {
             node_text(node),
             resource.as_str()
         ),
+        OperationImpactReason::WasmStateReset { node } => {
+            format!("{kind} {}", node_text(node))
+        }
     }
 }
 

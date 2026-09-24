@@ -383,6 +383,13 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   state, and say that it replaces the lifetime once rather than retrying. Never present it as a
   recovery for a compile, initialization, fuel, memory, storage, replication, or authority failure;
   none of those discards state under either value.
+- To intentionally replace an existing WASM processor's guest state, use
+  `RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
+  Choose the explicit scope that matches its declared branch, and supply every branch-key field
+  with an exact typed literal for one selected branch. The processor must be running and the
+  selected branch must already exist. This command loses the selected computation state; a fresh
+  command reference is a new reset, while retrying the same reference returns its original outcome.
+  See the reset section in `Runtime Nodes` and `Command Completion` before suggesting it.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.

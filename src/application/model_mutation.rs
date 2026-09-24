@@ -165,6 +165,7 @@ pub(in crate::application) fn is_persistent_statement(statement: &Statement) -> 
                 | Statement::UncordonNode(_)
                 | Statement::DrainNode(_)
                 | Statement::Relocate(_)
+                | Statement::ResetWasmState(_)
         )
 }
 
@@ -859,13 +860,18 @@ impl SessionServiceImpl {
                 .iter()
                 .any(|statement| matches!(statement, Statement::RebindResource(_)))
         {
-            let captured =
-                match Box::pin(self.plan_transaction_statements(&domain, &statements, 0, false))
-                    .await
-                {
-                    Ok(captured) => captured,
-                    Err(error) => return command_error(transaction_planning_error_message(&error)),
-                };
+            let captured = match Box::pin(self.plan_transaction_statements(
+                &domain,
+                &statements,
+                &[],
+                0,
+                false,
+            ))
+            .await
+            {
+                Ok(captured) => captured,
+                Err(error) => return command_error(transaction_planning_error_message(&error)),
+            };
             let Some(step) = captured.plan.steps().first().cloned() else {
                 return command_error(
                     "resource rebind planning produced no model step".to_string(),
@@ -2151,6 +2157,7 @@ impl SessionServiceImpl {
             | Statement::AlterGenerator(_)
             | Statement::AlterPlacement(_)
             | Statement::RebindResource(_)
+            | Statement::ResetWasmState(_)
             | Statement::Drop(_) => {
                 unreachable!("model mutations are handled before statement dispatch")
             }
