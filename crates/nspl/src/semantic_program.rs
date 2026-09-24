@@ -7,8 +7,8 @@ use error_stack::Report;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, BuiltinFunctionName,
     CaseBranch, Expression, FieldName, FieldReference, FieldScope, Float64Literal, Inheritance,
-    InheritedField, Invocation, Literal, NameError, ParseAsType, RelayName, RouteConstruction,
-    UdfName, UnaryOperator,
+    InheritedField, Invocation, Literal, MembershipOperator, NameError, ParseAsType, RangeOperator,
+    RelayName, RouteConstruction, UdfName, UnaryOperator,
 };
 
 use crate::{
@@ -24,6 +24,17 @@ where
     I: ValueInput<'src, Token = Token, Span = Span>,
 {
     just(token).ignored()
+}
+
+/// A keyword written as several words, parsed as one grammar unit and reported under its phrase.
+fn keyword_phrase<'src, I, const WORDS: usize>(
+    words: [Token; WORDS],
+    phrase: &'static str,
+) -> impl Parser<'src, I, (), extra::Err<ParseError<'src>>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    just(words).ignored().labelled(phrase)
 }
 
 fn raw_identifier<'src, I>() -> impl Parser<'src, I, String, extra::Err<ParseError<'src>>> + Clone
@@ -129,6 +140,53 @@ where
     })
 }
 
+/// One comparison-level operation, applied to the expression parsed before it.
+///
+/// Comparisons fold left, so each one takes the whole comparison to its left as its operand:
+/// `a = b IN (TRUE)` tests whether `a = b` is an element of the set.
+enum ComparisonSuffix {
+    Binary {
+        operator: BinaryOperator,
+        right: Expression,
+    },
+    Membership {
+        operator: MembershipOperator,
+        set: Vec<Expression>,
+    },
+    Range {
+        operator: RangeOperator,
+        low: Expression,
+        high: Expression,
+    },
+}
+
+impl ComparisonSuffix {
+    fn apply(self, operand: Expression) -> Expression {
+        match self {
+            Self::Binary { operator, right } => Expression::Binary {
+                operator,
+                left: Box::new(operand),
+                right: Box::new(right),
+            },
+            Self::Membership { operator, set } => Expression::Membership {
+                operator,
+                operand: Box::new(operand),
+                set,
+            },
+            Self::Range {
+                operator,
+                low,
+                high,
+            } => Expression::Range {
+                operator,
+                operand: Box::new(operand),
+                low: Box::new(low),
+                high: Box::new(high),
+            },
+        }
+    }
+}
+
 fn expression<'src, I>() -> impl Parser<'src, I, Expression, extra::Err<ParseError<'src>>> + Clone
 where
     I: ValueInput<'src, Token = Token, Span = Span>,
@@ -156,13 +214,12 @@ where
                 function,
                 arguments,
             });
-        let function_call =
-            name(BuiltinFunctionName::parse)
-                .then(arguments)
-                .map(|(function, arguments)| Expression::Call {
-                    function,
-                    arguments,
-                });
+        let function_call = name(BuiltinFunctionName::parse)
+            .then(arguments.clone())
+            .map(|(function, arguments)| Expression::Call {
+                function,
+                arguments,
+            });
         let array = expression
             .clone()
             .separated_by(keyword(Token::Comma))
@@ -281,25 +338,59 @@ where
                 },
             )
             .boxed();
+        let comparison_operator = choice((
+            keyword(Token::Eq).to(BinaryOperator::Equal),
+            keyword(Token::NotEq).to(BinaryOperator::NotEqual),
+            keyword(Token::GtEq).to(BinaryOperator::GreaterThanOrEqual),
+            keyword(Token::LtEq).to(BinaryOperator::LessThanOrEqual),
+            keyword(Token::Gt).to(BinaryOperator::GreaterThan),
+            keyword(Token::Lt).to(BinaryOperator::LessThan),
+            keyword_phrase(
+                [Token::Is, Token::Distinct, Token::From],
+                "IS DISTINCT FROM",
+            )
+            .to(BinaryOperator::IsDistinctFrom),
+            keyword_phrase(
+                [Token::Is, Token::Not, Token::Distinct, Token::From],
+                "IS NOT DISTINCT FROM",
+            )
+            .to(BinaryOperator::IsNotDistinctFrom),
+        ));
+        let membership_operator = choice((
+            keyword(Token::In).to(MembershipOperator::In),
+            keyword_phrase([Token::Not, Token::In], "NOT IN").to(MembershipOperator::NotIn),
+        ));
+        let range_operator = choice((
+            keyword(Token::Between).to(RangeOperator::Between),
+            keyword_phrase([Token::Not, Token::Between], "NOT BETWEEN")
+                .to(RangeOperator::NotBetween),
+        ));
+        // A set is written like an argument list, so it may be empty and may end with a comma.
+        let set = arguments;
+        // Both bounds are read one level tighter than a comparison, so the `AND` that closes the
+        // low bound belongs to the range and a later `AND` combines the whole range test.
+        let comparison_suffix = choice((
+            comparison_operator
+                .then(additive.clone())
+                .map(|(operator, right)| ComparisonSuffix::Binary { operator, right }),
+            membership_operator
+                .then(set)
+                .map(|(operator, set)| ComparisonSuffix::Membership { operator, set }),
+            range_operator
+                .then(additive.clone())
+                .then_ignore(keyword(Token::And))
+                .then(additive.clone())
+                .map(|((operator, low), high)| ComparisonSuffix::Range {
+                    operator,
+                    low,
+                    high,
+                }),
+        ));
         let comparison = additive
             .clone()
-            .foldl(
-                choice((
-                    keyword(Token::Eq).to(BinaryOperator::Equal),
-                    keyword(Token::NotEq).to(BinaryOperator::NotEqual),
-                    keyword(Token::GtEq).to(BinaryOperator::GreaterThanOrEqual),
-                    keyword(Token::LtEq).to(BinaryOperator::LessThanOrEqual),
-                    keyword(Token::Gt).to(BinaryOperator::GreaterThan),
-                    keyword(Token::Lt).to(BinaryOperator::LessThan),
-                ))
-                .then(additive.clone())
-                .repeated(),
-                |left, (operator, right)| Expression::Binary {
-                    operator,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            )
+            .foldl(comparison_suffix.repeated(), |operand, suffix| {
+                suffix.apply(operand)
+            })
             .boxed();
         let and = comparison
             .clone()
@@ -631,5 +722,170 @@ mod tests {
             Expression::Call { ref function, .. } if function.as_str() == "add_one"
         ));
         assert!(parse_expression("builtin::add_one(input.value)").is_err());
+    }
+
+    fn field(name: &str) -> Expression {
+        Expression::Field(FieldReference::scoped(
+            FieldScope::Input,
+            FieldName::try_from(name).expect("test field names are valid"),
+        ))
+    }
+
+    fn integer(value: i64) -> Expression {
+        Expression::Literal(Literal::I64(value))
+    }
+
+    fn string(value: &str) -> Expression {
+        Expression::Literal(Literal::String(value.to_string()))
+    }
+
+    fn binary(operator: BinaryOperator, left: Expression, right: Expression) -> Expression {
+        Expression::Binary {
+            operator,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    #[test]
+    fn parses_membership_tests_over_written_sets() {
+        assert_eq!(
+            parse_expression("input.status in ('open', 'held',)").expect("IN must parse"),
+            Expression::Membership {
+                operator: MembershipOperator::In,
+                operand: Box::new(field("status")),
+                set: vec![string("open"), string("held")],
+            }
+        );
+        assert_eq!(
+            parse_expression("input.code NOT IN ()").expect("an empty set must parse"),
+            Expression::Membership {
+                operator: MembershipOperator::NotIn,
+                operand: Box::new(field("code")),
+                set: Vec::new(),
+            }
+        );
+        let Expression::Membership { set, .. } =
+            parse_expression("input.code IN (-1 AS I32, (2) AS I32)").expect("casts must parse")
+        else {
+            panic!("IN must parse as a membership test");
+        };
+        assert_eq!(
+            set[0],
+            Expression::Unary {
+                operator: UnaryOperator::Negate,
+                expression: Box::new(Expression::Cast {
+                    expression: Box::new(integer(1)),
+                    target: ParseAsType::I32,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_ranges_whose_and_closes_the_low_bound() {
+        assert_eq!(
+            parse_expression("input.weight BETWEEN 1 AND 2 + 3 AND input.active")
+                .expect("BETWEEN must parse"),
+            binary(
+                BinaryOperator::And,
+                Expression::Range {
+                    operator: RangeOperator::Between,
+                    operand: Box::new(field("weight")),
+                    low: Box::new(integer(1)),
+                    high: Box::new(binary(BinaryOperator::Add, integer(2), integer(3))),
+                },
+                field("active"),
+            )
+        );
+        assert_eq!(
+            parse_expression("input.weight not between -1 and 1").expect("NOT BETWEEN must parse"),
+            Expression::Range {
+                operator: RangeOperator::NotBetween,
+                operand: Box::new(field("weight")),
+                low: Box::new(Expression::Unary {
+                    operator: UnaryOperator::Negate,
+                    expression: Box::new(integer(1)),
+                }),
+                high: Box::new(integer(1)),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_null_safe_equality_as_a_comparison() {
+        assert_eq!(
+            parse_expression(
+                "input.region IS DISTINCT FROM input.home OR input.region is not distinct from \
+                 'eu'"
+            )
+            .expect("distinctness must parse"),
+            binary(
+                BinaryOperator::Or,
+                binary(
+                    BinaryOperator::IsDistinctFrom,
+                    field("region"),
+                    field("home"),
+                ),
+                binary(
+                    BinaryOperator::IsNotDistinctFrom,
+                    field("region"),
+                    string("eu"),
+                ),
+            )
+        );
+    }
+
+    #[test]
+    fn comparisons_fold_left_across_every_comparison_form() {
+        assert_eq!(
+            parse_expression("input.a = input.b IN (TRUE) IS DISTINCT FROM FALSE")
+                .expect("chained comparisons must parse"),
+            binary(
+                BinaryOperator::IsDistinctFrom,
+                Expression::Membership {
+                    operator: MembershipOperator::In,
+                    operand: Box::new(binary(BinaryOperator::Equal, field("a"), field("b"))),
+                    set: vec![Expression::Literal(Literal::Bool(true))],
+                },
+                Expression::Literal(Literal::Bool(false)),
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_comparison_phrases() {
+        for source in [
+            "input.region IS DISTINCT input.home",
+            "input.region IS NOT input.home",
+            "input.region IS NULL",
+            "input.region DISTINCT FROM input.home",
+            "input.region NOT 'eu'",
+            "input.region NOT",
+            "input.code IN 1",
+            "input.code IN (1",
+            "input.code IN [1]",
+            "IN (1)",
+            "input.weight BETWEEN 1",
+            "input.weight BETWEEN 1 OR 2",
+            "input.weight BETWEEN AND 2",
+        ] {
+            assert!(parse_expression(source).is_err(), "{source} must not parse");
+        }
+    }
+
+    #[test]
+    fn comparison_keywords_are_reserved_in_expressions() {
+        for keyword in ["in", "between", "is", "distinct", "from"] {
+            assert!(
+                parse_expression(&format!("input.{keyword} = 1")).is_err(),
+                "input.{keyword} must not parse as a field"
+            );
+            assert!(
+                parse_expression(&format!("{keyword} = 1")).is_err(),
+                "{keyword} must not parse as a bare field"
+            );
+        }
+        assert!(parse_expression("input.inbound IN (input.from_unix)").is_ok());
     }
 }

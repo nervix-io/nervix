@@ -363,6 +363,57 @@ mod tests {
     }
 
     #[test]
+    fn parses_source_filters_whose_sets_and_calls_hold_commas() {
+        let parsed = parse_create_junction(
+            "CREATE JUNCTION route_parcels FROM parcels WHERE input.status NOT IN ('void', \
+             'test'), archive WHERE greatest(input.weight, 1.0) BETWEEN 1.0 AND 5.0 UNBRANCHED TO \
+             routed INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+        )
+        .expect("commas inside a set and a call belong to the source filter");
+        assert_eq!(
+            parsed
+                .from
+                .from
+                .iter()
+                .map(|relay| relay.as_str())
+                .collect::<Vec<_>>(),
+            ["parcels", "archive"]
+        );
+        let filters = &parsed.from.r#where;
+        assert_eq!(filters.len(), 2);
+        assert!(matches!(
+            &filters[0].where_clause,
+            nervix_models::Expression::Membership { set, .. } if set.len() == 2
+        ));
+        assert!(matches!(
+            &filters[1].where_clause,
+            nervix_models::Expression::Range { .. }
+        ));
+    }
+
+    #[test]
+    fn completion_inside_a_source_filter_set_stays_in_the_filter() {
+        // A comma inside the set does not end the filter, so nothing that follows a source
+        // filter, such as the next relay of the list, is offered inside it.
+        let input = "CREATE JUNCTION route_parcels FROM parcels WHERE input.status IN ('void', ";
+        let suggestions = suggest_create_junction(input, input.len());
+        assert!(!suggestions.contains(&"ref:relay".to_string()));
+        assert!(!suggestions.contains(&"UNBRANCHED".to_string()));
+        assert!(!suggestions.contains(&"COLLECT FOR".to_string()));
+
+        let input = "CREATE JUNCTION route_parcels FROM parcels WHERE input.status NOT IN \
+                     ('void', 'test') AND input.weight NOT BETWEEN 1.0 AND 2.0 ";
+        let suggestions = suggest_create_junction(input, input.len());
+        assert!(
+            suggestions.contains(&"UNBRANCHED".to_string()),
+            "unexpected suggestions: {suggestions:?}"
+        );
+        assert!(suggestions.contains(&",".to_string()));
+        assert!(!suggestions.contains(&"ref:relay".to_string()));
+        assert!(!suggestions.contains(&")".to_string()));
+    }
+
+    #[test]
     fn suggests_collect_for_after_source_list() {
         let input = "CREATE JUNCTION join_streams FROM ss1 COL";
         let suggestions = suggest_create_junction(input, input.len());

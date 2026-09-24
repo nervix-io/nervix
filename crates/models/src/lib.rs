@@ -54,8 +54,8 @@ pub use domain_clock::{
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
     ExternalValue, FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField,
-    Invocation, Literal, MaterializedStateDependency, MaterializedStatePolicy, OutputBranch,
-    RouteConstruction, UnaryOperator,
+    Invocation, Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
+    OutputBranch, RangeOperator, RouteConstruction, UnaryOperator,
 };
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,

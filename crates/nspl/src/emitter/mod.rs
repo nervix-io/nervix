@@ -374,7 +374,9 @@ fn otel_literal_expression(expression: &nervix_models::Expression) -> bool {
         | nervix_models::Expression::Call { .. }
         | nervix_models::Expression::UdfCall { .. }
         | nervix_models::Expression::If { .. }
-        | nervix_models::Expression::Case { .. } => false,
+        | nervix_models::Expression::Case { .. }
+        | nervix_models::Expression::Membership { .. }
+        | nervix_models::Expression::Range { .. } => false,
     }
 }
 

@@ -5,22 +5,26 @@ use std::{
 };
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use arrow_array::{BooleanArray, Float64Array, Int64Array, StringArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 
 use crate::{
-    error::CompileError,
+    batch::TypedArray,
+    error::{CompileError, SideErrorReason},
     ir::{
         AssignmentFallback, CompiledPredicate, CompiledProgram, InputBinding, Instruction,
         InstructionKind, InvocationBinding, OutputBinding, RegisterLayouts, RegisterRef,
         RegisterSpace, RegisterType, ScalarValue, SelectArm,
     },
+    membership::MembershipSet,
     program::{
         BinaryOp, CaseArm, Expr, FieldRef, FunctionName, InternalFieldNamespace, InternalFieldRef,
         Literal, Program, Span, SpannedExpr, SpannedNode, UnaryOp, WindowAggregateFunction,
     },
     regexp::{PatternSource, RegexpCall, RegexpFunction},
+    runtime::{cast_constant, unary_constant},
     semantics::{
         BitwiseOperation, BuiltinLowering, CaseMapping, FloatClass, IntegerBits as _,
         binary_descriptor, binary_output_type, builtin_descriptor, builtin_semantics_for_lowering,
@@ -215,6 +219,15 @@ enum ExprKey {
         operand: Option<Box<ExprKey>>,
         branches: Vec<(ExprKey, ExprKey)>,
         else_result: Option<Box<ExprKey>>,
+    },
+    Membership {
+        operand: Box<ExprKey>,
+        set: Vec<ExprKey>,
+    },
+    Between {
+        operand: Box<ExprKey>,
+        low: Box<ExprKey>,
+        high: Box<ExprKey>,
     },
 }
 
@@ -1278,6 +1291,63 @@ impl Compiler {
                 }
                 Ok(result_type)
             }
+            Expr::Membership { operand, set } => {
+                let operand_type = self.infer_expr_type(operand)?;
+                let operand_is_scalar = match RegisterType::from_data_type(&operand_type) {
+                    Some(operand_register) => operand_register.is_scalar(),
+                    None => false,
+                };
+                if !operand_is_scalar {
+                    return Err(CompileError {
+                        code: "unsupported_membership",
+                        message: format!("IN is not valid for {operand_type:?}"),
+                        span: expr.span,
+                    });
+                }
+                for (index, element) in set.iter().enumerate() {
+                    if let Some(defect) = SetElementDefect::of_shape(element) {
+                        return Err(defect.into_compile_error(index, element.span));
+                    }
+                    let element_type = self.infer_expr_type(element)?;
+                    if element_type != operand_type {
+                        let position = SetElementDefect::position(index);
+                        return Err(CompileError {
+                            code: "type_mismatch",
+                            message: format!(
+                                "IN set element {position} has type {element_type:?}, but the \
+                                 operand has type {operand_type:?}"
+                            ),
+                            span: element.span,
+                        });
+                    }
+                }
+                Ok(DataType::Boolean)
+            }
+            Expr::Between { operand, low, high } => {
+                let operand_type = self.infer_expr_type(operand)?;
+                let low_type = self.infer_expr_type(low)?;
+                let high_type = self.infer_expr_type(high)?;
+                if low_type != operand_type || high_type != operand_type {
+                    return Err(CompileError {
+                        code: "type_mismatch",
+                        message: format!(
+                            "BETWEEN requires the operand and both bounds to have one exact type, \
+                             found {operand_type:?}, {low_type:?} and {high_type:?}"
+                        ),
+                        span: expr.span,
+                    });
+                }
+                // The range is the conjunction of `>=` and `<=`, so it accepts exactly the types
+                // those comparisons order.
+                if binary_output_type(BinaryOp::GtEq, &operand_type, &operand_type).is_none() {
+                    return Err(CompileError {
+                        code: "unsupported_range",
+                        message: format!("BETWEEN is not valid for {operand_type:?}"),
+                        span: expr.span,
+                    });
+                }
+                Ok(DataType::Boolean)
+            }
         }
     }
 
@@ -1324,9 +1394,22 @@ impl Compiler {
                 Ok(binding.nullable)
             }
             Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => self.expr_may_be_null(expr),
-            Expr::Binary { left, right, .. } => {
+            Expr::Binary { op, left, right } => {
+                if let BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom = op {
+                    return Ok(false);
+                }
                 Ok(self.expr_may_be_null(left)? || self.expr_may_be_null(right)?)
             }
+            Expr::Membership { operand, set } => {
+                // No value is an element of an empty set, a null one included.
+                if set.is_empty() {
+                    return Ok(false);
+                }
+                self.expr_may_be_null(operand)
+            }
+            Expr::Between { operand, low, high } => Ok(self.expr_may_be_null(operand)?
+                || self.expr_may_be_null(low)?
+                || self.expr_may_be_null(high)?),
             Expr::Call { function, args } => {
                 if let FunctionName::LeakSensitive = function {
                     let arg = self.leak_sensitive_arg(args, expr.span)?;
@@ -1376,7 +1459,11 @@ impl Compiler {
                 if let FunctionName::NullIf = function {
                     return Ok(true);
                 }
-                if let FunctionName::Coalesce = function {
+                // `greatest` and `least` skip null arguments like `coalesce` does, so one required
+                // argument makes the result required.
+                if let FunctionName::Coalesce | FunctionName::Greatest | FunctionName::Least =
+                    function
+                {
                     let mut all_nullable = true;
                     for arg in args {
                         all_nullable &= self.expr_may_be_null(arg)?;
@@ -1479,6 +1566,20 @@ impl Compiler {
                 }
                 Ok(false)
             }
+            Expr::Membership { operand, set } => {
+                if self.expr_is_sensitive(operand)? {
+                    return Ok(true);
+                }
+                for element in set {
+                    if self.expr_is_sensitive(element)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Expr::Between { operand, low, high } => Ok(self.expr_is_sensitive(operand)?
+                || self.expr_is_sensitive(low)?
+                || self.expr_is_sensitive(high)?),
         }
     }
 
@@ -1572,7 +1673,7 @@ impl Compiler {
             }
 
             if semantics.supports_constant_folding()
-                && let Some(value) = self.try_fold_constant_expr(expr)?
+                && let Some(value) = fold_constant_expr(expr)?
                 && let FoldedValue::NonNull(_) = value
             {
                 let reg = self.emit_folded_value(value, expr.span);
@@ -1813,6 +1914,46 @@ impl Compiler {
                     expr.span,
                 )
             }
+            // The set's elements are constants, evaluated here once for the program, so a batch
+            // computes only the operand and tests it against the prepared set.
+            Expr::Membership { operand, set } => {
+                self.infer_expr_type(expr)?;
+                let operand_type = RegisterType::from_data_type(&self.infer_expr_type(operand)?)
+                    .verified("type inference above accepted only operands of a scalar type");
+                let mut elements = Vec::with_capacity(set.len());
+                for (index, element) in set.iter().enumerate() {
+                    let value = evaluate_set_element(element)
+                        .map_err(|defect| defect.into_compile_error(index, element.span))?;
+                    elements.push(value);
+                }
+                let prepared = MembershipSet::prepare(operand_type, &elements).verified(
+                    "type inference above accepted only non-null elements of the operand's type",
+                );
+                let input = self.compile_expr(operand)?;
+                let dst = self.alloc_temp(RegisterType::Boolean);
+                self.emit(
+                    InstructionKind::Builtin {
+                        dst,
+                        lowering: BuiltinLowering::Membership(prepared),
+                        inputs: vec![input],
+                    },
+                    expr.span,
+                );
+                Ok(dst)
+            }
+            // The operand is computed once and compared with each bound, so a failure while
+            // computing it is reported once, as it is for the operand of any other comparison.
+            Expr::Between { operand, low, high } => {
+                self.infer_expr_type(expr)?;
+                let operand = self.compile_expr(operand)?;
+                let low = self.compile_expr(low)?;
+                let high = self.compile_expr(high)?;
+                let at_least_low =
+                    self.emit_boolean_binary(BinaryOp::GtEq, operand, low, expr.span);
+                let at_most_high =
+                    self.emit_boolean_binary(BinaryOp::LtEq, operand, high, expr.span);
+                Ok(self.emit_boolean_binary(BinaryOp::And, at_least_low, at_most_high, expr.span))
+            }
         }
     }
 
@@ -1985,13 +2126,6 @@ impl Compiler {
         }
     }
 
-    fn try_fold_constant_expr(
-        &self,
-        expr: &SpannedExpr,
-    ) -> Result<Option<FoldedValue>, CompileError> {
-        fold_constant_expr(expr)
-    }
-
     fn compile_builtin_call(
         &mut self,
         function: &FunctionName,
@@ -2024,7 +2158,11 @@ impl Compiler {
             .map(|arg| self.compile_expr(arg))
             .collect::<Result<Vec<_>, _>>()?;
 
-        BuiltinPlan::from_descriptor(descriptor.lowering, compiled_args, output_type, span)
+        Ok(BuiltinPlan {
+            lowering: descriptor.lowering,
+            inputs: compiled_args,
+            output_type,
+        })
     }
 
     /// Compiles a regular-expression call.
@@ -2198,6 +2336,15 @@ impl ExprKey {
                     .as_ref()
                     .map(|result| Box::new(Self::from_expr(result))),
             },
+            Expr::Membership { operand, set } => Self::Membership {
+                operand: Box::new(Self::from_expr(operand)),
+                set: set.iter().map(Self::from_expr).collect(),
+            },
+            Expr::Between { operand, low, high } => Self::Between {
+                operand: Box::new(Self::from_expr(operand)),
+                low: Box::new(Self::from_expr(low)),
+                high: Box::new(Self::from_expr(high)),
+            },
         }
     }
 }
@@ -2233,19 +2380,6 @@ struct BuiltinPlan {
 }
 
 impl BuiltinPlan {
-    fn from_descriptor(
-        lowering: BuiltinLowering,
-        args: Vec<RegisterRef>,
-        output_type: RegisterType,
-        _span: Span,
-    ) -> Result<Self, CompileError> {
-        Ok(Self {
-            lowering,
-            inputs: args,
-            output_type,
-        })
-    }
-
     fn output_type(&self) -> RegisterType {
         self.output_type
     }
@@ -2256,6 +2390,114 @@ impl BuiltinPlan {
             lowering: self.lowering,
             inputs: self.inputs,
         }
+    }
+}
+
+/// Why a written `IN` set element cannot be one of the set's values.
+#[derive(Debug, Clone, PartialEq)]
+enum SetElementDefect {
+    /// The element reads something other than a literal, such as a field or a function call.
+    NotConstant,
+    /// The element is `NULL`, which no value equals.
+    Null,
+    /// Computing the element fails as it would fail for a row, such as a cast out of range.
+    Unevaluable(SideErrorReason),
+}
+
+impl SetElementDefect {
+    /// What the element's shape alone rules out. An element is a literal other than `NULL`,
+    /// optionally negated with `-` or `NOT` and cast with `AS`, any number of times.
+    fn of_shape(element: &SpannedExpr) -> Option<Self> {
+        match &element.inner {
+            Expr::Literal(Literal::Null) => Some(Self::Null),
+            Expr::Literal(_) => None,
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => Self::of_shape(expr),
+            Expr::FieldRef(_)
+            | Expr::InternalFieldRef(_)
+            | Expr::Binary { .. }
+            | Expr::Call { .. }
+            | Expr::Case { .. }
+            | Expr::Membership { .. }
+            | Expr::Between { .. } => Some(Self::NotConstant),
+        }
+    }
+
+    /// The element's position as written, counting from `1`.
+    fn position(index: usize) -> usize {
+        index
+            .checked_add(1)
+            .assured("a set held in memory has fewer than usize::MAX elements")
+    }
+
+    fn into_compile_error(self, index: usize, span: Span) -> CompileError {
+        let position = Self::position(index);
+        match self {
+            Self::NotConstant => CompileError {
+                code: "non_constant_set_element",
+                message: format!(
+                    "IN set element {position} is not a constant; write a literal, optionally \
+                     negated with '-' or NOT and cast with AS"
+                ),
+                span,
+            },
+            Self::Null => CompileError {
+                code: "null_set_element",
+                message: format!(
+                    "IN set element {position} is NULL, which no value equals; test for null with \
+                     is_null(...)"
+                ),
+                span,
+            },
+            Self::Unevaluable(reason) => CompileError {
+                code: "invalid_set_element",
+                message: format!("IN set element {position} cannot be evaluated: {reason}"),
+                span,
+            },
+        }
+    }
+}
+
+/// The value of an `IN` set element, computed once when its program is compiled.
+///
+/// Negation and casts run the kernels execution runs, so the element holds exactly the value the
+/// same expression computes for a row, and an element that would fail for every row fails the
+/// statement instead.
+fn evaluate_set_element(element: &SpannedExpr) -> Result<TypedArray, SetElementDefect> {
+    match &element.inner {
+        Expr::Literal(Literal::Int64(value)) => {
+            Ok(TypedArray::Int64(Int64Array::from_value(*value, 1)))
+        }
+        Expr::Literal(Literal::Float64(value)) => {
+            Ok(TypedArray::Float64(Float64Array::from_value(*value, 1)))
+        }
+        Expr::Literal(Literal::Bool(value)) => {
+            Ok(TypedArray::Boolean(BooleanArray::from(vec![*value])))
+        }
+        Expr::Literal(Literal::String(value)) => {
+            Ok(TypedArray::Utf8(StringArray::from_iter_values([
+                value.as_str()
+            ])))
+        }
+        Expr::Literal(Literal::Null) => Err(SetElementDefect::Null),
+        Expr::Unary { op, expr } => {
+            let value = evaluate_set_element(expr)?;
+            unary_constant(*op, &value)
+                .verified("type inference accepted only operators with a kernel for the element")
+                .map_err(SetElementDefect::Unevaluable)
+        }
+        Expr::Cast { expr, data_type } => {
+            let value = evaluate_set_element(expr)?;
+            let target = RegisterType::from_data_type(data_type)
+                .verified("type inference accepted only casts to a register type");
+            cast_constant(value, target).map_err(SetElementDefect::Unevaluable)
+        }
+        Expr::FieldRef(_)
+        | Expr::InternalFieldRef(_)
+        | Expr::Binary { .. }
+        | Expr::Call { .. }
+        | Expr::Case { .. }
+        | Expr::Membership { .. }
+        | Expr::Between { .. } => Err(SetElementDefect::NotConstant),
     }
 }
 
@@ -2340,6 +2582,7 @@ fn fold_constant_expr(expr: &SpannedExpr) -> Result<Option<FoldedValue>, Compile
                 .transpose()
                 .map(Option::flatten)
         }
+        Expr::Membership { .. } | Expr::Between { .. } => Ok(None),
     }
 }
 
@@ -2684,6 +2927,9 @@ fn fold_builtin_call(function: &FunctionName, args: &[FoldedValue]) -> Option<Fo
         | FunctionName::Trunc
         | FunctionName::ShiftLeft
         | FunctionName::ShiftRight
+        | FunctionName::Greatest
+        | FunctionName::Least
+        | FunctionName::Clamp
         | FunctionName::Datetime(_) => None,
     }
 }
@@ -3259,6 +3505,14 @@ fn expression_contains_udf(expr: &SpannedExpr) -> bool {
                 })
                 || else_result.as_deref().is_some_and(expression_contains_udf)
         }
+        Expr::Membership { operand, set } => {
+            expression_contains_udf(operand) || set.iter().any(expression_contains_udf)
+        }
+        Expr::Between { operand, low, high } => {
+            expression_contains_udf(operand)
+                || expression_contains_udf(low)
+                || expression_contains_udf(high)
+        }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
 }
@@ -3296,6 +3550,17 @@ fn expression_contains_volatile_udf(expr: &SpannedExpr, signatures: &UdfSignatur
                 || else_result
                     .as_deref()
                     .is_some_and(|result| expression_contains_volatile_udf(result, signatures))
+        }
+        Expr::Membership { operand, set } => {
+            expression_contains_volatile_udf(operand, signatures)
+                || set
+                    .iter()
+                    .any(|element| expression_contains_volatile_udf(element, signatures))
+        }
+        Expr::Between { operand, low, high } => {
+            expression_contains_volatile_udf(operand, signatures)
+                || expression_contains_volatile_udf(low, signatures)
+                || expression_contains_volatile_udf(high, signatures)
         }
         Expr::Literal(_) | Expr::FieldRef(_) | Expr::InternalFieldRef(_) => false,
     }
@@ -4950,6 +5215,9 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+#[path = "compiler_comparison_tests.rs"]
+mod comparison_tests;
 #[cfg(test)]
 #[path = "compiler_numeric_function_tests.rs"]
 mod numeric_function_tests;
