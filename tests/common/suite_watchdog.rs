@@ -29,8 +29,9 @@
 //! # Why the budget is the length it is
 //!
 //! The suite runs inside one workflow job whose own [`WORKFLOW_JOB_LIMIT`] kills everything it
-//! owns and uploads nothing. The budget therefore has to leave that job enough time to finish the
-//! work around the suite and to upload the diagnostics the suite just produced:
+//! owns wherever it is, so the logs such a job leaves end mid-scenario without the suite's own
+//! diagnostic. The budget therefore has to leave that job enough time to finish the work around
+//! the suite and to upload the diagnostics the suite just produced:
 //! [`SLOWEST_JOB_WORK_BEFORE_SUITE`] before the scenario binary starts and
 //! [`SUITE_CLEANUP_RESERVE`] after its budget expires. What is left is the budget, and a healthy
 //! suite finishes inside it with [`SUITE_SLACK`] to spare.
@@ -120,8 +121,8 @@ const CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// runner.
 ///
 /// Stopping containers is the runner's job too, and it does it when the job ends. Waiting here
-/// without a bound is how a run that has already produced its whole result still loses to the
-/// workflow's own timeout, which uploads nothing. A policy input.
+/// without a bound is how a run that has already produced its whole result still loses it to the
+/// workflow's own timeout, which cancels the job instead of reporting that result. A policy input.
 pub(crate) const DEPENDENCY_SHUTDOWN_BUDGET: Duration = Duration::from_secs(2 * 60);
 /// How long dropping the runtime may wait for the blocking tasks a scenario left behind.
 ///
@@ -592,7 +593,7 @@ impl SuiteWatchdog {
 /// What stopping the suite's test dependencies did.
 ///
 /// The run's own result is already known by the time this happens, so the only thing at stake is
-/// whether the process ends in time to have that result uploaded.
+/// whether the process ends in time to report that result itself.
 #[derive(Clone, Debug)]
 pub(crate) enum SuiteTeardown {
     /// The dependencies stopped, reporting these failures.
