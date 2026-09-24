@@ -26,7 +26,7 @@ use arrow_schema::{DataType, Field, Fields};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_models::{JsonPath, JsonPathStep, ParseAsType};
-use simd_json::{Buffers, Node, StaticNode};
+use simd_json::{Buffers, StaticNode};
 use thiserror::Error;
 use triomphe::Arc;
 
@@ -34,6 +34,10 @@ use crate::{
     error::{ErrorCode, RowErrors, SideError, SideErrorReason},
     program::{CastFailure, Span},
 };
+
+/// One entry of a parsed document's tape: a scalar, a string, or the header of an object or array
+/// that the entries of its members follow.
+type TapeEntry<'input> = simd_json::Node<'input>;
 
 /// The longest document an extraction reads, in bytes. A longer one is a defect of that document.
 pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -410,23 +414,25 @@ impl ValueDefect {
 }
 
 /// The number of tape nodes the value starting at `node` spans, itself included.
-const fn node_span(node: &Node<'_>) -> usize {
+const fn node_span(node: &TapeEntry<'_>) -> usize {
     match node {
-        Node::Object { count, .. } | Node::Array { count, .. } => *count + 1,
-        Node::String(_) | Node::Static(_) => 1,
+        TapeEntry::Object { count, .. } | TapeEntry::Array { count, .. } => *count + 1,
+        TapeEntry::String(_) | TapeEntry::Static(_) => 1,
     }
 }
 
 /// The kind of the JSON value `node` starts.
-fn node_kind(node: &Node<'_>) -> JsonKind {
+fn node_kind(node: &TapeEntry<'_>) -> JsonKind {
     match node {
-        Node::String(_) => JsonKind::String,
-        Node::Object { .. } => JsonKind::Object,
-        Node::Array { .. } => JsonKind::Array,
-        Node::Static(StaticNode::Null) => JsonKind::Null,
-        Node::Static(StaticNode::Bool(_)) => JsonKind::Boolean,
-        Node::Static(StaticNode::F64(value)) if value.fract() != 0.0 => JsonKind::FractionalNumber,
-        Node::Static(StaticNode::I64(_) | StaticNode::U64(_) | StaticNode::F64(_)) => {
+        TapeEntry::String(_) => JsonKind::String,
+        TapeEntry::Object { .. } => JsonKind::Object,
+        TapeEntry::Array { .. } => JsonKind::Array,
+        TapeEntry::Static(StaticNode::Null) => JsonKind::Null,
+        TapeEntry::Static(StaticNode::Bool(_)) => JsonKind::Boolean,
+        TapeEntry::Static(StaticNode::F64(value)) if value.fract() != 0.0 => {
+            JsonKind::FractionalNumber
+        }
+        TapeEntry::Static(StaticNode::I64(_) | StaticNode::U64(_) | StaticNode::F64(_)) => {
             JsonKind::Number
         }
     }
@@ -434,11 +440,11 @@ fn node_kind(node: &Node<'_>) -> JsonKind {
 
 /// A parsed document: the nodes of its tape, in document order.
 struct Document<'tape, 'input> {
-    tape: &'tape [Node<'input>],
+    tape: &'tape [TapeEntry<'input>],
 }
 
 impl<'input> Document<'_, 'input> {
-    fn node(&self, index: usize) -> &Node<'input> {
+    fn node(&self, index: usize) -> &TapeEntry<'input> {
         self.tape
             .get(index)
             .verified("the tape index is the root or was reached by stepping over whole values")
@@ -451,10 +457,10 @@ impl<'input> Document<'_, 'input> {
         let mut index = 0;
         for step in path.steps() {
             let next = match (step, self.node(index)) {
-                (JsonPathStep::Member(name), Node::Object { len, .. }) => {
+                (JsonPathStep::Member(name), TapeEntry::Object { len, .. }) => {
                     self.member(index, *len, name)
                 }
-                (JsonPathStep::Element(position), Node::Array { len, .. }) => {
+                (JsonPathStep::Element(position), TapeEntry::Array { len, .. }) => {
                     self.element(index, *len, *position)
                 }
                 (JsonPathStep::Member(_) | JsonPathStep::Element(_), _) => None,
@@ -469,7 +475,7 @@ impl<'input> Document<'_, 'input> {
         let mut key = object + 1;
         for _ in 0..len {
             let value = key + 1;
-            if let Node::String(member) = self.node(key)
+            if let TapeEntry::String(member) = self.node(key)
                 && *member == name
             {
                 found = Some(value);
@@ -501,7 +507,7 @@ impl<'input> Document<'_, 'input> {
             {
                 open_ends.pop();
             }
-            if let Node::Object { count, .. } | Node::Array { count, .. } = node {
+            if let TapeEntry::Object { count, .. } | TapeEntry::Array { count, .. } = node {
                 open_ends.push(index + count + 1);
                 if open_ends.len() > limit {
                     return true;
@@ -552,9 +558,9 @@ enum ValueColumn {
 macro_rules! integer_value {
     ($node:expr, $place:expr, $target:expr, $integer:ty) => {
         match $node {
-            Node::Static(StaticNode::I64(value)) => <$integer>::try_from(*value).ok(),
-            Node::Static(StaticNode::U64(value)) => <$integer>::try_from(*value).ok(),
-            Node::Static(StaticNode::F64(value)) if value.fract() == 0.0 => {
+            TapeEntry::Static(StaticNode::I64(value)) => <$integer>::try_from(*value).ok(),
+            TapeEntry::Static(StaticNode::U64(value)) => <$integer>::try_from(*value).ok(),
+            TapeEntry::Static(StaticNode::F64(value)) if value.fract() == 0.0 => {
                 (*value).checked_approx_into::<$integer>()
             }
             node => {
@@ -714,13 +720,13 @@ impl ValueColumn {
         let node = document.node(index);
         match self {
             Self::Bool(values) => {
-                let Node::Static(StaticNode::Bool(value)) = node else {
+                let TapeEntry::Static(StaticNode::Bool(value)) = node else {
                     return Err(Self::mismatch(node, target, place));
                 };
                 values.append(*value);
             }
             Self::String { offsets, bytes } => {
-                let Node::String(value) = node else {
+                let TapeEntry::String(value) = node else {
                     return Err(Self::mismatch(node, target, place));
                 };
                 bytes.extend_from_slice(value.as_bytes());
@@ -736,9 +742,9 @@ impl ValueColumn {
             Self::Int64(values) => values.push(integer_value!(node, place, target, i64)),
             Self::Float32(values) => {
                 let value = match node {
-                    Node::Static(StaticNode::I64(value)) => (*value).approx_into::<f32>(),
-                    Node::Static(StaticNode::U64(value)) => (*value).approx_into::<f32>(),
-                    Node::Static(StaticNode::F64(value)) => (*value).approx_into::<f32>(),
+                    TapeEntry::Static(StaticNode::I64(value)) => (*value).approx_into::<f32>(),
+                    TapeEntry::Static(StaticNode::U64(value)) => (*value).approx_into::<f32>(),
+                    TapeEntry::Static(StaticNode::F64(value)) => (*value).approx_into::<f32>(),
                     node => return Err(Self::mismatch(node, target, place)),
                 };
                 // A finite JSON number beyond the F32 range rounds to an infinity.
@@ -752,9 +758,9 @@ impl ValueColumn {
             }
             Self::Float64(values) => {
                 let value = match node {
-                    Node::Static(StaticNode::I64(value)) => (*value).approx_into::<f64>(),
-                    Node::Static(StaticNode::U64(value)) => (*value).approx_into::<f64>(),
-                    Node::Static(StaticNode::F64(value)) => *value,
+                    TapeEntry::Static(StaticNode::I64(value)) => (*value).approx_into::<f64>(),
+                    TapeEntry::Static(StaticNode::U64(value)) => (*value).approx_into::<f64>(),
+                    TapeEntry::Static(StaticNode::F64(value)) => *value,
                     node => return Err(Self::mismatch(node, target, place)),
                 };
                 values.push(value);
@@ -764,7 +770,7 @@ impl ValueColumn {
                 offsets,
                 elements,
             } => {
-                let Node::Array { len, .. } = node else {
+                let TapeEntry::Array { len, .. } = node else {
                     return Err(Self::mismatch(node, target, place));
                 };
                 elements.append_elements(document, index, *len, element)?;
@@ -776,7 +782,7 @@ impl ValueColumn {
                 width,
                 elements,
             } => {
-                let Node::Array { len, .. } = node else {
+                let TapeEntry::Array { len, .. } = node else {
                     return Err(Self::mismatch(node, target, place));
                 };
                 if *len != *width {
@@ -808,7 +814,7 @@ impl ValueColumn {
         Ok(())
     }
 
-    fn mismatch(node: &Node<'_>, target: &Arc<JsonTarget>, place: JsonPlace) -> ValueDefect {
+    fn mismatch(node: &TapeEntry<'_>, target: &Arc<JsonTarget>, place: JsonPlace) -> ValueDefect {
         ValueDefect::TypeMismatch {
             place,
             found: node_kind(node),
@@ -1062,7 +1068,7 @@ impl DocumentReader {
                     validity.append_null();
                     return;
                 };
-                if let Node::Static(StaticNode::Null) = document.node(index) {
+                if let TapeEntry::Static(StaticNode::Null) = document.node(index) {
                     values.push_placeholder();
                     validity.append_null();
                     return;
