@@ -1,41 +1,53 @@
-//! A STRING column built from values whose length an argument chooses.
+//! A STRING or BYTES column built from values whose length an argument chooses.
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** The text one STRING column holds, and refusing a value the column under
+//! - **Owns.** The bytes one STRING or BYTES column holds, and refusing a value the column under
 //!   construction has no room left for, so a builtin can size a value before it allocates it.
-//! - **Depends on.** Arrow's string builder.
+//! - **Depends on.** Arrow's byte array builders.
 //! - **Must not know.** Registers, programs, spans, or how a refused value is reported.
 
 use std::num::NonZeroUsize;
 
-use arrow_array::{StringArray, builder::StringBuilder};
+use arrow_array::{
+    GenericByteArray,
+    builder::GenericByteBuilder,
+    types::{BinaryType, ByteArrayType, Utf8Type},
+};
 
 /// A STRING column under construction that never holds more text than an Arrow string array
 /// addresses.
+pub(crate) type TextColumnBuilder = ByteColumnBuilder<Utf8Type>;
+
+/// A BYTES column under construction that never holds more octets than an Arrow binary array
+/// addresses.
+pub(crate) type BinaryColumnBuilder = ByteColumnBuilder<BinaryType>;
+
+/// A STRING or BYTES column under construction that never holds more bytes than an Arrow byte
+/// array addresses.
 ///
-/// An Arrow string array records where each value ends as an `i32` offset into its text, so one
-/// column holds at most `i32::MAX` bytes over all of its rows. A value that every row of a batch
-/// shares is computed once, as a one-row column, and expanded into one row per message wherever a
-/// message-by-message operation or an output field needs one, so it is charged once for every row
-/// it stands for.
-pub(crate) struct TextColumnBuilder {
-    builder: StringBuilder,
+/// An Arrow string or binary array records where each value ends as an `i32` offset into its
+/// bytes, so one column holds at most `i32::MAX` bytes over all of its rows. A value that every
+/// row of a batch shares is computed once, as a one-row column, and expanded into one row per
+/// message wherever a message-by-message operation or an output field needs one, so it is charged
+/// once for every row it stands for.
+pub(crate) struct ByteColumnBuilder<T: ByteArrayType<Offset = i32>> {
+    builder: GenericByteBuilder<T>,
     /// How many rows of the finished column each value appended here stands for.
     rows_per_value: NonZeroUsize,
 }
 
-impl TextColumnBuilder {
+impl<T: ByteArrayType<Offset = i32>> ByteColumnBuilder<T> {
     /// A column appending to `builder` that charges each value once for every one of
-    /// `rows_per_value` rows, counting the text `builder` already holds.
-    pub(crate) fn new(builder: StringBuilder, rows_per_value: NonZeroUsize) -> Self {
+    /// `rows_per_value` rows, counting the bytes `builder` already holds.
+    pub(crate) fn new(builder: GenericByteBuilder<T>, rows_per_value: NonZeroUsize) -> Self {
         Self {
             builder,
             rows_per_value,
         }
     }
 
-    /// Whether a value of `bytes` bytes fits in the text the column has left.
+    /// Whether a value of `bytes` bytes fits in the bytes the column has left.
     pub(crate) fn fits(&self, bytes: usize) -> bool {
         let Some(charged) = bytes.checked_mul(self.rows_per_value.get()) else {
             return false;
@@ -43,15 +55,17 @@ impl TextColumnBuilder {
         let Some(total) = self.builder.values_slice().len().checked_add(charged) else {
             return false;
         };
-        // The offset after the column's last value is the length of all of its text.
+        // The offset after the column's last value is the length of all of its bytes.
         i32::try_from(total).is_ok()
     }
 
     /// Appends `value`, or answers false without appending anything when it does not fit in the
-    /// text the column has left.
+    /// bytes the column has left.
     #[must_use]
-    pub(crate) fn append_value(&mut self, value: &str) -> bool {
-        if !self.fits(value.len()) {
+    pub(crate) fn append_value(&mut self, value: impl AsRef<T::Native>) -> bool {
+        let value = value.as_ref();
+        let bytes: &[u8] = value.as_ref();
+        if !self.fits(bytes.len()) {
             return false;
         }
         self.builder.append_value(value);
@@ -62,7 +76,7 @@ impl TextColumnBuilder {
         self.builder.append_null();
     }
 
-    pub(crate) fn finish(mut self) -> StringArray {
+    pub(crate) fn finish(mut self) -> GenericByteArray<T> {
         self.builder.finish()
     }
 }
@@ -71,9 +85,12 @@ impl TextColumnBuilder {
 mod tests {
     use std::num::NonZeroUsize;
 
-    use arrow_array::{Array, builder::StringBuilder};
+    use arrow_array::{
+        Array,
+        builder::{BinaryBuilder, StringBuilder},
+    };
 
-    use super::TextColumnBuilder;
+    use super::{BinaryColumnBuilder, TextColumnBuilder};
 
     /// The most text one Arrow string array addresses.
     fn column_bytes() -> usize {
@@ -122,5 +139,21 @@ mod tests {
         assert_eq!(finished.len(), 2);
         assert!(finished.is_null(0));
         assert_eq!(finished.value(1), "");
+    }
+
+    #[test]
+    fn a_binary_column_charges_its_octets_as_a_text_column_charges_its_text() {
+        let mut column = BinaryColumnBuilder::new(BinaryBuilder::new(), NonZeroUsize::MIN);
+        assert!(column.append_value([0_u8, 255]));
+        assert!(column.fits(column_bytes() - 2));
+        assert!(!column.fits(column_bytes() - 1));
+
+        let mut shared = BinaryColumnBuilder::new(BinaryBuilder::new(), NonZeroUsize::MAX);
+        assert!(!shared.append_value([1_u8]));
+        shared.append_null();
+
+        let finished = column.finish();
+        assert_eq!(finished.value(0), [0, 255]);
+        assert!(shared.finish().is_null(0));
     }
 }

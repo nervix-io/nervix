@@ -8,6 +8,7 @@ use thiserror::Error;
 use crate::{
     datetime::{UnreadableText, Zone},
     extremum::ClampBoundsDefect,
+    ip_address::{IpFamily, NetworkDefect},
     ir::{RegisterRef, RegisterType},
     program::Span,
 };
@@ -86,6 +87,33 @@ pub enum SideErrorReason {
     InvalidUtf8Bytes,
     #[error("{0} result exceeds the bytes one column holds")]
     BytesTooLong(BytesOperation),
+    /// An `ip_from_string` input that writes no IPv4 or IPv6 address.
+    #[error("ip_from_string input is not an IPv4 or IPv6 address")]
+    UnreadableIpAddress,
+    /// A `BYTES` value an IP builtin read that is neither four nor sixteen octets long.
+    #[error("{0} input is not a 4 or 16 byte IP address")]
+    NotAnIpAddress(IpOperation),
+    /// An `ip_trunc` prefix length that is negative or longer than its address.
+    #[error(
+        "ip_trunc prefix length must be 0 to {longest} for an {family} address",
+        longest = family.bits()
+    )]
+    IpPrefixOutOfRange { family: IpFamily },
+    /// An `ip_in_network` network read from a row that is not a network in CIDR notation.
+    #[error("ip_in_network network {0}")]
+    InvalidIpNetwork(NetworkDefect),
+    /// A URL builtin input that is not an absolute URL, with the URL Standard's reason.
+    #[error("{operation} input is not an absolute URL: {defect}")]
+    InvalidUrl {
+        operation: UrlOperation,
+        defect: url::ParseError,
+    },
+    /// Text a URL builtin percent-decodes that is not percent-encoded UTF-8.
+    #[error("{0} input is not valid percent-encoded UTF-8")]
+    InvalidPercentEncoding(UrlOperation),
+    /// A `url_query_values` result whose values or text do not fit one `VEC<STRING>` column.
+    #[error("url_query_values result exceeds what one VEC<STRING> column holds")]
+    QueryValuesTooLong,
     /// A `uuid_v7` whose execution time is before the Unix epoch, where a version 7 UUID's
     /// millisecond field has no value for it.
     #[error("uuid_v7 execution time is before the Unix epoch")]
@@ -103,6 +131,7 @@ impl SideErrorReason {
             | Self::DateDiffOverflow
             | Self::TextTooLong(_)
             | Self::BytesTooLong(_)
+            | Self::QueryValuesTooLong
             | Self::UuidTimeBeforeEpoch => ErrorCode::Overflow,
             Self::DivisionByZero(_) => ErrorCode::DivisionByZero,
             Self::NegativeShiftCount(_)
@@ -110,11 +139,17 @@ impl SideErrorReason {
             | Self::InvalidRegularExpression(_)
             | Self::SkippedLocalTime { .. }
             | Self::RepeatedLocalTime { .. }
-            | Self::InvalidClampBounds(_) => ErrorCode::InvalidArgument,
+            | Self::InvalidClampBounds(_)
+            | Self::NotAnIpAddress(_)
+            | Self::IpPrefixOutOfRange { .. }
+            | Self::InvalidIpNetwork(_) => ErrorCode::InvalidArgument,
             Self::InvalidBytesEncoding(_)
             | Self::InvalidUtf8Bytes
             | Self::CastFailed { .. }
-            | Self::UnreadableDatetime(_) => ErrorCode::CastFailed,
+            | Self::UnreadableDatetime(_)
+            | Self::UnreadableIpAddress
+            | Self::InvalidUrl { .. }
+            | Self::InvalidPercentEncoding(_) => ErrorCode::CastFailed,
             Self::Injected { code, .. } => *code,
         }
     }
@@ -177,7 +212,8 @@ pub enum DatetimeOperation {
     ParseDatetime,
 }
 
-/// A text builtin whose count chooses the length of its result.
+/// A text builtin that sizes each value before it builds it, because its arguments choose how
+/// long the value is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
 pub enum TextOperation {
     #[strum(to_string = "repeat")]
@@ -186,6 +222,22 @@ pub enum TextOperation {
     Lpad,
     #[strum(to_string = "rpad")]
     Rpad,
+    #[strum(to_string = "ip_to_string")]
+    IpToString,
+    #[strum(to_string = "url_scheme")]
+    UrlScheme,
+    #[strum(to_string = "url_host")]
+    UrlHost,
+    #[strum(to_string = "url_path")]
+    UrlPath,
+    #[strum(to_string = "url_query")]
+    UrlQuery,
+    #[strum(to_string = "url_fragment")]
+    UrlFragment,
+    #[strum(to_string = "url_query_value")]
+    UrlQueryValue,
+    #[strum(to_string = "url_decode")]
+    UrlDecode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -200,6 +252,48 @@ pub enum BytesOperation {
     HexEncode,
     #[strum(to_string = "sha256")]
     Sha256,
+    #[strum(to_string = "ip_from_string")]
+    IpFromString,
+    #[strum(to_string = "ip_trunc")]
+    IpTrunc,
+}
+
+/// A builtin that reads an IP address from a `BYTES` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum IpOperation {
+    #[strum(to_string = "ip_to_string")]
+    IpToString,
+    #[strum(to_string = "ip_family")]
+    IpFamily,
+    #[strum(to_string = "ip_trunc")]
+    IpTrunc,
+    #[strum(to_string = "ip_in_network")]
+    IpInNetwork,
+    #[strum(to_string = "ip_unmap")]
+    IpUnmap,
+}
+
+/// A builtin that parses a URL or percent-decodes part of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum UrlOperation {
+    #[strum(to_string = "url_scheme")]
+    UrlScheme,
+    #[strum(to_string = "url_host")]
+    UrlHost,
+    #[strum(to_string = "url_port")]
+    UrlPort,
+    #[strum(to_string = "url_path")]
+    UrlPath,
+    #[strum(to_string = "url_query")]
+    UrlQuery,
+    #[strum(to_string = "url_fragment")]
+    UrlFragment,
+    #[strum(to_string = "url_query_value")]
+    UrlQueryValue,
+    #[strum(to_string = "url_query_values")]
+    UrlQueryValues,
+    #[strum(to_string = "url_decode")]
+    UrlDecode,
 }
 
 /// A floating-point operation whose result has to be finite.
