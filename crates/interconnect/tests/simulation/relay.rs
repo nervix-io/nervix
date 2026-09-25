@@ -400,6 +400,7 @@ fn relay_reconciliation_and_cancellation_survive_lost_replies() {
 enum RestartMilestone {
     BodyReceived,
     RuntimeAdmitted,
+    RuntimeAdmittedWithDelayedReply,
 }
 
 impl RestartMilestone {
@@ -407,6 +408,7 @@ impl RestartMilestone {
         match self {
             Self::BodyReceived => "receiver restart after relay body receipt",
             Self::RuntimeAdmitted => "receiver restart after runtime admission",
+            Self::RuntimeAdmittedWithDelayedReply => "receiver restart with delayed relay response",
         }
     }
 }
@@ -491,8 +493,14 @@ fn restarted_receiver_fences_unresolved_relay(
                             };
                             assert_eq!(body.delivery, FIRST);
                             assert_eq!(decode_arrow(&body.batch_ipc), 3);
-                            turmoil::partition_oneway("server", "client");
-                            if let RestartMilestone::RuntimeAdmitted = milestone {
+                            if let RestartMilestone::RuntimeAdmittedWithDelayedReply = milestone {
+                                turmoil::hold("server", "client");
+                            } else {
+                                turmoil::partition_oneway("server", "client");
+                            }
+                            if let RestartMilestone::RuntimeAdmitted
+                            | RestartMilestone::RuntimeAdmittedWithDelayedReply = milestone
+                            {
                                 assert_eq!(
                                     envelope
                                         .relay_admission
@@ -586,7 +594,18 @@ fn restarted_receiver_fences_unresolved_relay(
                         });
                         wait_for_count(&mut ready, 2).await;
                         let first_outcome = first.await.assured("first relay task joins");
-                        assert!(first_outcome.is_err(), "crash hides the first response");
+                        if let RestartMilestone::RuntimeAdmittedWithDelayedReply = milestone {
+                            assert!(
+                                first_outcome.is_ok(),
+                                "the delayed reply confirms only historical body receipt"
+                            );
+                            trace.record(
+                                "client",
+                                "delayed reply confirmed historical body receipt",
+                            );
+                        } else {
+                            assert!(first_outcome.is_err(), "crash hides the first response");
+                        }
                         {
                             let identities = epochs.lock();
                             assert_eq!(identities.len(), 2);
@@ -603,20 +622,32 @@ fn restarted_receiver_fences_unresolved_relay(
                         client.replace_outbound_targets(&Default::default());
                         register_peer(&client, "server").await;
                         wait_for_connection(&client, &peer).await;
-                        let error = match client
-                            .send(
-                                &peer,
-                                Envelope::RelayPayload(relay_payload(FIRST, 81, &client)),
-                            )
-                            .await
-                        {
-                            Ok(()) => panic!("the retained relay cannot cross the receiver epoch"),
-                            Err(error) => error,
-                        };
-                        assert!(
-                            matches!(error, TransportError::RelayIndeterminate),
-                            "{error:?}"
-                        );
+                        if let RestartMilestone::RuntimeAdmittedWithDelayedReply = milestone {
+                            assert_eq!(
+                                client
+                                    .relay_admission_status(&peer, FIRST)
+                                    .await
+                                    .assured("old admission resolves against the new epoch"),
+                                RelayAdmissionStatus::Indeterminate
+                            );
+                        } else {
+                            let error = match client
+                                .send(
+                                    &peer,
+                                    Envelope::RelayPayload(relay_payload(FIRST, 81, &client)),
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    panic!("the retained relay cannot cross the receiver epoch")
+                                }
+                                Err(error) => error,
+                            };
+                            assert!(
+                                matches!(error, TransportError::RelayIndeterminate),
+                                "{error:?}"
+                            );
+                        }
                         trace.record("client", "retained relay returned indeterminate");
                         fresh.send_replace(true);
                         client
@@ -668,7 +699,11 @@ fn restarted_receiver_fences_unresolved_relay(
                 .is_ok()
             {
                 simulation.crash("server");
-                simulation.repair_oneway("server", "client");
+                if let RestartMilestone::RuntimeAdmittedWithDelayedReply = milestone {
+                    simulation.release("server", "client");
+                } else {
+                    simulation.repair_oneway("server", "client");
+                }
                 simulation.bounce("server");
             }
         },
@@ -687,6 +722,7 @@ fn relay_restart_fences_unresolved_delivery_and_accepts_fresh_work() {
     for (milestone, seed) in [
         (RestartMilestone::BodyReceived, 81),
         (RestartMilestone::RuntimeAdmitted, 83),
+        (RestartMilestone::RuntimeAdmittedWithDelayedReply, 85),
     ] {
         let first = restarted_receiver_fences_unresolved_relay(seed, milestone);
         let replay = restarted_receiver_fences_unresolved_relay(seed, milestone);

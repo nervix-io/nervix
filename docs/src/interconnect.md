@@ -517,13 +517,16 @@ payload values. These checks apply within the retention contract above; they do 
 guarantee across a receiver process restart.
 
 The receiver-restart fixture continues from a lost body reply at two milestones: after the Arrow
-body enters the receiver queue but before runtime admission, and after runtime admission. Its
-controller crashes the simulated receiver at the selected milestone, then bounces the same named
-host. Each invocation binds a new transport with controlled entropy, so the stable node identity
-has a distinct process epoch. The sender's retained delivery resolves as indeterminate against that
-epoch; it does not enter the restarted receiver's queue. A new delivery identity then crosses the
-restarted listener and authenticated connection, and its admission-status request returns admitted.
-The fixture checks the Arrow batch and the two process identities at the protocol boundary.
+body enters the receiver queue but before runtime admission, and after runtime admission. It also
+holds an admitted attempt's reply and releases it after the crash. That reply can confirm
+historical body receipt, but reconciliation with the new epoch still returns indeterminate for
+runtime admission. Its controller crashes the simulated receiver at the
+selected milestone, then bounces the same named host. Each invocation binds a new transport with
+controlled entropy, so the stable node identity has a distinct process epoch. The sender's retained
+delivery resolves as indeterminate against that epoch; it does not enter the restarted receiver's
+queue. A new delivery identity then crosses the restarted listener and authenticated connection,
+and its admission-status request returns admitted. The fixture checks the Arrow batch and the two
+process identities at the protocol boundary.
 
 For this fixture, `Sim::crash` cancels the receiver host's simulated Tokio tasks. Bouncing reruns
 the host software and rebinds its listener. The scenario uses no simulated filesystem and no
