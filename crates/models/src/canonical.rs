@@ -34,8 +34,8 @@ use crate::{
     EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterPublishingMode, EndpointIngestMode,
     Expression, FieldName, FieldScope, FlushPolicy, GeneralErrorPolicy, IcebergCatalog,
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, Inheritance, InputCollectPolicy, JsonType, KafkaIngestMode,
-    KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
+    IngestTimestampSource, Inheritance, InputCollectPolicy, InspectionFormat, JsonType,
+    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
     MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
     MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
     NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
@@ -43,9 +43,8 @@ use crate::{
     PulsarIngestMode, QueueName, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
     RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
     SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
-    SubscriptionLiteral, TopicName, TransactionInspectionTarget, TransactionReportFormat,
-    UnaryOperator, WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField,
-    ZeroMqIngestMode,
+    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
+    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -870,10 +869,14 @@ impl Statement {
                 "DESCRIBE WINDOW PROCESSOR {};",
                 describe.name.as_str()
             )),
-            Self::DescribeWasmProcessor(describe) => Ok(format!(
-                "DESCRIBE WASM PROCESSOR {};",
-                describe.name.as_str()
-            )),
+            Self::DescribeWasmProcessor(describe) => {
+                let mut statement = format!("DESCRIBE WASM PROCESSOR {}", describe.name.as_str());
+                if describe.format != InspectionFormat::Text {
+                    statement.push_str(" FORMAT JSON");
+                }
+                statement.push(';');
+                Ok(statement)
+            }
             Self::DescribeUdf(describe) => Ok(format!("DESCRIBE UDF {};", describe.name.as_str())),
             Self::DescribePlacement(describe) => {
                 Ok(format!("DESCRIBE PLACEMENT {};", describe.name.as_str()))
@@ -912,7 +915,7 @@ impl DescribeTransaction {
         if let Some(operation) = self.request.operation {
             statement.push_str(&format!(" OPERATION {operation}"));
         }
-        if self.format != TransactionReportFormat::default() {
+        if self.format != InspectionFormat::default() {
             statement.push_str(&format!(" FORMAT {}", self.format.as_ref()));
         }
         statement.push(';');

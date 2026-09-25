@@ -44,6 +44,15 @@ pub enum WasmStateResetScope {
 }
 
 impl WasmStateResetScope {
+    /// A bounded diagnostic label that does not include a branch value or fingerprint.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Unbranched => "unbranched",
+            Self::Branch(_) => "branch",
+            Self::AllBranches => "all branches",
+        }
+    }
+
     /// Whether this scope selects the supplied concrete-branch fingerprint. `None` is the explicit
     /// unbranched execution.
     pub fn contains(&self, branch: Option<&BranchKeyFingerprint>) -> bool {
@@ -99,10 +108,37 @@ impl WasmStateResetScope {
     Archive,
     RkyvSerialize,
     RkyvDeserialize,
+    strum::AsRefStr,
 )]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum WasmStateResetPhase {
     Publishing,
     Ready,
+}
+
+/// The operation that requested a coordinated guest-state lifetime change.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+    strum::AsRefStr,
+)]
+#[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
+pub enum WasmStateResetReason {
+    Operator,
+    Transaction,
+    Guest,
+    RejectedSnapshot,
 }
 
 /// The latest coordinated reset published for one scheduled WASM processor.
@@ -128,14 +164,20 @@ pub struct WasmStateReset {
     request: CommandExecutionReference,
     scope: WasmStateResetScope,
     phase: WasmStateResetPhase,
+    reason: WasmStateResetReason,
 }
 
 impl WasmStateReset {
-    pub fn publishing(request: CommandExecutionReference, scope: WasmStateResetScope) -> Self {
+    pub fn publishing(
+        request: CommandExecutionReference,
+        scope: WasmStateResetScope,
+        reason: WasmStateResetReason,
+    ) -> Self {
         Self {
             request,
             scope,
             phase: WasmStateResetPhase::Publishing,
+            reason,
         }
     }
 
@@ -149,6 +191,10 @@ impl WasmStateReset {
 
     pub const fn phase(&self) -> WasmStateResetPhase {
         self.phase
+    }
+
+    pub const fn reason(&self) -> WasmStateResetReason {
+        self.reason
     }
 
     pub fn mark_ready(&mut self) {
@@ -346,6 +392,14 @@ impl WasmStateRecoveries {
     /// Every scope that has spent an attempt, with the attempt it spent.
     pub fn iter(&self) -> impl Iterator<Item = (&WasmStateResetScope, &WasmStateRecovery)> {
         self.scopes.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.scopes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.scopes.is_empty()
     }
 
     /// Decide what a refused `generation` of `scope` is entitled to, and record an admitted attempt.
@@ -561,6 +615,19 @@ impl WasmStateGenerations {
         }
     }
 
+    /// The generation of a branch that has not been reset separately.
+    pub const fn default_generation(&self) -> WasmStateGeneration {
+        self.every_branch
+    }
+
+    /// The generation named by a coordinated reset's exact scope.
+    pub fn of_reset_scope(&self, scope: &WasmStateResetScope) -> WasmStateGeneration {
+        match scope {
+            WasmStateResetScope::Unbranched | WasmStateResetScope::AllBranches => self.every_branch,
+            WasmStateResetScope::Branch(branch) => self.of_branch(Some(branch)),
+        }
+    }
+
     /// Start a new lifetime for every branch at once and return its generation.
     pub fn begin_every_branch(&mut self) -> WasmStateGeneration {
         let generation = self.latest().successor();
@@ -608,7 +675,9 @@ mod tests {
     use super::*;
     use crate::{
         AckMode, BranchSelection, CreateRelay, CreateWasmProcessor, GeneralErrorPolicy, Model,
-        ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint, WasmProcessorLimits,
+        ProcessorInputs, ProcessorOutputs, ScheduledNode, SchemaFingerprint,
+        WasmCheckpointInspection, WasmCheckpointStage, WasmProcessorLimits, WasmStateInspection,
+        WasmStateResetReadiness,
     };
 
     fn branch(byte: u8) -> BranchKeyFingerprint {
@@ -708,13 +777,21 @@ mod tests {
     fn a_coordinated_branch_reset_advances_once_and_becomes_ready_for_the_same_request() {
         let mut processor = wasm_processor(1, nonzero!(1_000u64));
         let request = CommandExecutionReference::parse("reset-alpha")
-            .expect("the reset reference must be valid");
+            .assured("reset-alpha uses only permitted reference characters");
         let other_request = CommandExecutionReference::parse("reset-beta")
             .expect("the reset reference must be valid");
         let scope = WasmStateResetScope::Branch(branch(1));
 
-        assert!(processor.begin_wasm_state_reset(request.clone(), scope));
-        assert!(!processor.begin_wasm_state_reset(request.clone(), scope));
+        assert!(processor.begin_wasm_state_reset(
+            request.clone(),
+            scope,
+            WasmStateResetReason::Operator,
+        ));
+        assert!(!processor.begin_wasm_state_reset(
+            request.clone(),
+            scope,
+            WasmStateResetReason::Operator,
+        ));
         assert_eq!(
             processor
                 .wasm_state_generations()
@@ -747,6 +824,139 @@ mod tests {
                 .phase(),
             WasmStateResetPhase::Ready
         );
+    }
+
+    #[test]
+    fn inspection_fences_previous_generations_and_distinguishes_durable_from_usable() {
+        let mut processor = wasm_processor(1, nonzero!(1_000u64));
+        let request = CommandExecutionReference::parse("reset-alpha")
+            .assured("reset-alpha uses only permitted reference characters");
+        let scope = WasmStateResetScope::Branch(branch(1));
+        assert!(processor.begin_wasm_state_reset(
+            request.clone(),
+            scope,
+            WasmStateResetReason::Operator,
+        ));
+        let resetting = WasmStateInspection::of_scheduled(&processor, Vec::new())
+            .assured("the test scheduled a WASM processor with state generations");
+        assert_eq!(
+            resetting.reset_readiness,
+            Some(WasmStateResetReadiness::Resetting)
+        );
+        let checkpoint = |branch, generation, stage| WasmCheckpointInspection {
+            branch: Some(branch),
+            generation,
+            committed_revision: NonZeroU64::new(1),
+            latest_revision: NonZeroU64::new(1),
+            stage,
+            required_replicas: Some(1),
+            confirmed_replicas: Some(1),
+        };
+        let inspection = WasmStateInspection::of_scheduled(
+            &processor,
+            vec![
+                checkpoint(
+                    branch(1),
+                    WasmStateGeneration::FIRST,
+                    WasmCheckpointStage::Failed,
+                ),
+                checkpoint(
+                    branch(1),
+                    generation(2),
+                    WasmCheckpointStage::ReplicaConfirmed,
+                ),
+                checkpoint(
+                    branch(2),
+                    WasmStateGeneration::FIRST,
+                    WasmCheckpointStage::Captured,
+                ),
+            ],
+        )
+        .assured("the test scheduled a WASM processor with state generations");
+        assert_eq!(
+            inspection.reset_readiness,
+            Some(WasmStateResetReadiness::AwaitingUsableExecution)
+        );
+        assert_eq!(inspection.checkpoint_counts.total, 2);
+        assert_eq!(inspection.checkpoint_counts.failed, 0);
+        assert_eq!(inspection.checkpoint_counts.replica_confirmed, 1);
+        assert_eq!(inspection.checkpoint_counts.captured, 1);
+
+        assert!(processor.complete_wasm_state_reset(&request));
+        let ready = WasmStateInspection::of_scheduled(&processor, inspection.checkpoints)
+            .expect("the same processor remains inspectable");
+        assert_eq!(ready.reset_readiness, Some(WasmStateResetReadiness::Ready));
+    }
+
+    #[test]
+    fn inspection_retains_a_failed_restore_without_inventing_checkpoint_success() {
+        let mut processor = wasm_processor(1, nonzero!(1_000u64));
+        let scope = WasmStateResetScope::Branch(branch(1));
+        let admitted = processor
+            .admit_wasm_state_recovery(
+                scope,
+                WasmStateGeneration::FIRST,
+                WasmSavedStateRejection::ApplicationState,
+            )
+            .assured("the test scheduled a WASM processor with recovery state");
+        let WasmStateRecoveryAdmission::Admitted(request) = admitted else {
+            panic!("the first refusal must admit recovery: {admitted:?}");
+        };
+        assert!(processor.settle_wasm_state_recovery(
+            &scope,
+            &request,
+            WasmStateRecoveryOutcome::Failed,
+        ));
+        let inspection = WasmStateInspection::of_scheduled(&processor, Vec::new())
+            .assured("the test scheduled a WASM processor with state generations");
+        assert_eq!(inspection.reset, None);
+        assert_eq!(inspection.reset_readiness, None);
+        assert_eq!(inspection.checkpoint_counts.total, 0);
+        assert_eq!(inspection.recoveries.len(), 1);
+        assert_eq!(inspection.recoveries[0].scope, scope);
+        assert_eq!(
+            inspection.recoveries[0].rejection,
+            WasmSavedStateRejection::ApplicationState
+        );
+        assert_eq!(
+            inspection.recoveries[0].outcome,
+            WasmStateRecoveryOutcome::Failed
+        );
+    }
+
+    #[test]
+    fn inspection_counts_every_checkpoint_stage_and_pending_replica() {
+        let processor = wasm_processor(1, nonzero!(1_000u64));
+        let checkpoint =
+            |number, stage, required_replicas, confirmed_replicas| WasmCheckpointInspection {
+                branch: Some(branch(number)),
+                generation: WasmStateGeneration::FIRST,
+                committed_revision: NonZeroU64::new(1),
+                latest_revision: NonZeroU64::new(1),
+                stage,
+                required_replicas,
+                confirmed_replicas,
+            };
+        let inspection = WasmStateInspection::of_scheduled(
+            &processor,
+            vec![
+                checkpoint(1, WasmCheckpointStage::Empty, None, None),
+                checkpoint(2, WasmCheckpointStage::Captured, Some(2), Some(0)),
+                checkpoint(3, WasmCheckpointStage::LocallyDurable, Some(2), Some(1)),
+                checkpoint(4, WasmCheckpointStage::ReplicaConfirmed, Some(2), Some(2)),
+                checkpoint(5, WasmCheckpointStage::Failed, Some(2), Some(0)),
+            ],
+        )
+        .assured("the test scheduled a WASM processor with state generations");
+
+        assert_eq!(inspection.checkpoint_counts.total, 5);
+        assert_eq!(inspection.checkpoint_counts.empty, 1);
+        assert_eq!(inspection.checkpoint_counts.captured, 1);
+        assert_eq!(inspection.checkpoint_counts.locally_durable, 1);
+        assert_eq!(inspection.checkpoint_counts.awaiting_replicas, 1);
+        assert_eq!(inspection.checkpoint_counts.replica_confirmed, 1);
+        assert_eq!(inspection.checkpoint_counts.failed, 1);
+        assert_eq!(inspection.omitted_checkpoints, 0);
     }
 
     #[test]
@@ -936,7 +1146,14 @@ mod tests {
     #[test]
     fn a_limits_change_keeps_the_lifetime_and_a_binding_change_starts_a_new_one() {
         let mut existing = wasm_processor(1, nonzero!(1_000u64));
-        existing.begin_wasm_branch_state_generation(branch(1));
+        let request = CommandExecutionReference::parse("reset-alpha")
+            .assured("reset-alpha uses only permitted reference characters");
+        assert!(existing.begin_wasm_state_reset(
+            request.clone(),
+            WasmStateResetScope::Branch(branch(1)),
+            WasmStateResetReason::Operator,
+        ));
+        assert!(existing.complete_wasm_state_reset(&request));
         let mut relimited = wasm_processor(1, nonzero!(2_000u64));
         let mut rebound = wasm_processor(2, nonzero!(1_000u64));
 
@@ -947,6 +1164,8 @@ mod tests {
             relimited.wasm_state_generations(),
             existing.wasm_state_generations()
         );
+        assert_eq!(relimited.wasm_state_reset(), existing.wasm_state_reset());
+        assert_eq!(rebound.wasm_state_reset(), None);
         let rebound = rebound
             .wasm_state_generations()
             .expect("a WASM processor carries generations");

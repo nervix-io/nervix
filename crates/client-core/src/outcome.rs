@@ -44,6 +44,8 @@ pub struct CommandOutcome {
     /// The transaction a `DESCRIBE TRANSACTION` read, whichever format rendered its message. It
     /// may name a transaction other than `transaction`, which stays this session's own binding.
     pub inspection: Option<Box<TransactionInspection>>,
+    /// State facts returned by `DESCRIBE WASM PROCESSOR`.
+    pub wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
     /// Present when the statement opened a subscription.
     pub subscription: Option<Box<SubscriptionOpened>>,
     pub resource_upload: Option<ResourceUploadOutcome>,
@@ -90,6 +92,7 @@ impl CommandOutcome {
             transaction: None,
             transaction_admission: None,
             inspection: None,
+            wasm_state: None,
             subscription: None,
             resource_upload: None,
         }
@@ -199,6 +202,7 @@ impl From<wire::CommandOutcome> for CommandOutcome {
             transaction: outcome.transaction,
             transaction_admission: outcome.transaction_admission,
             inspection: outcome.inspection,
+            wasm_state: outcome.wasm_state,
             subscription: None,
             resource_upload: None,
         }

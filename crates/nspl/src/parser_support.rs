@@ -21,13 +21,14 @@ use nervix_models::{
     ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName,
     EmitterAckWindow, EmitterName, EndpointName, Expression, FieldName, FlushPolicy,
     GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
-    JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarSubscriptionName, QueueGroupName,
-    QueueName, ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
-    RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, TopicName, TransactionOperationNumber, UdfName, UserName,
-    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    InspectionFormat, JunctionName, LookupName, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName,
+    RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
+    SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName,
+    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -148,6 +149,16 @@ pub fn kw<'src>(
         Token::Word(Word::KnownWord { iden: got, .. }) if got == iden => ()
     }
     .labelled(label)
+    .boxed()
+}
+
+/// The shared rendering choice for read-only inspection statements.
+pub fn inspection_format<'src>()
+-> impl Parser<'src, &'src [Token], InspectionFormat, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw(Identifier::Text).to(InspectionFormat::Text),
+        kw(Identifier::Json).to(InspectionFormat::Json),
+    ))
     .boxed()
 }
 

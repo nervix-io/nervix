@@ -15190,6 +15190,28 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
     }
 }
 
+#[then(expr = "the last client outcome reports WASM reset phase {string} at generation {int}")]
+fn then_last_client_outcome_reports_wasm_reset(
+    world: &mut ScenarioWorld,
+    phase: String,
+    generation: u64,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .assured("the preceding step executed a client command");
+    let state = outcome
+        .wasm_state
+        .as_ref()
+        .assured("the preceding command described a WASM processor");
+    let reset = state
+        .reset
+        .as_ref()
+        .assured("the preceding transaction published a WASM state reset");
+    assert_eq!(reset.reset.phase().as_ref(), phase);
+    assert_eq!(u64::from(reset.generation), generation);
+}
+
 /// Assert that one of two emitters reports the given text.
 ///
 /// Which of two peers contending for the last connection ends up holding it and which ends up

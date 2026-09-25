@@ -38,6 +38,7 @@ mod statement;
 mod timestamp;
 mod udf;
 mod wasm_state_generation;
+mod wasm_state_inspection;
 
 pub use canonical::{
     CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
@@ -162,8 +163,8 @@ pub use statement::{
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
     InferencerTensorSchema, InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode,
     IngestQuiesceOverflow, IngestSource, IngestTimestampSource, InputCollectPolicy,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry,
+    InspectionFormat, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry,
     MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos,
     MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping, NatsConfigEntry,
     NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric, OtelMetricKind,
@@ -180,8 +181,8 @@ pub use statement::{
     ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
     SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, TransactionReportFormat,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
     WasmRejectedStatePolicy, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
     WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
@@ -190,5 +191,9 @@ pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
 pub use wasm_state_generation::{
     InvalidWasmStateGeneration, WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations,
     WasmStateRecoveries, WasmStateRecovery, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
-    WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
+    WasmStateReset, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
+};
+pub use wasm_state_inspection::{
+    WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
+    WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
 };
