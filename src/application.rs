@@ -584,24 +584,37 @@ pub struct Application {
     pub drain_timeout: Duration,
 }
 
-fn parse_human_duration(input: &str) -> Result<Duration, String> {
-    humantime::parse_duration(input).map_err(|err| err.to_string())
+#[derive(Debug, thiserror::Error)]
+enum CliValueError {
+    #[error("invalid duration: {source}")]
+    Duration { source: humantime::DurationError },
+    #[error("invalid byte quantity")]
+    Bytes,
+    #[error("invalid trace sample ratio: {source}")]
+    TraceSampleRatio { source: std::num::ParseFloatError },
+    #[error("trace sample ratio must be between 0.0 and 1.0")]
+    TraceSampleRatioRange,
 }
 
-fn parse_human_bytes(input: &str) -> Result<ubyte::ByteUnit, String> {
+fn parse_human_duration(input: &str) -> error_stack::Result<Duration, CliValueError> {
+    humantime::parse_duration(input)
+        .map_err(|source| Report::new(CliValueError::Duration { source }))
+}
+
+fn parse_human_bytes(input: &str) -> error_stack::Result<ubyte::ByteUnit, CliValueError> {
     input
         .parse::<ubyte::ByteUnit>()
-        .map_err(|err| err.to_string())
+        .map_err(|_| Report::new(CliValueError::Bytes))
 }
 
-fn parse_trace_sample_ratio(input: &str) -> Result<f64, String> {
+fn parse_trace_sample_ratio(input: &str) -> error_stack::Result<f64, CliValueError> {
     let ratio = input
         .parse::<f64>()
-        .map_err(|err| format!("invalid trace sample ratio: {err}"))?;
+        .map_err(|source| Report::new(CliValueError::TraceSampleRatio { source }))?;
     if (0.0..=1.0).contains(&ratio) {
         Ok(ratio)
     } else {
-        Err("trace sample ratio must be between 0.0 and 1.0".to_string())
+        Err(Report::new(CliValueError::TraceSampleRatioRange))
     }
 }
 
@@ -2365,7 +2378,7 @@ impl Application {
                                 {
                                     warn!(
                                         %node_id,
-                                        error,
+                                        error = %error,
                                         "failed to fan out runtime error event"
                                     );
                                 }

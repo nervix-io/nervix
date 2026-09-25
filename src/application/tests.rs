@@ -98,7 +98,7 @@ fn parse_and_text_encoding_helpers_roundtrip() {
         parse_human_bytes("1.5MiB").expect("valid bytes"),
         ubyte::ByteUnit::Mebibyte(1) + ubyte::ByteUnit::Kibibyte(512)
     );
-    assert_eq!(parse_trace_sample_ratio("0.25"), Ok(0.25));
+    assert_eq!(parse_trace_sample_ratio("0.25").expect("valid ratio"), 0.25);
     assert!(parse_trace_sample_ratio("1.25").is_err());
 
     let bytes = vec![0xde, 0xad, 0xbe, 0xef];
