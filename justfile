@@ -6,7 +6,10 @@ cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
-tests-deps: build-deps build-nspl-format
+tests-deps: build-deps build-nspl-format build-test-cli
+
+build-test-cli:
+    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-cli --bin nervix-cli
 
 test: tests-deps
     #!/usr/bin/env bash
@@ -363,6 +366,27 @@ test-coverage-feature feature additional_feature="": tests-deps
 # a change to those packages without the scenario suite that `test-coverage` runs.
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
+
+# Write line coverage for binary unit tests, such as the CLI's main target.
+coverage-bins output *args:
+    cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
+
+# Exercise the one-shot CLI binary through the public transaction scenario with LLVM coverage.
+coverage-cli-process output="target/cli-process.lcov":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage_dir="{{ cargo_target_dir }}/cli-process"
+    mkdir -p "$coverage_dir"
+    CARGO_TARGET_DIR="$coverage_dir" RUSTFLAGS="-C instrument-coverage ${RUSTFLAGS:-}" \
+        cargo build --package nervix-cli --bin nervix-cli
+    rm -f "$coverage_dir"/cli-*.profraw
+    LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
+        NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
+        just test-scenarios --input tests/features/runtime/nspl_transactions.feature --name CLI
+    llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/{print $2}')/bin"
+    "$llvm_bin/llvm-profdata" merge -sparse "$coverage_dir"/*.profraw -o "$coverage_dir/merged.profdata"
+    "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
+        --instr-profile="$coverage_dir/merged.profdata" --format=lcov > {{ quote(output) }}
 
 # Measure the Turmoil runner's changed lines without running the full scenario suite.
 coverage-turmoil output:

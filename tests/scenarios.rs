@@ -10263,6 +10263,97 @@ async fn then_last_inspection_reports(world: &mut ScenarioWorld, #[step] step: &
     }
 }
 
+#[when("the CLI successfully executes this JSON inspection")]
+async fn when_cli_executes_json_inspection(world: &mut ScenarioWorld, #[step] step: &Step) {
+    run_cli_inspection(world, step, true, CliConnectionCase::Leader).await;
+}
+
+#[when("the CLI successfully executes this text inspection")]
+async fn when_cli_executes_text_inspection(world: &mut ScenarioWorld, #[step] step: &Step) {
+    run_cli_inspection(world, step, true, CliConnectionCase::Leader).await;
+}
+
+#[when("the CLI refuses this JSON inspection")]
+async fn when_cli_refuses_json_inspection(world: &mut ScenarioWorld, #[step] step: &Step) {
+    run_cli_inspection(world, step, false, CliConnectionCase::Leader).await;
+}
+
+#[when("the CLI executes this JSON inspection with a missing CA file")]
+async fn when_cli_json_inspection_has_missing_ca(world: &mut ScenarioWorld, #[step] step: &Step) {
+    run_cli_inspection(world, step, false, CliConnectionCase::MissingCa).await;
+}
+
+#[when("the CLI executes this JSON inspection with an invalid server URL")]
+async fn when_cli_json_inspection_has_invalid_server(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    run_cli_inspection(world, step, false, CliConnectionCase::InvalidServer).await;
+}
+
+#[derive(Clone, Copy)]
+enum CliConnectionCase {
+    Leader,
+    MissingCa,
+    InvalidServer,
+}
+
+async fn run_cli_inspection(
+    world: &mut ScenarioWorld,
+    step: &Step,
+    succeeds: bool,
+    connection: CliConnectionCase,
+) {
+    let leader = current_leader_node(world).await;
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .expect("the leader has a gRPC URI");
+    let executable = std::env::var_os("NERVIX_TEST_CLI_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+            target_dir.join("debug/nervix-cli")
+        });
+    let query = expand_placeholders(world, docstring(step));
+    let server = match connection {
+        CliConnectionCase::InvalidServer => "not-a-server-url",
+        CliConnectionCase::Leader | CliConnectionCase::MissingCa => &grpc_uri,
+    };
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .arg("--server")
+        .arg(server)
+        .arg("--domain")
+        .arg(&world.domain)
+        .arg("--username")
+        .arg(TEST_AUTH_USERNAME)
+        .arg("--password")
+        .arg(TEST_AUTH_PASSWORD)
+        .arg("--command")
+        .arg(query);
+    if let CliConnectionCase::MissingCa = connection {
+        command
+            .arg("--tls-ca-cert")
+            .arg("/nonexistent/nervix-ca.pem");
+    }
+    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .expect("the standalone CLI inspection finishes within one minute")
+        .expect("the standalone CLI process starts and returns");
+    let stdout = String::from_utf8(output.stdout).expect("JSON stdout is UTF-8");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.success(),
+        succeeds,
+        "CLI exit status for JSON inspection; stdout: {stdout}; stderr: {stderr}"
+    );
+    world.last_command_output = Some(stdout);
+    world.last_command_error = Some(stderr.into_owned());
+}
+
 /// Compares values in the JSON document the last command printed, one `pointer = literal` per line.
 #[then("the last command output is a JSON document where")]
 async fn then_last_command_output_is_a_json_document_where(
