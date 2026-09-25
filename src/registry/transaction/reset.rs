@@ -160,7 +160,11 @@ impl Registry {
             }]),
             ..ImpactEffects::default()
         };
-        if node.begin_wasm_state_reset(request.clone(), scope) {
+        if node.begin_wasm_state_reset(
+            request.clone(),
+            scope,
+            nervix_models::WasmStateResetReason::Transaction,
+        ) {
             node.complete_wasm_state_reset(request);
         } else if node
             .wasm_state_reset()

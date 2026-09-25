@@ -123,6 +123,12 @@ checkpoint completes or fails. The publications retain the saved buffer rather t
 every persistence or replication reader. Input buffered by the guest host and ACK tokens remain
 execution state and are never included in a guest save.
 
+Each branch publishes checkpoint revision, boundary, and stage together through one immutable
+observation. An inspection read samples that publication and replica progress without taking the
+branch task's execution lane or advancing durability. A failure before guest state was captured is
+an explicit observation without a new revision; any earlier committed checkpoint remains the
+restore source. The published observation contains no guest bytes.
+
 Every branch save is addressed by the guest-state generation in the committed schedule. Forced
 recovery publishes a new generation with the replacement schedule, so a late save, replica
 installation, or recovered checkpoint from the generation it replaced cannot address current

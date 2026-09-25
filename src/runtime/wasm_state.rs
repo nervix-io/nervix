@@ -9,19 +9,15 @@
 //! - **Must not know.** How a checkpoint reaches stable storage or a replica, guest execution, or
 //!   which acknowledgements a completed checkpoint releases.
 
-use std::{
-    collections::BTreeSet,
-    sync::{
-        Arc as StdArc,
-        atomic::{AtomicU8, Ordering},
-    },
-};
+use std::{collections::BTreeSet, num::NonZeroU64, sync::Arc as StdArc};
 
 use ahash::RandomState;
-use meticulous::OptionExt as _;
-use nervix_execution::sync::{ArcSwap, DashMap};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_execution::sync::{ArcSwap, ArcSwapOption, DashMap};
 use nervix_interconnect::RuntimeState;
-use nervix_models::{ClusterNodeName, WasmStateGeneration};
+use nervix_models::{
+    ClusterNodeName, WasmCheckpointInspection, WasmCheckpointStage, WasmStateGeneration,
+};
 use tokio::sync::Notify;
 
 use super::{PersistedRuntimeStateEntry, RuntimeStatePlacement, lsm_sequence::LsmSequence};
@@ -46,8 +42,9 @@ pub(super) struct ReplicatedWasmProcessorState {
     /// the revision of a checkpoint that failed, because a replica or this node's storage may still
     /// hold it.
     current_lsm: LsmSequence,
-    /// Where the latest checkpoint stands, as the tag of a [`WasmCheckpointProgress`].
-    progress: AtomicU8,
+    /// The latest checkpoint's non-sensitive revision and boundary, published as one read-only
+    /// observation. Absence means this lifetime has not captured a checkpoint on this owner.
+    latest: ArcSwapOption<ObservedWasmCheckpoint>,
     /// The highest revision each replica reported holding on its stable storage.
     replica_progress: DashMap<ClusterNodeName, u64, RandomState>,
     /// Wakes a checkpoint waiting for its replicas when one of them reports progress.
@@ -69,52 +66,40 @@ pub(super) struct RestorableGuestState<'a> {
 }
 
 /// Where the latest checkpoint of one branch stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::FromRepr)]
-#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum WasmCheckpointProgress {
     /// The latest checkpoint reached its boundary, so the committed checkpoint is current.
-    Committed = 0,
+    Committed,
     /// The guest saved its state, and the state is being written to this node's stable storage.
-    Captured = 1,
+    Captured,
     /// The state is on this node's stable storage and waits for the replicas its boundary names.
-    LocallyDurable = 2,
+    LocallyDurable,
     /// The latest checkpoint did not reach its boundary, so the previous committed checkpoint
     /// stays current.
-    Failed = 3,
+    Failed,
 }
 
-impl WasmCheckpointProgress {
-    /// The tag the progress cell stores this progress as, which is its declared discriminant.
-    const fn tag(self) -> u8 {
+#[derive(Debug, Clone)]
+enum ObservedWasmCheckpoint {
+    /// The boundary or guest save failed before a new checkpoint had a revision.
+    FailedBeforeCapture,
+    Captured {
+        revision: NonZeroU64,
+        boundary: WasmCheckpointBoundary,
+        progress: WasmCheckpointProgress,
+    },
+}
+
+impl ObservedWasmCheckpoint {
+    fn captured(&self) -> Option<(NonZeroU64, &WasmCheckpointBoundary)> {
         match self {
-            Self::Committed => 0,
-            Self::Captured => 1,
-            Self::LocallyDurable => 2,
-            Self::Failed => 3,
+            Self::FailedBeforeCapture => None,
+            Self::Captured {
+                revision, boundary, ..
+            } => Some((*revision, boundary)),
         }
     }
 }
-
-// The progress cell is read back through the declared discriminant, so every tag must be that
-// discriminant.
-const _: () = {
-    assert!(matches!(
-        WasmCheckpointProgress::from_repr(WasmCheckpointProgress::Committed.tag()),
-        Some(WasmCheckpointProgress::Committed)
-    ));
-    assert!(matches!(
-        WasmCheckpointProgress::from_repr(WasmCheckpointProgress::Captured.tag()),
-        Some(WasmCheckpointProgress::Captured)
-    ));
-    assert!(matches!(
-        WasmCheckpointProgress::from_repr(WasmCheckpointProgress::LocallyDurable.tag()),
-        Some(WasmCheckpointProgress::LocallyDurable)
-    ));
-    assert!(matches!(
-        WasmCheckpointProgress::from_repr(WasmCheckpointProgress::Failed.tag()),
-        Some(WasmCheckpointProgress::Failed)
-    ));
-};
 
 /// The boundary a checkpoint has to reach before the success acknowledgements it covers are
 /// released.
@@ -297,7 +282,7 @@ impl ReplicatedWasmProcessorState {
             current_lsm: LsmSequence::restored(committed.revision),
             published: ArcSwap::from(committed.clone()),
             committed: ArcSwap::from(committed),
-            progress: AtomicU8::new(WasmCheckpointProgress::Committed.tag()),
+            latest: ArcSwapOption::empty(),
             replica_progress: DashMap::default(),
             replication_notify: Notify::new(),
         }
@@ -324,13 +309,98 @@ impl ReplicatedWasmProcessorState {
     }
 
     /// Where the latest checkpoint of this branch stands.
+    #[cfg(test)]
     pub(super) fn progress(&self) -> WasmCheckpointProgress {
-        WasmCheckpointProgress::from_repr(self.progress.load(Ordering::Acquire))
-            .assured("the progress cell only ever stores the tag of a declared progress")
+        match self.latest.load().as_deref() {
+            Some(ObservedWasmCheckpoint::Captured { progress, .. }) => *progress,
+            Some(ObservedWasmCheckpoint::FailedBeforeCapture) => WasmCheckpointProgress::Failed,
+            None => WasmCheckpointProgress::Committed,
+        }
     }
 
     fn record_progress(&self, progress: WasmCheckpointProgress) {
-        self.progress.store(progress.tag(), Ordering::Release);
+        let observed = self
+            .latest
+            .load_full()
+            .assured("checkpoint progress changes only after capture published its observation");
+        let (revision, boundary) = observed
+            .captured()
+            .assured("local durability and commit follow a captured checkpoint");
+        self.latest
+            .store(Some(StdArc::new(ObservedWasmCheckpoint::Captured {
+                revision,
+                boundary: boundary.clone(),
+                progress,
+            })));
+    }
+
+    /// A read-only observation of the latest checkpoint and its completed predecessor. Replica
+    /// reports are read as progress facts; this does not synchronize or advance a checkpoint.
+    pub(super) fn inspection(&self) -> WasmCheckpointInspection {
+        let committed = self.committed.load_full();
+        let committed_revision = NonZeroU64::new(committed.revision);
+        let latest = self.latest.load_full();
+        let (latest_revision, stage, required_replicas, confirmed_replicas) = match latest
+            .as_deref()
+        {
+            None => (
+                committed_revision,
+                match committed_revision {
+                    Some(_) => WasmCheckpointStage::LocallyDurable,
+                    None => WasmCheckpointStage::Empty,
+                },
+                None,
+                None,
+            ),
+            Some(ObservedWasmCheckpoint::FailedBeforeCapture) => {
+                (None, WasmCheckpointStage::Failed, None, None)
+            }
+            Some(ObservedWasmCheckpoint::Captured {
+                revision,
+                boundary,
+                progress,
+            }) => {
+                let (required_replicas, confirmed_replicas) = match boundary {
+                    WasmCheckpointBoundary::LocalStorage => (Some(0), Some(0)),
+                    WasmCheckpointBoundary::Replicas(replicas) => {
+                        let required = u32::try_from(replicas.nodes().len())
+                            .assured("a cluster cannot contain more than u32::MAX nodes");
+                        let awaiting = self.replicas_awaiting(replicas, revision.get());
+                        let confirmed = required
+                            .checked_sub(u32::try_from(awaiting.len()).assured(
+                                "the awaiting set is a subset of the u32-bounded required replicas",
+                            ))
+                            .assured("the awaiting set cannot exceed the required replicas");
+                        (Some(required), Some(confirmed))
+                    }
+                };
+                let stage = match progress {
+                    WasmCheckpointProgress::Committed => WasmCheckpointStage::ReplicaConfirmed,
+                    WasmCheckpointProgress::Captured => WasmCheckpointStage::Captured,
+                    WasmCheckpointProgress::LocallyDurable => WasmCheckpointStage::LocallyDurable,
+                    WasmCheckpointProgress::Failed => WasmCheckpointStage::Failed,
+                };
+                (
+                    Some(*revision),
+                    stage,
+                    required_replicas,
+                    confirmed_replicas,
+                )
+            }
+        };
+        WasmCheckpointInspection {
+            branch: self
+                .placement
+                .branch_key
+                .as_ref()
+                .map(|key| key.fingerprint()),
+            generation: self.generation(),
+            committed_revision,
+            latest_revision,
+            stage,
+            required_replicas,
+            confirmed_replicas,
+        }
     }
 
     /// Stamp `bytes`, what the guest returned from a save, with the next revision. Keeping the
@@ -344,7 +414,14 @@ impl ReplicatedWasmProcessorState {
             revision: self.current_lsm.advance(),
             bytes,
         });
-        self.record_progress(WasmCheckpointProgress::Captured);
+        let revision = NonZeroU64::new(saved.revision)
+            .assured("a captured checkpoint advances the revision beyond zero");
+        self.latest
+            .store(Some(StdArc::new(ObservedWasmCheckpoint::Captured {
+                revision,
+                boundary: boundary.clone(),
+                progress: WasmCheckpointProgress::Captured,
+            })));
         CapturedWasmCheckpoint { saved, boundary }
     }
 
@@ -369,7 +446,20 @@ impl ReplicatedWasmProcessorState {
     /// Record that the latest checkpoint did not reach its boundary. The committed checkpoint
     /// stays where it was.
     pub(super) fn record_failed(&self) {
-        self.record_progress(WasmCheckpointProgress::Failed);
+        let latest = self.latest.load_full();
+        let failed = match latest.as_deref() {
+            Some(ObservedWasmCheckpoint::Captured {
+                revision,
+                boundary,
+                progress: WasmCheckpointProgress::Captured | WasmCheckpointProgress::LocallyDurable,
+            }) => ObservedWasmCheckpoint::Captured {
+                revision: *revision,
+                boundary: boundary.clone(),
+                progress: WasmCheckpointProgress::Failed,
+            },
+            _ => ObservedWasmCheckpoint::FailedBeforeCapture,
+        };
+        self.latest.store(Some(StdArc::new(failed)));
     }
 
     /// The committed checkpoint, as an ownership handoff transfers it.
@@ -557,19 +647,40 @@ mod tests {
     #[test]
     fn only_a_completed_checkpoint_becomes_the_committed_checkpoint() {
         let state = ReplicatedWasmProcessorState::new(placement(), None);
+        assert_eq!(state.inspection().stage, WasmCheckpointStage::Empty);
         let first = state.capture(vec![1], WasmCheckpointBoundary::LocalStorage);
         assert_eq!(state.progress(), WasmCheckpointProgress::Captured);
+        let captured = state.inspection();
+        assert_eq!(captured.stage, WasmCheckpointStage::Captured);
+        assert_eq!(captured.committed_revision, None);
+        assert_eq!(captured.required_replicas, Some(0));
+        assert_eq!(captured.confirmed_replicas, Some(0));
         let first = state.record_locally_durable(first);
         assert_eq!(state.progress(), WasmCheckpointProgress::LocallyDurable);
+        assert_eq!(
+            state.inspection().stage,
+            WasmCheckpointStage::LocallyDurable
+        );
         state.commit(first.completed());
         assert_eq!(state.progress(), WasmCheckpointProgress::Committed);
+        assert_eq!(
+            state.inspection().stage,
+            WasmCheckpointStage::ReplicaConfirmed
+        );
         assert_eq!(state.committed_revision(), 1);
 
         let failed = state.capture(vec![2], replicas(&["node-2"]));
         let failed = state.record_locally_durable(failed);
+        let awaiting = state.inspection();
+        assert_eq!(awaiting.stage, WasmCheckpointStage::LocallyDurable);
+        assert_eq!(awaiting.required_replicas, Some(1));
+        assert_eq!(awaiting.confirmed_replicas, Some(0));
         assert_eq!(failed.revision(), 2);
         state.record_failed();
         assert_eq!(state.progress(), WasmCheckpointProgress::Failed);
+        let failed_inspection = state.inspection();
+        assert_eq!(failed_inspection.stage, WasmCheckpointStage::Failed);
+        assert_eq!(failed_inspection.committed_revision, NonZeroU64::new(1));
         assert_eq!(state.committed_revision(), 1);
         assert_eq!(state.restore_guest_state().bytes(), [1_u8].as_slice());
         assert_eq!(
@@ -581,6 +692,56 @@ mod tests {
 
         let retried = state.capture(vec![3], WasmCheckpointBoundary::LocalStorage);
         assert_eq!(retried.revision(), 3);
+    }
+
+    #[test]
+    fn failure_before_capture_keeps_the_committed_revision_without_claiming_a_new_one() {
+        let state = ReplicatedWasmProcessorState::new(placement(), None);
+        state.record_failed();
+        let failed = state.inspection();
+        assert_eq!(failed.stage, WasmCheckpointStage::Failed);
+        assert_eq!(failed.committed_revision, None);
+        assert_eq!(failed.latest_revision, None);
+        assert_eq!(failed.required_replicas, None);
+
+        let captured = state.capture(vec![1], WasmCheckpointBoundary::LocalStorage);
+        let durable = state.record_locally_durable(captured);
+        state.commit(durable.completed());
+        state.record_failed();
+        let failed = state.inspection();
+        assert_eq!(failed.stage, WasmCheckpointStage::Failed);
+        assert_eq!(failed.committed_revision, NonZeroU64::new(1));
+        assert_eq!(failed.latest_revision, None);
+
+        state.capture(vec![2], WasmCheckpointBoundary::LocalStorage);
+        state.record_failed();
+        let failed_capture = state.inspection();
+        assert_eq!(failed_capture.stage, WasmCheckpointStage::Failed);
+        assert_eq!(failed_capture.committed_revision, NonZeroU64::new(1));
+        assert_eq!(failed_capture.latest_revision, NonZeroU64::new(2));
+    }
+
+    #[test]
+    fn inspection_counts_only_replica_reports_for_the_current_revision() {
+        let state = ReplicatedWasmProcessorState::new(placement(), None);
+        let captured = state.capture(vec![1], replicas(&["node-2", "node-3"]));
+        let durable = state.record_locally_durable(captured);
+        state.mark_replica_progress(&node("node-2"), 1);
+        let inspection = state.inspection();
+        assert_eq!(inspection.required_replicas, Some(2));
+        assert_eq!(inspection.confirmed_replicas, Some(1));
+        state.mark_replica_progress(&node("node-3"), 1);
+        assert_eq!(state.inspection().confirmed_replicas, Some(2));
+        state.commit(durable.completed());
+        assert_eq!(
+            state.inspection().stage,
+            WasmCheckpointStage::ReplicaConfirmed
+        );
+
+        let next = state.capture(vec![2], replicas(&["node-2", "node-3"]));
+        assert_eq!(state.inspection().confirmed_replicas, Some(0));
+        state.record_locally_durable(next);
+        assert_eq!(state.inspection().committed_revision, NonZeroU64::new(1));
     }
 
     #[test]

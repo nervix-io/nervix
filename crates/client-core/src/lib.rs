@@ -21,6 +21,7 @@ mod error;
 mod events;
 mod exchange;
 mod outcome;
+mod subscriptions;
 mod upload;
 
 pub use client::{Client, ExecutionHandle};
@@ -45,6 +46,7 @@ pub use nervix_models::{
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
+pub use subscriptions::{SubscriptionInterruption, SubscriptionLifecycle};
 use thiserror::Error;
 
 #[derive(Debug, Error)]

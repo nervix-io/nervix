@@ -166,6 +166,7 @@ impl<Version> CodecProtobufConfig<Version> {
             resource_version,
             config: self.config,
             message: self.message,
+            batch_message: self.batch_message,
             transformations: self.transformations,
         })
     }

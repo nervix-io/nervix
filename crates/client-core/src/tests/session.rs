@@ -110,6 +110,7 @@ fn command_outcome(
         transaction: None,
         transaction_admission: None,
         inspection: None,
+        wasm_state: None,
     }))
 }
 

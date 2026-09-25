@@ -150,7 +150,7 @@ relay. Do not use them to scan across branches.
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
 - Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
-  order. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
+  order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
@@ -166,7 +166,13 @@ relay. Do not use them to scan across branches.
 - Every emitter sink declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
-- ClickHouse, Postgres, MySQL, and MongoDB emitter sinks declare a positive `WITH MAX BATCH`.
+- ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
+  <bytes>` before `FLUSH`; any other emitter may, with `MAX MESSAGES` from 1 to 65,536, a positive
+  whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
+  emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec. `MAX SIZE` is the
+  exact encoded payload length, including escaping and any `ON EMITTING` expansion; a record-sink
+  emitter routes a record whose payload would exceed it to `ON MESSAGE ERROR` as a `validation`
+  error, so leave headroom for the largest record rather than sizing it to a typical one.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above

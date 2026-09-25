@@ -9549,20 +9549,34 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_a_follower_
     }
 }
 
-async fn connect_named_client_to_node(world: &mut ScenarioWorld, name: String, node_id: String) {
+async fn connect_named_client_to_node(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+    seed_nodes: Vec<String>,
+) {
     let name = expand_placeholders(world, &name);
     let node_id = expand_placeholders(world, &node_id);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node_id)
         .expect("failed to resolve client node gRPC URI");
-    let client = Client::connect_with_options(
-        &grpc_uri,
-        client_domain(&world.domain),
-        client_connect_options(&grpc_uri).expect("failed to build client tls options"),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("failed to connect client '{name}' to '{node_id}': {error}"));
+    let mut options =
+        client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    for seed_node in seed_nodes {
+        let seed_uri = world
+            .cluster()
+            .grpc_uri(&seed_node)
+            .expect("failed to resolve seed node gRPC URI");
+        options
+            .seed_servers
+            .push(url::Url::parse(&seed_uri).expect("cluster gRPC seed URIs are valid URLs"));
+    }
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to connect client '{name}' to '{node_id}': {error}")
+        });
     assert!(
         world
             .transaction_clients
@@ -9578,13 +9592,23 @@ async fn given_named_client_is_connected_to_node(
     name: String,
     node_id: String,
 ) {
-    connect_named_client_to_node(world, name, node_id).await;
+    connect_named_client_to_node(world, name, node_id, Vec::new()).await;
+}
+
+#[given(expr = "client {string} is connected to node {string} with cluster seeds")]
+async fn given_named_client_is_connected_with_cluster_seeds(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+) {
+    let seeds = world.cluster().node_ids();
+    connect_named_client_to_node(world, name, node_id, seeds).await;
 }
 
 #[given(expr = "client {string} is connected to the leader node")]
 async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, name: String) {
     let leader = current_leader_node(world).await;
-    connect_named_client_to_node(world, name, leader).await;
+    connect_named_client_to_node(world, name, leader, Vec::new()).await;
 }
 
 #[given(
@@ -11439,6 +11463,38 @@ async fn then_last_command_output_contains(world: &mut ScenarioWorld, #[step] st
         "expected command output fragment {} in output, got: {output}",
         expected.trim()
     );
+}
+
+/// Runs `SHOW CREATE EMITTER` for every emitter the table names and requires its rendering to
+/// contain the clause beside it. The first row names the columns.
+#[then("SHOW CREATE EMITTER on the leader node renders these clauses")]
+async fn then_show_create_emitter_renders_these_clauses(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let table = step
+        .table
+        .as_ref()
+        .expect("the step lists each emitter with the clause it must render");
+    let leader = current_leader_node(world).await;
+    for row in table.rows.iter().skip(1) {
+        let [emitter, clause] = row.as_slice() else {
+            panic!("each row names an emitter and one clause, got {row:?}");
+        };
+        let output = world
+            .cluster()
+            .run_command(
+                &leader,
+                &world.domain,
+                &format!("SHOW CREATE EMITTER {emitter};"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("SHOW CREATE EMITTER {emitter} failed: {error}"));
+        assert!(
+            output.contains(clause.as_str()),
+            "expected SHOW CREATE EMITTER {emitter} to contain {clause:?}, got: {output}"
+        );
+    }
 }
 
 #[then("the last command output is saved as the relocation plan")]
@@ -15028,6 +15084,28 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
     }
 }
 
+#[then(expr = "the last client outcome reports WASM reset phase {string} at generation {int}")]
+fn then_last_client_outcome_reports_wasm_reset(
+    world: &mut ScenarioWorld,
+    phase: String,
+    generation: u64,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .assured("the preceding step executed a client command");
+    let state = outcome
+        .wasm_state
+        .as_ref()
+        .assured("the preceding command described a WASM processor");
+    let reset = state
+        .reset
+        .as_ref()
+        .assured("the preceding transaction published a WASM state reset");
+    assert_eq!(reset.reset.phase().as_ref(), phase);
+    assert_eq!(u64::from(reset.generation), generation);
+}
+
 /// Assert that one of two emitters reports the given text.
 ///
 /// Which of two peers contending for the last connection ends up holding it and which ends up
@@ -17687,6 +17765,117 @@ async fn then_named_client_receives_subscription_payload(
         "client '{client_name}' expected subscription payload {expected:?}, got {payload:?}"
     );
     world.last_subscription_payload = Some(payload);
+}
+
+#[when(
+    expr = "within {string} client {string} receives a subscription payload from repeated http \
+            posts to node {string} with host {string} path {string}"
+)]
+async fn when_named_client_receives_from_repeated_http_posts(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the scenario delivery deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' did not receive a row from repeated posts within {duration:?}"
+        );
+        world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await
+            .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(Duration::from_secs(1));
+        match tokio::time::timeout(wait, client.next_subscription()).await {
+            Ok(Ok(nervix_client_core::SubscriptionEvent::Rows(rows))) => {
+                let lines = rows.display_lines().unwrap_or_else(|error| {
+                    panic!("client '{client_name}' rows do not render: {error}")
+                });
+                if let Some(line) = lines.into_iter().next() {
+                    world.last_subscription_payload = Some(line);
+                    return;
+                }
+            }
+            Ok(Ok(_)) | Err(_) => {}
+            Ok(Err(error)) => panic!("client '{client_name}' subscription stream closed: {error}"),
+        }
+    }
+}
+
+#[then(expr = "within {string} client {string} observes subscription {string} interrupted")]
+async fn then_named_client_observes_subscription_interrupted(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the interruption deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let event = tokio::time::timeout(duration, client.next_subscription())
+        .await
+        .unwrap_or_else(|_| panic!("client '{client_name}' did not report an interruption"))
+        .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+    let nervix_client_core::SubscriptionEvent::Interrupted(interrupted) = event else {
+        panic!("client '{client_name}' did not report an interruption: {event:?}");
+    };
+    assert_eq!(interrupted.subscription.name.as_str(), subscription_name);
+}
+
+#[then(expr = "client {string} subscription {string} is active")]
+async fn then_named_client_subscription_is_active(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let lifecycle = client.subscription_lifecycle(&name);
+        if let Some(nervix_client_core::SubscriptionLifecycle::Active(_)) = lifecycle {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' subscription '{subscription_name}' did not become active: \
+             {lifecycle:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[then(expr = "node {string} eventually accepts websocket traffic for host {string} path {string}")]
@@ -20980,6 +21169,82 @@ async fn then_within_duration_the_observed_broker_receives_exactly_messages(
         duplicate.is_none(),
         "observed an extra broker message after receiving exactly {count}: {duplicate:?}; \
          observed payload counts: {payload_counts:?}"
+    );
+}
+
+/// Every docstring line is one exact payload. The broker must deliver exactly those payloads, in
+/// any order, and nothing else: a payload the emitter was required to withhold must never arrive,
+/// so the closing window only strengthens the assertion.
+#[then(expr = "within {string} the observed broker receives exactly these payloads")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_payloads(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let mut remaining = BTreeMap::<String, usize>::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let payload = expand_placeholders(world, line);
+        *remaining.entry(payload).or_insert(0) += 1;
+    }
+    assert!(
+        !remaining.is_empty(),
+        "step docstring must contain at least one expected payload"
+    );
+
+    let deadline = Instant::now() + duration;
+    let mut observed = Vec::new();
+    while !remaining.is_empty() {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for broker payloads; expected remaining {remaining:?}, observed \
+             {observed:?}"
+        );
+        let payload = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_payload(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for exact broker payloads");
+        let Some(payload) = payload else {
+            panic!(
+                "timed out waiting for broker payloads; expected remaining {remaining:?}, \
+                 observed {observed:?}"
+            );
+        };
+        let Some(count) = remaining.get_mut(&payload) else {
+            panic!(
+                "observed an unexpected broker payload {payload:?} ({} bytes); expected remaining \
+                 {remaining:?}, observed before it {observed:?}",
+                payload.len()
+            );
+        };
+        *count -= 1;
+        if *count == 0 {
+            remaining.remove(&payload);
+        }
+        world.last_broker_payload = Some(payload.clone());
+        observed.push(payload);
+    }
+
+    let extra = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion")
+        .try_next_payload(Duration::from_secs(2))
+        .await
+        .expect("failed while checking for an unexpected broker payload");
+    assert!(
+        extra.is_none(),
+        "observed a broker payload beyond the expected ones: {extra:?}; observed {observed:?}"
     );
 }
 

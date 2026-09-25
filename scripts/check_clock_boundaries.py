@@ -70,7 +70,6 @@ def main() -> int:
     violations: list[str] = []
 
     wall_time_owners = {
-        ROOT / "crates/interconnect/src/connection.rs",
         ROOT / "crates/models/src/timestamp.rs",
         ROOT / "src/application/domain_clock.rs",
         ROOT / "src/cluster.rs",

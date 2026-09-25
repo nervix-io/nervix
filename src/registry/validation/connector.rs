@@ -13,11 +13,12 @@ use error_stack::Report;
 use meticulous::ResultExt;
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
-    Assignment, AssignmentTarget, CreateEmitter, CreateIngestor, CreateSchema,
-    CreateSignalingProtocol, DomainName, EmitSink, EndpointName, Expression, FieldName,
-    IngestSource, IngestTimestampSource, Model, ModelIndex, ModelName, OtelAggregationTemporality,
-    OtelMetricKind, OtelSignal, OtelValueMapping, ParseAsType, ProcessorOutput, RelayName,
-    RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
+    Assignment, AssignmentTarget, CodecBatchContainer, CreateCodec, CreateEmitter, CreateIngestor,
+    CreateSchema, CreateSignalingProtocol, DomainName, EmitSink, EndpointName, Expression,
+    FieldName, IngestSource, IngestTimestampSource, Model, ModelIndex, ModelName,
+    OtelAggregationTemporality, OtelMetricKind, OtelSignal, OtelValueMapping, ParseAsType,
+    ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat,
+    SqsFifoGroup, VhostName,
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
@@ -140,6 +141,10 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         )));
     }
 
+    emitter
+        .validate_batch()
+        .map_err(|error| invalid(error.current_context().to_string()))?;
+
     let retry = emitter.publishing_mode.retry_policy();
     let backoff = humantime::parse_duration(&retry.backoff).map_err(|error| {
         invalid(format!(
@@ -235,6 +240,43 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         | EmitSink::MongoDb { .. } => {}
     }
 
+    Ok(())
+}
+
+/// Checks that the codec a batching emitter encodes through has a container its sink can publish
+/// one batch in.
+pub(in crate::registry) fn validate_emitter_batch_container(
+    domain: &DomainName,
+    identifier: &ModelName,
+    emitter: &CreateEmitter,
+    codec: &CreateCodec,
+) -> Result<(), Report<RegistryError>> {
+    let invalid = |reason: String| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason,
+        })
+    };
+    if emitter.batch.is_none() {
+        return Ok(());
+    }
+    let container = codec.wire_format.batch_container();
+    if let CodecBatchContainer::Undeclared = container {
+        return Err(invalid(format!(
+            "a batching emitter requires protobuf codec '{}' to declare a BATCH MESSAGE, because \
+             protobuf has no self-delimiting sequence",
+            codec.name.as_str()
+        )));
+    }
+    if emitter.sink.requires_batch_transformation() && container.transformation().is_none() {
+        return Err(invalid(format!(
+            "a batching {} emitter requires codec '{}' to declare an ON EMITTING BATCH \
+             transformation, because one envelope carries at most one event",
+            emitter.sink.transport_label(),
+            codec.name.as_str()
+        )));
+    }
     Ok(())
 }
 
@@ -1003,12 +1045,12 @@ mod tests {
 
     use nervix_models::{
         AckMode, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName, CodecName,
-        ConsumerGroupName, CreateClientHttp, CreateClientSqs, CreateWireSchema, EmitterAckWindow,
-        EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, IngestorName,
-        JsonType, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy,
-        MqttIngestMode, MqttQos, MqttSession, OtelMetric, OutputBranch, ProcessorInputs,
-        ProcessorOutputs, RetryPolicy, SignalingProtobufConfig, TopicName, WireSchemaField,
-        WireSchemaName,
+        CodecWireFormat, ConsumerGroupName, CreateClientHttp, CreateClientSqs, CreateWireSchema,
+        EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
+        IngestorName, JsonType, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
+        MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, OtelMetric, OutputBranch,
+        ProcessorInputs, ProcessorOutputs, RetryPolicy, SignalingProtobufConfig, TopicName,
+        WireSchemaField, WireSchemaName,
     };
     use nonzero_ext::nonzero;
 
@@ -1018,9 +1060,9 @@ mod tests {
         storage::Registry,
         test_fixtures::{
             branch, branch_for_relay, branch_schema, branch_schema_with_types, branched_by,
-            client_model, codec, emitter, explicitly_unbranched_relay, named, relay,
-            relay_branched_by, relay_branched_by_relay_branch, schema, signaling_protocol,
-            temp_db_path, unbranched_transforming_outputs, vhost, wire_schema,
+            client_model, codec, emitter, explicitly_unbranched_relay, jaq_native_codec, named,
+            protobuf_codec, relay, relay_branched_by, relay_branched_by_relay_branch, schema,
+            signaling_protocol, temp_db_path, unbranched_transforming_outputs, vhost, wire_schema,
         },
     };
 
@@ -1221,6 +1263,126 @@ mod tests {
         )
         .expect_err("FIFO GROUP on a standard queue must be rejected");
         assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
+    }
+
+    fn batch_policy(max_messages: u32, max_size: &str) -> nervix_models::EmitterBatchPolicy {
+        nervix_models::EmitterBatchPolicy {
+            max_messages: nervix_models::BatchMessageLimit::try_from(max_messages)
+                .expect("the fixture message limit is within range"),
+            max_size: max_size
+                .parse()
+                .expect("the fixture size is a whole number of bytes"),
+        }
+    }
+
+    #[test]
+    fn publishing_contract_checks_the_batch_clause_against_its_sink() {
+        let domain = DomainName::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        let identifier = ModelName::from(&emitter.name);
+        let models = ModelIndex::new();
+        emitter.encode_using_codec = None;
+        emitter.publishing_mode = EmitterPublishingMode::RequestAck {
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        *emitter.sink = EmitSink::Postgres {
+            client: named("postgres_main"),
+            table: named("events"),
+            values: Vec::new(),
+            conflict_action: nervix_models::PostgresConflictAction::None,
+        };
+
+        let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect_err("a Postgres emitter without BATCH must be rejected");
+        assert!(
+            format!("{error:#}").contains("POSTGRES emitters require BATCH MAX MESSAGES"),
+            "unexpected error: {error:#}"
+        );
+
+        emitter.batch = Some(batch_policy(500, "8MiB"));
+        validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect("a Postgres emitter with BATCH is valid");
+
+        *emitter.sink = EmitSink::Sqs {
+            client: named("sqs_main"),
+            queue: "events".to_string(),
+            fifo_group: None,
+        };
+        emitter.encode_using_codec = Some(named("event_codec"));
+        emitter.publishing_mode = EmitterPublishingMode::SqsBatch {
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect_err("an SQS batch larger than one SQS message must be rejected");
+        assert!(
+            format!("{error:#}").contains("accept BATCH MAX SIZE up to 256KiB"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn batching_emitters_require_a_codec_container_their_sink_can_publish() {
+        let domain = DomainName::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        let identifier = ModelName::from(&emitter.name);
+        let Model::Codec(mut protobuf) =
+            protobuf_codec("event_codec", "event_schema", None, Some("."))
+        else {
+            unreachable!("protobuf_codec builds a codec model")
+        };
+
+        validate_emitter_batch_container(&domain, &identifier, &emitter, &protobuf)
+            .expect("an emitter without BATCH needs no batch container");
+
+        emitter.batch = Some(batch_policy(100, "1MiB"));
+        let error = validate_emitter_batch_container(&domain, &identifier, &emitter, &protobuf)
+            .expect_err("a protobuf codec without BATCH MESSAGE has no batch container");
+        assert!(
+            format!("{error:#}").contains("to declare a BATCH MESSAGE"),
+            "unexpected error: {error:#}"
+        );
+        if let CodecWireFormat::Protobuf(config) = &mut protobuf.wire_format {
+            config.batch_message = Some("nervix.test.NotificationBatch".to_string());
+        }
+        validate_emitter_batch_container(&domain, &identifier, &emitter, &protobuf)
+            .expect("a protobuf codec with BATCH MESSAGE has a batch container");
+
+        *emitter.sink = EmitSink::Sentry {
+            client: named("sentry_main"),
+        };
+        let Model::Codec(mut json) =
+            jaq_native_codec("event_codec", "event_schema", None, Some("."))
+        else {
+            unreachable!("jaq_native_codec builds a codec model")
+        };
+        let error = validate_emitter_batch_container(&domain, &identifier, &emitter, &json)
+            .expect_err("a batching Sentry emitter needs ON EMITTING BATCH");
+        assert!(
+            format!("{error:#}").contains(
+                "SENTRY emitter requires codec 'event_codec' to declare an ON EMITTING BATCH"
+            ),
+            "unexpected error: {error:#}"
+        );
+        if let CodecWireFormat::JaqNative {
+            transformations, ..
+        } = &mut json.wire_format
+        {
+            transformations.on_emitting_batch = Some("{extra: {records: .}}".to_string());
+        }
+        validate_emitter_batch_container(&domain, &identifier, &emitter, &json)
+            .expect("a Sentry emitter whose codec builds the batch event is valid");
     }
 
     fn otel_mapping(key: &str) -> OtelValueMapping {
@@ -1454,6 +1616,7 @@ mod tests {
                     max_backoff: "30s".to_string(),
                 },
             },
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
                 max_batch_size: "1MiB".to_string(),

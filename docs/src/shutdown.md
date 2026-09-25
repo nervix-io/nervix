@@ -285,6 +285,13 @@ and interconnect handlers alive so the fresh initial checkpoint and `Ready` publ
 within their ordinary bounds. If shutdown ends first, restart observes `Publishing` and resumes the
 new generation rather than restoring the old one.
 
+Read-only WASM state inspection after restart uses the committed schedule's generation and
+retained reset and recovery outcomes. A pre-publication failure leaves the preceding generation
+visible; a published but not yet usable reset remains `PUBLISHING` until its initial checkpoint
+and activation finish. Runtime checkpoint observations from a replaced generation are excluded,
+and a restored checkpoint reports unknown prior replica confirmation when that boundary cannot
+be reconstructed. Inspection never settles an uncertain transaction outcome or resumes a reset.
+
 An admitted NSPL reset is recorded as an ordered transaction effect. If shutdown interrupts the
 command after its effect is recorded, recovery resumes it with the original execution reference;
 it does not admit the text as a fresh reset. The client receives success only after the replacement

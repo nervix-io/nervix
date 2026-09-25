@@ -3,6 +3,7 @@ use std::{fmt, sync::Arc};
 use arrow_schema::{DataType, Schema, TimeUnit};
 
 use crate::{
+    json::JsonScanOutput,
     program::{BinaryOp, CastFailure, FunctionName, Span, UnaryOp},
     semantics::BuiltinLowering,
 };
@@ -195,13 +196,31 @@ pub enum InstructionKind {
         arms: Vec<SelectArm>,
         otherwise: RegisterRef,
     },
+    /// Parses each JSON document `input` holds once and answers every one of `outputs` from that
+    /// parse. `dst` holds the answers side by side, one column per output in order, and is read
+    /// only by the `JsonField` instructions that take each answer out.
+    JsonScan {
+        dst: RegisterRef,
+        input: RegisterRef,
+        outputs: Vec<JsonScanOutput>,
+    },
+    /// The answer to output `index` of the scan whose result `input` holds.
+    JsonField {
+        dst: RegisterRef,
+        input: RegisterRef,
+        index: usize,
+    },
 }
 
 impl InstructionKind {
     /// The registers this instruction reads, in operand order.
     pub fn operands(&self) -> Vec<RegisterRef> {
         match self {
-            Self::Move { input, .. } | Self::Unary { input, .. } | Self::Cast { input, .. } => {
+            Self::Move { input, .. }
+            | Self::Unary { input, .. }
+            | Self::Cast { input, .. }
+            | Self::JsonScan { input, .. }
+            | Self::JsonField { input, .. } => {
                 vec![*input]
             }
             Self::Assign {
@@ -232,6 +251,15 @@ impl InstructionKind {
         }
     }
 
+    /// The outputs of a JSON scan, which the compiler extends as it meets each extraction the
+    /// scan answers. `None` for every other instruction.
+    pub(crate) fn json_scan_outputs_mut(&mut self) -> Option<&mut Vec<JsonScanOutput>> {
+        match self {
+            Self::JsonScan { outputs, .. } => Some(outputs),
+            _ => None,
+        }
+    }
+
     /// The register this instruction writes.
     pub fn output(&self) -> RegisterRef {
         match self {
@@ -245,7 +273,9 @@ impl InstructionKind {
             | Self::Cast { dst, .. }
             | Self::Builtin { dst, .. }
             | Self::Inject { dst, .. }
-            | Self::Select { dst, .. } => *dst,
+            | Self::Select { dst, .. }
+            | Self::JsonScan { dst, .. }
+            | Self::JsonField { dst, .. } => *dst,
         }
     }
 }
@@ -261,9 +291,9 @@ pub struct Instruction {
     /// kernel whose cost per row dwarfs narrowing run over the selected rows only, a vectorized
     /// kernel runs over the batch and keeps only the selected rows' errors, and an arm no row
     /// selects skips the instruction altogether. Only an instruction that can report a per-row
-    /// error, calls out of the VM, or parses or formats text in a cast that yields null for a
-    /// failure carries a selection; any other instruction's result on an unselected row is never
-    /// observed.
+    /// error, calls out of the VM, parses or formats text in a cast that yields null for a
+    /// failure, or parses JSON documents carries a selection; any other instruction's result on an
+    /// unselected row is never observed.
     pub selection: Option<RegisterRef>,
 }
 

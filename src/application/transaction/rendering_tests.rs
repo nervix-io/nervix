@@ -14,13 +14,14 @@ use nervix_models::{
     ConfigurationTransition, DomainLifecycleAction, DomainLifecycleImpact, DomainName,
     ExecutionStepImpactReport, ExecutionStepOutcome, ForceFlushImpact, ImpactAttribution,
     ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactGateBoundary, ImpactNodeCoverage,
-    ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, ModelChangeAspect, ModelKind,
-    NodeRef, OperationImpactReason, OperationImpactReport, OwnershipMoveImpact, PauseRequirement,
-    PlannedExecutionStepImpact, QuiesceSubgraph, QuiescenceOutcome, RebuildImpact, RebuildReason,
-    RelayName, RequestedResourceVersion, ResourceBindingImpact, ResourceCatalogAction,
-    ResourceCatalogImpact, ResourceName, StatePurge, StateResetImpact, TransactionImpactReport,
-    TransactionInspection, TransactionLifecycle, TransactionOperation, TransactionOperationNumber,
-    TransactionOperationRange, TransactionPosition, TransactionReportFormat, TransactionStatus,
+    ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, InspectionFormat,
+    ModelChangeAspect, ModelKind, NodeRef, OperationImpactReason, OperationImpactReport,
+    OwnershipMoveImpact, PauseRequirement, PlannedExecutionStepImpact, QuiesceSubgraph,
+    QuiescenceOutcome, RebuildImpact, RebuildReason, RelayName, RequestedResourceVersion,
+    ResourceBindingImpact, ResourceCatalogAction, ResourceCatalogImpact, ResourceName, StatePurge,
+    StateResetImpact, TransactionImpactReport, TransactionInspection, TransactionLifecycle,
+    TransactionOperation, TransactionOperationNumber, TransactionOperationRange,
+    TransactionPosition, TransactionStatus,
 };
 
 use super::InspectionRendering;
@@ -198,7 +199,7 @@ fn text_renders_identity_scope_operations_and_steps_in_order() {
         three_operation_report(ImpactReportCompleteness::Complete),
     );
 
-    let text = InspectionRendering::new(&inspection).render(TransactionReportFormat::Text);
+    let text = InspectionRendering::new(&inspection).render(InspectionFormat::Text);
 
     let expected = [
         "transaction: 0199c1a0-7c1e",
@@ -242,7 +243,7 @@ fn a_selected_operation_leads_with_its_contribution_and_step_without_narrowing_t
         three_operation_report(ImpactReportCompleteness::Complete),
     );
 
-    let text = InspectionRendering::new(&inspection).render(TransactionReportFormat::Text);
+    let text = InspectionRendering::new(&inspection).render(InspectionFormat::Text);
     let lines = text.lines().collect::<Vec<_>>();
 
     let selected = lines
@@ -334,7 +335,7 @@ fn a_failed_transaction_and_an_incomplete_report_say_so() {
     )
     .assured("recording outcomes keeps the report's numbering");
 
-    let text = InspectionRendering::new(&failed).render(TransactionReportFormat::Text);
+    let text = InspectionRendering::new(&failed).render(InspectionFormat::Text);
 
     for expected in [
         "state: FAILED",
@@ -363,7 +364,7 @@ fn json_renders_the_same_typed_inspection() {
         three_operation_report(ImpactReportCompleteness::Complete),
     );
 
-    let json = InspectionRendering::new(&inspection).render(TransactionReportFormat::Json);
+    let json = InspectionRendering::new(&inspection).render(InspectionFormat::Json);
     let document: serde_json::Value =
         serde_json::from_str(&json).assured("FORMAT JSON prints one JSON document");
 
@@ -395,7 +396,7 @@ fn json_names_a_failure_inline_and_an_unselected_operation_as_null() {
         three_operation_report(ImpactReportCompleteness::Complete),
     );
 
-    let json = InspectionRendering::new(&inspection).render(TransactionReportFormat::Json);
+    let json = InspectionRendering::new(&inspection).render(InspectionFormat::Json);
     let document: serde_json::Value =
         serde_json::from_str(&json).assured("FORMAT JSON prints one JSON document");
 
@@ -692,7 +693,7 @@ fn text_names_every_operation_reason_effect_and_outcome() {
         every_kind_report(),
     );
 
-    let text = InspectionRendering::new(&inspection).render(TransactionReportFormat::Text);
+    let text = InspectionRendering::new(&inspection).render(InspectionFormat::Text);
 
     for expected in [
         "state: COMMITTING",
@@ -763,7 +764,7 @@ fn json_keeps_every_kind_of_the_same_report() {
         every_kind_report(),
     );
 
-    let json = InspectionRendering::new(&inspection).render(TransactionReportFormat::Json);
+    let json = InspectionRendering::new(&inspection).render(InspectionFormat::Json);
     let document: serde_json::Value =
         serde_json::from_str(&json).assured("FORMAT JSON prints one JSON document");
     let report: TransactionImpactReport = serde_json::from_value(document["report"].clone())

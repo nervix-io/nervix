@@ -84,8 +84,8 @@ use nervix_models::{
     RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
     RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
     SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmRejectedStatePolicy,
-    WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
+    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -160,12 +160,12 @@ use crate::{
         AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
     },
     runtime_schema::{
-        CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool,
-        RuntimeProjectionComponent, RuntimeRecordBatch, RuntimeRecordBatchBuilder,
-        RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError, RuntimeSchemaOperation,
-        RuntimeValue, RuntimeValueColumn, RuntimeValueLocation, RuntimeVmOperation,
-        compile_codec_with_protobuf, compile_schema, decode_with_codec, parse_as_type_from_arrow,
-        runtime_value_from_arrow_array,
+        CodecError, CompiledCodec, CompiledSchema, ProtobufCodecDescriptors,
+        ProtobufDescriptorPool, RuntimeProjectionComponent, RuntimeRecordBatch,
+        RuntimeRecordBatchBuilder, RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError,
+        RuntimeSchemaOperation, RuntimeValue, RuntimeValueColumn, RuntimeValueLocation,
+        RuntimeVmOperation, compile_codec_with_protobuf, compile_schema, decode_with_codec,
+        parse_as_type_from_arrow, runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
 };
@@ -545,8 +545,7 @@ use wasm_processor::{
 };
 use wasm_state::{
     CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,
-    ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary,
-    WasmCheckpointProgress, WasmGuestState,
+    ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary, WasmGuestState,
 };
 use wasm_state_recovery::RaisedWasmStateRecoveries;
 pub(crate) use wasm_state_recovery::WasmStateRecoveryRequest;
