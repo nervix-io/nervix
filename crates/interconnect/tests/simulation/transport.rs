@@ -21,9 +21,9 @@ use arrow_schema::{DataType, Field, Schema};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass};
 use nervix_interconnect::{
-    Envelope, InterconnectRequest, PeerTarget, ReceivedEnvelope, RelayDelivery, RelayPayload,
-    RelayPayloadKind, TlsConfigBundle, Transport, TransportClock, TransportEntropy, TransportError,
-    TransportOptions,
+    ConnectionFailureReason, Envelope, InterconnectRequest, PeerTarget, PoolClass,
+    ReceivedEnvelope, RelayDelivery, RelayPayload, RelayPayloadKind, RequestError, RequestSubquota,
+    TlsConfigBundle, Transport, TransportClock, TransportEntropy, TransportError, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, DomainName, NodeEndpoint, RelayName, RemoteAckRegistration};
 use rcgen::{
@@ -34,8 +34,8 @@ use rkyv::{Archive, Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use super::runner::{
-    ClockSkew, HostSupervisor, SimulatedEntropy, SimulatedUtc, SimulationBounds, SimulationConfig,
-    Topology,
+    ClockSkew, HostSupervisor, SemanticTrace, SimulatedEntropy, SimulatedUtc, SimulationBounds,
+    SimulationConfig, Topology, TraceEvent,
 };
 
 const CLUSTER: &str = "simulated";
@@ -127,6 +127,23 @@ impl InterconnectRequest for BatchRequest {
 
     const NAME: &'static str = "simulation_arrow_batch";
     const TIMEOUT: Duration = Duration::from_secs(10);
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct LivenessRequest;
+
+#[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+struct LivenessResponse {
+    peer: ClusterNodeName,
+}
+
+impl InterconnectRequest for LivenessRequest {
+    type Response = LivenessResponse;
+
+    const NAME: &'static str = "simulation_liveness";
+    const CLASS: PoolClass = PoolClass::Management;
+    const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
+    const TIMEOUT: Duration = Duration::from_secs(1);
 }
 
 fn arrow_batch() -> Vec<u8> {
@@ -508,4 +525,357 @@ fn multiple_peers_and_invalid_authentication_use_production_transport_contract()
         });
     });
     assert!(result.is_ok(), "{result:?}");
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NetworkFault {
+    PartitionBeforeConnect,
+    AsymmetricBeforeConnect,
+    HeldExchange,
+    PartitionedExchange,
+}
+
+impl NetworkFault {
+    fn name(self) -> &'static str {
+        match self {
+            Self::PartitionBeforeConnect => "partition before connect",
+            Self::AsymmetricBeforeConnect => "one-way partition before connect",
+            Self::HeldExchange => "held authenticated exchange",
+            Self::PartitionedExchange => "partitioned authenticated exchange",
+        }
+    }
+
+    fn install(self, simulation: &mut turmoil::Sim<'_>) {
+        match self {
+            Self::PartitionBeforeConnect => simulation.partition("client", "server"),
+            Self::AsymmetricBeforeConnect => simulation.partition_oneway("server", "client"),
+            Self::HeldExchange | Self::PartitionedExchange => {}
+        }
+    }
+
+    fn repair(self) {
+        match self {
+            Self::PartitionBeforeConnect | Self::PartitionedExchange => {
+                turmoil::repair("client", "server");
+            }
+            Self::AsymmetricBeforeConnect => {
+                turmoil::repair_oneway("server", "client");
+            }
+            Self::HeldExchange => turmoil::release("client", "server"),
+        }
+    }
+}
+
+async fn wait_for_connection(transport: &Transport, peer: &ClusterNodeName) {
+    tokio::time::timeout(HOST_DEADLINE, async {
+        while !transport.is_connected_to(peer) {
+            tokio::task::consume_budget().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .assured("the repaired peer becomes transport-ready within the simulated deadline");
+}
+
+fn assert_bounded(transport: &Transport) {
+    let snapshot = transport.snapshot();
+    let connections: usize = snapshot.connections.iter().flatten().sum();
+    assert!(
+        connections <= 12,
+        "one peer has at most six connections in each direction: {snapshot:?}"
+    );
+    assert!(
+        snapshot
+            .pending_operations
+            .iter()
+            .flatten()
+            .all(|count| *count <= 1)
+    );
+    let failures: u64 = snapshot.counters.connection_failures.iter().flatten().sum();
+    assert!(
+        failures < 100,
+        "bounded backoff prevents a retry storm: {snapshot:?}"
+    );
+    let tcp_streams = turmoil::established_tcp_stream_count();
+    assert!(
+        tcp_streams <= 64,
+        "simulated TCP streams grew without bound: {tcp_streams}"
+    );
+    let tasks = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    assert!(
+        tasks <= 128,
+        "the simulated host accumulated {tasks} live tasks"
+    );
+}
+
+async fn assert_liveness(transport: &Transport, peer: &ClusterNodeName) {
+    let response = transport
+        .request(peer, LivenessRequest)
+        .await
+        .assured("the authenticated peer answers the liveness probe");
+    assert_eq!(response.peer, *transport.node_id());
+}
+
+async fn assert_liveness_timeout(transport: &Transport, peer: &ClusterNodeName) {
+    let started = turmoil::elapsed();
+    let error = match transport.request(peer, LivenessRequest).await {
+        Ok(_) => panic!("disrupted liveness traffic must expire"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error.current_context(), RequestError::Timeout { timeout, .. } if *timeout == Duration::from_secs(1)),
+        "{error:?}"
+    );
+    assert!(turmoil::elapsed() >= started + Duration::from_secs(1));
+}
+
+async fn assert_stopped(transport: &Transport) {
+    assert_eq!(transport.active_outbound_connections().await, 0);
+    let snapshot = transport.snapshot();
+    assert!(
+        snapshot
+            .connections
+            .iter()
+            .flatten()
+            .all(|count| *count == 0)
+    );
+    assert!(
+        snapshot
+            .pending_operations
+            .iter()
+            .flatten()
+            .all(|count| *count == 0)
+    );
+    assert!(snapshot.leased_streams.iter().all(|count| *count == 0));
+}
+
+async fn bind_fault_server(credentials: Credentials, seed: u64) -> Transport {
+    let server = bind("server", credentials, seed).await;
+    server
+        .register_handler::<BatchRequest, _, _>(|context, request| async move {
+            BatchResponse {
+                rows: decode_arrow(&request.ipc),
+                peer: context.peer_node_id().clone(),
+            }
+        })
+        .assured("the fixture handler is registered once per listener");
+    server
+        .register_handler::<LivenessRequest, _, _>(|context, _| async move {
+            LivenessResponse {
+                peer: context.peer_node_id().clone(),
+            }
+        })
+        .assured("the fixture liveness handler is registered once per listener");
+    server.replace_live_nodes(&BTreeSet::from([
+        ClusterNodeName::parse("client").assured("fixture node name is valid"),
+        ClusterNodeName::parse("server").assured("fixture node name is valid"),
+    ]));
+    server
+}
+
+fn exercise_fault(fault: NetworkFault, seed: u64) -> Vec<TraceEvent> {
+    let authority = Authority::new();
+    let server_credentials = authority.issue("server");
+    let client_credentials = authority.issue("client");
+    let (ready_tx, ready_rx) = watch::channel(false);
+    let (done_tx, done_rx) = watch::channel(false);
+    let (restart_tx, restart_rx) = watch::channel(false);
+    let (restarted_tx, restarted_rx) = watch::channel(false);
+    let (finished_tx, finished_rx) = watch::channel(0_usize);
+    let trace = SemanticTrace::default();
+    let event_trace = trace.clone();
+    let mut scenario_config = config(seed);
+    scenario_config.bounds.simulated_duration = Duration::from_secs(60);
+    let result = scenario_config.run(fault.name(), move |simulation| {
+        let server_finished = finished_tx.clone();
+        simulation.host("server", move || {
+            let credentials = server_credentials.clone();
+            let ready = ready_tx.clone();
+            let mut done = done_rx.clone();
+            let mut restart = restart_rx.clone();
+            let restarted = restarted_tx.clone();
+            let finished = server_finished.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let server = bind_fault_server(credentials.clone(), seed).await;
+                    ready.send_replace(true);
+                    if let NetworkFault::PartitionedExchange = fault {
+                        wait_for(&mut restart).await;
+                        server.shutdown().await;
+                        let rebuilt = bind_fault_server(credentials, seed).await;
+                        restarted.send_replace(true);
+                        wait_for(&mut done).await;
+                        assert_bounded(&rebuilt);
+                        rebuilt.shutdown().await;
+                        assert_stopped(&rebuilt).await;
+                        return Ok::<(), io::Error>(());
+                    }
+                    let completed = async {
+                        while !*done.borrow() {
+                            tokio::task::consume_budget().await;
+                            done.changed()
+                                .await
+                                .assured("the client remains alive during repair");
+                        }
+                    };
+                    tokio::time::timeout(Duration::from_secs(40), completed)
+                        .await
+                        .assured("the client completes before the server budget expires");
+                    assert_bounded(&server);
+                    server.shutdown().await;
+                    assert_stopped(&server).await;
+                    Ok::<(), io::Error>(())
+                }).await;
+                finished.send_modify(|count| {
+                    *count = count.checked_add(1).assured("only two fixture hosts finish");
+                });
+                result
+            }
+        });
+        let client_finished = finished_tx.clone();
+        let client_trace = event_trace.clone();
+        simulation.host("client", move || {
+            let credentials = client_credentials.clone();
+            let mut ready = ready_rx.clone();
+            let done = done_tx.clone();
+            let restart = restart_tx.clone();
+            let mut restarted = restarted_rx.clone();
+            let finished = client_finished.clone();
+            let trace = client_trace.clone();
+            async move {
+                let result = HostSupervisor::run(async move {
+                    let client_seed = seed
+                        .checked_add(1)
+                        .assured("fixture seeds are below u64::MAX");
+                    let client = bind("client", credentials, client_seed).await;
+                    let peer = ClusterNodeName::parse("server").assured("fixture node name is valid");
+                    let live = BTreeSet::from([client.node_id().clone(), peer.clone()]);
+                    client.replace_live_nodes(&live);
+                    wait_for(&mut ready).await;
+                    register_peer(&client, "server").await;
+                    trace.record("client", format!("{fault:?} installed; peer registered"));
+                    match fault {
+                        NetworkFault::PartitionBeforeConnect | NetworkFault::AsymmetricBeforeConnect => {
+                            let setup_failed = async {
+                                loop {
+                                    tokio::task::consume_budget().await;
+                                    let counters = client.snapshot().counters;
+                                    let failures = counters.connection_failures
+                                        [PoolClass::Management.index()]
+                                        [ConnectionFailureReason::Setup.index()];
+                                    if failures > 0 {
+                                        break;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(10)).await;
+                                }
+                            };
+                            tokio::time::timeout(HOST_DEADLINE, setup_failed)
+                                .await
+                                .assured("the partitioned dial reports a setup failure");
+                            assert!(!client.is_connected_to(&peer));
+                            assert_liveness_timeout(&client, &peer).await;
+                            let disruption_deadline =
+                                tokio::time::Instant::now() + Duration::from_secs(12);
+                            tokio::time::sleep_until(disruption_deadline).await;
+                            assert!(!client.is_connected_to(&peer));
+                            assert_bounded(&client);
+                            trace.record("client", "setup failed through prolonged partition");
+                            fault.repair();
+                            trace.record("client", "link repaired");
+                        }
+                        NetworkFault::HeldExchange | NetworkFault::PartitionedExchange => {
+                            wait_for_connection(&client, &peer).await;
+                            assert_liveness(&client, &peer).await;
+                            let first = client
+                                .request(&peer, BatchRequest { ipc: arrow_batch() })
+                                .await
+                                .assured("the first authenticated request succeeds");
+                            assert_eq!(first.rows, 3);
+                            trace.record("client", "authenticated exchange completed");
+                            if let NetworkFault::HeldExchange = fault {
+                                turmoil::hold("client", "server");
+                            } else {
+                                turmoil::partition("client", "server");
+                            }
+                            let started = turmoil::elapsed();
+                            assert_liveness_timeout(&client, &peer).await;
+                            let request = BatchRequest { ipc: arrow_batch() };
+                            let deadline = Duration::from_secs(2);
+                            let error = match client.request_with_timeout(&peer, request, deadline).await {
+                                Ok(_) => panic!("disrupted traffic must hit its physical request deadline"),
+                                Err(error) => error,
+                            };
+                            assert!(
+                                matches!(error.current_context(), RequestError::Timeout { timeout, .. } if *timeout == deadline),
+                                "{error:?}"
+                            );
+                            assert!(turmoil::elapsed() >= started + Duration::from_secs(3));
+                            assert_bounded(&client);
+                            trace.record("client", "request reached its two-second deadline");
+                            fault.repair();
+                            trace.record("client", "link repaired");
+                            if let NetworkFault::PartitionedExchange = fault {
+                                // Dropped TCP segments can leave an established HTTP/2 session
+                                // unusable. Close the listener and its sockets, then retire the
+                                // client pool through the public topology API.
+                                restart.send_replace(true);
+                                wait_for(&mut restarted).await;
+                                client.replace_outbound_targets(&Default::default());
+                                assert!(!client.is_connected_to(&peer));
+                                register_peer(&client, "server").await;
+                                trace.record("client", "listener rebound and pool reconnected");
+                            }
+                        }
+                    }
+                    wait_for_connection(&client, &peer).await;
+                    assert_liveness(&client, &peer).await;
+                    let response = client
+                        .request(&peer, BatchRequest { ipc: arrow_batch() })
+                        .await
+                        .assured("the repaired authenticated peer answers again");
+                    assert_eq!(response.rows, 3);
+                    assert_eq!(response.peer, *client.node_id());
+                    assert_bounded(&client);
+                    trace.record("client", "authenticated exchange recovered");
+                    done.send_replace(true);
+                    client.shutdown().await;
+                    assert_stopped(&client).await;
+                    Ok::<(), io::Error>(())
+                }).await;
+                finished.send_modify(|count| {
+                    *count = count.checked_add(1).assured("only two fixture hosts finish");
+                });
+                result
+            }
+        });
+        simulation.client("observer", async move {
+            let mut finished = finished_rx;
+            tokio::time::timeout(Duration::from_secs(50), async {
+                while *finished.borrow() < 2 {
+                    tokio::task::consume_budget().await;
+                    finished.changed().await.assured("the fixture hosts remain alive");
+                }
+            }).await.assured("the fault scenario hosts finish within their simulated budget");
+            Ok(())
+        });
+        fault.install(simulation);
+    });
+    assert!(result.is_ok(), "fault {fault:?} seed {seed}: {result:?}");
+    trace.events()
+}
+
+#[test]
+fn network_disruption_respects_deadlines_and_repairs_authenticated_service() {
+    for (fault, seed) in [
+        (NetworkFault::PartitionBeforeConnect, 61),
+        (NetworkFault::AsymmetricBeforeConnect, 62),
+        (NetworkFault::HeldExchange, 63),
+        (NetworkFault::PartitionedExchange, 64),
+    ] {
+        let first = exercise_fault(fault, seed);
+        let replay = exercise_fault(fault, seed);
+        assert_eq!(first, replay, "fault {fault:?} seed {seed} did not replay");
+    }
 }
