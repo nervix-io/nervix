@@ -295,6 +295,15 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `ip_family`, and `ip_unmap`, and write it with `ip_to_string`. Families never mix: an
   IPv4-mapped `::ffff:a.b.c.d` address matches no IPv4 network until `ip_unmap`. Write a literal
   network in exact CIDR form without host bits, or the statement is rejected.
+- Read embedded JSON text with `JSON_VALUE(doc, '$.path' AS TYPE)`, `TRY_JSON_VALUE(...)`, and
+  `JSON_EXISTS(doc, '$.path')`. Declare the exact result type, including `VEC<...>` and
+  `ARRAY<..., n>`; `DATETIME` and `BYTES` are not readable, so read text as `STRING` and convert
+  it. Paths are `$` followed by `.name`, `["any name"]`, and `[index]` steps. Missing values and
+  JSON null both read as null, so write results to `OPTIONAL` fields and use `JSON_EXISTS` to tell
+  them apart; `JSON_VALUE` fails the message for a malformed document, a value of another kind, a
+  number out of range, or an `ARRAY` of the wrong length, while `TRY_JSON_VALUE` yields null.
+  Extractions from one document column share one parse, so read many fields freely. Check
+  `Filter-Map Functions` → `JSON Documents` for paths, number rules, and limits.
 - Read URL parts with `url_scheme`, `url_host`, `url_port`, `url_path`, `url_query`,
   `url_fragment`, `url_query_value`, and `url_query_values`, and decode escapes with `url_decode`.
   Inputs must be absolute URLs; prefix a request target with a base explicitly. Host, port, query,

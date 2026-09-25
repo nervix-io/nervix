@@ -319,10 +319,6 @@ where
 }
 
 #[cfg(all(test, feature = "turmoil"))]
-#[path = "../tests/simulation/runner.rs"]
-mod simulation_runner;
-
-#[cfg(all(test, feature = "turmoil"))]
 mod simulation_checks {
     use std::{
         num::NonZeroUsize,
@@ -332,10 +328,8 @@ mod simulation_checks {
     use meticulous::OptionExt as _;
     use nervix_execution::{CpuClass, Executor, MemoryClass};
 
-    use super::{
-        RelayGrantDisposition, RelayGrantResponse, decode_rkyv, encode_rkyv,
-        simulation_runner::{HostSupervisor, SimulationBounds, SimulationConfig, Topology},
-    };
+    use super::{RelayGrantDisposition, RelayGrantResponse, decode_rkyv, encode_rkyv};
+    use crate::simulation_runner::{HostSupervisor, SimulationBounds, SimulationConfig, Topology};
 
     #[test]
     fn seeded_wire_round_trips_use_the_execution_owner() {

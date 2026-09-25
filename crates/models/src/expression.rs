@@ -1,7 +1,9 @@
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
-use crate::{BranchName, BuiltinFunctionName, FieldName, ParseAsType, RelayName, UdfName};
+use crate::{
+    BranchName, BuiltinFunctionName, FieldName, JsonPath, ParseAsType, RelayName, UdfName,
+};
 
 /// An executable NSPL expression with parser-only spans removed.
 #[derive(
@@ -86,6 +88,31 @@ pub enum Expression {
         expression: Box<Self>,
         target: ParseAsType,
     },
+    /// `JSON_VALUE(document, 'path' AS target)`: the value `path` leads to in the JSON text
+    /// `document` holds, read as `target`. A missing value and JSON null are a typed null, and a
+    /// document or value that cannot be read as `target` fails the message.
+    JsonValue {
+        #[rkyv(omit_bounds)]
+        document: Box<Self>,
+        path: JsonPath,
+        target: ParseAsType,
+    },
+    /// `TRY_JSON_VALUE(document, 'path' AS target)`: the read `JsonValue` performs, except that a
+    /// document or value that cannot be read as `target` becomes a typed null instead of failing
+    /// the message.
+    TryJsonValue {
+        #[rkyv(omit_bounds)]
+        document: Box<Self>,
+        path: JsonPath,
+        target: ParseAsType,
+    },
+    /// `JSON_EXISTS(document, 'path')`: whether `path` leads to a value, JSON null included, in
+    /// the JSON text `document` holds. A document that cannot be read fails the message.
+    JsonExists {
+        #[rkyv(omit_bounds)]
+        document: Box<Self>,
+        path: JsonPath,
+    },
 }
 
 #[derive(
@@ -114,7 +141,19 @@ impl Expression {
             Self::Field(field) => visitor(field),
             Self::Unary { expression, .. }
             | Self::Cast { expression, .. }
-            | Self::TryCast { expression, .. } => {
+            | Self::TryCast { expression, .. }
+            | Self::JsonValue {
+                document: expression,
+                ..
+            }
+            | Self::TryJsonValue {
+                document: expression,
+                ..
+            }
+            | Self::JsonExists {
+                document: expression,
+                ..
+            } => {
                 expression.visit_fields(visitor);
             }
             Self::Binary { left, right, .. } => {
@@ -177,7 +216,19 @@ impl Expression {
             Self::Literal(_) | Self::Field(_) => {}
             Self::Unary { expression, .. }
             | Self::Cast { expression, .. }
-            | Self::TryCast { expression, .. } => {
+            | Self::TryCast { expression, .. }
+            | Self::JsonValue {
+                document: expression,
+                ..
+            }
+            | Self::TryJsonValue {
+                document: expression,
+                ..
+            }
+            | Self::JsonExists {
+                document: expression,
+                ..
+            } => {
                 expression.visit_calls(visitor);
             }
             Self::Binary { left, right, .. } => {
@@ -249,7 +300,19 @@ impl Expression {
             Self::Literal(_) | Self::Field(_) => {}
             Self::Unary { expression, .. }
             | Self::Cast { expression, .. }
-            | Self::TryCast { expression, .. } => {
+            | Self::TryCast { expression, .. }
+            | Self::JsonValue {
+                document: expression,
+                ..
+            }
+            | Self::TryJsonValue {
+                document: expression,
+                ..
+            }
+            | Self::JsonExists {
+                document: expression,
+                ..
+            } => {
                 expression.visit_udf_calls(visitor);
             }
             Self::Binary { left, right, .. } => {
@@ -670,6 +733,49 @@ impl OutputBranch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visitors_reach_the_document_of_every_json_extraction() {
+        let path = crate::JsonPath::parse("$.a").expect("the path is valid");
+        let document = || {
+            Box::new(Expression::UdfCall {
+                function: UdfName::parse("decode").expect("valid UDF name"),
+                arguments: vec![Expression::Call {
+                    function: BuiltinFunctionName::parse("lower").expect("valid function name"),
+                    arguments: vec![Expression::Field(FieldReference::bare(
+                        FieldName::parse("raw").expect("valid field name"),
+                    ))],
+                }],
+            })
+        };
+        for expression in [
+            Expression::JsonValue {
+                document: document(),
+                path: path.clone(),
+                target: ParseAsType::I64,
+            },
+            Expression::TryJsonValue {
+                document: document(),
+                path: path.clone(),
+                target: ParseAsType::String,
+            },
+            Expression::JsonExists {
+                document: document(),
+                path: path.clone(),
+            },
+        ] {
+            let mut fields = Vec::new();
+            expression.visit_fields(&mut |field| fields.push(field.field.as_str().to_string()));
+            assert_eq!(fields, ["raw"]);
+            let mut calls = Vec::new();
+            expression.visit_calls(&mut |function, _| calls.push(function.as_str().to_string()));
+            assert_eq!(calls, ["lower"]);
+            let mut udf_calls = Vec::new();
+            expression
+                .visit_udf_calls(&mut |function, _| udf_calls.push(function.as_str().to_string()));
+            assert_eq!(udf_calls, ["decode"]);
+        }
+    }
 
     #[test]
     fn visitors_reach_the_operand_of_a_tolerant_conversion() {

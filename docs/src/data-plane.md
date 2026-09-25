@@ -83,6 +83,8 @@ The current VM surface covers:
 - arithmetic operators: `+`, `-`, `*`, `/`, `%`
 - comparisons and boolean operators: `=`, `!=`, `>`, `<`, `>=`, `<=`, `AND`, `OR`, `NOT`
 - explicit casts and tolerant conversions
+- typed extraction from JSON text with `JSON_VALUE`, `TRY_JSON_VALUE`, and `JSON_EXISTS`, which
+  parse each document of a column once for every extraction a route makes from it
 - built-ins: `lower`, `upper`, `trim`, `length`, `coalesce`, `is_null`, `nullif`, `abs`, `contains`, `starts_with`, `ends_with`
 
 These expressions can be nested, and builtin calls can be chained.

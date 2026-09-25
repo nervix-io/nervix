@@ -4,7 +4,17 @@ use serde::{Deserialize, Serialize};
 use crate::{ClusterNodeName, Timestamp};
 
 #[derive(
-    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
 )]
 pub struct RemoteAckRegistration {
     pub ack_id: u64,

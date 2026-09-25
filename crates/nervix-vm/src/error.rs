@@ -10,6 +10,7 @@ use crate::{
     extremum::ClampBoundsDefect,
     ip_address::{IpFamily, NetworkDefect},
     ir::{RegisterRef, RegisterType},
+    json::JsonDefect,
     program::Span,
 };
 
@@ -126,6 +127,9 @@ pub enum SideErrorReason {
     /// millisecond field has no value for it.
     #[error("uuid_v7 execution time is before the Unix epoch")]
     UuidTimeBeforeEpoch,
+    /// A JSON extraction that could not read its document or value, or build its result.
+    #[error("{0}")]
+    Json(JsonDefect),
     /// A failure an injected function reported, with the code and text that function chose.
     #[error("{message}")]
     Injected { code: ErrorCode, message: String },
@@ -162,6 +166,7 @@ impl SideErrorReason {
             | Self::UnreadableIpAddress
             | Self::InvalidUrl { .. }
             | Self::InvalidPercentEncoding(_) => ErrorCode::CastFailed,
+            Self::Json(defect) => defect.code(),
             Self::Injected { code, .. } => *code,
         }
     }

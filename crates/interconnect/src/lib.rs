@@ -43,7 +43,9 @@ use strum::IntoStaticStr;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
+mod authentication;
 mod connection;
+mod entropy;
 mod identity;
 mod observation;
 mod operation;
@@ -53,13 +55,18 @@ mod request;
 mod runtime_state;
 #[cfg(all(test, feature = "shuttle"))]
 mod shuttle_test;
+#[cfg(all(test, feature = "turmoil"))]
+#[path = "../tests/simulation/runner.rs"]
+mod simulation_runner;
 mod wasm_state;
 mod wire;
 
+pub use authentication::TransportClock;
 pub use connection::{
     ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
     IncomingByteStream, RelayAdmission, RelayCancellationGuard,
 };
+pub use entropy::TransportEntropy;
 pub use identity::TlsConfigBundle;
 pub use observation::{
     ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, RequestOutcome,
@@ -121,6 +128,8 @@ pub struct TransportOptions {
     pub reconnect_backoff: Duration,
     pub max_reconnect_backoff: Duration,
     pub shutdown_drain_timeout: Duration,
+    /// The source of this transport's process epoch and relay grant identifiers.
+    pub entropy: TransportEntropy,
 }
 
 impl Default for TransportOptions {
@@ -139,6 +148,7 @@ impl Default for TransportOptions {
             reconnect_backoff: DEFAULT_RECONNECT_BACKOFF,
             max_reconnect_backoff: DEFAULT_MAX_RECONNECT_BACKOFF,
             shutdown_drain_timeout: DEFAULT_SHUTDOWN_DRAIN_TIMEOUT,
+            entropy: TransportEntropy::operating_system(),
         }
     }
 }
@@ -1030,6 +1040,10 @@ pub enum TlsConfigError {
     Expired,
     #[error("certificate is not valid yet")]
     NotYetValid,
+    #[error("the certificate clock has no current time")]
+    ClockUnavailable,
+    #[error("the certificate clock reads outside the representable certificate time range")]
+    ClockOutOfRange,
 }
 
 pub fn install_rustls_crypto_provider() {
@@ -1095,6 +1109,7 @@ mod tests {
             tls_path("ca.pem"),
             tls_path("node.pem"),
             tls_path("node-key.pem"),
+            TransportClock::system(),
         )
         .expect("test TLS should load")
     }
@@ -1157,8 +1172,13 @@ mod tests {
                 .expect("test node certificate should be written");
             std::fs::write(&key_path, key.serialize_pem())
                 .expect("test node key should be written");
-            TlsConfigBundle::from_pem_files(&self.path, certificate_path, key_path)
-                .expect("test node TLS identity should load")
+            TlsConfigBundle::from_pem_files(
+                &self.path,
+                certificate_path,
+                key_path,
+                TransportClock::system(),
+            )
+            .expect("test node TLS identity should load")
         }
     }
 

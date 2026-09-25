@@ -344,11 +344,13 @@ impl TransportState {
                 _ = interval.tick() => {}
             }
 
+            // Report in registration order, not map order, so every process sends the same reports
+            // in the same sequence.
             let registrations = self
                 .relay_attempts
                 .iter()
                 .filter_map(|record| record.progress_registration())
-                .collect::<Vec<_>>();
+                .collect::<BTreeSet<_>>();
             let mut reports = FuturesUnordered::new();
             for registration in registrations {
                 tokio::task::consume_budget().await;
@@ -953,7 +955,7 @@ impl TransportState {
 
     fn next_grant_id(&self) -> u64 {
         loop {
-            let id = OsRng.next_u64();
+            let id = self.options.entropy.next_u64();
             if id != 0 && !self.grants.contains_key(&id) {
                 return id;
             }
