@@ -220,6 +220,58 @@ test-connectors *args:
 test-client-wire *args:
     cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
 
+# Rewrite the client wire conformance corpus from the encoder's current output. Review the
+# regenerated `corpus.report` before committing it: every client implementation is held to it.
+update-client-wire-corpus:
+    NERVIX_UPDATE_CLIENT_WIRE_CORPUS=1 cargo test --package nervix-client-wire --lib -- \
+        tests::conformance
+
+# Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
+# linked against it, the Go probe with its generated FlatBuffers code, and the TypeScript probe
+# bundled with its generated code for Node.js and Bun. Every generated file lands under the
+# artifacts directory, never in the source tree.
+build-client-conformance:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
+    library_dir={{ quote(cargo_target_dir + "/debug") }}
+    schema="${PWD}/crates/client-wire/schema/session.fbs"
+    mkdir -p "${artifacts}"
+    cargo build --package nervix-client-ffi
+    cc -std=c11 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include \
+        tests/client_conformance/c/probe.c \
+        -L "${library_dir}" -lnervix_client_ffi -Wl,-rpath,"${library_dir}" \
+        -o "${artifacts}/c-probe"
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include \
+        tests/client_conformance/cpp/probe.cpp \
+        -L "${library_dir}" -lnervix_client_ffi -Wl,-rpath,"${library_dir}" \
+        -o "${artifacts}/cpp-probe"
+    rm -rf "${artifacts}/go" && mkdir -p "${artifacts}/go"
+    cp tests/client_conformance/go/go.mod tests/client_conformance/go/go.sum \
+        tests/client_conformance/go/*.go "${artifacts}/go/"
+    flatc --go -o "${artifacts}/go" "${schema}"
+    (cd "${artifacts}/go" && go build -o "${artifacts}/go-probe" .)
+    rm -rf "${artifacts}/node-src" "${artifacts}/node" && mkdir -p "${artifacts}/node-src"
+    cp tests/client_conformance/node/package.json tests/client_conformance/node/package-lock.json \
+        tests/client_conformance/node/probe.ts "${artifacts}/node-src/"
+    flatc --ts -o "${artifacts}/node-src/generated" "${schema}"
+    (cd "${artifacts}/node-src" && npm ci --no-audit --no-fund && \
+        ./node_modules/.bin/esbuild probe.ts --bundle --platform=node --format=esm \
+            --target=es2022 --outfile="${artifacts}/node/probe.mjs")
+
+# Run the cross-language client probes against in-process clusters. Every probe prints the same
+# report, which the scenario compares with its one expected report. Select runtimes with a tag
+# expression, for example `just test-client-conformance '@client_probe_python or @client_probe_java'`.
+test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps build-client-conformance
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
+    cargo test --features testing --test scenarios -- \
+        --input tests/features/runtime/client_conformance.feature \
+        --tags {{ quote(tags) }} {{ args }}
+
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail

@@ -94,11 +94,12 @@ use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
+    client_conformance::{ClientProbe, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE, corpus_report},
     cluster::{
         BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        client_connect_options, client_domain,
+        TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
+        WebsocketExchangeAction, client_connect_options, client_domain,
     },
     cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
@@ -337,6 +338,8 @@ struct ScenarioWorld {
     /// When the last signal was sent to the server process, taken before the signal is delivered
     /// so an exit measured against it can only look later, never earlier.
     last_server_signal_at: Option<Instant>,
+    /// The cross-language client probe a scenario started, until a step reads its report.
+    client_probe: Option<ClientProbe>,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -432,6 +435,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("server_process_http_load", &self.server_process_http_load)
             .field("held_resource_upload", &self.held_resource_upload.is_some())
             .field("last_server_signal_at", &self.last_server_signal_at)
+            .field("client_probe", &self.client_probe)
             .finish()
     }
 }
@@ -2174,6 +2178,109 @@ fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
         Path::new(artifact).is_file(),
         "client-wire baseline artifact was not written to {artifact}"
     );
+}
+
+/// How long a probe may take to open its session and subscription. Starting a JVM or compiling
+/// nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
+const CLIENT_PROBE_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[when(
+    expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
+            expecting {int} rows"
+)]
+async fn when_client_probe_subscribes(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    subscription: String,
+    relay: String,
+    node_id: String,
+    rows: usize,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let cluster = world.cluster();
+    let grpc_uri = cluster
+        .grpc_uri(&node_id)
+        .expect("the probe's node belongs to the cluster");
+    let console = cluster
+        .web_console_url(&node_id)
+        .expect("the probe's node belongs to the cluster");
+    let mut websocket_uri =
+        url::Url::parse(&console).expect("the harness builds a valid console URL");
+    websocket_uri
+        .set_scheme("ws")
+        .expect("an http URL can take the ws scheme");
+    websocket_uri.set_path("/console/ws");
+    let target = ProbeTarget {
+        grpc_uri,
+        websocket_uri: websocket_uri.to_string(),
+        username: TEST_AUTH_USERNAME.to_string(),
+        password: TEST_AUTH_PASSWORD.to_string(),
+        domain: world.domain.clone(),
+        relay: expand_placeholders(world, &relay),
+        subscription: expand_placeholders(world, &subscription),
+        rows,
+    };
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: node={node_id} target={target:?}"
+    ));
+    let mut probe = ClientProbe::start(runtime, target)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    probe
+        .wait_for_line(SUBSCRIBED_LINE, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
+
+#[when(expr = "the {string} client probe decodes the conformance corpus")]
+async fn when_client_probe_decodes_the_corpus(world: &mut ScenarioWorld, runtime: String) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let probe = ClientProbe::start_corpus(runtime)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
+
+#[then(expr = "within {string} the client probe reports the conformance corpus")]
+async fn then_client_probe_reports_the_corpus(world: &mut ScenarioWorld, within: String) {
+    let within =
+        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let probe = world
+        .client_probe
+        .take()
+        .verified("a preceding step started a client probe");
+    let report = probe
+        .finish(within)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let expected = corpus_report().expect("the conformance corpus report is checked in");
+    report
+        .check(&expected)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[then(expr = "within {string} the client probe reports")]
+async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[step] step: &Step) {
+    let within =
+        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let probe = world
+        .client_probe
+        .take()
+        .verified("a preceding step started a client probe");
+    let report = probe
+        .finish(within)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let expected = expand_placeholders(world, docstring(step));
+    report
+        .check(&expected)
+        .unwrap_or_else(|error| panic!("{error}"));
 }
 
 #[then(expr = "the server process exits with status {int}")]
@@ -21624,7 +21731,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
             "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
-             @http_emitter_expected_failure)"
+             @http_emitter_expected_failure) and (not @client_conformance_toolchain)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );

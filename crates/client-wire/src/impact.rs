@@ -166,7 +166,10 @@ pub(crate) fn encode_report<'fbb>(
     report: &TransactionImpactReport,
 ) -> Result<WIPOffset<wire::TransactionImpactReport<'fbb>>, Report<WireEncodeError>> {
     let domain = encoder.text("TransactionImpactReport.domain", report.domain().as_str())?;
-    let planning_basis = wire::Fingerprint::new(report.planning_basis().fingerprint());
+    let planning_basis = encoder.fingerprint(
+        "TransactionImpactReport.planning_basis",
+        report.planning_basis().fingerprint(),
+    )?;
     let completeness = encode_completeness(encoder, report.completeness())?;
     let operations = encoder.table_vector(
         "TransactionImpactReport.operations",
@@ -183,7 +186,7 @@ pub(crate) fn encode_report<'fbb>(
         &wire::TransactionImpactReportArgs {
             domain: Some(domain),
             position: wire_size(report.position().accepted_operations()),
-            planning_basis: Some(&planning_basis),
+            planning_basis: Some(planning_basis),
             completeness_type: completeness.discriminant,
             completeness: Some(completeness.value),
             operations: Some(operations),
@@ -199,7 +202,10 @@ pub(crate) fn decode_report(
 ) -> Result<TransactionImpactReport, Report<WireDecodeError>> {
     let domain: DomainName = decoder.name("TransactionImpactReport.domain", report.domain())?;
     let position = decoder.size("TransactionImpactReport.position", report.position())?;
-    let planning_basis = <[u8; 32]>::from(report.planning_basis().bytes());
+    let planning_basis = decoder.fingerprint(
+        "TransactionImpactReport.planning_basis",
+        report.planning_basis(),
+    )?;
     let completeness = decode_completeness(
         decoder,
         "TransactionImpactReport.completeness",
@@ -1828,12 +1834,13 @@ fn encode_branch_coverage<D: BranchCoverageUnion>(
         }
         ConcreteBranchCoverage::Selected { branch, keys } => {
             let branch = encoder.text("SelectedBranchCoverage.branch", branch.as_str())?;
-            let fingerprints = keys
-                .as_slice()
-                .iter()
-                .map(|key| wire::Fingerprint::new(key.fingerprint()))
-                .collect::<Vec<_>>();
-            let keys = encoder.scalars("SelectedBranchCoverage.keys", &fingerprints)?;
+            let keys = encoder.table_vector(
+                "SelectedBranchCoverage.keys",
+                keys.as_slice(),
+                |key, encoder| {
+                    encoder.fingerprint("SelectedBranchCoverage.keys", key.fingerprint())
+                },
+            )?;
             let selected = wire::SelectedBranchCoverage::create(
                 encoder.fbb(),
                 &wire::SelectedBranchCoverageArgs {
@@ -1863,12 +1870,15 @@ impl BranchCoverageMember<'_> {
             Self::Selected(selected) => {
                 let branch: BranchName =
                     decoder.name("SelectedBranchCoverage.branch", selected.branch())?;
-                let keys = selected.keys();
-                decoder.entries("SelectedBranchCoverage.keys", keys.len())?;
-                let mut fingerprints = Vec::with_capacity(keys.len());
-                for key in keys.iter() {
-                    fingerprints.push(BranchKeyFingerprint::new(<[u8; 32]>::from(key.bytes())));
-                }
+                let fingerprints = decoder.table_vector(
+                    "SelectedBranchCoverage.keys",
+                    selected.keys(),
+                    |key| {
+                        let fingerprint =
+                            decoder.fingerprint("SelectedBranchCoverage.keys", key)?;
+                        Ok(BranchKeyFingerprint::new(fingerprint))
+                    },
+                )?;
                 ensure_ascending("SelectedBranchCoverage.keys", fingerprints.iter())?;
                 match ConcreteBranchCoverage::selected(branch, fingerprints) {
                     Ok(coverage) => Ok(coverage),

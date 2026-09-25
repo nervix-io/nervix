@@ -1,0 +1,65 @@
+FRAME client_cancel.nxcm
+REQUEST 14 CANCEL target=18446744073709551615
+FRAME client_command.nxcm
+REQUEST 1 COMMAND query=str:43524541544520534348454d41206f726465727320282069642055363420293b204352454154452052454c4159206f726465727320534348454d41206f726465727320554e4252414e434845443b domain=tenant reference=0192d4e4-7b36-7c3e.9f00_5b2d8c3a1e44 expected_position=0 expected_preview=none
+FRAME client_command_bare.nxcm
+REQUEST 3 COMMAND query=str: domain=none reference=x expected_position=none expected_preview=none
+FRAME client_commit.nxcm
+REQUEST 2 COMMAND query=str:434f4d4d49543b domain=none reference=rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr expected_position=18446744073709551615 expected_preview=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44/18446744073709551615/a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
+FRAME client_subscribe.nxcm
+REQUEST 12 SUBSCRIBE domain=tenant statement=str:43524541544520535542534352495054494f4e206c6976652046524f4d206f72646572733b type=Row
+FRAME server_command_failed.nxsm
+REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+FRAME server_command_leader_unknown.nxsm
+REPLY 3 COMMAND not_leader reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+LEADER none
+FRAME server_command_redirect.nxsm
+REPLY 2 COMMAND not_leader reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+LEADER node=node-2 grpc=https://node-2.cluster.local:7443/ console=http://node-2.cluster.local:17420/console/
+FRAME server_command_unknown.nxsm
+REPLY 4 COMMAND outcome_unknown reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
+DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
+DIAGNOSTIC span=4294967295..4294967295 message=str:616e20656d707479207370616e206d61726b73206120706f736974696f6e
+DIAGNOSTIC span=none message=str:
+UNKNOWN cause=StillApplying
+FRAME server_rejected.nxsm
+REPLY 5 REJECTED InvalidRequest field=SubscribeRequest.subscription_type message=str:60537562736372696265526571756573742e737562736372697074696f6e5f7479706560206973207265717569726564
+FRAME server_rows.nxsm
+EVENT ROWS name=live generation=18446744073709551615
+ROW [tenant=str:61636d65 region=null token=redacted] u8=u8:0 i8=i8:-128 u16=u16:0 i16=i16:-32768 u32=u32:0 i32=i32:-2147483648 u64=u64:0 i64=i64:-9223372036854775808 f32=f32:80000000 f64=f64:fff0000000000000 flag=bool:false text=str: seen_at=datetime:-9223372036854775808 note=null secret=redacted maybe_secret=redacted triple=list[i32:-2147483648,i32:0,i32:2147483647] pairs=list[]
+ROW [tenant=str:61636d65 region=null token=redacted] u8=u8:255 i8=i8:127 u16=u16:65535 i16=i16:32767 u32=u32:4294967295 i32=i32:2147483647 u64=u64:18446744073709551615 i64=i64:9223372036854775807 f32=f32:7fc00001 f64=f64:0000000000000001 flag=bool:true text=str:c3bc6ec3af63c3b864c3a920f09fa6802000 seen_at=datetime:9223372036854775807 note=str:70726573656e74 secret=redacted maybe_secret=redacted triple=list[i32:1,i32:2,i32:3] pairs=list[list[u8:0,u8:255],list[u8:7,u8:8]]
+FRAME server_subscription_ended.nxsm
+EVENT ENDED name=live generation=18446744073709551615 reason=RelayChanged message=str:72656c617920276f72646572732720776173207265646566696e6564
+FRAME server_subscription_opened.nxsm
+REPLY 7 SUBSCRIBED name=live generation=18446744073709551615 domain=tenant relay=orders type=Row
+FIELD u8 U8 required public
+FIELD i8 I8 required public
+FIELD u16 U16 required public
+FIELD i16 I16 required public
+FIELD u32 U32 required public
+FIELD i32 I32 required public
+FIELD u64 U64 required public
+FIELD i64 I64 required public
+FIELD f32 F32 required public
+FIELD f64 F64 required public
+FIELD flag BOOL required public
+FIELD text STRING required public
+FIELD seen_at DATETIME required public
+FIELD note STRING nullable public
+FIELD secret STRING required sensitive
+FIELD maybe_secret I64 nullable sensitive
+FIELD triple FIXED_LIST<I32,3> required public
+FIELD pairs LIST<FIXED_LIST<U8,2>> required public
+BRANCH tenants
+KEY tenant STRING required public
+KEY region U16 nullable public
+KEY token STRING required sensitive
