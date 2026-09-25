@@ -155,6 +155,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   commit boundaries, durable versus volatile state, the former-owner startup fence, and
   observability. It is the single canonical shutdown chapter: work that finishes with shutdown
   documentation extends it rather than adding a competing page.
+- [Typed States And Validation Boundaries](docs/src/typed-states.md) is the authoritative
+  architecture reference for absence, distinct semantic states, owning validation boundaries,
+  state identity, private atomic representations, and external encodings. Any change to how a
+  missing value, state variant, required identity, conversion failure, or boundary representation
+  is modeled or validated must keep that chapter current in the same change. Interconnect,
+  domain-clock, and shutdown details remain in their own authoritative chapters.
 
 ## System Layers and Migration
 
