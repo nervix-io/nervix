@@ -170,10 +170,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   logical, while Wasmtime fuel and epoch yielding are physical safety controls.
 - Do not simulate a targeted WASM guest-state reset with `ALTER`, resource rebinding, or a
   stop/start cycle. A coordinated reset is a control-plane state-lifetime operation with an explicit
-  unbranched, concrete-branch, or all-branches target and a stable execution reference. Apart from
-  the `ON REJECTED STATE RESET` policy, which triggers it for one refused branch lifetime, it is not
-  an NSPL graph statement, so say that no other public NSPL reset syntax exists rather than inventing
-  one. Guest code reaches the same operation for its own branch through the SDK's
+  unbranched, concrete-branch, or all-branches target and a stable execution reference. Its one
+  public statement is `RESET WASM PROCESSOR ... STATE`, described below, and the
+  `ON REJECTED STATE RESET` policy triggers it for one refused branch lifetime; do not invent any
+  other reset syntax. Guest code reaches the same operation for its own branch through the SDK's
   `request_state_reset` or the raw `nervix_request_state_reset` import, which discards that
   callback's uncommitted output and input and never re-enters the guest. `REBIND RESOURCE` does
   start a fresh lifetime for every branch of each WASM processor it moves, but only as the
@@ -419,7 +419,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   defaults to `PRESERVE`. Offer `RESET` only when the user accepts losing that branch's computation
   state, and say that it replaces the lifetime once rather than retrying. Never present it as a
   recovery for a compile, initialization, fuel, memory, storage, replication, or authority failure;
-  none of those discards state under either value.
+  the policy discards state for none of those under either value. Only an owner loss whose forced
+  recovery cannot prepare the new owner recreates guest state without the guest's verdict.
 - To intentionally replace an existing WASM processor's guest state, use
   `RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
   Choose the explicit scope that matches its declared branch, and supply every branch-key field

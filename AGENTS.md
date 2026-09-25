@@ -136,6 +136,16 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   resolution, the pinning invariant for every binding kind, rebinding atomicity and rollback, the
   separation of uploads from bindings, the `DYNAMIC` TLS refresh, guarantees and limits, failure
   semantics and recovery, and observability.
+- [WASM State And Recovery](docs/src/wasm-state.md) is the authoritative architecture reference for
+  WASM processor guest state. Any change to what a guest save holds, the checkpoint that completes a
+  guest callback and the acknowledgements it holds back, local or replica durability of guest state,
+  state generations and the events that advance them, ownership fencing or forced recovery of guest
+  state, coordinated, guest-requested, or rejected-state resets, the guest save, restore, and reset
+  ABI, or how rebinding affects guest state must keep that chapter current in the same change. Its
+  scope includes branch ownership and unbranched execution, durable versus volatile state,
+  placements and revisions, failure before and after each durability and authority boundary,
+  stale-node catch-up and why state does not resurrect, quiescence, shutdown and restart, replay and
+  duplicate windows, observability, and limits.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph

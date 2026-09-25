@@ -481,18 +481,19 @@ memory bounds the branch instance's Wasmtime linear memory. See
 failure behavior.
 
 Guest initialization, input processing, requested-timeout callbacks, quiesce flushes, and state
-save, load, or reset each receive the snapshot selected for that operation. The guest cannot ask
+saves and restores each receive the snapshot selected for that operation. The guest cannot ask
 the engine for wall time or execute without an explicit snapshot.
 
 `ON REJECTED STATE` decides what happens when a recreated guest refuses the snapshot Nervix hands
 it. It is optional and defaults to `PRESERVE`, which keeps the refused snapshot and reports the
 refusal; `RESET` opts the processor in to replacing that branch's state lifetime once. Only the
 guest's own verdict on the saved bytes reaches this policy, so no module, limit, storage or
-replication failure can erase computation state. See
+replication failure can erase computation state through it. See
 [Recovering A Rejected Snapshot](wasm-processor-guests.md#recovering-a-rejected-snapshot).
 
-A WASM processor acknowledges an input only after the guest-state checkpoint that covers it is on
-the stable storage of the branch's owner and of every replica the schedule assigns the processor.
+An `ATTACHED` WASM processor, the default, acknowledges an input only after the guest-state
+checkpoint that covers it is on the stable storage of the branch's owner and of every replica the
+schedule assigns the processor; relay fan-out acknowledges the input of a `DETACHED` one upstream.
 A checkpoint that cannot get there negatively acknowledges what it covers and recreates the branch's
 guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` reads the committed binding,
 default state generation, latest coordinated reset and retained rejected-state recoveries together
@@ -503,7 +504,8 @@ reports those counts as unknown. Counts cover every active branch, while detaile
 recovery entries are bounded. `DESCRIBE WASM PROCESSOR <name> FORMAT JSON` serializes the same
 typed state inspection used by the text output; the command also returns it as a typed client
 outcome in either format. See
-[Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements).
+[Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements) and
+[WASM State And Recovery](wasm-state.md).
 
 ### Reset guest state from NSPL
 

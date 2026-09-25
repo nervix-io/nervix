@@ -65,6 +65,7 @@
   - [Data Plane](./data-plane.md)
   - [Data-Plane Concurrency](./data-plane-concurrency.md)
   - [Relay](./relay.md)
+  - [WASM State And Recovery](./wasm-state.md)
   - [Shutdown And Recovery](./shutdown.md)
   - [Integration Test Lifecycle](./integration-test-lifecycle.md)
 - [Developing Nervix](./developing-nervix.md)
