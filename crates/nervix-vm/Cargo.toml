@@ -8,6 +8,9 @@ version.workspace = true
 [lints]
 workspace = true
 
+[features]
+benchmark-allocations = []
+
 [dependencies]
 ahash = { workspace = true }
 aho-corasick = { workspace = true }

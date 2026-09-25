@@ -461,6 +461,11 @@ bench-wasm-checkpoint *args:
 bench-vm *args:
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
+# Run the same VM Criterion harness with one-shot allocation and output-size probes. The
+# instrumentation is compiled only for this recipe; use `bench-vm` for timing comparisons.
+bench-vm-alloc *args:
+    cargo bench --package nervix-vm --bench vm --features benchmark-allocations -- {{ args }}
+
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
 # such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
 benchmark *args:
