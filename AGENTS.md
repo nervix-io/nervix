@@ -125,7 +125,8 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   change to hot-path state publication, task or branch ownership, delivery or assignment fences,
   or the data-plane lock ratchet must keep that chapter current in the same change. Its scope
   includes the contentionless rule, published and pre-resolved state, mutable execution state,
-  bounded synchronization, and review classification for new lock sites.
+  bounded synchronization, review classification for new lock sites, and deterministic checks of
+  data-plane concurrency protocols.
 - [Resource Versions And Bindings](docs/src/resource-versions.md) is the authoritative architecture
   reference for resource versions and the models that bind them. Any change to the resource
   catalog, upload installation or replication, version resolution, how a binding is validated,
@@ -598,6 +599,12 @@ build and the existing tests, and nothing in it changes behavior.
 
 ### Integration coverage
 
+- A lock-free or wait-and-notify protocol on the data plane ships with a Shuttle check over its
+  production owner that names and asserts its invariant. Run it through `just test-shuttle` in CI
+  and preserve a failing schedule for replay. Use Loom only for memory-ordering claims, which
+  Shuttle's sequentially consistent scheduler cannot establish. Concurrency tests have no
+  wall-clock bounds or sleep polls; express deadline choices and progress with scheduler-visible
+  events. A publicly observable outcome still needs its Cucumber scenario.
 - [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) is the authoritative
   architecture reference for the lifecycle of the Cucumber scenario harness. Any change to how the
   harness starts, observes, diagnoses, or stops in-process nodes, server processes, scenarios, or
