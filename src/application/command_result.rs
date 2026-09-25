@@ -4,9 +4,9 @@
 //!
 //! - **Owns.** A command's typed disposition, its message and diagnostics, the outcomes of the
 //!   statements of a multi-statement command, and the transaction binding, admitted operation and
-//!   inspection read a command reports.
+//!   typed transaction or WASM-state inspection read a command reports.
 //! - **Depends on.** The vocabulary for transaction status, admission, preview identity and
-//!   inspection, cluster node names and service URLs, and consensus for the ways a reused
+//!   inspections, cluster node names and service URLs, and consensus for the ways a reused
 //!   execution reference can conflict and for the diagnostics its durable records keep.
 //! - **Must not know.** How an outcome travels to a client, or how any transport encodes it.
 
@@ -143,6 +143,8 @@ pub(in crate::application) struct CommandResult {
     /// The read of a command that inspected a transaction. It may name a transaction other than
     /// `transaction`, which keeps describing this session's own binding.
     pub(in crate::application) inspection: Option<Box<TransactionInspection>>,
+    /// The read-only state facts returned by a WASM processor description.
+    pub(in crate::application) wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
 }
 
 impl CommandResult {
@@ -156,6 +158,7 @@ impl CommandResult {
             transaction: None,
             transaction_admission: None,
             inspection: None,
+            wasm_state: None,
         }
     }
 

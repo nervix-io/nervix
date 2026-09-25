@@ -1147,6 +1147,8 @@ table CommandOutcome {
   /// inspected transaction may differ from `transaction`, which keeps describing this session's
   /// own binding.
   inspection: TransactionInspected;
+  /// JSON serialization of the typed WASM state inspection returned by a processor description.
+  wasm_state: string;
 }
 
 table TransactionAttached {

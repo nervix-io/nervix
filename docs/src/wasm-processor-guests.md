@@ -604,9 +604,31 @@ processor's `ON GLOBAL ERROR` policy, and then:
   input, pending output and timeouts. The branch never continues from that state: its next input
   instantiates the guest again from the committed checkpoint.
 
-`DESCRIBE WASM PROCESSOR` reports, for the branches on the node that answers it, how many latest
-checkpoints are awaiting local storage, awaiting replicas, or failed. A branch counts as failed until
-its next checkpoint completes.
+`DESCRIBE WASM PROCESSOR` reads the scheduled binding and state lifetime beside a read-only sample
+of the owner's current checkpoints. The reset line reports its `PUBLISHING` or `READY` phase, reason,
+scope, and selected generation. `PUBLISHING` remains fenced even if its initiating command has
+returned an error; `READY` means the new initial checkpoint reached its durability boundary and
+the schedule admitted the new lifetime. Reset readiness reports `RESETTING` while the selected
+checkpoint is unfinished, `AWAITING_USABLE_EXECUTION` when a selected single-branch checkpoint is
+confirmed but its scope is still fenced, and `READY` when the ready schedule is published. An
+all-branches reset remains `RESETTING` until ready publication because a sample of currently
+materialized branches cannot establish that every selected branch completed. Rejected-state recovery
+lines retain the original guest
+rejection class and the attempt's outcome, including a failed fresh initialization.
+
+For each current branch, the description gives its generation, committed and latest revision,
+checkpoint stage, and required and confirmed replica counts. `CAPTURED` has not reached local
+storage, `LOCALLY_DURABLE` reached it but has not completed the replica boundary, and
+`REPLICA_CONFIRMED` completed its boundary. A restored checkpoint whose earlier replica boundary
+cannot be reconstructed reports replica counts as unknown rather than claiming confirmation.
+`FAILED` leaves the previous committed revision current until another checkpoint succeeds. When
+the failure occurred before capture, the latest revision and replica counts are absent because no
+new checkpoint exists. Branch
+identities are fixed-size opaque fingerprints; guest bytes and branch field values never enter the
+inspection. Counts cover all current branches, while detailed branch and recovery entries have a
+fixed report limit. `FORMAT JSON` serializes the same typed inspection; it is also returned to
+clients beside either rendering. JSON is the state inspection itself, so an unscheduled processor
+reports `null` rather than inventing runtime progress.
 
 A failed synchronization of a node's stable storage is not retried. The operating system may have
 dropped the writes it could not flush, and the database refuses to synchronize again, so every later
