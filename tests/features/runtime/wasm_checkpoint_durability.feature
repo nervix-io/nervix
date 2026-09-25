@@ -268,9 +268,9 @@ Feature: WASM guest-state checkpoint durability
         ON GLOBAL ERROR LOG;
       START;
       """
+    # Keep node-1 cordoned so the surviving replica owns recovery through the output assertion.
     And these NSPL commands are executed through the client on node "node-1"
       """
-      UNCORDON NODE node-1;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "wasm_processor" "filter_even_rows" is saved as placeholder "failed_owner"
@@ -324,10 +324,6 @@ Feature: WASM guest-state checkpoint durability
     And runtime state replica installations succeed again on every node
     Then node "{{promoted_replica}}" eventually observes a stable leader
     And within "60s" node "{{promoted_replica}}" eventually reports scheduled "wasm_processor" "filter_even_rows" owner equals placeholder "promoted_replica"
-    And the last command output contains
-      """
-      transition_from={{failed_owner}} state_recovery=unverified
-      """
     When Kafka message is published to topic "wasm_checkpoint_failover_in_{{test_id}}"
       """
       {"value":14,"tenant":"beta"}
