@@ -238,23 +238,71 @@ is validated against that emitter too.
 unit it was written in. `DESCRIBE EMITTER` reports it on the line after `sink:`, as
 `batch: MAX MESSAGES 500 MAX SIZE 1MiB` or `batch: none`.
 
-The database sinks bound every sequential insert or bulk write by `MAX MESSAGES`, as their sections
-below describe. The complete contract for batch payloads — packing, containers per wire format,
-exact size measurement and failure attribution for every sink — is defined in
+The complete contract for batch payloads — packing, containers per wire format, exact size
+measurement and failure attribution for every sink — is defined in
 [Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
-Until an emitter's sink implements that contract, it publishes one record per message exactly as
-it does without the clause, but `MAX SIZE` already holds on every Kafka, Pulsar, RabbitMQ, Redis,
-MQTT, NATS, ZeroMQ, SQS, Sentry and Syslog emitter that declares it. `MAX SIZE` is the exact length
-of what the codec writes: escaping, UTF-8, base64, field names, separators and length prefixes all
-count, and an `ON EMITTING` transformation is measured by the bytes of its output, not by the record
-it read. Nervix never estimates the size. It encodes the record into a buffer that refuses to grow
-past the limit and abandons the encoding at the first byte that would not fit, so an oversize
-payload is never built in full and never reaches the destination. A payload of exactly `MAX SIZE`
-bytes is published. A record whose payload would exceed it follows `ON MESSAGE ERROR` with code
-`validation`, operation `encode` and a message naming the codec, its encoding and the limit, such as
-`emitter 'bounded_events' codec 'event_codec' JSON payload exceeds MAX SIZE 32B`, and the records
-after it are published as usual. The bound covers the payload only: keys, headers and the framing a
-transport adds around the payload are outside it.
+The database sinks bound every sequential insert or bulk write by `MAX MESSAGES`, as their sections
+below describe, and OTEL and Iceberg emitters keep their current request and data-file grouping.
+
+### Batch payloads
+
+A Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry or Syslog emitter that declares
+the clause publishes batch payloads instead of one payload per record. Each payload is one message,
+one event or one frame whose value is the codec's
+[batch container](schemas-and-codecs.md#batch-containers): an array for JSON, CBOR, YAML and Avro, a
+single `batch` key for TOML, a single `batch` root element for XML, the codec's `BATCH MESSAGE` for
+protobuf and one RFC 5424 frame for `SYSLOG`, or the single value an `ON EMITTING BATCH`
+transformation built instead.
+
+The members of a payload are the records of one buffered batch — one source relay, one branch, one
+execution snapshot — in the order the emitter would have published them. A payload never spans two
+buffered batches. The emitter walks the buffered batch in row order and adds each record to the open
+payload until it holds `MAX MESSAGES` members or the next record is not batch-compatible: a
+different key, a different ordered set of written headers, a different ordering group, or, with a
+`SYSLOG` codec, a different syslog header other than the timestamp. That record then opens the next
+payload; no record is skipped over or reordered. A payload with one member keeps the container
+shape, such as a one-element array, and a buffered batch with no eligible record publishes nothing.
+Batching adds no timer: `FLUSH` alone decides when records leave, and a partial payload is published
+exactly like a full one.
+
+`MAX SIZE` is the exact length of the payload: escaping, UTF-8, base64, field names, separators,
+length prefixes and the container's own brackets all count, and a batch transformation is measured
+by the bytes of its output. Nervix never estimates the size. It encodes the candidate into a buffer
+that refuses to grow past the limit and abandons the encoding at the first byte that would not fit,
+so an oversize payload is never built in full and never reaches the destination. A payload of
+exactly `MAX SIZE` bytes is published. A candidate whose encoding reached the limit is halved: its
+first half is re-encoded under the same limit and the rest returns to the front of the queue. Each
+halving is encoded again, because a batch transformation may write more bytes for fewer members, so
+a candidate of `n` members takes at most `⌈log2(n)⌉ + 1` encodings. The bound covers the payload
+only: keys, headers and the framing a transport adds around the payload are outside it.
+
+A record is rejected alone, through `ON MESSAGE ERROR` with operation `encode`, when its member value
+cannot be produced — its `ON EMITTING` transformation fails, or, without a batch transformation, its
+value is not one the format can write — and when a payload of it alone still exceeds `MAX SIZE`.
+The second case has code `validation` and a message naming the codec, its encoding and the limit,
+such as `emitter 'bounded_events' codec 'event_codec' JSON payload exceeds MAX SIZE 32B`. The records
+around it are packed as usual.
+
+A batch transformation that yields no output, more than one output, fails to evaluate, or yields a
+value the format cannot write fails the whole candidate. Every member follows `ON MESSAGE ERROR`
+with operation `encode`, the same error reference and a message naming the emitter, the codec, the
+cause and the member count, such as
+`emitter 'kafka_notifications' codec 'notification_envelope' ON EMITTING BATCH produced no output
+for a batch of 3 messages`. The code is `evaluation`, or `validation` for a value the format cannot
+write. The message never quotes a payload value, so it does not repeat the program's own error text,
+and Nervix does not subdivide such a batch to look for a member to blame; use a smaller
+`MAX MESSAGES`, or no batching, where per-record attribution matters.
+
+One payload is one publish. Its confirmation delivers every member, and a destination's rejection
+of it rejects every member with one shared error reference. `ACK PARALLEL MAX <n>` therefore counts
+payloads, not records. `nervix_messages_total` keeps counting source records.
+
+Member values and containers are working values that exist only while one buffered batch is
+encoded; the records themselves stay in Arrow batches. For a codec with jaq transformations, member
+preparation, batch transformations and every re-encoding run in the same job on Nervix's blocking
+worker pool that already runs `ON EMITTING`, so a slow program never stalls the emitter task. That
+work is bounded by the members one buffered batch holds and by the encodings above, not by
+`MAX SIZE`, which bounds only what is written.
 
 ## Altering emitters
 

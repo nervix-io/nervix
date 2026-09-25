@@ -7039,6 +7039,7 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "nervix-models",
+ "serde",
  "serde_json",
  "strum 0.26.3",
  "thiserror 2.0.21",

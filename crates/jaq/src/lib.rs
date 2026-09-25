@@ -27,6 +27,7 @@ use jaq_fmts::{
 };
 use jaq_json::{Num as JaqNum, Val as JaqVal};
 use nervix_models::{CodecJaqFormat, SignalingWireFormat};
+use serde::Deserialize as _;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use strum::IntoStaticStr;
 use thiserror::Error;
@@ -473,7 +474,7 @@ impl JaqNativeFormat {
     /// Encode one value as a payload of this format.
     pub fn write_value(self, value: JsonValue) -> Result<Vec<u8>, JaqFormatError> {
         let mut encoded = Vec::new();
-        self.write_value_into(value, &mut encoded)?;
+        self.write_value_into(&value, &mut encoded)?;
         Ok(encoded)
     }
 
@@ -483,7 +484,7 @@ impl JaqNativeFormat {
     /// refuses to grow past a limit stops the encoding at that point.
     pub fn write_value_into(
         self,
-        value: JsonValue,
+        value: &JsonValue,
         output: &mut impl io::Write,
     ) -> Result<(), JaqFormatError> {
         if self == Self::Raw {
@@ -494,7 +495,7 @@ impl JaqNativeFormat {
                 .write_all(value.as_bytes())
                 .map_err(|error| self.encode(error));
         }
-        let value: JaqVal = serde_json::from_value(value).map_err(|error| self.encode(error))?;
+        let value = JaqVal::deserialize(value).map_err(|error| self.encode(error))?;
         let writer = JaqWriter {
             format: self.jaq_format(),
             // YAML reads `{1:2}` as the key `"1:2"`, so a space after the separator is required
