@@ -30,8 +30,12 @@ pub(super) enum WindowProcessorError {
         demand: usize,
         storage: WindowAggregateStorageKind,
     },
-    #[error("window snapshot row carries {values} argument values for {arguments} arguments")]
-    SnapshotArgumentCount { values: usize, arguments: usize },
+    #[error("window snapshot argument columns do not match the compiled aggregate demands")]
+    SnapshotArgumentSchema,
+    #[error("window snapshot input columns do not match the compiled input schema")]
+    SnapshotInputSchema,
+    #[error("window snapshot row belongs to another concrete branch")]
+    SnapshotBranchKey,
     #[error("window snapshot row sequence {found} does not follow sequence {previous}")]
     SnapshotSequence { previous: u64, found: u64 },
     #[error("window snapshot delays a removal from bucket {bucket} of {buckets} buckets")]
@@ -40,8 +44,6 @@ pub(super) enum WindowProcessorError {
     EncodeSnapshotEntry,
     #[error("failed to restore a window entry from the branch snapshot")]
     RestoreSnapshotEntry,
-    #[error("failed to restore a window entry branch key: {reason}")]
-    RestoreSnapshotBranchKey { reason: String },
     #[error("failed to project the window aggregate input batch")]
     ProjectAggregateInput,
     #[error("window aggregate input VM execution failed")]
@@ -115,6 +117,7 @@ pub(super) struct WindowAdmission {
 pub(super) struct WindowProcessorState {
     pub(super) entries: VecDeque<WindowEntry>,
     pub(super) next_sequence: u64,
+    pub(super) incarnation: u64,
     pub(super) accumulators: Vec<WindowAccumulator>,
 }
 
@@ -362,10 +365,11 @@ pub(super) fn snapshot_window_processor_live_state(
 }
 
 impl WindowProcessorState {
-    pub(super) fn new(plan: &WindowAccumulatorPlan) -> Self {
+    pub(super) fn new(plan: &WindowAccumulatorPlan, incarnation: u64) -> Self {
         Self {
             entries: VecDeque::new(),
             next_sequence: 0,
+            incarnation,
             accumulators: plan.empty_accumulators(),
         }
     }
@@ -374,24 +378,35 @@ impl WindowProcessorState {
         &self,
     ) -> error_stack::Result<WindowProcessorStateSnapshot, WindowProcessorError> {
         let mut entries = Vec::with_capacity(self.entries.len());
+        let mut argument_batches: HashMap<*const WindowArgumentColumns, Arc<RuntimeRecordBatch>> =
+            HashMap::default();
         for entry in &self.entries {
-            let record = entry
-                .message
-                .record
-                .to_remote()
-                .change_context(WindowProcessorError::EncodeSnapshotEntry)?;
-            let arguments = entry.row.arguments.published_values(entry.row.row)?;
+            let source = Arc::as_ptr(&entry.row.arguments);
+            let argument_batch = if let Some(batch) = argument_batches.get(&source) {
+                batch.clone()
+            } else {
+                let batch = Arc::new(entry.row.arguments.snapshot_batch()?);
+                argument_batches.insert(source, batch.clone());
+                batch
+            };
+            let arguments = RuntimeRow::new(
+                argument_batch,
+                entry.row.row,
+                entry.message.record.metadata().clone(),
+            )
+            .change_context(WindowProcessorError::EncodeSnapshotEntry)?;
             entries.push(WindowEntrySnapshot {
                 sequence: entry.row.sequence,
                 timestamp: entry.row.timestamp,
-                key: BranchKey::to_remote_key(&entry.message.key),
-                record,
+                key: entry.message.key.clone(),
+                record: entry.message.record.clone(),
                 arguments,
             });
         }
         Ok(WindowProcessorStateSnapshot {
             entries,
             next_sequence: self.next_sequence,
+            incarnation: Some(self.incarnation),
             accumulators: self
                 .accumulators
                 .iter()
@@ -413,15 +428,11 @@ impl WindowProcessorState {
                 demands: plan.demands().len(),
             }));
         }
-        let published_arguments = snapshot
-            .entries
-            .iter()
-            .map(|entry| entry.arguments.as_slice())
-            .collect::<Vec<_>>();
-        let arguments = Arc::new(WindowArgumentColumns::restored(plan, &published_arguments)?);
+        let mut argument_batches: HashMap<*const RuntimeRecordBatch, Arc<WindowArgumentColumns>> =
+            HashMap::default();
         let mut entries = VecDeque::with_capacity(snapshot.entries.len());
         let mut previous_sequence: Option<u64> = None;
-        for (row, entry) in snapshot.entries.iter().enumerate() {
+        for entry in &snapshot.entries {
             if let Some(previous) = previous_sequence
                 && previous.checked_add(1) != Some(entry.sequence)
             {
@@ -431,22 +442,30 @@ impl WindowProcessorState {
                 }));
             }
             previous_sequence = Some(entry.sequence);
-            let key = BranchKey::from_remote_key(entry.key.clone()).map_err(|reason| {
-                Report::new(WindowProcessorError::RestoreSnapshotBranchKey { reason })
-            })?;
-            let record = input_schema
-                .runtime_row_from_remote(&entry.record)
-                .change_context(WindowProcessorError::RestoreSnapshotEntry)?;
+            if entry.record.one_row_batch().schema() != input_schema.arrow_schema() {
+                return Err(Report::new(WindowProcessorError::SnapshotInputSchema));
+            }
+            let source = Arc::as_ptr(entry.arguments.batch());
+            let arguments = if let Some(arguments) = argument_batches.get(&source) {
+                arguments.clone()
+            } else {
+                let arguments = Arc::new(WindowArgumentColumns::from_snapshot_batch(
+                    plan,
+                    entry.arguments.batch(),
+                )?);
+                argument_batches.insert(source, arguments.clone());
+                arguments
+            };
             entries.push_back(WindowEntry {
                 row: WindowRow {
                     sequence: entry.sequence,
                     timestamp: entry.timestamp,
-                    arguments: arguments.clone(),
-                    row,
+                    arguments,
+                    row: entry.arguments.row_index(),
                 },
                 message: RelayMessage {
-                    key,
-                    record,
+                    key: entry.key.clone(),
+                    record: entry.record.clone(),
                     acks: AckSet::empty(),
                 },
             });
@@ -477,9 +496,12 @@ impl WindowProcessorState {
         let state = Self {
             entries,
             next_sequence: snapshot.next_sequence,
+            incarnation: snapshot.incarnation.verified(
+                "the restore caller checked this snapshot against the branch incarnation",
+            ),
             accumulators,
         };
-        state.check_admission(plan, &arguments, &[])?;
+        state.check_admission(plan, None, &[])?;
         Ok(state)
     }
 
@@ -489,7 +511,7 @@ impl WindowProcessorState {
     pub(super) fn check_admission(
         &self,
         plan: &WindowAccumulatorPlan,
-        arguments: &Arc<WindowArgumentColumns>,
+        arguments: Option<&Arc<WindowArgumentColumns>>,
         incoming: &[WindowAdmission],
     ) -> error_stack::Result<(), WindowProcessorError> {
         let Some(limit) = plan.max_state_bytes else {
@@ -513,6 +535,8 @@ impl WindowProcessorState {
             }
         }
         for admission in incoming {
+            let arguments = arguments
+                .verified("incoming admissions are evaluated together with their argument columns");
             required = required
                 .checked_add(Self::admission_bytes(
                     &admission.message,
@@ -1367,7 +1391,7 @@ mod tests {
             let max_state_bytes = sketch_layout.and_then(|_| NonZeroU64::new(1_048_576));
             let plan =
                 WindowAccumulatorPlan::new([&compiled.route], sketch_layout, max_state_bytes);
-            let state = WindowProcessorState::new(&plan);
+            let state = WindowProcessorState::new(&plan, 1);
             Self {
                 plan,
                 compiled,
@@ -1415,9 +1439,9 @@ mod tests {
                 };
                 run.push(WindowAdmission { message, row });
             }
-            if let Err(error) = self
-                .state
-                .check_admission(&self.plan, &evaluated.columns, &run)
+            if let Err(error) =
+                self.state
+                    .check_admission(&self.plan, Some(&evaluated.columns), &run)
             {
                 refused.push(error.current_context().to_string());
             } else {
@@ -1512,15 +1536,6 @@ mod tests {
             &snapshot,
         )
         .assured("the snapshot came from the same validated window plan");
-        let restored_snapshot = window
-            .state
-            .to_snapshot()
-            .assured("the restored test window has valid snapshot state");
-        let before_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
-            .assured("the snapshot contains only serializable test values");
-        let after_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&restored_snapshot)
-            .assured("the restored snapshot contains only serializable test values");
-        assert_eq!(before_bytes.as_slice(), after_bytes.as_slice());
         let restored = window.emitted().await;
         assert_eq!(
             batch_value(&restored, "distinct_values"),
@@ -1669,7 +1684,7 @@ mod tests {
         tight_plan.max_state_bytes = NonZeroU64::new(1);
         let error = window
             .state
-            .check_admission(&tight_plan, arguments, &[])
+            .check_admission(&tight_plan, Some(arguments), &[])
             .expect_err("one byte cannot hold a populated sketch window");
         let required = match error.current_context() {
             WindowProcessorError::StateBudgetExceeded { required, .. } => Some(*required),
@@ -2430,6 +2445,34 @@ mod tests {
         let retained = window.emitted().await;
         assert_eq!(batch_value(&retained, "p0"), f64_value(15.0));
 
+        let published = window
+            .state
+            .to_snapshot()
+            .assured("the admitted histogram has valid snapshot state");
+        let executor = Executor::default();
+        let sealed =
+            super::super::window_state::encode_window_processor_snapshot(&published, 7, &executor)
+                .await
+                .assured("the histogram state fits a bounded snapshot section");
+        let restored = super::super::window_state::decode_window_processor_snapshot(
+            &sealed,
+            &executor,
+            &window.plan,
+            window.input_schema.as_ref(),
+            window.state.incarnation,
+        )
+        .await
+        .assured("the same histogram plan opens its sealed state")
+        .assured("the saved branch lifetime matches the active one");
+        window.state = WindowProcessorState::from_snapshot(
+            &window.plan,
+            window.input_schema.as_ref(),
+            &restored,
+        )
+        .assured("the sealed histogram restores its retained and delayed values");
+        let after_restore = window.emitted().await;
+        assert_eq!(batch_value(&after_restore, "p0"), f64_value(15.0));
+
         window
             .admit(vec![int64([Some(90)])], &[2_000_000_000])
             .await;
@@ -2606,18 +2649,6 @@ mod tests {
             "window snapshot accumulator count 1 does not match aggregate demand count 2"
         );
 
-        let mut keyed = snapshot.clone();
-        keyed.entries[0].key = Some(Vec::new());
-        assert_eq!(
-            failure(WindowProcessorState::from_snapshot(
-                &window.plan,
-                window.input_schema.as_ref(),
-                &keyed
-            )),
-            "failed to restore a window entry branch key: branch key must contain at least one \
-             field"
-        );
-
         let mut gapped = snapshot.clone();
         gapped.entries[1].sequence = 5;
         assert_eq!(
@@ -2629,15 +2660,14 @@ mod tests {
             "window snapshot row sequence 5 does not follow sequence 0"
         );
 
-        let mut truncated = snapshot;
-        truncated.entries[0].arguments.clear();
+        let wrong_input_schema = test_optional_schema(&[field("other", ParseAsType::I64)]);
         assert_eq!(
             failure(WindowProcessorState::from_snapshot(
                 &window.plan,
-                window.input_schema.as_ref(),
-                &truncated
+                wrong_input_schema.as_ref(),
+                &snapshot
             )),
-            "window snapshot row carries 0 argument values for 1 arguments"
+            "window snapshot input columns do not match the compiled input schema"
         );
     }
 

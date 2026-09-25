@@ -322,8 +322,10 @@ unbranched windows have one state. A sketch's pane size is the greatest common d
 width and step, aligned to the Unix epoch. Each pane includes its starting timestamp and excludes
 the next pane's starting timestamp. Stepping removes records strictly before the step cutoff;
 records exactly at that cutoff remain. Panes are merged only from rows still in the active
-window and are rebuilt after stepping. Published branch snapshots carry retained rows and restore
-the same sketches when ownership moves or a node recovers.
+window and are rebuilt after stepping. Published branch snapshots share the retained Arrow input
+and argument columns, seal them in bounded sections, and rebuild the same sketches from those
+columns when ownership moves or a node recovers. Histogram delayed removals travel in bounded
+typed sections beside the columns.
 
 In a window route, `COUNT`, `SUM`, `FIRST`, and `LAST` always name window aggregates. The
 [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same names

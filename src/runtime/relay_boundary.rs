@@ -1691,7 +1691,7 @@ impl Runtime {
             Some(branch_key) => {
                 let branch_instance = branches
                     .instances
-                    .get_or_try_create_with(batch.key.clone(), now, |_| {
+                    .get_or_try_create_with(batch.key.clone(), now, |_, _| {
                         Ok::<RelayMetricRecorders, std::convert::Infallible>(
                             self.inner.metrics.resolve_relay_metric_recorders(
                                 domain,
@@ -1966,7 +1966,7 @@ impl Runtime {
             let mut restored_branches = state.read().restored_branch_watermarks();
             restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
             for (key, last_ingestion) in restored_branches {
-                branch_instances.insert_restored(key, last_ingestion, ());
+                branch_instances.insert_changed(key, last_ingestion, ());
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
@@ -2087,7 +2087,7 @@ impl Runtime {
                     }
                 };
                 branch_instances
-                    .get_or_try_create_with(branch_key.clone(), now, |_| {
+                    .get_or_try_create_with(branch_key.clone(), now, |_, _| {
                         Ok::<(), std::convert::Infallible>(())
                     })
                     .assured("the tracking closure's error type is Infallible");

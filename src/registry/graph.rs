@@ -259,7 +259,8 @@ impl ActiveGraph {
     }
 
     /// The fingerprint of every schema model the node at `index` depends on through its
-    /// configuration, which the runtime keys the node's schema-bound state by.
+    /// configuration, together with the window definition when the node is a window processor.
+    /// The runtime keys the node's schema-bound state by this identity.
     pub(in crate::registry) fn schema_fingerprint_for_index(
         &self,
         index: NodeIndex,
@@ -272,6 +273,16 @@ impl ActiveGraph {
             encoded: Vec<u8>,
         }
 
+        let window_definition =
+            self.graph.node_weight(index).and_then(|node| {
+                if let Model::WindowProcessor(_) = node.config.as_ref() {
+                    Some(serde_json::to_vec(node.config.as_ref()).assured(
+                        "registry window models are plain serde structures with string keys",
+                    ))
+                } else {
+                    None
+                }
+            });
         let mut pending = vec![index];
         let mut visited = HashSet::default();
         let mut schemas = Vec::<FingerprintedSchema>::new();
@@ -323,6 +334,10 @@ impl ActiveGraph {
             hasher.update(&[0]);
             hasher.update(&schema.encoded);
             hasher.update(&[0]);
+        }
+        if let Some(encoded) = window_definition {
+            hasher.update(b"nervix/window-state/model");
+            hasher.update(&encoded);
         }
         SchemaFingerprint::from_digest(*hasher.finalize().as_bytes())
     }
@@ -1095,9 +1110,49 @@ mod tests {
             explicitly_unbranched_relay, full_graph_batch, ingestor_with_params, junction,
             materialized_relay, named, processor, relay_branched_by_relay_branch,
             relay_branched_like, schema, temp_db_path, unbranched_correlator, unbranched_ingestor,
-            wasm_processor, wire_schema,
+            wasm_processor, window_processor, wire_schema,
         },
     };
+
+    #[test]
+    fn window_model_change_changes_its_state_fingerprint() {
+        fn fingerprint(width: u64) -> SchemaFingerprint {
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry should open");
+            let domain = DomainName::parse("default").expect("valid domain");
+            let mut window = window_processor(
+                "window",
+                "notifications",
+                "summaries",
+                "SET value = FIRST(input.value)",
+            );
+            let Model::WindowProcessor(processor) = &mut window else {
+                unreachable!("the fixture constructs a window processor");
+            };
+            processor.width.messages = Some(width);
+            registry
+                .apply_batch(
+                    &domain,
+                    vec![
+                        schema("event_schema"),
+                        relay_branched_by_relay_branch("notifications", "event_schema"),
+                        relay_branched_like("summaries", "event_schema", "notifications"),
+                        branch_schema("value_branch", &["value"]),
+                        branch_for_relay("notifications", "value_branch"),
+                        window,
+                    ],
+                )
+                .expect("window graph should validate");
+            let graph = registry.active_graph(&domain).expect("graph should exist");
+            let node = NodeRef::new(ModelKind::WindowProcessor, named::<ModelName>("window"));
+            let index = graph.indices[&node];
+            let fingerprint = graph.schema_fingerprint_for_index(index);
+            let _ = fs::remove_dir_all(path);
+            fingerprint
+        }
+
+        assert_ne!(fingerprint(10), fingerprint(12));
+    }
 
     #[test]
     fn apply_batch_builds_full_graph_in_single_batch() {

@@ -20,9 +20,8 @@ use arrow_array::{
         TimestampNanosecondType, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
     },
 };
-use arrow_schema::{Field as ArrowField, TimeUnit as ArrowTimeUnit};
+use arrow_schema::{Field as ArrowField, Schema as ArrowSchema, TimeUnit as ArrowTimeUnit};
 use error_stack::ResultExt as _;
-use nervix_models::RemoteRuntimeValue;
 
 use super::*;
 
@@ -384,9 +383,85 @@ impl ArgumentColumn {
 #[derive(Debug)]
 pub(in crate::runtime) struct WindowArgumentColumns {
     demands: Vec<WindowArguments<ArgumentColumn>>,
+    rows: usize,
 }
 
 impl WindowArgumentColumns {
+    /// Share the evaluated Arrow columns as a batch for a window snapshot. This does not extract
+    /// per-row scalar values or rebuild columns already held by the live argument batch.
+    pub(in crate::runtime) fn snapshot_batch(
+        &self,
+    ) -> error_stack::Result<RuntimeRecordBatch, WindowProcessorError> {
+        let mut fields = Vec::new();
+        let mut columns = Vec::new();
+        for demand in &self.demands {
+            for column in demand.iter() {
+                fields.push(ArrowField::new(
+                    format!("argument_{}", fields.len()),
+                    column.array.data_type().clone(),
+                    true,
+                ));
+                columns.push(column.array.clone());
+            }
+        }
+        let schema = StdArc::new(ArrowSchema::new(fields));
+        let batch = RecordBatch::try_new_with_options(
+            schema.clone(),
+            columns,
+            &RecordBatchOptions::new().with_row_count(Some(self.rows)),
+        )
+        .map_err(|error| {
+            Report::new(WindowProcessorError::EncodeSnapshotEntry).attach_printable(error)
+        })?;
+        RuntimeRecordBatch::from_record_batch(schema, batch)
+            .change_context(WindowProcessorError::EncodeSnapshotEntry)
+    }
+
+    /// The column layout a saved argument batch must declare for this compiled window plan.
+    pub(in crate::runtime) fn snapshot_schema(plan: &WindowAccumulatorPlan) -> StdArc<ArrowSchema> {
+        let mut fields = Vec::new();
+        for demand in plan.demands() {
+            for column in demand.arguments.iter() {
+                fields.push(ArrowField::new(
+                    format!("argument_{}", fields.len()),
+                    column.data_type.clone(),
+                    true,
+                ));
+            }
+        }
+        StdArc::new(ArrowSchema::new(fields))
+    }
+
+    /// Reuse the decoded Arrow columns directly as one validated argument batch.
+    pub(in crate::runtime) fn from_snapshot_batch(
+        plan: &WindowAccumulatorPlan,
+        batch: &RuntimeRecordBatch,
+    ) -> error_stack::Result<Self, WindowProcessorError> {
+        if batch.schema() != Self::snapshot_schema(plan) {
+            return Err(Report::new(WindowProcessorError::SnapshotArgumentSchema));
+        }
+        let mut slot = 0;
+        let mut arrays = Vec::with_capacity(plan.demands().len());
+        for demand in plan.demands() {
+            let first = batch.batch().column(slot).clone();
+            slot = slot
+                .checked_add(1)
+                .assured("the snapshot schema has one column for every compiled argument");
+            let arguments = match demand.arguments.second() {
+                None => WindowArguments::Single(first),
+                Some(_) => {
+                    let second = batch.batch().column(slot).clone();
+                    slot = slot
+                        .checked_add(1)
+                        .assured("the snapshot schema has one column for every compiled argument");
+                    WindowArguments::Pair { first, second }
+                }
+            };
+            arrays.push(arguments);
+        }
+        Self::new(plan, arrays, batch.batch().num_rows())
+    }
+
     /// Bound each demand's Arrow storage and one typed-key copy per value. Each top-k demand gets
     /// its own charge, even when demands project the same input. The row allowance also covers a
     /// snapshot rebuild as one value per retained row.
@@ -460,7 +535,7 @@ impl WindowArgumentColumns {
             };
             demands.push(columns);
         }
-        Ok(Self { demands })
+        Ok(Self { demands, rows })
     }
 
     fn checked(
@@ -505,91 +580,6 @@ impl WindowArgumentColumns {
             }
         }
         None
-    }
-
-    /// Every argument value of `row`, in demand and argument order, as a published window carries
-    /// it.
-    pub(in crate::runtime) fn published_values(
-        &self,
-        row: usize,
-    ) -> error_stack::Result<Vec<Option<RemoteRuntimeValue>>, WindowProcessorError> {
-        let mut values = Vec::new();
-        for arguments in &self.demands {
-            for column in arguments.iter() {
-                let ty = parse_as_type_from_arrow(column.array.data_type())
-                    .change_context(WindowProcessorError::EncodeSnapshotEntry)?;
-                let value = runtime_value_from_arrow_array(
-                    column.array.as_ref(),
-                    &ty,
-                    true,
-                    row,
-                    "window_argument",
-                )
-                .change_context(WindowProcessorError::EncodeSnapshotEntry)?;
-                values.push(value.as_ref().map(RuntimeValue::to_remote));
-            }
-        }
-        Ok(values)
-    }
-
-    /// Rebuild one argument batch holding every row of a published window, from each row's
-    /// argument values in demand and argument order.
-    pub(in crate::runtime) fn restored(
-        plan: &WindowAccumulatorPlan,
-        rows: &[&[Option<RemoteRuntimeValue>]],
-    ) -> error_stack::Result<Self, WindowProcessorError> {
-        let slots = plan
-            .demands()
-            .iter()
-            .map(|demand| demand.arguments.iter().count())
-            .sum::<usize>();
-        for values in rows {
-            if values.len() != slots {
-                return Err(Report::new(WindowProcessorError::SnapshotArgumentCount {
-                    values: values.len(),
-                    arguments: slots,
-                }));
-            }
-        }
-        let mut slot = 0usize;
-        let mut arrays = Vec::with_capacity(plan.demands().len());
-        for demand in plan.demands() {
-            let first = Self::restored_array(rows, slot, &demand.arguments.first().data_type)?;
-            slot = slot
-                .checked_add(1)
-                .assured("argument slots count the arguments of the window's compiled demands");
-            let arguments = match demand.arguments.second() {
-                None => WindowArguments::Single(first),
-                Some(second_column) => {
-                    let second = Self::restored_array(rows, slot, &second_column.data_type)?;
-                    slot = slot.checked_add(1).assured(
-                        "argument slots count the arguments of the window's compiled demands",
-                    );
-                    WindowArguments::Pair { first, second }
-                }
-            };
-            arrays.push(arguments);
-        }
-        Self::new(plan, arrays, rows.len())
-    }
-
-    fn restored_array(
-        rows: &[&[Option<RemoteRuntimeValue>]],
-        slot: usize,
-        data_type: &ArrowDataType,
-    ) -> error_stack::Result<ArrayRef, WindowProcessorError> {
-        let mut values = Vec::with_capacity(rows.len());
-        for row in rows {
-            let value = row
-                .get(slot)
-                .verified("every published row was checked to carry every argument slot");
-            values.push(value.clone().map(RuntimeValue::from_remote));
-        }
-        let field = ArrowField::new("window_argument", data_type.clone(), true);
-        let column =
-            runtime_values_input_column(values.iter().map(Option::as_ref), rows.len(), &field)
-                .change_context(WindowProcessorError::RestoreSnapshotEntry)?;
-        Ok(column.to_array_ref())
     }
 }
 

@@ -96,7 +96,7 @@ impl Runtime {
                                     "failed to publish branch state during shutdown"
                                 );
                             }
-                            match state.persist_published(&store) {
+                            match state.persist_published(&store, &runtime.inner.executor).await {
                                 Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
                                     state.placement(), lsm,
                                 ),
@@ -122,7 +122,7 @@ impl Runtime {
                             continue;
                         }
                         next_persist = Instant::now() + snapshot_interval;
-                        match state.persist_published(&store) {
+                        match state.persist_published(&store, &runtime.inner.executor).await {
                             Ok(Some(lsm)) => runtime.notify_runtime_state_replicas(
                                 state.placement(), lsm,
                             ),
@@ -464,14 +464,14 @@ impl Runtime {
                         continue;
                     }
                 };
-                for (branch_key, _) in branches {
+                for branch in branches {
                     tokio::task::consume_budget().await;
                     let placement = match runtime.state_placement(
                         &branch_lru.domain,
                         state_kind,
                         branch_lru.kind,
                         branch_lru.identifier.clone(),
-                        branch_key,
+                        branch.key,
                     ) {
                         Ok(placement) => placement,
                         Err(error) => {

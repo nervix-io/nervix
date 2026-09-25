@@ -17,6 +17,8 @@ use super::*;
 pub(super) enum ProcessorBranchTaskError {
     #[error("failed to instantiate processor branch '{}'", branch_key_display(.branch))]
     Instantiate { branch: Option<BranchKey> },
+    #[error("failed to initialize a new window branch '{}'", branch_key_display(.branch))]
+    InitializeWindow { branch: Option<BranchKey> },
     #[error("failed to read the persisted processor branch LRU snapshot")]
     ReadLruSnapshot,
     #[error("failed to decode the persisted processor branch LRU snapshot")]
@@ -32,6 +34,13 @@ pub(super) enum ProcessorBranchStopMode {
     Evict,
     Detach,
     Handoff(oneshot::Sender<ProcessorBranchHandoff>),
+}
+
+/// Whether a branch resumes a known lifetime or appears after the lifecycle had no such key.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ProcessorBranchLifetime {
+    Restored,
+    Appeared,
 }
 
 pub(super) enum ProcessorBranchCommand {
@@ -51,6 +60,11 @@ pub(super) struct ProcessorBranchInput {
     pub(super) relay: RelayName,
     pub(super) batch: RelayRecordBatch,
     pub(super) work: NodeQuiesceWorkGuard,
+}
+
+struct ProcessorBranchRunIdentity {
+    processor: ModelName,
+    incarnation: u64,
 }
 
 /// A snapshot task asking the branch task to publish the live state it owns.
@@ -74,6 +88,7 @@ pub(super) struct SpawnedSnapshotTask {
 pub(super) struct ProcessorBranchHandoff {
     pub(super) key: Option<BranchKey>,
     pub(super) restored_at: Timestamp,
+    pub(super) incarnation: u64,
     pub(super) pending_materialized: VecDeque<PendingMaterializedBatch>,
 }
 
@@ -218,7 +233,9 @@ pub(super) async fn run_processor_node_runtime(
             &graph,
             &template,
             &mut instances,
-        ) {
+        )
+        .await
+        {
             Ok(lsm) => lsm,
             Err(error) => {
                 warn!(
@@ -231,21 +248,58 @@ pub(super) async fn run_processor_node_runtime(
             }
         };
     } else {
+        let placement = match branch_lru_placement(&runtime_handle, &domain, &template) {
+            Ok(placement) => placement,
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "failed to place handed-off branch lifecycle");
+                return;
+            }
+        };
+        let transferred_lru = match runtime_handle.take_restorable_branch_lru_snapshot(&placement) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                warn!(
+                    processor = processor.as_str(),
+                    "handed-off branch lifecycle is unavailable"
+                );
+                return;
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "failed to read handed-off branch lifecycle");
+                return;
+            }
+        };
+        if restored_handoffs
+            .iter()
+            .any(|handoff| handoff.incarnation > transferred_lru.lsm)
+        {
+            warn!(
+                processor = processor.as_str(),
+                "handed-off branch lifetime exceeds its lifecycle revision"
+            );
+            return;
+        }
+        instances.set_version(transferred_lru.lsm);
         for handoff in restored_handoffs {
+            tokio::task::consume_budget().await;
             let key = handoff.key.clone();
             match spawn_processor_branch_task(
                 ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
                 &template,
                 key.clone(),
                 handoff.pending_materialized,
-            ) {
+                ProcessorBranchLifetime::Restored,
+                handoff.incarnation,
+            )
+            .await
+            {
                 Ok(entry) => {
                     runtime_handle.observe_branch_instance_created(
                         &domain,
                         template.branch.as_ref(),
                         &key,
                     );
-                    instances.insert_restored(key, handoff.restored_at, entry);
+                    instances.insert_restored(key, handoff.restored_at, handoff.incarnation, entry);
                 }
                 Err(error) => {
                     warn!(
@@ -262,8 +316,7 @@ pub(super) async fn run_processor_node_runtime(
         evict_processor_branch_instances_to_capacity(
             &runtime_handle,
             &domain,
-            &processor,
-            template.branch.as_ref(),
+            &template,
             max_instances,
             &mut instances,
         )
@@ -317,8 +370,7 @@ pub(super) async fn run_processor_node_runtime(
                 expire_processor_branch_instances(
                     &runtime_handle,
                     &domain,
-                    &processor,
-                    template.branch.as_ref(),
+                    &template,
                     now,
                     branch_ttl,
                     &mut instances,
@@ -618,7 +670,7 @@ fn processor_reset_target_keys(
         (Some(_), WasmStateResetScope::Branch(selected), None) => Ok(instances
             .snapshot_entries()
             .into_iter()
-            .map(|(key, _)| key)
+            .map(|entry| entry.key)
             .filter(|key| {
                 key.as_ref()
                     .is_some_and(|branch| branch.fingerprint() == selected)
@@ -627,7 +679,7 @@ fn processor_reset_target_keys(
         (Some(_), WasmStateResetScope::AllBranches, None) => Ok(instances
             .snapshot_entries()
             .into_iter()
-            .map(|(key, _)| key)
+            .map(|entry| entry.key)
             .collect()),
         _ => Err(Report::new(WasmStateResetRuntimeError::InvalidScope {
             processor: processor.clone(),
@@ -635,7 +687,7 @@ fn processor_reset_target_keys(
     }
 }
 
-fn restore_processor_wasm_state_reset_branches(
+async fn restore_processor_wasm_state_reset_branches(
     runtime: &Runtime,
     domain: &DomainName,
     graph: &SharedActiveGraph,
@@ -645,6 +697,7 @@ fn restore_processor_wasm_state_reset_branches(
 ) -> error_stack::Result<(), WasmStateResetRuntimeError> {
     let processor = ModelName::from(&template.source);
     for mut branch in branches.drain(..) {
+        tokio::task::consume_budget().await;
         let Some(handoff) = branch.previous.take() else {
             continue;
         };
@@ -655,7 +708,10 @@ fn restore_processor_wasm_state_reset_branches(
             template,
             key.clone(),
             handoff.pending_materialized,
+            ProcessorBranchLifetime::Restored,
+            handoff.incarnation,
         )
+        .await
         .change_context_lazy(|| WasmStateResetRuntimeError::RestoreAfterAbort {
             processor: processor.clone(),
         })?;
@@ -725,7 +781,8 @@ impl ProcessorWasmStateResetContext<'_> {
                             template,
                             instances,
                             &mut branches,
-                        );
+                        )
+                        .await;
                         restore?;
                         return Err(Report::new(WasmStateResetRuntimeError::StopBranch {
                             processor,
@@ -760,7 +817,8 @@ impl ProcessorWasmStateResetContext<'_> {
                         template,
                         instances,
                         &mut branches,
-                    )?;
+                    )
+                    .await?;
                     return Err(error);
                 }
             }
@@ -804,6 +862,7 @@ async fn abort_processor_wasm_state_reset(
         instances,
         &mut current.branches,
     )
+    .await
 }
 
 impl ProcessorWasmStateResetContext<'_> {
@@ -864,7 +923,10 @@ impl ProcessorWasmStateResetContext<'_> {
                 template,
                 key.clone(),
                 VecDeque::new(),
+                ProcessorBranchLifetime::Appeared,
+                instances.next_incarnation(),
             )
+            .await
             .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
                 processor: processor.clone(),
             })?;
@@ -997,25 +1059,40 @@ pub(super) async fn dispatch_processor_node_input(
             return;
         }
     };
-    let instance = match instances.get_or_try_create_with(key.clone(), accepted_at, |key| {
-        spawn_processor_branch_task(
+    let instance = if let Some(state) = instances.touch(&key, accepted_at) {
+        GetOrCreateBranchInstance {
+            state,
+            created: false,
+        }
+    } else {
+        let incarnation = instances.next_incarnation();
+        let state = match spawn_processor_branch_task(
             ProcessorRuntimeContext::new(runtime_handle.clone(), domain.clone(), graph.clone()),
             template,
             key.clone(),
             VecDeque::new(),
+            ProcessorBranchLifetime::Appeared,
+            incarnation,
         )
-    }) {
-        Ok(instance) => instance,
-        Err(error) => {
-            runtime_handle.handle_internal_processor_error_for_acks(
-                domain,
-                template.source_kind,
-                &template.source,
-                &template.error_policies,
-                batch.acks.iter(),
-                format!("{error:#}"),
-            );
-            return;
+        .await
+        {
+            Ok(state) => state,
+            Err(error) => {
+                runtime_handle.handle_internal_processor_error_for_acks(
+                    domain,
+                    template.source_kind,
+                    &template.source,
+                    &template.error_policies,
+                    batch.acks.iter(),
+                    format!("{error:#}"),
+                );
+                return;
+            }
+        };
+        let state = instances.insert_changed(key.clone(), accepted_at, state);
+        GetOrCreateBranchInstance {
+            state,
+            created: true,
         }
     };
     if instance.created {
@@ -1030,8 +1107,7 @@ pub(super) async fn dispatch_processor_node_input(
             evict_processor_branch_instances_to_capacity(
                 runtime_handle,
                 domain,
-                &template.source,
-                template.branch.as_ref(),
+                template,
                 max_instances,
                 instances,
             )
@@ -1090,17 +1166,35 @@ pub(super) async fn dispatch_processor_node_input(
     }
 }
 
-pub(super) fn spawn_processor_branch_task(
+pub(super) async fn spawn_processor_branch_task(
     context: ProcessorRuntimeContext,
     template: &BranchInstanceTemplate,
     key: Option<BranchKey>,
     pending_materialized: VecDeque<PendingMaterializedBatch>,
+    lifetime: ProcessorBranchLifetime,
+    incarnation: u64,
 ) -> error_stack::Result<ProcessorBranchTask, ProcessorBranchTaskError> {
     let branch_key = key.clone();
     let mut branch = template
-        .instantiate(&context.runtime_handle, &context.domain, key)
-        .change_context(ProcessorBranchTaskError::Instantiate { branch: branch_key })?
+        .instantiate(&context.runtime_handle, &context.domain, key, incarnation)
+        .await
+        .change_context(ProcessorBranchTaskError::Instantiate {
+            branch: branch_key.clone(),
+        })?
         .into_inner();
+    if template.source_kind == ModelKind::WindowProcessor
+        && let ProcessorBranchLifetime::Appeared = lifetime
+    {
+        let processor = ModelName::from(&template.source);
+        if let Some(node) = branch.processors.get_mut(&processor) {
+            node.reset_window_state();
+        }
+        branch
+            .snapshot_processor_live_state(&processor)
+            .change_context_lazy(|| ProcessorBranchTaskError::InitializeWindow {
+                branch: branch_key,
+            })?;
+    }
     if let Some(processor) = branch
         .processors
         .get_mut(&ModelName::from(&template.source))
@@ -1131,7 +1225,10 @@ pub(super) fn spawn_processor_branch_task(
     );
     let task = tokio::spawn(run_processor_branch_task(
         context,
-        ModelName::from(&processor),
+        ProcessorBranchRunIdentity {
+            processor: ModelName::from(&processor),
+            incarnation,
+        },
         branch,
         input_rx,
         command_rx,
@@ -1188,15 +1285,19 @@ pub(super) async fn stop_processor_snapshot_task(
     }
 }
 
-pub(super) async fn run_processor_branch_task(
+async fn run_processor_branch_task(
     context: ProcessorRuntimeContext,
-    processor: ModelName,
+    identity: ProcessorBranchRunIdentity,
     mut branch: BranchRuntime,
     mut input: mpsc::Receiver<ProcessorBranchInput>,
     mut command_rx: mpsc::Receiver<ProcessorBranchCommand>,
     quiesce_counters: Arc<NodeQuiesceCounters>,
     mut snapshot: ProcessorSnapshotTask,
 ) {
+    let ProcessorBranchRunIdentity {
+        processor,
+        incarnation,
+    } = identity;
     let ProcessorRuntimeContext {
         runtime_handle,
         domain,
@@ -1460,9 +1561,12 @@ pub(super) async fn run_processor_branch_task(
     if let Some(snapshot) = &finalization_snapshot {
         branch.force_flush(&graph, snapshot).await;
     }
+    if let Some(ProcessorBranchStopMode::Evict) = &stop_mode {
+        branch.evict().await;
+    }
     stop_processor_snapshot_task(&mut branch, &processor, &mut snapshot).await;
     match stop_mode {
-        Some(ProcessorBranchStopMode::Evict) => branch.evict().await,
+        Some(ProcessorBranchStopMode::Evict) => {}
         Some(ProcessorBranchStopMode::Handoff(response)) => {
             let restored_at = finalization_snapshot
                 .verified("a handoff stop always finalizes with the snapshot its command captured")
@@ -1474,6 +1578,7 @@ pub(super) async fn run_processor_branch_task(
             let handoff = ProcessorBranchHandoff {
                 key: branch.key.clone(),
                 restored_at,
+                incarnation,
                 pending_materialized,
             };
             response
@@ -1599,17 +1704,16 @@ pub(super) async fn handoff_all_processor_branch_instances(
 pub(super) async fn expire_processor_branch_instances(
     runtime: &Runtime,
     domain: &DomainName,
-    processor: impl Into<ModelName>,
-    branch: Option<&BranchName>,
+    template: &BranchInstanceTemplate,
     now: Timestamp,
     expiration_after: Duration,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
-    let processor = processor.into();
+    let processor = ModelName::from(&template.source);
     for (key, entry) in instances.expire(now, expiration_after) {
         runtime.observe_branch_instance_removed(
             domain,
-            branch,
+            template.branch.as_ref(),
             &key,
             Some(BranchEvictionReason::Ttl),
         );
@@ -1622,6 +1726,11 @@ pub(super) async fn expire_processor_branch_instances(
             ProcessorBranchStopMode::Evict,
         )
         .await;
+        if template.source_kind == ModelKind::WindowProcessor
+            && let Err(error) = runtime.release_evicted_window_state(domain, &processor, &key)
+        {
+            warn!(error = %format_args!("{error:#}"), "failed to release evicted window state");
+        }
         debug!(
             domain = domain.as_str(),
             processor = processor.as_str(),
@@ -1634,16 +1743,15 @@ pub(super) async fn expire_processor_branch_instances(
 pub(super) async fn evict_processor_branch_instances_to_capacity(
     runtime: &Runtime,
     domain: &DomainName,
-    processor: impl Into<ModelName>,
-    branch: Option<&BranchName>,
+    template: &BranchInstanceTemplate,
     max_instances: NonZeroUsize,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, ProcessorBranchTask>,
 ) {
-    let processor = processor.into();
+    let processor = ModelName::from(&template.source);
     for (key, entry) in instances.evict_lru_to_capacity(max_instances) {
         runtime.observe_branch_instance_removed(
             domain,
-            branch,
+            template.branch.as_ref(),
             &key,
             Some(BranchEvictionReason::Lru),
         );
@@ -1656,6 +1764,11 @@ pub(super) async fn evict_processor_branch_instances_to_capacity(
             ProcessorBranchStopMode::Evict,
         )
         .await;
+        if template.source_kind == ModelKind::WindowProcessor
+            && let Err(error) = runtime.release_evicted_window_state(domain, &processor, &key)
+        {
+            warn!(error = %format_args!("{error:#}"), "failed to release evicted window state");
+        }
         debug!(
             domain = domain.as_str(),
             processor = processor.as_str(),
@@ -1693,7 +1806,7 @@ pub(super) async fn shutdown_all_processor_branch_instances(
     }
 }
 
-pub(super) fn restore_processor_branch_lru_snapshot(
+pub(super) async fn restore_processor_branch_lru_snapshot(
     runtime: &Runtime,
     domain: &DomainName,
     graph: &SharedActiveGraph,
@@ -1710,15 +1823,22 @@ pub(super) fn restore_processor_branch_lru_snapshot(
     };
     let restored = decode_branch_lru_snapshot(&snapshot.payload)
         .change_context(ProcessorBranchTaskError::DecodeLruSnapshot)?;
-    for (key, last_ingestion) in restored {
+    for restored_entry in restored {
+        tokio::task::consume_budget().await;
+        let key = restored_entry.key;
+        let last_ingestion = restored_entry.last_ingestion;
+        let incarnation = restored_entry.incarnation;
         let entry = spawn_processor_branch_task(
             ProcessorRuntimeContext::new(runtime.clone(), domain.clone(), graph.clone()),
             template,
             key.clone(),
             VecDeque::new(),
-        )?;
+            ProcessorBranchLifetime::Restored,
+            incarnation,
+        )
+        .await?;
         runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
-        instances.insert_restored(key, last_ingestion, entry);
+        instances.insert_restored(key, last_ingestion, incarnation, entry);
     }
     instances.set_version(snapshot.lsm);
     Ok(snapshot.lsm)
@@ -2040,6 +2160,7 @@ mod tests {
         instances.insert_restored(
             None,
             Timestamp::now(),
+            1,
             ProcessorBranchTask {
                 input: input_tx,
                 commands,
@@ -2106,6 +2227,7 @@ mod tests {
         instances.insert_restored(
             None,
             stale,
+            1,
             ProcessorBranchTask {
                 input: input_tx,
                 commands,
@@ -2136,9 +2258,9 @@ mod tests {
         .await;
 
         let mut recorded = None;
-        for (key, activity) in instances.snapshot_entries() {
-            if key.is_none() {
-                recorded = Some(activity);
+        for entry in instances.snapshot_entries() {
+            if entry.key.is_none() {
+                recorded = Some(entry.last_ingestion);
             }
         }
         let recorded = recorded.expect("the unbranched instance stays registered");
@@ -2210,7 +2332,8 @@ mod tests {
             .bind_domain_clock(&domain)
             .expect("the fixture installs a running unpaced clock");
         let mut branch = template
-            .instantiate(&runtime, &domain, None)
+            .instantiate(&runtime, &domain, None, 1)
+            .await
             .expect("the junction fixture instantiates")
             .into_inner();
         let node = branch
@@ -2255,7 +2378,10 @@ mod tests {
                     domain.clone(),
                     StdArc::new(ArcSwapOption::from(None)),
                 ),
-                processor.clone(),
+                ProcessorBranchRunIdentity {
+                    processor: processor.clone(),
+                    incarnation: 1,
+                },
                 branch,
                 input,
                 command_rx,
