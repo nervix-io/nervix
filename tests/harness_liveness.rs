@@ -3,11 +3,11 @@
 //! Outside the layer order: a harness test crate.
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
-//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog and HTTP-receiver
+//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog, Redis-client and HTTP-receiver
 //!   regressions with Rust's test runner, and the stand-in nodes and clients those regressions talk
 //!   to.
 //! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase, suite-watchdog and HTTP-receiver harness modules, and the
+//!   cluster-teardown, scenario-phase, suite-watchdog, Redis-client and HTTP-receiver harness modules, and the
 //!   client wire session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
@@ -23,6 +23,8 @@ mod node_startup;
 mod phase_deadline;
 #[path = "common/port_pool.rs"]
 mod port_pool;
+#[path = "common/redis_client.rs"]
+mod redis_client;
 #[path = "common/scenario_phase.rs"]
 mod scenario_phase;
 #[path = "common/status_request.rs"]
@@ -3134,5 +3136,107 @@ mod http_receiver_tests {
                 "{line}: {error:?}"
             );
         }
+    }
+}
+
+mod redis_client_tests {
+    use std::{net::Ipv4Addr, time::Duration};
+
+    use meticulous::ResultExt as _;
+    use redis::{AsyncCommands as _, Value};
+    use tokio::{
+        io::AsyncWriteExt as _,
+        net::TcpListener,
+        sync::oneshot,
+        time::{sleep, timeout},
+    };
+
+    use crate::redis_client::{REDIS_REQUEST_BUDGET, TestRedisClient};
+
+    #[tokio::test]
+    async fn redis_harness_connections_fail_when_the_broker_never_answers() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("the regression can bind an ephemeral loopback port");
+        let address = listener.local_addr().assured("the listener has an address");
+        let (stop, stopped) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.assured("the client connects");
+            stopped.await.assured("the test stops its silent endpoint");
+            drop(stream);
+        });
+        let client = TestRedisClient::open(&format!("redis://{address}/"))
+            .assured("the loopback address is a valid Redis URL");
+        let result = timeout(REDIS_REQUEST_BUDGET * 2, client.connect()).await;
+        stop.send(())
+            .assured("the endpoint waits for the test to stop it");
+        server.await.assured("the silent endpoint stopped");
+        let result =
+            result.assured("the driver's finite connection budget ends before the test bound");
+        let Err(error) = result else {
+            panic!("a silent endpoint cannot finish the Redis handshake");
+        };
+        assert!(error.to_string().contains("timed out"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn redis_harness_requests_allow_delayed_handshake_and_publish_replies() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("the regression can bind an ephemeral loopback port");
+        let address = listener
+            .local_addr()
+            .assured("the bound listener has an address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.assured("the client connects");
+            let mut decoder = Default::default();
+            for _ in 0..2 {
+                tokio::task::consume_budget().await;
+                let command = redis::parse_redis_value_async(&mut decoder, &mut stream)
+                    .await
+                    .assured("the Redis client sends a complete setup command");
+                let Value::Array(parts) = command else {
+                    panic!("Redis commands are arrays");
+                };
+                assert_eq!(parts[0], Value::BulkString(b"CLIENT".to_vec()));
+                // Inject scheduling/broker latency at both setup replies, rather than waiting
+                // for a condition that an idle machine would satisfy immediately.
+                sleep(Duration::from_secs(2)).await;
+                stream
+                    .write_all(b"+OK\r\n")
+                    .await
+                    .assured("the client is waiting for setup");
+            }
+            let command = redis::parse_redis_value_async(&mut decoder, &mut stream)
+                .await
+                .assured("the client sends its publish command");
+            assert_eq!(
+                command,
+                Value::Array(vec![
+                    Value::BulkString(b"PUBLISH".to_vec()),
+                    Value::BulkString(b"notifications".to_vec()),
+                    Value::BulkString(b"payload".to_vec()),
+                ])
+            );
+            sleep(Duration::from_secs(2)).await;
+            stream
+                .write_all(b":1\r\n")
+                .await
+                .assured("the client is waiting for the publish result");
+        });
+        let client = TestRedisClient::open(&format!("redis://{address}/"))
+            .assured("the loopback address is a valid Redis URL");
+        let mut connection = client
+            .connect()
+            .await
+            .assured("the handshake replies arrive within the harness budget");
+        let subscribers: usize = connection
+            .publish("notifications", "payload")
+            .await
+            .assured("the publish reply arrives within the harness budget");
+        assert_eq!(subscribers, 1);
+        server
+            .await
+            .assured("the scripted Redis endpoint completed");
     }
 }

@@ -552,6 +552,16 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
+Harness Redis connections use an explicit ten-second budget for connection setup and each command
+response to tolerate scheduling delay under parallel load. The driver's one-second connection and 500ms
+response defaults are too short under concurrent scenario load: the three-node JAQ transformation
+scenario reached a running ingestor but its publishing client timed out. The budget belongs to the
+test client used for individual publishes, bursts, and subscriber-count observations. A request
+failure still fails the step; a publish with an ambiguous result is never retried. The existing
+bounded subscriber wait only republishes when Redis confirms that the publish reached zero
+subscribers. Focused harness regressions delay setup and publish replies by two seconds and verify
+that a silent broker still reaches the connection deadline.
+
 After the run, the suite stops its dependencies within 2 minutes. A stop that does not finish is
 abandoned and its containers are left to the runner, because waiting without a bound is how a run
 that already has its result loses it to the job's own timeout. Dropping the runtime then waits at
