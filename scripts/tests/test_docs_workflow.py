@@ -90,7 +90,7 @@ class DocsWorkflowTests(unittest.TestCase):
         # A published book must never show an older console than it documents.
         justfile = Path("justfile").read_text()
 
-        self.assertIn('book version="": test-docs docs-screenshots', justfile)
+        self.assertRegex(justfile, r'book version="[^"]+": test-docs docs-screenshots')
 
     def test_book_job_can_build_the_console_and_the_binaries(self) -> None:
         # The book build embeds the console into nervix-server and renders the

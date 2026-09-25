@@ -3,6 +3,7 @@ rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
+turmoil_failures := cargo_target_dir + "/turmoil-failures"
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
@@ -189,23 +190,143 @@ test-shuttle-replay schedule: build-web-console wasm-processor-guests download-o
         cargo test --package "${shuttle_package}" --features shuttle --lib \
             "${shuttle_test}" -- --exact --test-threads=1 --nocapture
 
-# Tokio's unstable runtime knobs seed per-host scheduling and turn unhandled task panics into
-# runtime failures. Scope the cfg to this test mode; ordinary and Shuttle builds keep their flags.
-test-turmoil:
+# Run the Turmoil suite: the execution and library simulation checks, then every interconnect
+# scenario over its committed regression seeds. Tokio's unstable runtime knobs seed per-host
+# scheduling and turn unhandled task panics into runtime failures; the cfg is scoped to this test
+# mode, and ordinary and Shuttle builds keep their flags. After the build, the tests run inside a
+# real-time budget of `budget_seconds` and end with status 124 when it expires. A failed scenario
+# leaves a failure record under target/turmoil-failures for `test-turmoil-replay`.
+test-turmoil budget_seconds="480":
     #!/usr/bin/env bash
     set -euo pipefail
-    export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
-    cargo test --package nervix-execution --features turmoil --lib -- --test-threads=1
-    cargo test --package nervix-interconnect --features turmoil --lib -- wire::simulation_checks authentication::simulation_tests --test-threads=1
-    cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
+    turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-execution --features turmoil --lib
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-interconnect --features turmoil --lib --test simulation
+    deadline=$((SECONDS + {{ budget_seconds }}))
+    within_budget() {
+        local remaining=$((deadline - SECONDS))
+        local status=0
+        if ((remaining > 0)); then
+            RUSTFLAGS="${turmoil_rustflags}" timeout --kill-after=30 "${remaining}" "$@" \
+                || status=$?
+        else
+            status=124
+        fi
+        if ((status == 124)); then
+            echo "the Turmoil suite exceeded its {{ budget_seconds }}s real-time budget;" \
+                "in-progress records under ${NERVIX_TURMOIL_FAILURES} name the unfinished runs" >&2
+        fi
+        return "${status}"
+    }
+    within_budget cargo test --package nervix-execution --features turmoil --lib -- \
+        --test-threads=1
+    within_budget cargo test --package nervix-interconnect --features turmoil --lib -- \
+        wire::simulation_checks authentication::simulation_tests --test-threads=1
+    within_budget cargo test --package nervix-interconnect --features turmoil --test simulation -- \
+        --test-threads=1
 
 # Run the interconnect's Turmoil simulation scenarios. Extra arguments filter or configure the test
-# binary, so one scenario can be replayed without the execution and library checks.
+# binary, so one test can run without the execution and library checks.
 test-turmoil-simulation *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
     cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1 {{ args }}
+
+# Replay one Turmoil failure record in a fresh process with exactly its recorded inputs: the seed,
+# epoch, topology, network parameters, bounds and any injected failure. The record names the
+# package, test target and test, so nothing else runs. The replay reports how the recorded build
+# differs from this one, compares its outcome and semantic trace with the record, and fails when
+# the recorded failure reproduces.
+test-turmoil-replay record:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    record="$(realpath -e {{ quote(record) }})"
+    mapfile -t selection < <(
+        python3 -c 'import json, sys; scenario = json.load(open(sys.argv[1]))["scenario"]; print(scenario["package"], scenario["target"], scenario["test"], sep="\n")' "${record}"
+    )
+    if ((${#selection[@]} != 3)); then
+        echo "${record} is not a Turmoil failure record" >&2
+        exit 1
+    fi
+    output="$(mktemp)"
+    trap 'rm -f "${output}"' EXIT
+    status=0
+    NERVIX_TURMOIL_REPLAY="${record}" RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
+        cargo test --package "${selection[0]}" --features turmoil --test "${selection[1]}" -- \
+            "${selection[2]}" --exact --include-ignored --test-threads=1 --nocapture 2>&1 \
+        | tee "${output}" \
+        || status=$?
+    if ! grep -Fq 'turmoil replay of' "${output}"; then
+        echo "no scenario in ${selection[2]} matches ${record}; it may come from another revision" >&2
+        exit 1
+    fi
+    exit "${status}"
+
+# Prove the replay path end to end: inject a harness failure into one scenario, require exactly one
+# failure record, and reproduce it in a fresh process through `test-turmoil-replay`.
+test-turmoil-replay-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    check="$(mktemp -d)"
+    trap 'rm -rf "${check}"' EXIT
+    records="${check}/records"
+    if NERVIX_TURMOIL_FAILURES="${records}" NERVIX_TURMOIL_INJECT_FAILURE=5s \
+        RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
+        cargo test --package nervix-interconnect --features turmoil --test simulation -- \
+            transport::network_disruption_respects_deadlines_and_repairs_authenticated_service \
+            --exact --test-threads=1 >"${check}/injected.log" 2>&1; then
+        cat "${check}/injected.log"
+        echo "the injected harness failure did not fail its scenario" >&2
+        exit 1
+    fi
+    mapfile -t found < <(find "${records}" -name '*.json')
+    if ((${#found[@]} != 1)); then
+        cat "${check}/injected.log"
+        echo "expected one failure record, found ${#found[@]}" >&2
+        exit 1
+    fi
+    if just test-turmoil-replay "${found[0]}" >"${check}/replay.log" 2>&1; then
+        cat "${check}/replay.log"
+        echo "the replay of an injected failure passed" >&2
+        exit 1
+    fi
+    if ! grep -Fq 'turmoil replay: reproduced the recorded outcome and trace' \
+        "${check}/replay.log"; then
+        cat "${check}/replay.log"
+        echo "the replay did not reproduce the recorded failure" >&2
+        exit 1
+    fi
+    grep -F 'turmoil replay' "${check}/replay.log"
+
+# Explore every interconnect scenario over `count` consecutive seeds from `first` instead of its
+# committed regression seeds, running each seed twice, inside a real-time budget of
+# `budget_seconds`; the recipe ends with status 124 when the budget expires. A failure leaves a
+# record like any other run. A seed that exposes a defect joins its scenario's committed seeds
+# with the fix.
+test-turmoil-sweep first="1000" count="64" budget_seconds="1500":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
+    first={{ quote(first) }}
+    end=$((first + {{ count }}))
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-interconnect --features turmoil --test simulation
+    status=0
+    NERVIX_TURMOIL_SWEEP="${first}..${end}" RUSTFLAGS="${turmoil_rustflags}" \
+        timeout --kill-after=30 {{ budget_seconds }} \
+        cargo test --package nervix-interconnect --features turmoil --test simulation -- \
+            --test-threads=1 || status=$?
+    if ((status == 124)); then
+        echo "the seed sweep exceeded its {{ budget_seconds }}s real-time budget;" \
+            "in-progress records under ${NERVIX_TURMOIL_FAILURES} name the unfinished runs" >&2
+    fi
+    exit "${status}"
 
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
@@ -348,13 +469,6 @@ test-coverage: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
-    RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
-        cargo llvm-cov --no-report --package nervix-execution --features turmoil --lib
-    RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
-        cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --lib -- \
-            wire::simulation_checks authentication::simulation_tests --test-threads=1
-    RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
-        cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
     cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
@@ -727,32 +841,41 @@ validate-shuttle-dependencies:
         exit 1
     fi
 
-# The normal workspace graph must not pull the optional simulation scheduler into production.
+# The normal workspace graph, with or without default features, must not pull the optional
+# simulation scheduler into production.
 validate-turmoil-dependencies:
     #!/usr/bin/env bash
     set -euo pipefail
-    if cargo tree --workspace --edges normal --no-default-features --prefix none \
-        | grep -E '^turmoil([[:space:]-]|$)'; then
-        echo "the production workspace includes Turmoil" >&2
-        exit 1
-    fi
+    production_graphs=(
+        "$(cargo tree --workspace --edges normal --prefix none)"
+        "$(cargo tree --workspace --edges normal --no-default-features --prefix none)"
+    )
+    for production_graph in "${production_graphs[@]}"; do
+        if printf '%s\n' "${production_graph}" | grep -E '^turmoil([[:space:]-]|$)'; then
+            echo "the production workspace includes Turmoil" >&2
+            exit 1
+        fi
+    done
 
-# Keep a precise diagnostic when the two scheduler modes are accidentally selected together.
+# Keep a precise diagnostic when the two scheduler modes are accidentally selected together, in
+# every package that offers both.
 validate-simulation-feature-conflict:
     #!/usr/bin/env bash
     set -euo pipefail
     diagnostics="$(mktemp)"
     trap 'rm -f "${diagnostics}"' EXIT
-    if cargo check --package nervix-interconnect --features 'shuttle turmoil' --lib \
-        >"${diagnostics}" 2>&1; then
-        echo "Shuttle and Turmoil unexpectedly compiled together" >&2
-        exit 1
-    fi
-    if ! grep -Fq 'Shuttle and Turmoil scheduler modes cannot be enabled together' \
-        "${diagnostics}"; then
-        cat "${diagnostics}" >&2
-        exit 1
-    fi
+    for package in nervix-execution nervix-interconnect; do
+        if cargo check --package "${package}" --features 'shuttle turmoil' --lib \
+            >"${diagnostics}" 2>&1; then
+            echo "${package}: Shuttle and Turmoil unexpectedly compiled together" >&2
+            exit 1
+        fi
+        if ! grep -Fq 'Shuttle and Turmoil scheduler modes cannot be enabled together' \
+            "${diagnostics}"; then
+            cat "${diagnostics}" >&2
+            exit 1
+        fi
+    done
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py
@@ -773,13 +896,13 @@ test-docs:
 
 # Screenshots are recaptured from the current console and the nervix-cli reference chapter is
 # rendered from the current binary, so a published book can never describe an older build.
-book version="": test-docs docs-screenshots
+book version="0.1.0-dev": test-docs docs-screenshots
     python scripts/build_book.py --version {{ version }}
 
 validate-skill:
     env GH_PROMPT_DISABLED=1 gh skill publish .agents/skills --dry-run
 
-book-pdf version="" output="":
+book-pdf version="0.1.0-dev" output="":
     #!/usr/bin/env bash
     set -euo pipefail
     just book "{{ version }}"

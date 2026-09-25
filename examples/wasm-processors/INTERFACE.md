@@ -34,7 +34,7 @@ The guest imports these functions from the `env` module:
 | `nervix_read_emit` | `() -> i32` | If the guest has a pending outgoing batch envelope, writes the next envelope into the reusable buffer, removes it from the pending emit queue, and returns the byte size. Returns `0` when nothing is pending. |
 | `nervix_dump_state` | `() -> i32` | Serializes the guest's durable computation state into the reusable buffer and returns the byte size, or a negative code when it cannot serialize the state. The host keeps the state saved last when a save fails. |
 | `nervix_load_state` | `(ptr: i32, size: i32) -> i32` | Loads previously dumped guest state bytes into an instance the host initialized with `nervix_init`. Returns `-7` or `-8` when it rejects the saved state, and another negative code when restoring fails for any other reason. |
-| `nervix_reset_state` | `() -> i32` | Clears guest-owned state while keeping the reusable buffer. |
+| `nervix_reset_state` | `() -> i32` | Clears guest-owned state while keeping the reusable buffer. The host resolves this export when it instantiates a branch but never calls it: every new state lifetime starts in a newly instantiated guest. |
 
 Return code `0` means success. Negative return codes are guest errors:
 
@@ -268,15 +268,15 @@ The shape is:
 {
   "domain_name": text,
   "domain_type": text,
-  "branch_key": bytes,
+  "branch_key": bytes | null,
   "input_schema": WasmProcessorSchema,
   "output_schemas": [WasmProcessorSchema, ...]
 }
 ```
 
-`branch_key` is the serialized concrete branch key for the branch-local WASM
-instance. A singleton root branch is still represented by a concrete, serialized
-branch key.
+`branch_key` is the concrete branch key of the branch-local WASM instance as its
+canonical JSON text, for example `{"tenant":"alpha"}`. It is absent for the
+explicit unbranched instance of an unbranched processor.
 
 `input_schema` and every entry in `output_schemas` use the `nervix-wasm` ABI
 schema contract:

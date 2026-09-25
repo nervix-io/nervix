@@ -95,6 +95,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   in-memory hot-path state and are never persisted.
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
   schema, branch, error, or sensitivity rules.
+- [Connector Crates And The Connector Contract](docs/src/connector-contract.md) is the authoritative
+  architecture reference for external integrations and the contract between connector crates and
+  their host. Any change to a connector crate, the shared connector contract, connector planning or
+  composition, or host source and sink execution must keep that chapter current in the same change.
+  Its scope includes layer and dependency ownership, source and sink plans and lifecycle, metadata
+  and header semantics, ACK and commit boundaries, host loops and cadence, special integrations,
+  failures, guarantees, limits, and observability.
 - [Cluster Interconnect](docs/src/interconnect.md) is the authoritative architecture reference for
   node-to-node communication. Any change to interconnect code or to a node-to-node operation must
   keep that chapter current in the same change. Its scope includes authentication and identity,
@@ -118,7 +125,20 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   change to hot-path state publication, task or branch ownership, delivery or assignment fences,
   or the data-plane lock ratchet must keep that chapter current in the same change. Its scope
   includes the contentionless rule, published and pre-resolved state, mutable execution state,
-  bounded synchronization, and review classification for new lock sites.
+  bounded synchronization, review classification for new lock sites, and deterministic checks of
+  data-plane concurrency protocols.
+- [VM Functions](docs/src/vm-functions.md) is the authoritative architecture reference for the
+  expression VM and its function catalog. Any change to expression lowering, the semantic catalog
+  and function registration, type or sensitivity checking, constant folding or expression sharing,
+  compiled programs and their prepared artifacts, the runtime bridge and execution context, scalar
+  operands, selected-row execution of conditional arms, row and batch errors, kernel selection and
+  SIMD use, function-family implementations, injected functions, or window aggregate and sketch
+  structures must keep that chapter current in the same change. Its scope includes ownership by
+  layer, where programs compile and how long they live, allocation and result bounds, scheduling
+  and execution bounds, branch-local accumulation, bounded sketch state, publication and recovery
+  of window state, measured performance evidence, and the checklist for adding a function.
+  [Expression Functions](docs/src/filter-map-functions.md) remains the owner of every public
+  function contract.
 - [Resource Versions And Bindings](docs/src/resource-versions.md) is the authoritative architecture
   reference for resource versions and the models that bind them. Any change to the resource
   catalog, upload installation or replication, version resolution, how a binding is validated,
@@ -128,6 +148,16 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   resolution, the pinning invariant for every binding kind, rebinding atomicity and rollback, the
   separation of uploads from bindings, the `DYNAMIC` TLS refresh, guarantees and limits, failure
   semantics and recovery, and observability.
+- [WASM State And Recovery](docs/src/wasm-state.md) is the authoritative architecture reference for
+  WASM processor guest state. Any change to what a guest save holds, the checkpoint that completes a
+  guest callback and the acknowledgements it holds back, local or replica durability of guest state,
+  state generations and the events that advance them, ownership fencing or forced recovery of guest
+  state, coordinated, guest-requested, or rejected-state resets, the guest save, restore, and reset
+  ABI, or how rebinding affects guest state must keep that chapter current in the same change. Its
+  scope includes branch ownership and unbranched execution, durable versus volatile state,
+  placements and revisions, failure before and after each durability and authority boundary,
+  stale-node catch-up and why state does not resurrect, quiescence, shutdown and restart, replay and
+  duplicate windows, observability, and limits.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
@@ -137,6 +167,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   commit boundaries, durable versus volatile state, the former-owner startup fence, and
   observability. It is the single canonical shutdown chapter: work that finishes with shutdown
   documentation extends it rather than adding a competing page.
+- [Typed States And Validation Boundaries](docs/src/typed-states.md) is the authoritative
+  architecture reference for absence, distinct semantic states, owning validation boundaries,
+  state identity, private atomic representations, and external encodings. Any change to how a
+  missing value, state variant, required identity, conversion failure, or boundary representation
+  is modeled or validated must keep that chapter current in the same change. Interconnect,
+  domain-clock, and shutdown details remain in their own authoritative chapters.
 
 ## System Layers and Migration
 
@@ -591,6 +627,12 @@ build and the existing tests, and nothing in it changes behavior.
 
 ### Integration coverage
 
+- A lock-free or wait-and-notify protocol on the data plane ships with a Shuttle check over its
+  production owner that names and asserts its invariant. Run it through `just test-shuttle` in CI
+  and preserve a failing schedule for replay. Use Loom only for memory-ordering claims, which
+  Shuttle's sequentially consistent scheduler cannot establish. Concurrency tests have no
+  wall-clock bounds or sleep polls; express deadline choices and progress with scheduler-visible
+  events. A publicly observable outcome still needs its Cucumber scenario.
 - [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) is the authoritative
   architecture reference for the lifecycle of the Cucumber scenario harness. Any change to how the
   harness starts, observes, diagnoses, or stops in-process nodes, server processes, scenarios, or

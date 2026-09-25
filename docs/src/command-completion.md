@@ -105,7 +105,7 @@ defines the rebinding contract.
 The ordered transaction records the reset as an effect even though it changes no Model. Success
 waits for the selected guest-state generation to be durable and its replacement execution usable.
 Retrying an admitted reference resumes or reads the original outcome; an expired reference cannot
-start another destructive reset.
+start another destructive reset. See [Coordinated Reset](./wasm-state.md#coordinated-reset).
 
 ## All-live-node barriers
 

@@ -498,7 +498,8 @@ Nervix does not provide:
   version, or module file, such as a rebinding, starts a new generation for every branch in the same
   schedule publication, so no checkpoint saved under the previous module can attach to the new one
   and every branch starts without guest state. A rebinding that leaves the processor's version
-  unchanged keeps its state. See [State Generations](./wasm-processor-guests.md#state-generations).
+  unchanged keeps its state. See [State Generations](./wasm-processor-guests.md#state-generations)
+  and [Rebinding And Rollback](./wasm-state.md#rebinding-and-rollback).
 - **Version deletion or retention.** Versions accumulate in the catalog and in every node's store.
   Plan storage for every version ever uploaded.
 

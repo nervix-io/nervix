@@ -98,7 +98,7 @@ remains fenced. A follower or offline replica that skips the intermediate runtim
 catches up through the ordered schedule records and cannot accept a checkpoint from the replaced
 generation. Thus a pre-publication failure leaves the old schedule authoritative, while a
 post-publication failure is recovered as committed but not yet usable rather than rolled back or
-acknowledged early.
+acknowledged early. See [Coordinated Reset](./wasm-state.md#coordinated-reset).
 
 ## Replication Pacing
 

@@ -4,6 +4,9 @@ WASM processors are native WebAssembly modules loaded by Wasmtime. They do not u
 
 Rust guests use the [Rust WASM Guest SDK](./wasm-guest-sdk.md) rather than implementing this ABI by hand. This chapter is the authoritative wire contract that the SDK implements and that guests in other languages implement directly.
 
+[WASM State And Recovery](./wasm-state.md) is the architecture reference for how Nervix makes guest
+state durable, fences its lifetimes, replaces them, and recovers them after a failure.
+
 See [Choosing An Extension Tier](filter-map-functions.md#choosing-an-extension-tier) when deciding
 between builtins, operator-trusted Roto UDFs, and a WASM processor.
 
@@ -37,7 +40,7 @@ MAX MEMORY 64MiB
 
 `MAX FUEL` is the Wasmtime instruction-fuel budget for one logical guest operation. Nervix resets
 the store to that budget before initialization, each input batch, each timeout callback, a
-quiesce flush, and each state save, load, or reset. All guest ABI calls made as part of that
+quiesce flush, and each state save or load. All guest ABI calls made as part of that
 operation share the budget: for example, input-buffer allocation, `nervix_process_batch`, global
 error inspection, and every subsequent `nervix_read_emit` call are one batch-processing budget.
 Module instantiation also receives one budget. Fuel measures guest WebAssembly execution, not
@@ -54,8 +57,8 @@ the branch's committed [checkpoint](#checkpoints-and-acknowledgements). Other br
 independent and continue running. There is no separate WASM wall-clock timeout clause.
 
 Before every guest operation, Nervix supplies one explicit domain execution snapshot to the WASM
-host. Initialization, input processing, a timeout callback, quiesce flush, and state save, load, or
-reset each receive the snapshot of their owning execution. Every call to
+host. Initialization, input processing, a timeout callback, quiesce flush, and state save or load
+each receive the snapshot of their owning execution. Every call to
 `nervix_domain_time_nanos()` during that operation returns exactly that value. The host exposes no
 context-free guest invocation and the module cannot choose or read host wall time. Wasmtime epoch
 yielding and fuel enforcement remain physical execution safeguards and do not change guest-visible
@@ -91,6 +94,10 @@ nervix_reset_state() -> i32
 
 Return `0` from fallible functions on success. Return a negative code on guest rejection. Nervix treats negative codes as runtime errors and applies the processor error policy. `nervix_dump_state` returns the size of the snapshot it wrote, or a negative code when it cannot serialize its state; Nervix then keeps the state saved last.
 
+Nervix resolves `nervix_reset_state` when it instantiates a branch but never calls it: every new
+state lifetime starts in a newly instantiated guest that is initialized without a restore. A guest
+must still export it.
+
 `nervix_load_state` has two reserved codes that classify the saved state itself:
 
 | Code | Verdict |
@@ -100,8 +107,9 @@ Return `0` from fallible functions on success. Return a negative code on guest r
 
 Only these two codes are a rejection of the saved state. A trap, an exhausted `MAX FUEL` or
 `MAX MEMORY`, or any other negative code while restoring is a failure of the restore itself and says
-nothing about the saved bytes. Nervix keeps the saved state after every failed restore, including a
-rejection, and reports each outcome as a distinct [failure stage](#failure-diagnostics).
+nothing about the saved bytes. When an instance the branch's owner creates fails to restore, Nervix
+keeps the saved state, including after a rejection, and reports each outcome as a distinct
+[failure stage](#failure-diagnostics).
 
 `nervix_request_state_reset` is answered by the host rather than by the guest: `0` when Nervix
 takes the request and `-9` when the guest operation in progress cannot carry one. See
@@ -140,7 +148,7 @@ immutable base independently visible to every route. The authoritative cross-lan
 {
   "domain_name": text,
   "domain_type": text,
-  "branch_key": bytes,
+  "branch_key": bytes | null,
   "input_schema": {
     "name": text,
     "fields": [
@@ -162,9 +170,10 @@ immutable base independently visible to every route. The authoritative cross-lan
 it unless they own a strict compatibility rule for the exact Nervix version they
 are targeting.
 
-`branch_key` is the serialized concrete branch key for this instance. An
-explicit `UNBRANCHED` relay is still represented by one concrete branch
-key.
+`branch_key` is the concrete branch key of this instance as its canonical JSON
+text, for example `{"tenant":"alpha"}`. It is absent for the explicit
+unbranched instance of an unbranched processor; an unbranched execution is
+never represented by an empty key.
 
 `ProcessorTypeKind` is a FlatBuffers enum with these scalar variants:
 
@@ -395,6 +404,10 @@ Keep `nervix_load_state` strict about what it restores. Save what a restore need
 state, such as the branch configuration it was taken under, and reject state that does not match
 the instance it is handed to.
 
+A concrete branch evicted for its `TTL` or instance limit stops without a quiesce flush, but its
+checkpoint stays: when the same branch key appears again, its new instance restores the last
+checkpoint that branch committed.
+
 A zero-length `nervix_dump_state` result saves no state at all: the next instance is initialized
 without a `nervix_load_state` call. A guest whose computation state can be empty therefore wraps it
 in an envelope, as both example guests do with `GuestSnapshot`, so that empty computation state is
@@ -423,8 +436,11 @@ keeps the generation. When an owner is lost and its state is recovered without i
 recovery starts a new generation for every branch of the processor in the same schedule
 publication that names the new owner. The checkpoint the recovery selects for a branch continues in
 that generation; a branch with no surviving checkpoint of the generation being replaced starts
-fresh, and `SHOW CLUSTER STATUS` reports it as a `wasm_processor` reset. Applying the same committed
-schedule again, after a restart or a rebuild, publishes nothing new.
+fresh, and `SHOW CLUSTER STATUS` reports it as a `wasm_processor` reset. A recovery whose
+preparation fails, including one whose new owner cannot restore a staged checkpoint and one that
+runs past its five-second budget, starts every branch fresh the same way, whatever
+`ON REJECTED STATE` declares; see [Forced Recovery](./wasm-state.md#forced-recovery). Applying the
+same committed schedule again, after a restart or a rebuild, publishes nothing new.
 
 A generation also belongs to the module binding it was published for. A model change that binds
 another resource, version, or module file, such as a `REBIND RESOURCE`, starts a new generation for
@@ -478,8 +494,9 @@ callback returns and never calls back into the guest to do it. The request selec
 scoped to the calling branch and to the generation that branch is running in, so a guest can never
 name another processor, domain, branch, or generation. Every accepted request is routed through the
 same coordinated reset described above, so it has the same durability, replica, fencing and
-recovery guarantees as an operator's, and `SHOW CLUSTER STATUS` reports it under a request
-reference beginning with `wasm-guest-reset.`.
+recovery guarantees as an operator's. `DESCRIBE WASM PROCESSOR` reports it with the reason
+`GUEST`, and its `FORMAT JSON` inspection carries its request reference, which begins with
+`wasm-guest-reset.`.
 
 Only the callbacks that end with a [checkpoint](#checkpoints-and-acknowledgements) own uncommitted
 effects a reset can discard, so only those admit a request: an input batch, a timeout callback, and
@@ -525,8 +542,9 @@ values:
 Only the guest's own verdict — `-7` or `-8` from `nervix_load_state` — reaches this policy. A
 module that does not compile, an initialization the guest refuses, an exhausted `MAX FUEL` or
 `MAX MEMORY`, a trap while restoring, and every storage, replication and state-authority failure
-leave the saved bytes as usable as they were, so none of them ever discards state, whichever policy
-the processor declares.
+leave the saved bytes as usable as they were, so the policy never discards state for any of them.
+Losing the branch's owner is the one path that can recreate state without a verdict; see
+[Forced Recovery](./wasm-state.md#forced-recovery).
 
 One refused lifetime is worth exactly one recovery attempt. Nervix records that the attempt was
 spent before it resets anything, so the budget survives whatever happens next:
@@ -577,6 +595,11 @@ callback at a time, in this order:
    the held acknowledgements. An input's acknowledgement then succeeds as soon as every delivery the
    callback made for it has succeeded as well.
 8. Only then does the branch run its next callback.
+
+Only an `ATTACHED` processor, the default, holds its source's acknowledgements this way. A
+`DETACHED` processor receives its input after relay fan-out has acknowledged it upstream, so no
+source acknowledgement waits for its checkpoints, although its guest state is checkpointed the same
+way.
 
 The replicas a checkpoint waits for are the ones the committed schedule assigns when it is captured,
 and `SHOW CLUSTER STATUS` lists them. While it waits, the checkpoint follows the schedule: a replica
@@ -643,9 +666,10 @@ checkpoint was confirmed by. What that means differs for guest state, for the so
 
 - **Guest state.** A restarted node restores each branch from the newest checkpoint on its own
   storage. After an owner is lost, [forced recovery](#state-generations) continues each branch from
-  the newest surviving checkpoint of its generation, and with replicas, a replica holds every
-  checkpoint whose acknowledgements were released. Without replicas, only the owner's own storage
-  holds a branch's checkpoints, so recovering without that node resets the branch.
+  the newest surviving checkpoint of its generation when the new owner prepares the recovery, and
+  with replicas, a replica holds every checkpoint whose acknowledgements were released. Without
+  replicas, only the owner's own storage holds a branch's checkpoints, so recovering without that
+  node resets the branch.
 - **Source replay.** An input whose acknowledgement is withheld — its checkpoint failed, its node
   stopped first, or the guest still buffers it — is redelivered by a source with acknowledgements
   and lost by one without. The state the branch continues from can already reflect a redelivered
@@ -671,6 +695,8 @@ its inputs were not acknowledged, so a source with acknowledgements redelivers t
 A source that keeps redelivering an input while no owner accepts it can deliver it to the recovered
 branch more than once, so the number of times a redelivered input is applied is not fixed. A source
 without acknowledgements delivers nothing again, and the input is lost in the first two windows.
+[Failure At Each Boundary](./wasm-state.md#failure-at-each-boundary) extends this account to the
+control plane's authority boundaries.
 
 A branch holds back the acknowledgements of one callback at a time, for no longer than the
 checkpoint deadline. Stopping a node ends a branch still waiting for its checkpoint after the
@@ -701,7 +727,8 @@ lifetime.
 ## Quiesce Flush
 
 When Nervix quiesces a branch — to hand it to a replacement node during an `ENTITY_PAUSE`
-alteration, or to shut it down — it calls:
+alteration or an ownership move, to pause its domain, to stop it for a coordinated reset, or to shut
+it down — it calls:
 
 ```text
 nervix_flush()

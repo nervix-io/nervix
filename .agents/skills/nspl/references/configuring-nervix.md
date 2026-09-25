@@ -23,7 +23,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Domain timing and lifecycle | `Domains And Time` |
 | Administrative durability, storage errors, and recovery of uncertain commits | `Control Plane` → `Durability and recovery` |
 | Internal/wire schemas, schema evolution, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` and `Control Plane` |
-| Expressions, comparisons, membership and range tests, casts, and built-in functions | `Filter-Map Functions` |
+| Expressions, operators, casts, built-in functions, window aggregates, and approximate sketches | `Expression Functions` |
 | Trusted Roto user-defined expression functions | `User-Defined Functions` |
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
@@ -235,11 +235,12 @@ relay. Do not use them to scan across branches.
   `<stage> failed` diagnostic, and treat only `snapshot envelope decoding` and `application state
   restoration` as a verdict on the saved state, which Nervix keeps unless the processor declares
   `ON REJECTED STATE RESET` and thereby spends that lifetime's single recovery attempt. Owner loss
-  without a surviving
-  checkpoint of the current state generation resets the affected branches; a returning former
-  owner or stale replica never restores older guest state. Treat a WASM processor's input
+  without a surviving checkpoint of the current state generation, or whose recovery the new owner
+  cannot prepare, resets the affected branches; a returning former owner or stale replica never
+  restores the state of a replaced generation. Treat a WASM processor's input
   acknowledgement as released only after the guest-state checkpoint covering it reached the owner's
-  stable storage and every replica the schedule assigns; a failed checkpoint negatively
+  stable storage and every replica the schedule assigns, unless the processor is `DETACHED`, whose
+  input relay fan-out acknowledges upstream; a failed checkpoint negatively
   acknowledges its inputs and recreates the guest from the last completed checkpoint. Output is
   dispatched before its checkpoint completes, so a redelivered input can emit again: the path stays
   at least once, and a guest that must not double-count redelivered input has to recognize it.

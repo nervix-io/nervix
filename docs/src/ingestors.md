@@ -291,7 +291,7 @@ General notes:
 
 Useful built-ins include string, null-handling, numeric, regex, and contextual functions such as `lower`, `coalesce`, `abs`, `regexp_like`, `now`, and `uuid_v7`.
 
-See [Filter-Map Functions](filter-map-functions.md) for the full function reference.
+See [Expression Functions](filter-map-functions.md) for the full function reference.
 
 Common expression patterns include:
 

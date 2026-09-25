@@ -170,94 +170,48 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   logical, while Wasmtime fuel and epoch yielding are physical safety controls.
 - Do not simulate a targeted WASM guest-state reset with `ALTER`, resource rebinding, or a
   stop/start cycle. A coordinated reset is a control-plane state-lifetime operation with an explicit
-  unbranched, concrete-branch, or all-branches target and a stable execution reference. Apart from
-  the `ON REJECTED STATE RESET` policy, which triggers it for one refused branch lifetime, it is not
-  an NSPL graph statement, so say that no other public NSPL reset syntax exists rather than inventing
-  one. Guest code reaches the same operation for its own branch through the SDK's
+  unbranched, concrete-branch, or all-branches target and a stable execution reference. Its one
+  public statement is `RESET WASM PROCESSOR ... STATE`, described below, and the
+  `ON REJECTED STATE RESET` policy triggers it for one refused branch lifetime; do not invent any
+  other reset syntax. Guest code reaches the same operation for its own branch through the SDK's
   `request_state_reset` or the raw `nervix_request_state_reset` import, which discards that
   callback's uncommitted output and input and never re-enters the guest. `REBIND RESOURCE` does
   start a fresh lifetime for every branch of each WASM processor it moves, but only as the
   consequence of changing the module, and it cannot select a branch.
 - Declare exact schema types and nullability. Use explicit conversions; never invent implicit
   casts between wire, internal, branch, processor, lookup, state, and sink values.
-- Choose a conversion by what a value that does not convert should do: `expr AS TYPE` fails the
-  message with `cast_failed` and activates `ON MESSAGE ERROR`, while `TRY_CAST(expr AS TYPE)`
-  yields a typed null. A `TRY_CAST` result is always optional, so write it to an `OPTIONAL` field or
-  wrap it in `coalesce(...)`. It suppresses only its own conversion: a failure inside its operand
-  still fails the message. Check `Filter-Map Functions` → `Conversions` for the values each
-  conversion rejects.
-- Use `IF ... THEN ... ELSE ... END` or searched/simple `CASE` for conditional values. Keep every
-  result at one exact type; remember that omitted `CASE ELSE` yields a typed null and requires an
-  optional destination. An arm is evaluated only for the messages that select it, so a `CASE`
-  guard shields a conversion, pattern, or UDF from the messages it cannot handle.
-- Write `IN` sets as constants of the operand's exact type, casting literals for narrower types:
-  `input.priority IN (1 AS I32, 2 AS I32)`. A set cannot hold `NULL` or read a field, and an empty
-  set is false for every message. `IN`, `NOT IN`, and `BETWEEN` are null for a null operand, so use
-  `IS [NOT] DISTINCT FROM` where nulls must compare; `IN`, `BETWEEN`, `IS`, `DISTINCT`, and `FROM`
-  are reserved in expressions. `greatest` and `least` skip nulls and order NaN highest, and `clamp`
-  fails a message whose low bound is above its high bound, so give such routes an
-  `ON MESSAGE ERROR` policy.
-- Count string positions in `substr`, `split_part`, and `strpos` from 1, but `nth(list, index)`
-  from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
-  `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
-  aggregates over retained input rows.
-- For text, use `octet_length` for UTF-8 bytes and `length` for Unicode scalar values;
-  `normalize_nfc` for canonical composition; `split` and `join` for string vectors;
-  `like`/`ilike` for wildcards, `contains_any` for literal substring sets, and
-  `regexp_extract` for numbered captures. Read `Filter-Map Functions` → `String Functions`,
-  `String Predicates`, and `Regular Expressions` for their exact Unicode, null, and size rules.
-- Pass counts and positions as any integer type; they are read at full value. `repeat`, `lpad`,
-  and `rpad` fail only the message whose result would not fit the text one `STRING` column holds,
-  and `uuid_v7()` fails every message while domain time is before the Unix epoch. Give routes that
-  can reach either an `ON MESSAGE ERROR` policy for `overflow`.
-- Write datetime units, date parts, `date_bin` widths, time zones, formats, and disambiguations as
-  literals. Units from `nanosecond` to `week` have fixed lengths; `month`, `quarter`, and `year` are
-  calendar units that only `date_trunc`, `date_add`, and `date_diff` accept. `date_trunc`,
-  `date_bin`, and `to_unix` round toward negative infinity, including before the epoch; `date_diff`
-  rounds toward zero; a week starts on Monday; and `date_bin` always takes an explicit origin. A
-  result outside the `DATETIME` range fails only that message with an `overflow` error. Datetime
-  functions compute only from their arguments; pass `now()` for the execution-local domain time.
-- Name a zone explicitly for local calendars: `date_part`, `date_trunc`, `date_add`, `date_diff`, and
-  `format_datetime` take an optional trailing `'UTC'`, IANA name, or `'+HH:MM'` offset, read in UTC
-  without one, and always return UTC instants. Zone rules come from the IANA database bundled into
-  Nervix, never from the host. In an IANA zone a `day` or `week` is a local calendar day, a month
-  moved past a shorter month lands on its last day, and a calendar `date_diff` counts whole units
-  from `start`.
-- Read external timestamps with `parse_datetime(format, text[, zone[, disambiguation]])` using
-  strftime-style directives such as `%Y-%m-%dT%H:%M:%S%.f%:z`. Reading is strict and never guesses:
-  there are no two-digit years or locale formats, and a format must read a complete date. A format
-  with `%z`, `%:z`, `%::z`, or `%s` takes no zone; any other format requires one, and a local time
-  the zone skips or repeats fails its message unless `'earlier'`, `'later'`, or `'compatible'` is
-  given. Give such routes an `ON MESSAGE ERROR` policy for `cast_failed` and `invalid_argument`
-  failures. Formats describe values of at most 256 bytes.
-- Treat arithmetic and numeric functions as checked at the operands' exact type: integer overflow,
-  a zero divisor, and a float or math result that is NaN or infinite fail only that message with a
-  per-message error. Give a route whose operands can reach those values an `ON MESSAGE ERROR`
-  policy, and cast to a wider type before arithmetic that can exceed the narrower one.
-- Build fixed arrays with `[a, b]` or `array(a, b)` and vectors with `vec(a, b)`; a direct `vec()`
-  assignment takes its empty vector type from the declared `VEC` field. Keep element types exact.
-  Use `slice`, `concat`, `contains`, `overlap`, `min`, `max`, `mean`, `dot`, and `distance` as specified
-  in `Filter-Map Functions` → `Array And Vector Functions`; equal lengths are required for `dot`
-  and `distance`.
-- Expect `round(x, digits)` to round a float's stored binary value exactly, so `round(2.675, 2)` is
-  `2.67`. Test for NaN and infinities with `is_nan`, `is_finite`, and `is_infinite`, which accept
-  only `F32` and `F64`. Give `bitwise_and`, `bitwise_or`, and `bitwise_xor` two arguments of one
-  integer type, and treat shifts as checked: a negative count, or a `shift_left` whose product does
-  not fit the value's type, fails that message.
-- In window routes, prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `BOOL_AND`, `BOOL_OR`,
-  `ARG_MIN`, `ARG_MAX`, `*_POP` and `*_SAMP` variance, deviation, and covariance, `CORR`) over
-  hand-built formulas. Check `Processors` → `Window aggregate functions`: a null argument
-  contributes nothing while `COUNT` counts every row, and an aggregate that can be null (sample
-  statistics, `CORR`, anything over an `OPTIONAL` argument) needs an `OPTIONAL` output field or
-  `COALESCE`.
-- For bounded approximate window statistics, use `APPROX_COUNT_DISTINCT(value, precision)`
-  (precision 4–16), `APPROX_QUANTILE(value, percentile, capacity)` (percentile 0–100, capacity
-  32–4096), or `APPROX_TOP_K(value, k, capacity)` (`1 <= k <= capacity <= 4096`). Put
-  `MAX STATE SIZE <bytes>` after duration `WIDTH` and `STEP`. A branched sketch window also needs
-  `MAX INSTANCES <n> EVICT LRU` on its branch. Null values are ignored, non-finite floats are
-  message errors, and results are approximate; choose precision and capacity for the desired
-  error and memory cost. See `Processors` → `Window aggregate functions` for result types and
-  bounds.
+- For every expression, read `Expression Functions`: `Where Expressions Run` for the functions each
+  context allows, `Function Properties` and `Errors` for optional results, sensitivity, and where a
+  failure goes, then the section of each operator and function the expression uses. Check that:
+  - literals are `I64` and `F64`, so a narrower operand's literal is cast (`input.count > 5 AS U32`),
+    and there is no exponent, `DATETIME`, or `BYTES` literal;
+  - `NOT` binds tighter than comparisons and `AS` tighter than unary minus: write `NOT (a > b)` and
+    `(-128) AS I8`;
+  - `AND`, `OR`, and `coalesce` evaluate every operand, so only an `IF` or `CASE` arm shields an
+    operand that can fail, such as a division by a field that can be zero;
+  - an optional result (`TRY_CAST`, JSON extraction, `nullif`, `LOOKUP_HASH_MAP`, `regexp_substr`,
+    `regexp_extract`, URL components, list `first`/`last`/`nth`/`sum`/`min`/`max`/`mean`, sample
+    window statistics, `CASE` without `ELSE`) reaches a required field only through `coalesce`;
+  - every route whose functions can fail has an `ON MESSAGE ERROR` policy, and expressions that can
+    fail stay out of deduplication keys, reorderer `BY`, `CORRELATE WHERE`, inferencer `INPUTS`,
+    and `BRANCHED BY ... SET`, which have no error route;
+  - `IN` sets hold non-null constants of the operand's exact type, and string positions count from
+    1 while `nth`, `slice`, and JSON path indexes count from 0;
+  - datetime units, parts, `date_bin` widths, zones, formats, and disambiguations are literals, a
+    local calendar names its zone, `now()` supplies domain time, and foreign timestamps are read
+    with a strict `parse_datetime` format;
+  - IP text is parsed once into a `BYTES` field, IPv4-mapped addresses are unmapped before IPv4
+    network tests, URL inputs are absolute, and many JSON fields are read from one document field;
+  - every sensitive value stored in a field that is not sensitive goes through `leak_sensitive(...)`;
+    hashing, counting, or testing a sensitive value keeps the result sensitive.
+- In window routes, read `Expression Functions` → `Window Aggregates`. Aggregates appear only in
+  window route `SET`, `input` only inside their arguments, and `COUNT`, `SUM`, `FIRST`, `LAST`,
+  `MIN`, and `MAX` are aggregates there, never list functions. Compute window output from aggregates
+  and constants, and prefer the dedicated aggregates (`AVG`, `COUNT_IF`, `ARG_MIN`, `ARG_MAX`, the
+  `*_POP` and `*_SAMP` statistics, `CORR`) over hand-built formulas. For `APPROX_COUNT_DISTINCT`,
+  `APPROX_QUANTILE`, and `APPROX_TOP_K`, read `Approximate Sketches`: the window needs
+  `MAX STATE SIZE` after duration `WIDTH` and `STEP`, a branched window a branch with
+  `MAX INSTANCES <n> EVICT LRU`, and the precision or capacity sets both accuracy and memory.
 - Use a separate wire schema and codec when transport shape differs from the internal runtime
   schema. Declare datetime encoding explicitly when required.
 - For every JAQ-backed codec, use `WITH JAQ TRANSFORMATIONS` and declare `ON INGESTION`,
@@ -288,29 +242,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   every create, alter, show, drop, and codec reference must include the exact format.
 - Use `BYTES` for arbitrary octets, including `ARRAY` and `VEC` elements. Keep branch key schemas
   free of `BYTES`. JSON and CBOR wire `BYTES` fields carry padded standard base64 text; AVRO uses
-  native bytes. Convert explicitly with `bytes_from_utf8`, `bytes_to_utf8`, `base64_encode`,
-  `base64_decode`, `hex_encode`, and `hex_decode`; `sha256` returns raw digest bytes and `xxh3_64`
-  returns a deterministic `U64`. Encoding and hashing keep input sensitivity.
-- Parse address text once with `ip_from_string` into a 4-octet IPv4 or 16-octet IPv6 `BYTES`
-  value, then test and mask the value with `ip_in_network(address, '<cidr>')`, `ip_trunc`,
-  `ip_family`, and `ip_unmap`, and write it with `ip_to_string`. Families never mix: an
-  IPv4-mapped `::ffff:a.b.c.d` address matches no IPv4 network until `ip_unmap`. Write a literal
-  network in exact CIDR form without host bits, or the statement is rejected.
-- Read embedded JSON text with `JSON_VALUE(doc, '$.path' AS TYPE)`, `TRY_JSON_VALUE(...)`, and
-  `JSON_EXISTS(doc, '$.path')`. Declare the exact result type, including `VEC<...>` and
-  `ARRAY<..., n>`; `DATETIME` and `BYTES` are not readable, so read text as `STRING` and convert
-  it. Paths are `$` followed by `.name`, `["any name"]`, and `[index]` steps. Missing values and
-  JSON null both read as null, so write results to `OPTIONAL` fields and use `JSON_EXISTS` to tell
-  them apart; `JSON_VALUE` fails the message for a malformed document, a value of another kind, a
-  number out of range, or an `ARRAY` of the wrong length, while `TRY_JSON_VALUE` yields null.
-  Extractions from one document column share one parse, so read many fields freely. Check
-  `Filter-Map Functions` → `JSON Documents` for paths, number rules, and limits.
-- Read URL parts with `url_scheme`, `url_host`, `url_port`, `url_path`, `url_query`,
-  `url_fragment`, `url_query_value`, and `url_query_values`, and decode escapes with `url_decode`.
-  Inputs must be absolute URLs; prefix a request target with a base explicitly. Host, port, query,
-  fragment, and query values are null when the URL lacks them, so write them to `OPTIONAL` fields or
-  `coalesce` them. Malformed addresses, networks, URLs, and escapes fail the message; guard with
-  `is_ip_address` or `is_url` in a `CASE` to route them without an error.
+  native bytes. A cast never converts `BYTES`; use the functions of `Expression Functions` →
+  `Bytes, Encodings And Hashes`.
 - Declare wire-schema mode after the entity name with `CREATE WIRE <format> SCHEMA <name> MODE
   STRICT|LOOSE`. Change it with `ALTER WIRE <format> SCHEMA <wire_schema> MODE STRICT|LOOSE`;
   the same format-qualified ALTER form owns field evolution.
@@ -419,7 +352,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   defaults to `PRESERVE`. Offer `RESET` only when the user accepts losing that branch's computation
   state, and say that it replaces the lifetime once rather than retrying. Never present it as a
   recovery for a compile, initialization, fuel, memory, storage, replication, or authority failure;
-  none of those discards state under either value.
+  the policy discards state for none of those under either value. Only an owner loss whose forced
+  recovery cannot prepare the new owner recreates guest state without the guest's verdict.
 - To intentionally replace an existing WASM processor's guest state, use
   `RESET WASM PROCESSOR <processor> STATE IN DOMAIN <domain> FOR UNBRANCHED|ALL BRANCHES|BRANCH VALUES { <field> = <literal>, ... };`.
   Choose the explicit scope that matches its declared branch, and supply every branch-key field

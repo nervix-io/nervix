@@ -210,6 +210,8 @@ not be encoded; a connection, session, or response-stream error carrying the tra
 session that ended before the result; a frame from the node that does not decode, or a reply to the
 command that is not a command result; or, when the caller needs the status text, an unsuccessful
 command result with its disposition, message, and diagnostics.
+Client diagnostic scenarios inspect the failed disposition and source span from that result, so
+the assertion uses the delivered diagnostic rather than parsing the displayed message.
 
 A **status wait** polls one node every 200 milliseconds until its parsed status satisfies a
 condition, within 40 seconds from the start of the wait. The waits the harness performs are a
