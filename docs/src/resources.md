@@ -141,7 +141,7 @@ cannot compile rejects the whole rebinding with every previous binding and its s
 still in place:
 
 ```text
-invalid WASM PROCESSOR 'counting_guest': wasm processor 'counting_guest' module compilation failed
+invalid WASM PROCESSOR 'counting_guest' in domain '<domain>': wasm processor 'counting_guest' module compilation failed
 ```
 
 ## Upload Format

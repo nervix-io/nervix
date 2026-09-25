@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use arch_into::ArchInto;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dataflow_graph::DataflowNodeHealth;
 use nervix_execution::MemoryClass;
@@ -28,15 +28,16 @@ use nervix_interconnect::{
     LookupResponse as RemoteLookupResponse, RemoteOperationFailure, RemoteOperationSubject,
 };
 use nervix_models::{
-    ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter, CreateEndpoint,
-    CreateIngestor, CreateJunction, CreateLookup, CreatePlacement, CreateReingestor,
-    CreateReorderer, CreateUdf, CreateWasmProcessor, CreateWindowProcessor, DescribeCorrelator,
-    DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
-    DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
-    DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainName, DomainStatus, InspectionFormat, LookupName, LookupQuery,
-    Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ResourceId, ScheduledNode,
-    ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
+    ClusterNodeName, CodecName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
+    CreateEndpoint, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
+    CreateReingestor, CreateReorderer, CreateUdf, CreateWasmProcessor, CreateWindowProcessor,
+    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
+    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
+    DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainName, DomainStatus, FieldName, InspectionFormat, LookupName,
+    LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ResourceId,
+    ScheduledNode, SchemaName, ShowRelayMaterializedState, UniquelyKindedModel,
+    WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tokio::time::Duration;
@@ -90,6 +91,74 @@ struct LookupTarget {
     key_ty: ParseAsType,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum ObservationError {
+    #[error("failed to describe {kind} '{name}' in domain '{domain}' locally", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
+    LocalDescribe { domain: DomainName, entity: NodeRef },
+    #[error("failed to describe {kind} '{name}' in domain '{domain}' on node '{node}'", kind = .entity.kind.as_str(), name = .entity.identifier.as_str())]
+    RemoteDescribeRequest {
+        domain: DomainName,
+        entity: NodeRef,
+        node: ClusterNodeName,
+    },
+    #[error("remote describe failed: {failure}")]
+    RemoteDescribeFailure { failure: RemoteOperationFailure },
+    #[error("hash map '{name}' in domain '{domain}' has no execution node")]
+    NoLookupExecutionNode {
+        domain: DomainName,
+        name: LookupName,
+    },
+    #[error("failed to query hash map '{name}' in domain '{domain}' locally")]
+    LocalLookup {
+        domain: DomainName,
+        name: LookupName,
+    },
+    #[error("failed to query hash map '{name}' in domain '{domain}' on node '{node}'")]
+    RemoteLookupRequest {
+        domain: DomainName,
+        name: LookupName,
+        node: ClusterNodeName,
+    },
+    #[error("remote hash map query failed: {failure}")]
+    RemoteLookupFailure { failure: RemoteOperationFailure },
+    #[error("failed to admit hash map query result")]
+    LookupAdmission,
+    #[error("failed to decode hash map query result")]
+    LookupDecode,
+    #[error("scheduled lookup node has invalid model kind in domain '{domain}'")]
+    LookupModelKind { domain: DomainName },
+    #[error("lookup '{lookup}' references missing scheduled codec '{codec}' in domain '{domain}'")]
+    MissingCodec {
+        domain: DomainName,
+        lookup: LookupName,
+        codec: CodecName,
+    },
+    #[error("scheduled codec node has invalid model kind in domain '{domain}'")]
+    CodecModelKind { domain: DomainName },
+    #[error(
+        "lookup '{lookup}' references missing scheduled schema '{schema}' in domain '{domain}'"
+    )]
+    MissingSchema {
+        domain: DomainName,
+        lookup: LookupName,
+        schema: SchemaName,
+    },
+    #[error("scheduled schema node has invalid model kind in domain '{domain}'")]
+    SchemaModelKind { domain: DomainName },
+    #[error(
+        "lookup '{lookup}' key field '{field}' is missing from schema '{schema}' in domain \
+         '{domain}'"
+    )]
+    MissingKeyField {
+        domain: DomainName,
+        lookup: LookupName,
+        field: FieldName,
+        schema: SchemaName,
+    },
+    #[error("scheduled ingestor node has invalid model kind in domain '{domain}'")]
+    IngestorModelKind { domain: DomainName },
+}
+
 /// The kind and model a dataflow metric identifier addresses, or `None` when `id` is not one.
 pub(in crate::application) fn dataflow_metric_target(id: &str) -> Option<(String, ModelName)> {
     let (kind, identifier) = id.split_once(':')?;
@@ -125,7 +194,7 @@ impl SessionServiceImpl {
                 );
             }
             Err(message) => {
-                return command_error(message);
+                return command_error(format!("{message:#}"));
             }
         };
 
@@ -149,7 +218,7 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(metrics) => metrics,
-                Err(message) => return command_error(message),
+                Err(message) => return command_error(format!("{message:#}")),
             };
             return command_ok(append_metrics_lines(
                 format_relay_describe_output(&ack_model, &branching, scheduled_relay),
@@ -161,13 +230,13 @@ impl SessionServiceImpl {
             match validate_subscription_bindings(&ack_model.name, &branching, &describe.bindings) {
                 Ok(filter) => filter,
                 Err(message) => {
-                    return command_error(message);
+                    return command_error(format!("{message:#}"));
                 }
             };
         let key = match branch_key_from_filter(&branching, &filter) {
             Ok(key) => key,
             Err(message) => {
-                return command_error(message);
+                return command_error(format!("{message:#}"));
             }
         };
 
@@ -177,15 +246,9 @@ impl SessionServiceImpl {
             return command_ok("not exists".to_string());
         }
 
-        let owner_nodes = match self
+        let owner_nodes = self
             .scheduled_stream_owner_nodes(domain, &describe.relay)
-            .await
-        {
-            Ok(owner_nodes) => owner_nodes,
-            Err(message) => {
-                return command_error(message);
-            }
-        };
+            .await;
 
         let local_node_id = self.inner.consensus.local_node_id().clone();
         let mut exists = false;
@@ -225,8 +288,7 @@ impl SessionServiceImpl {
                 Ok(RemoteDescribeRelayResponse {
                     result: Err(failure),
                 }) => {
-                    let message = failure.to_string();
-                    return command_error(message);
+                    return command_error(failure.to_string());
                 }
                 Err(error) => {
                     warn!(
@@ -259,7 +321,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         lines.extend(metrics);
 
@@ -281,7 +343,7 @@ impl SessionServiceImpl {
             .await
             .map_err(|reason| RemoteOperationFailure::Failed {
                 subject: subject.clone(),
-                reason,
+                reason: format!("{reason:#}"),
             })?;
         let Some(SubscriptionTarget {
             relay: ack_model,
@@ -295,12 +357,12 @@ impl SessionServiceImpl {
         let filter = validate_subscription_bindings(&ack_model.name, &branching, &request.bindings)
             .map_err(|reason| RemoteOperationFailure::Failed {
                 subject: subject.clone(),
-                reason,
+                reason: format!("{reason:#}"),
             })?;
         let key = branch_key_from_filter(&branching, &filter).map_err(|reason| {
             RemoteOperationFailure::Failed {
                 subject: subject.clone(),
-                reason,
+                reason: format!("{reason:#}"),
             }
         })?;
         match self
@@ -571,14 +633,20 @@ impl SessionServiceImpl {
                     domain.as_str()
                 ));
             }
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
 
         let local_node_id = self.inner.consensus.local_node_id();
-        let summary = if ingestor_node.executes_on(local_node_id) {
+        let summary: error_stack::Result<_, ObservationError> = if ingestor_node
+            .executes_on(local_node_id)
+        {
             self.inner
                 .runtime
                 .describe_local_ingestor(domain, &describe.ingestor)
+                .change_context(ObservationError::LocalDescribe {
+                    domain: domain.clone(),
+                    entity: NodeRef::new(ModelKind::Ingestor, ModelName::from(&describe.ingestor)),
+                })
                 .map(|summary| {
                     (
                         summary,
@@ -589,7 +657,6 @@ impl SessionServiceImpl {
                         ),
                     )
                 })
-                .map_err(|error| error.to_string())
         } else if let Some(owner) = ingestor_node.execution_node() {
             match self
                 .inner
@@ -604,8 +671,19 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(Ok(summary)) => Ok(runtime_ingestor_describe_from_envelope(summary)),
-                Ok(Err(failure)) => Err(failure.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(Err(failure)) => Err(Report::new(ObservationError::RemoteDescribeFailure {
+                    failure,
+                })),
+                Err(error) => Err(
+                    error.change_context(ObservationError::RemoteDescribeRequest {
+                        domain: domain.clone(),
+                        entity: NodeRef::new(
+                            ModelKind::Ingestor,
+                            ModelName::from(&describe.ingestor),
+                        ),
+                        node: owner.clone(),
+                    }),
+                ),
             }
         } else {
             Ok((
@@ -639,7 +717,7 @@ impl SessionServiceImpl {
                 ),
                 metrics,
             )),
-            Err(message) => command_error(message),
+            Err(message) => command_error(format!("{message:#}")),
         }
     }
 
@@ -759,11 +837,12 @@ impl SessionServiceImpl {
         kind: ModelKind,
         identifier: impl Into<ModelName>,
         scheduled_node: Option<&ScheduledNode>,
-    ) -> Result<Vec<String>, String> {
+    ) -> error_stack::Result<Vec<String>, ObservationError> {
         let identifier = identifier.into();
-        self.describe_runtime_for_scheduled_node(domain, kind, identifier, scheduled_node)
-            .await
-            .map(|details| details.metrics)
+        let details = self
+            .describe_runtime_for_scheduled_node(domain, kind, identifier, scheduled_node)
+            .await?;
+        Ok(details.metrics)
     }
 
     async fn describe_runtime_for_scheduled_node(
@@ -772,7 +851,7 @@ impl SessionServiceImpl {
         kind: ModelKind,
         identifier: impl Into<ModelName>,
         scheduled_node: Option<&ScheduledNode>,
-    ) -> Result<RemoteDescribeMetricsEnvelope, String> {
+    ) -> error_stack::Result<RemoteDescribeMetricsEnvelope, ObservationError> {
         let identifier = identifier.into();
         let metric_kind = kind.as_str().to_ascii_uppercase();
         let Some(node) = scheduled_node else {
@@ -797,9 +876,13 @@ impl SessionServiceImpl {
                 },
             )
             .await
-            .map_err(|error| error.to_string())?
+            .change_context(ObservationError::RemoteDescribeRequest {
+                domain: domain.clone(),
+                entity: NodeRef::new(kind, identifier),
+                node: owner.clone(),
+            })?
             .result
-            .map_err(|failure| failure.to_string())
+            .map_err(|failure| Report::new(ObservationError::RemoteDescribeFailure { failure }))
     }
 
     fn local_runtime_describe(
@@ -873,7 +956,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(target) => target,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         let Some(LookupTarget {
             lookup,
@@ -889,7 +972,9 @@ impl SessionServiceImpl {
         };
 
         let local_node_id = self.inner.consensus.local_node_id();
-        let summary = if lookup_node.executes_on(local_node_id) {
+        let summary: error_stack::Result<_, ObservationError> = if lookup_node
+            .executes_on(local_node_id)
+        {
             match self
                 .inner
                 .runtime
@@ -903,7 +988,10 @@ impl SessionServiceImpl {
                     key_field: lookup.key_field.clone(),
                     entry_count: description.entry_count.arch_into(),
                 }),
-                Err(message) => Err(message.to_string()),
+                Err(error) => Err(error.change_context(ObservationError::LocalDescribe {
+                    domain: domain.clone(),
+                    entity: NodeRef::new(ModelKind::Lookup, ModelName::from(&describe.name)),
+                })),
             }
         } else if let Some(owner) = lookup_node.execution_node() {
             match self
@@ -918,15 +1006,22 @@ impl SessionServiceImpl {
                 )
                 .await
             {
-                Ok(response) => response.result.map_err(|failure| failure.to_string()),
-                Err(error) => Err(error.to_string()),
+                Ok(response) => response.result.map_err(|failure| {
+                    Report::new(ObservationError::RemoteDescribeFailure { failure })
+                }),
+                Err(error) => Err(
+                    error.change_context(ObservationError::RemoteDescribeRequest {
+                        domain: domain.clone(),
+                        entity: NodeRef::new(ModelKind::Lookup, ModelName::from(&describe.name)),
+                        node: owner.clone(),
+                    }),
+                ),
             }
         } else {
-            Err(format!(
-                "hash map '{}' in domain '{}' has no execution node",
-                describe.name.as_str(),
-                domain.as_str()
-            ))
+            Err(Report::new(ObservationError::NoLookupExecutionNode {
+                domain: domain.clone(),
+                name: describe.name.clone(),
+            }))
         };
 
         match summary {
@@ -941,14 +1036,14 @@ impl SessionServiceImpl {
                     .await
                 {
                     Ok(metrics) => metrics,
-                    Err(message) => return command_error(message),
+                    Err(message) => return command_error(format!("{message:#}")),
                 };
                 command_ok(append_metrics_lines(
                     format_lookup_describe_output(&describe.name, &lookup_node, &summary),
                     metrics,
                 ))
             }
-            Err(message) => command_error(message),
+            Err(message) => command_error(format!("{message:#}")),
         }
     }
 
@@ -1018,7 +1113,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         command_ok(append_metrics_lines(
             format_deduplicator_describe_output(
@@ -1069,7 +1164,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         command_ok(append_metrics_lines(
             format_junction_describe_output(&describe.name, &junction, scheduled_node.as_ref()),
@@ -1116,7 +1211,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         command_ok(append_metrics_lines(
             format_reingestor_describe_output(&describe.name, &reingestor, scheduled_node.as_ref()),
@@ -1163,7 +1258,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         command_ok(append_metrics_lines(
             format_correlator_describe_output(&describe.name, &correlator, scheduled_node.as_ref()),
@@ -1210,7 +1305,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         command_ok(append_metrics_lines(
             format_reorderer_describe_output(&describe.name, &reorderer, scheduled_node.as_ref()),
@@ -1264,7 +1359,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         let description = match format_emitter_describe_output(
             &describe.name,
@@ -1341,7 +1436,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         command_ok(append_metrics_lines(
             format_window_processor_describe_output(
@@ -1394,7 +1489,7 @@ impl SessionServiceImpl {
             .await
         {
             Ok(metrics) => metrics,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         let inspection = scheduled_node
             .as_ref()
@@ -1518,13 +1613,7 @@ impl SessionServiceImpl {
             domain: domain.clone(),
             entity: NodeRef::new(ModelKind::Relay, relay.clone()),
         };
-        let owner_nodes = self
-            .scheduled_stream_owner_nodes(domain, relay)
-            .await
-            .map_err(|reason| RemoteOperationFailure::Failed {
-                subject: subject.clone(),
-                reason,
-            })?;
+        let owner_nodes = self.scheduled_stream_owner_nodes(domain, relay).await;
         let local_node_id = self.inner.consensus.local_node_id();
         if !owner_nodes.iter().any(|owner| owner == local_node_id) {
             return Err(RemoteOperationFailure::Rejected { subject });
@@ -1553,7 +1642,7 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         let lookup_target = match self.lookup_target_from_schedule(domain, &query.name).await {
             Ok(target) => target,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         let Some(LookupTarget {
             lookup,
@@ -1570,7 +1659,7 @@ impl SessionServiceImpl {
 
         let parsed = match parse_subscription_literal(&lookup.key_field, &key_ty, &query.key) {
             Ok(value) => value,
-            Err(message) => return command_error(message),
+            Err(message) => return command_error(format!("{message:#}")),
         };
         let key = parsed.to_key_fragment();
         let local_node_id = self.inner.consensus.local_node_id();
@@ -1579,7 +1668,10 @@ impl SessionServiceImpl {
                 self.inner
                     .runtime
                     .query_local_lookup(domain, &query.name, &key)
-                    .map_err(|error| error.to_string()),
+                    .change_context(ObservationError::LocalLookup {
+                        domain: domain.clone(),
+                        name: query.name.clone(),
+                    }),
             )
         } else {
             None
@@ -1616,11 +1708,10 @@ impl SessionServiceImpl {
                     }
                 }
                 if targets.is_empty() {
-                    Err(format!(
-                        "hash map '{}' in domain '{}' has no execution node",
-                        query.name.as_str(),
-                        domain.as_str()
-                    ))
+                    Err(Report::new(ObservationError::NoLookupExecutionNode {
+                        domain: domain.clone(),
+                        name: query.name.clone(),
+                    }))
                 } else {
                     self.lookup_query_remote_candidates(domain, &query.name, &key, targets)
                         .await
@@ -1638,7 +1729,7 @@ impl SessionServiceImpl {
                 query.name.as_str(),
                 render_subscription_literal(&query.key)
             )),
-            Err(message) => command_error(message),
+            Err(error) => command_error(format!("{error:#}")),
         }
     }
 
@@ -1648,9 +1739,9 @@ impl SessionServiceImpl {
         name: impl Into<ModelName>,
         key: &str,
         targets: Vec<ClusterNodeName>,
-    ) -> Result<Option<runtime_schema::RuntimeRecordBatch>, String> {
+    ) -> error_stack::Result<Option<runtime_schema::RuntimeRecordBatch>, ObservationError> {
         let name = name.into();
-        let mut errors = Vec::new();
+        let mut first_error = None;
         for target in targets {
             let response = self
                 .inner
@@ -1668,15 +1759,34 @@ impl SessionServiceImpl {
                 Ok(RemoteLookupResponse { result }) => match result {
                     Ok(None) => return Ok(None),
                     Ok(Some(bytes)) => return self.decode_lookup_record(bytes).await.map(Some),
-                    Err(failure) => errors.push(failure.to_string()),
+                    Err(failure) => {
+                        if first_error.is_none() {
+                            first_error =
+                                Some(Report::new(ObservationError::RemoteLookupFailure {
+                                    failure,
+                                }));
+                        }
+                    }
                 },
-                Err(error) => errors.push(error.to_string()),
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error =
+                            Some(error.change_context(ObservationError::RemoteLookupRequest {
+                                domain: domain.clone(),
+                                name: LookupName::from(&name),
+                                node: target,
+                            }));
+                    }
+                }
             }
         }
-        Err(errors
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| "lookup has no remote execution node".to_string()))
+        match first_error {
+            Some(error) => Err(error),
+            None => Err(Report::new(ObservationError::NoLookupExecutionNode {
+                domain: domain.clone(),
+                name: LookupName::from(&name),
+            })),
+        }
     }
 
     pub(in crate::application) async fn handle_lookup_request(
@@ -1702,15 +1812,15 @@ impl SessionServiceImpl {
     async fn decode_lookup_record(
         &self,
         bytes: Vec<u8>,
-    ) -> Result<runtime_schema::RuntimeRecordBatch, String> {
+    ) -> error_stack::Result<runtime_schema::RuntimeRecordBatch, ObservationError> {
         let executor = self.inner.runtime.executor();
         let body = executor
             .charge_owned(MemoryClass::Commands, bytes)
             .await
-            .map_err(|error| error.to_string())?;
+            .change_context(ObservationError::LookupAdmission)?;
         runtime_schema::RuntimeRecordBatch::decode_arrow_ipc(executor, body)
             .await
-            .map_err(|error| error.to_string())
+            .change_context(ObservationError::LookupDecode)
     }
 
     pub(in crate::application) async fn show_stream_materialized_state(
@@ -2165,7 +2275,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         name: impl Into<ModelName>,
-    ) -> Result<Option<LookupTarget>, String> {
+    ) -> error_stack::Result<Option<LookupTarget>, ObservationError> {
         let name = name.into();
         let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
@@ -2178,45 +2288,51 @@ impl SessionServiceImpl {
             return Ok(None);
         };
         let Model::Lookup(lookup) = lookup_node.config.as_ref() else {
-            return Err("scheduled lookup node has invalid model kind".to_string());
+            return Err(Report::new(ObservationError::LookupModelKind {
+                domain: domain.clone(),
+            }));
         };
         let Some(codec_node) = domain_schedule.nodes.get(&NodeRef::new(
             ModelKind::Codec,
             ModelName::from(&lookup.decode_using_codec),
         )) else {
-            return Err(format!(
-                "lookup '{}' references missing scheduled codec '{}'",
-                name.as_str(),
-                lookup.decode_using_codec.as_str()
-            ));
+            return Err(Report::new(ObservationError::MissingCodec {
+                domain: domain.clone(),
+                lookup: lookup.name.clone(),
+                codec: lookup.decode_using_codec.clone(),
+            }));
         };
         let Model::Codec(codec) = codec_node.config.as_ref() else {
-            return Err("scheduled codec node has invalid model kind".to_string());
+            return Err(Report::new(ObservationError::CodecModelKind {
+                domain: domain.clone(),
+            }));
         };
         let Some(schema_node) = domain_schedule.nodes.get(&NodeRef::new(
             ModelKind::Schema,
             ModelName::from(&codec.schema),
         )) else {
-            return Err(format!(
-                "lookup '{}' references missing scheduled schema '{}'",
-                name.as_str(),
-                codec.schema.as_str()
-            ));
+            return Err(Report::new(ObservationError::MissingSchema {
+                domain: domain.clone(),
+                lookup: lookup.name.clone(),
+                schema: codec.schema.clone(),
+            }));
         };
         let Model::Schema(schema) = schema_node.config.as_ref() else {
-            return Err("scheduled schema node has invalid model kind".to_string());
+            return Err(Report::new(ObservationError::SchemaModelKind {
+                domain: domain.clone(),
+            }));
         };
         let Some(field) = schema
             .fields
             .iter()
             .find(|field| field.name == lookup.key_field)
         else {
-            return Err(format!(
-                "lookup '{}' key field '{}' is missing from schema '{}'",
-                name.as_str(),
-                lookup.key_field.as_str(),
-                schema.name.as_str()
-            ));
+            return Err(Report::new(ObservationError::MissingKeyField {
+                domain: domain.clone(),
+                lookup: lookup.name.clone(),
+                field: lookup.key_field.clone(),
+                schema: schema.name.clone(),
+            }));
         };
         Ok(Some(LookupTarget {
             lookup: lookup.clone(),
@@ -2229,7 +2345,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         name: impl Into<ModelName>,
-    ) -> Result<Option<(CreateIngestor, ScheduledNode)>, String> {
+    ) -> error_stack::Result<Option<(CreateIngestor, ScheduledNode)>, ObservationError> {
         let name = name.into();
         let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
@@ -2242,7 +2358,9 @@ impl SessionServiceImpl {
             return Ok(None);
         };
         let Model::Ingestor(ingestor) = ingestor_node.config.as_ref() else {
-            return Err("scheduled ingestor node has invalid model kind".to_string());
+            return Err(Report::new(ObservationError::IngestorModelKind {
+                domain: domain.clone(),
+            }));
         };
         Ok(Some((ingestor.clone(), ingestor_node.clone())))
     }
@@ -2256,10 +2374,193 @@ mod tests {
         ResourceUploadKey, Timestamp, UserName,
     };
 
-    use super::super::{
-        subscription::SessionSubscriptions,
-        test_fixtures::{TestService, build_test_service, named, test_execution_reference},
+    use super::{
+        super::{
+            subscription::SessionSubscriptions,
+            test_fixtures::{TestService, build_test_service, named, test_execution_reference},
+        },
+        *,
     };
+
+    #[tokio::test]
+    async fn remote_observation_errors_retain_request_and_decode_causes() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let domain = named("accounts");
+        let lookup: LookupName = named("balances");
+        let peer: ClusterNodeName = named("unavailable_peer");
+        let node = super::super::test_fixtures::scheduled_node_on(
+            "events",
+            ModelKind::Junction,
+            peer.as_str(),
+        );
+        let error = service
+            .describe_runtime_for_scheduled_node(
+                &domain,
+                ModelKind::Junction,
+                named::<ModelName>("events"),
+                Some(&node),
+            )
+            .await
+            .expect_err("the scheduled owner has no transport route");
+        assert!(
+            matches!(error.current_context(), ObservationError::RemoteDescribeRequest { domain: actual_domain, entity, node } if actual_domain == &domain && entity.identifier.as_str() == "events" && node == &peer)
+        );
+        assert!(error.contains::<nervix_interconnect::RequestError>());
+
+        let error = service
+            .lookup_query_remote_candidates(&domain, &lookup, "sensitive-key", vec![peer.clone()])
+            .await
+            .expect_err("the lookup owner has no transport route");
+        assert!(
+            matches!(error.current_context(), ObservationError::RemoteLookupRequest { domain: actual_domain, name, node } if actual_domain == &domain && name == &lookup && node == &peer)
+        );
+        assert!(error.contains::<nervix_interconnect::RequestError>());
+        assert!(!format!("{error:?}").contains("sensitive-key"));
+
+        let error = service
+            .lookup_query_remote_candidates(&domain, &lookup, "sensitive-key", Vec::new())
+            .await
+            .expect_err("an empty owner set cannot serve a lookup");
+        assert!(
+            matches!(error.current_context(), ObservationError::NoLookupExecutionNode { domain: actual_domain, name } if actual_domain == &domain && name == &lookup)
+        );
+        let error = service
+            .decode_lookup_record(b"invalid Arrow IPC".to_vec())
+            .await
+            .expect_err("a malformed remote body cannot become a record batch");
+        assert!(matches!(
+            error.current_context(),
+            ObservationError::LookupDecode
+        ));
+        assert!(
+            error.frames().count() > 1,
+            "the decode cause must remain in the report"
+        );
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("the test database is removed");
+    }
+
+    #[tokio::test]
+    async fn lookup_schedule_errors_identify_missing_dependencies() {
+        use nervix_models::{
+            CodecWireFormat, CreateCodec, CreateSchema, DomainSchedule, SchemaField,
+            SchemaFingerprint,
+        };
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(true).await;
+        let domain: DomainName = named("default");
+        let lookup = CreateLookup {
+            name: named("balances"),
+            key_field: named("account"),
+            resource: named("data"),
+            resource_version: 1,
+            path: "balances.json".to_string(),
+            decode_using_codec: named("balance_codec"),
+        };
+        let codec = CreateCodec {
+            name: lookup.decode_using_codec.clone(),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: named("balance_wire"),
+            },
+            schema: named("balance_schema"),
+            encoding_rules: Vec::new(),
+        };
+        let mut schema = CreateSchema {
+            name: codec.schema.clone(),
+            fields: Vec::new(),
+        };
+        let fingerprint = SchemaFingerprint::from_digest([1; 32]);
+        let mut nodes = vec![ScheduledNode::new(
+            Model::Lookup(lookup.clone()),
+            fingerprint,
+        )];
+        for stage in 0..4 {
+            tokio::task::consume_budget().await;
+            let inputs = service
+                .inner
+                .consensus
+                .domain_planning_inputs(&domain)
+                .await;
+            service
+                .inner
+                .consensus
+                .replace_domain_schedule(
+                    inputs,
+                    Some(DomainSchedule::new(
+                        domain.clone(),
+                        nodes.clone(),
+                        Vec::new(),
+                    )),
+                    None,
+                )
+                .await
+                .expect("the current captured schedule basis is accepted");
+            let result = service
+                .lookup_target_from_schedule(&domain, &lookup.name)
+                .await;
+            match stage {
+                0 => {
+                    let error = result.err().expect("the codec is missing");
+                    assert!(
+                        matches!(error.current_context(), ObservationError::MissingCodec { lookup: actual, codec: missing, .. } if actual == &lookup.name && missing == &codec.name)
+                    );
+                    nodes.push(ScheduledNode::new(Model::Codec(codec.clone()), fingerprint));
+                }
+                1 => {
+                    let error = result.err().expect("the schema is missing");
+                    assert!(
+                        matches!(error.current_context(), ObservationError::MissingSchema { schema: missing, .. } if missing == &schema.name)
+                    );
+                    nodes.push(ScheduledNode::new(
+                        Model::Schema(schema.clone()),
+                        fingerprint,
+                    ));
+                }
+                2 => {
+                    let error = result.err().expect("the lookup key field is missing");
+                    assert!(
+                        matches!(error.current_context(), ObservationError::MissingKeyField { field, schema: actual, .. } if field == &lookup.key_field && actual == &schema.name)
+                    );
+                    schema.fields.push(SchemaField {
+                        name: lookup.key_field.clone(),
+                        ty: ParseAsType::U32,
+                        optional: false,
+                        sensitive: false,
+                    });
+                    nodes[2] = ScheduledNode::new(Model::Schema(schema.clone()), fingerprint);
+                }
+                _ => {
+                    let target = result
+                        .expect("all dependencies are present")
+                        .expect("the lookup is scheduled");
+                    assert_eq!(target.lookup.name, lookup.name);
+                    assert_eq!(target.key_ty, ParseAsType::U32);
+                    let result = service
+                        .describe_lookup(
+                            &domain,
+                            DescribeLookup {
+                                name: lookup.name.clone(),
+                            },
+                        )
+                        .await;
+                    assert!(!result.succeeded());
+                    assert!(result.message.contains("has no execution node"));
+                }
+            }
+        }
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("the test database is removed");
+    }
 
     #[tokio::test]
     async fn show_placements_reports_fully_overridden_effective_coverage() {

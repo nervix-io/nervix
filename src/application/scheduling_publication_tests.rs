@@ -42,8 +42,7 @@ async fn schedule_publication_keeps_the_basis_it_prepared() {
 
     let prepared = service
         .prepare_domain_schedule(&domain, None, PlacementPolicy::Neutral)
-        .await
-        .assured("the current domain has a complete planning basis");
+        .await;
     assert!(prepared.inputs.schedule().is_some());
     assert!(prepared.schedule.is_none());
 

@@ -805,6 +805,10 @@ be complete, valid, and identical in two consecutive reads before it replaces th
 a multi-file update cannot install a mixed generation. An invalid or partially written candidate
 leaves the current credentials active while the watcher continues trying.
 
+TLS loading identifies the CA certificate, node certificate, or node private key by kind and keeps
+PEM parsing failures as typed categories. Error reports and watcher logs omit credential file paths
+and malformed PEM input bytes.
+
 After a valid replacement, new outbound pools use the new credentials and existing inbound HTTP/2
 connections begin graceful shutdown. Certificate expiration is also mapped to a process-monotonic
 deadline when a connection is authenticated, so a connection cannot remain open beyond the validity
