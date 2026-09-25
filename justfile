@@ -6,7 +6,10 @@ cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
-tests-deps: build-deps build-nspl-format
+tests-deps: build-deps build-nspl-format build-test-cli
+
+build-test-cli:
+    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-cli --bin nervix-cli
 
 test: tests-deps
     #!/usr/bin/env bash
@@ -193,7 +196,7 @@ test-turmoil:
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
     cargo test --package nervix-execution --features turmoil --lib -- --test-threads=1
-    cargo test --package nervix-interconnect --features turmoil --lib wire::simulation_checks -- --test-threads=1
+    cargo test --package nervix-interconnect --features turmoil --lib -- wire::simulation_checks authentication::simulation_tests --test-threads=1
     cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
 
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
@@ -222,6 +225,58 @@ test-connectors *args:
 # Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
 test-client-wire *args:
     cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
+
+# Rewrite the client wire conformance corpus from the encoder's current output. Review the
+# regenerated `corpus.report` before committing it: every client implementation is held to it.
+update-client-wire-corpus:
+    NERVIX_UPDATE_CLIENT_WIRE_CORPUS=1 cargo test --package nervix-client-wire --lib -- \
+        tests::conformance
+
+# Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
+# linked against it, the Go probe with its generated FlatBuffers code, and the TypeScript probe
+# bundled with its generated code for Node.js and Bun. Every generated file lands under the
+# artifacts directory, never in the source tree.
+build-client-conformance:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
+    library_dir={{ quote(cargo_target_dir + "/debug") }}
+    schema="${PWD}/crates/client-wire/schema/session.fbs"
+    mkdir -p "${artifacts}"
+    cargo build --package nervix-client-ffi
+    cc -std=c11 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include \
+        tests/client_conformance/c/probe.c \
+        -L "${library_dir}" -lnervix_client_ffi -Wl,-rpath,"${library_dir}" \
+        -o "${artifacts}/c-probe"
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include \
+        tests/client_conformance/cpp/probe.cpp \
+        -L "${library_dir}" -lnervix_client_ffi -Wl,-rpath,"${library_dir}" \
+        -o "${artifacts}/cpp-probe"
+    rm -rf "${artifacts}/go" && mkdir -p "${artifacts}/go"
+    cp tests/client_conformance/go/go.mod tests/client_conformance/go/go.sum \
+        tests/client_conformance/go/*.go "${artifacts}/go/"
+    flatc --go -o "${artifacts}/go" "${schema}"
+    (cd "${artifacts}/go" && go build -o "${artifacts}/go-probe" .)
+    rm -rf "${artifacts}/node-src" "${artifacts}/node" && mkdir -p "${artifacts}/node-src"
+    cp tests/client_conformance/node/package.json tests/client_conformance/node/package-lock.json \
+        tests/client_conformance/node/probe.ts "${artifacts}/node-src/"
+    flatc --ts -o "${artifacts}/node-src/generated" "${schema}"
+    (cd "${artifacts}/node-src" && npm ci --no-audit --no-fund && \
+        ./node_modules/.bin/esbuild probe.ts --bundle --platform=node --format=esm \
+            --target=es2022 --outfile="${artifacts}/node/probe.mjs")
+
+# Run the cross-language client probes against in-process clusters. Every probe prints the same
+# report, which the scenario compares with its one expected report. Select runtimes with a tag
+# expression, for example `just test-client-conformance '@client_probe_python or @client_probe_java'`.
+test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps build-client-conformance
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
+    cargo test --features testing --test scenarios -- \
+        --input tests/features/runtime/client_conformance.feature \
+        --tags {{ quote(tags) }} {{ args }}
 
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
@@ -284,9 +339,10 @@ test-coverage: tests-deps
     RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
         cargo llvm-cov --no-report --package nervix-execution --features turmoil --lib
     RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
-        cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --lib
+        cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --lib -- \
+            wire::simulation_checks authentication::simulation_tests --test-threads=1
     RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
-        cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --test simulation
+        cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
     cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
 
@@ -330,6 +386,27 @@ coverage-shuttle output: build-web-console wasm-processor-guests download-onnxru
     done
     cargo llvm-cov report --lcov --output-path {{ quote(output) }}
 
+# Write line coverage for binary unit tests, such as the CLI's main target.
+coverage-bins output *args:
+    cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
+
+# Exercise the one-shot CLI binary through the public transaction scenario with LLVM coverage.
+coverage-cli-process output="target/cli-process.lcov":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage_dir="{{ cargo_target_dir }}/cli-process"
+    mkdir -p "$coverage_dir"
+    CARGO_TARGET_DIR="$coverage_dir" RUSTFLAGS="-C instrument-coverage ${RUSTFLAGS:-}" \
+        cargo build --package nervix-cli --bin nervix-cli
+    rm -f "$coverage_dir"/cli-*.profraw
+    LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
+        NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
+        just test-scenarios --input tests/features/runtime/nspl_transactions.feature --name CLI
+    llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/{print $2}')/bin"
+    "$llvm_bin/llvm-profdata" merge -sparse "$coverage_dir"/*.profraw -o "$coverage_dir/merged.profdata"
+    "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
+        --instr-profile="$coverage_dir/merged.profdata" --format=lcov > {{ quote(output) }}
+
 # Measure the Turmoil runner's changed lines without running the full scenario suite.
 coverage-turmoil output:
     #!/usr/bin/env bash
@@ -338,9 +415,10 @@ coverage-turmoil output:
     cargo llvm-cov --no-report \
         --package nervix-execution --features turmoil --lib
     cargo llvm-cov --no-report \
-        --package nervix-interconnect --features turmoil --lib
+        --package nervix-interconnect --features turmoil --lib -- \
+        wire::simulation_checks authentication::simulation_tests --test-threads=1
     cargo llvm-cov --no-report \
-        --package nervix-interconnect --features turmoil --test simulation
+        --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
     cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 

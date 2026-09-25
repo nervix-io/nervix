@@ -239,6 +239,12 @@ state but emits only windows that have met their declared `WIDTH`. A partially f
 emitted early by a shutdown, so its rows do not reach the sink; the window's input was already
 acknowledged when it was admitted, so nothing redelivers them either.
 
+An ownership handoff publishes the remaining window for the destination to restore. Evicting a
+concrete branch has a different endpoint: it drops the branch's retained rows and aggregate state
+before the final checkpoint, so a later branch with the same key begins with an empty window.
+The lifecycle checkpoint carries each branch incarnation; window restore accepts retained state
+only from that same incarnation.
+
 Draining ends with a confirmation pass. After a flush generation observes nothing outstanding, one
 more generation must also observe nothing, so work that an upstream node publishes after a
 downstream node finished its own flush is not left behind. A domain is quiescent only when that
@@ -278,6 +284,13 @@ already fenced permanently. Drain support keeps schedule activation, state stora
 and interconnect handlers alive so the fresh initial checkpoint and `Ready` publication can finish
 within their ordinary bounds. If shutdown ends first, restart observes `Publishing` and resumes the
 new generation rather than restoring the old one.
+
+Read-only WASM state inspection after restart uses the committed schedule's generation and
+retained reset and recovery outcomes. A pre-publication failure leaves the preceding generation
+visible; a published but not yet usable reset remains `PUBLISHING` until its initial checkpoint
+and activation finish. Runtime checkpoint observations from a replaced generation are excluded,
+and a restored checkpoint reports unknown prior replica confirmation when that boundary cannot
+be reconstructed. Inspection never settles an uncertain transaction outcome or resumes a reset.
 
 An admitted NSPL reset is recorded as an ordered transaction effect. If shutdown interrupts the
 command after its effect is recorded, recovery resumes it with the original execution reference;
@@ -591,9 +604,12 @@ depend on no schema: they are keyed by their entity alone and survive a restart 
 changed while the node was down. Every other checkpoint, including deduplicator, window, and
 materialized relay state, branch lifecycle records, and WASM guest state, is keyed by the
 fingerprint of the schemas its entity lays records out by, and WASM guest state also by its
-generation. A checkpoint written under a replaced fingerprint is never restored as the new layout,
-served, replicated, handed over, or selected by a forced recovery, and applying the committed
-schedule of a running domain removes it. Until the node has applied a schedule that names an entity,
+generation. Window state additionally includes the current window model in its identity, so a
+replacement that changes `WIDTH`, `STEP`, or aggregate expressions begins with an empty window even
+when its schemas are unchanged. A checkpoint written under a replaced fingerprint is never restored
+as the new layout, served, replicated, handed over, or selected by a forced recovery. Applying the
+committed schedule of a running domain removes it. Until the node has applied a schedule that names
+an entity,
 it has no fingerprint for that entity's schema-bound state and does not place that state at all.
 
 ### Interrupted Snapshot Installation

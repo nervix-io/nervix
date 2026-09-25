@@ -152,5 +152,14 @@ if let Some(inspection) = &described.inspection {
 `CommandOutcome::transaction` keeps describing this session's own binding, so inspecting another
 transaction by id changes neither `transaction_status()` nor the selected domain. An inspection
 consumes no queue position: the next queued statement receives the operation number it would have
-had, and the preview the client fences `COMMIT` with stays the one its last accepted append
-reported. A refused inspection is an unsuccessful outcome whose message names why nothing was read.
+had. An inspection of the attached transaction refreshes the identified preview used by `COMMIT`
+only when its report covers the attached transaction's current accepted-operation position.
+Inspecting another transaction, or receiving an older position, cannot replace that preview. A
+stale-preview refusal leaves the previously reviewed basis in place; inspect the attached
+transaction again before retrying `COMMIT`. A refused inspection is an unsuccessful outcome whose
+message names why nothing was read.
+
+`Client::inspect_transaction(target, operation)` also returns the typed `InspectionOutcome` from
+the API. It follows leader redirects and reconnects with the session client's normal request-ID
+dispatch. A successful read of the attached transaction refreshes the same commit preview; a
+rejected read changes no binding or preview.

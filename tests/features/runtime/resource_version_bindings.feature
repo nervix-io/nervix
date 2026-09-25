@@ -639,6 +639,16 @@ Feature: Resource version bindings
     And transaction "{{transaction_id}}" eventually has state "OPEN"
     When client "owner" executes these NSPL commands
       """
+      DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /transaction/transaction_id = "{{transaction_id}}"
+      /operation = 1
+      /report/position = 1
+      """
+    When client "owner" executes these NSPL commands
+      """
       COMMIT;
       """
     Then the last command output contains

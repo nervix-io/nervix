@@ -46,8 +46,9 @@ namespace nervix.session;
 // ---------------------------------------------------------------------------------------------
 
 /// A 32-byte opaque fingerprint.
-struct Fingerprint {
-  bytes: [ubyte:32];
+table Fingerprint {
+  /// Exactly 32 bytes.
+  bytes: [ubyte] (required);
 }
 
 /// A byte range of the NSPL source text a request carried. Offsets are UTF-8 byte offsets on
@@ -426,6 +427,7 @@ enum ModelChangeAspect : ubyte {
   EmitterMode,
   EmitterPublishingMode,
   EmitterFlushPolicy,
+  EmitterBatchPolicy,
   EmitterConstruction,
   EmitterErrorPolicies,
   EmitterMaterializedState,
@@ -1146,6 +1148,8 @@ table CommandOutcome {
   /// inspected transaction may differ from `transaction`, which keeps describing this session's
   /// own binding.
   inspection: TransactionInspected;
+  /// JSON serialization of the typed WASM state inspection returned by a processor description.
+  wasm_state: string;
 }
 
 table TransactionAttached {

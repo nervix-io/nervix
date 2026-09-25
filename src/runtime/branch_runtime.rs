@@ -253,6 +253,7 @@ impl BranchRuntime {
     pub(super) async fn evict(&mut self) {
         for processor in self.processors.values_mut() {
             processor.drop_collected_inputs("processor branch was evicted");
+            processor.reset_window_state();
         }
     }
 
@@ -1239,23 +1240,37 @@ impl BranchExecutionRuntime {
         for message in inputs {
             tokio::task::consume_budget().await;
             let key = message.key.clone();
-            let instance = match instances.get_or_try_create_with(key.clone(), accepted_at, |key| {
-                template.instantiate(runtime_handle, domain, key.clone())
-            }) {
-                Ok(instance) => instance,
-                Err(error) => {
-                    Self::report_dispatch_error(
-                        runtime_handle,
-                        domain,
-                        ingestor,
-                        template,
-                        message.acks.iter(),
-                        format!(
-                            "failed to instantiate branch '{}': {error:#}",
-                            branch_key_display(&key),
-                        ),
-                    );
-                    continue;
+            let instance = if let Some(state) = instances.touch(&key, accepted_at) {
+                GetOrCreateBranchInstance {
+                    state,
+                    created: false,
+                }
+            } else {
+                let incarnation = instances.next_incarnation();
+                let state = match template
+                    .instantiate(runtime_handle, domain, key.clone(), incarnation)
+                    .await
+                {
+                    Ok(state) => state,
+                    Err(error) => {
+                        Self::report_dispatch_error(
+                            runtime_handle,
+                            domain,
+                            ingestor,
+                            template,
+                            message.acks.iter(),
+                            format!(
+                                "failed to instantiate branch '{}': {error:#}",
+                                branch_key_display(&key),
+                            ),
+                        );
+                        continue;
+                    }
+                };
+                let state = instances.insert_changed(key.clone(), accepted_at, state);
+                GetOrCreateBranchInstance {
+                    state,
+                    created: true,
                 }
             };
             if instance.created {
@@ -1518,7 +1533,9 @@ impl BranchExecutionRuntime {
                 &domain,
                 &template,
                 &mut instances,
-            ) {
+            )
+            .await
+            {
                 Ok(lsm) => lsm,
                 Err(error) => {
                     warn!(
@@ -1987,7 +2004,7 @@ pub(super) fn branch_lru_placement(
     )
 }
 
-pub(super) fn restore_branch_instance_lru_snapshot(
+pub(super) async fn restore_branch_instance_lru_snapshot(
     runtime: &Runtime,
     domain: &DomainName,
     template: &BranchInstanceTemplate,
@@ -2001,14 +2018,19 @@ pub(super) fn restore_branch_instance_lru_snapshot(
     let Some(snapshot) = snapshot else {
         return Ok(0);
     };
-    for (key, last_ingestion) in
+    for restored in
         decode_branch_lru_snapshot(&snapshot.payload).map_err(|error| error.to_string())?
     {
+        tokio::task::consume_budget().await;
+        let key = restored.key;
+        let last_ingestion = restored.last_ingestion;
+        let incarnation = restored.incarnation;
         let state = template
-            .instantiate(runtime, domain, key.clone())
+            .instantiate(runtime, domain, key.clone(), incarnation)
+            .await
             .map_err(|error| format!("{error:#}"))?;
         runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
-        instances.insert_restored(key, last_ingestion, state);
+        instances.insert_restored(key, last_ingestion, incarnation, state);
     }
     instances.set_version(snapshot.lsm);
     Ok(snapshot.lsm)
@@ -2166,8 +2188,8 @@ mod tests {
         runtime_ack::{AckOutcome, AckRootTracker, AckSet},
         runtime_schema::{RuntimeValue, test_runtime_row},
     };
-    #[test]
-    fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
+    #[tokio::test]
+    async fn pending_materialized_batches_remain_visible_in_entity_drain_status() {
         let runtime = Runtime::default();
         let domain = domain("default");
         install_unpaced_test_domain(&runtime, &domain);
@@ -2175,7 +2197,8 @@ mod tests {
         let input_relay = named::<RelayName>("orders");
         let template = junction_branch_template(processor.as_str(), input_relay.as_str());
         let mut branch = template
-            .instantiate(&runtime, &domain, None)
+            .instantiate(&runtime, &domain, None, 1)
+            .await
             .expect("junction branch should instantiate")
             .into_inner();
         branch

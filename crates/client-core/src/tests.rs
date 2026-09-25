@@ -89,6 +89,12 @@ fn test_preview(transaction_id: &str, position: usize) -> TransactionPreviewIden
     }
 }
 
+async fn cache_test_preview(client: &Client, transaction_id: &str, position: usize) {
+    let preview = test_preview(transaction_id, position);
+    let key = (preview.transaction_id.clone(), preview.position);
+    client.inner.previews.lock().await.insert(key, preview);
+}
+
 fn empty_report() -> TransactionImpactReport {
     TransactionImpactReport::new(
         domain("tenant"),
@@ -116,6 +122,7 @@ fn wire_outcome(
         transaction: None,
         transaction_admission: None,
         inspection: None,
+        wasm_state: None,
     }
 }
 
@@ -257,9 +264,15 @@ fn detached_exchange(
 fn client_on(exchange: Exchange, session_domain: Option<DomainName>) -> Client {
     let connector = GrpcConnector::new(ConnectOptions::default())
         .assured("options without credentials build no authorization metadata");
+    let sinks = exchange.sinks.clone();
+    let events = SessionEvents {
+        leadership: sinks.leadership.subscribe(),
+        domains: tokio::sync::Mutex::new(sinks.domains.subscribe()),
+        sinks,
+    };
     Client::assemble(
         exchange,
-        SessionEvents::new(),
+        events,
         connector,
         session_domain,
         ServerDirectory::default(),
@@ -319,6 +332,24 @@ impl Loopback {
             .send(body)
             .assured("the client waits for the reply to its request");
     }
+
+    async fn replace_exchange(&mut self) {
+        let (frames, requests) = mpsc::channel(8);
+        let pending = Arc::new(Mutex::new(PendingReplies::new()));
+        let mut replacement = detached_exchange(frames, pending.clone());
+        let sinks = self.client.inner.events.sinks.clone();
+        replacement.generation = sinks.begin_generation();
+        replacement.sinks = sinks;
+        let mut current = self.client.inner.exchange.lock().await;
+        let previous = std::mem::replace(&mut *current, replacement);
+        drop(current);
+        previous.close().await;
+        self.requests = requests;
+        self.pending = pending;
+        let current = self.client.inner.exchange.lock().await;
+        self.client
+            .restore_subscriptions(current.generation.clone(), current.requests());
+    }
 }
 
 /// An exchange reader over a fresh registry, with event queues of `capacity` entries.
@@ -339,6 +370,7 @@ fn reader_fixture(capacity: usize) -> ReaderFixture {
     let pending = Arc::new(Mutex::new(PendingReplies::new()));
     let sinks = EventSinks {
         subscriptions: subscriptions.clone(),
+        desired: crate::subscriptions::DesiredSubscriptions::new(),
         notices: notices.clone(),
         leadership,
         domains,
@@ -390,7 +422,7 @@ async fn a_commit_fences_against_the_basis_its_own_transaction_reported() {
     client
         .adopt_transaction_status(open_transaction("tx-1", 1))
         .await;
-    *client.inner.commit_basis.lock().await = Some(test_preview("tx-1", 1));
+    cache_test_preview(&client, "tx-1", 1).await;
 
     let expectation = client.transaction_expectation().await;
 
@@ -404,7 +436,7 @@ async fn a_basis_read_for_another_transaction_never_fences_this_one() {
     client
         .adopt_transaction_status(open_transaction("tx-2", 1))
         .await;
-    *client.inner.commit_basis.lock().await = Some(test_preview("tx-1", 4));
+    cache_test_preview(&client, "tx-1", 4).await;
 
     let expectation = client.transaction_expectation().await;
 
@@ -416,11 +448,12 @@ async fn a_basis_read_for_another_transaction_never_fences_this_one() {
 }
 
 #[tokio::test]
-async fn a_refused_commit_leaves_the_current_basis_for_the_next_attempt() {
+async fn a_refused_commit_does_not_adopt_an_unreviewed_basis() {
     let client = test_client("tenant");
     client
         .adopt_transaction_status(open_transaction("tx-1", 1))
         .await;
+    cache_test_preview(&client, "tx-1", 1).await;
     let outcome = CommandOutcome::from(wire_outcome(
         "commit-1",
         CommandDisposition::PreviewStale {
@@ -434,8 +467,70 @@ async fn a_refused_commit_leaves_the_current_basis_for_the_next_attempt() {
 
     assert_eq!(
         client.transaction_expectation().await.preview,
-        Some(test_preview("tx-1", 2))
+        Some(test_preview("tx-1", 1))
     );
+}
+
+#[tokio::test]
+async fn inspection_refreshes_only_the_attached_transaction_at_its_queue_position() {
+    let client = test_client("tenant");
+    client
+        .adopt_transaction_status(open_transaction("tx-bound", 0))
+        .await;
+    let mut described = wire_outcome("describe-1", completed(), "described");
+    described.transaction = Some(open_transaction("tx-bound", 0));
+    described.inspection = Some(Box::new(TransactionInspection {
+        transaction: open_transaction("tx-other", 0),
+        operation: None,
+        report: empty_report(),
+    }));
+    client
+        .record_commit_basis(&CommandOutcome::from(described.clone()))
+        .await;
+    assert_eq!(client.transaction_expectation().await.preview, None);
+    let other_key = ("tx-other".to_string(), TransactionPosition::new(0));
+    assert_eq!(
+        client.inner.previews.lock().await.get(&other_key),
+        Some(&test_preview("tx-other", 0))
+    );
+
+    described.inspection = Some(Box::new(TransactionInspection {
+        transaction: open_transaction("tx-bound", 0),
+        operation: None,
+        report: empty_report(),
+    }));
+    client
+        .record_commit_basis(&CommandOutcome::from(described))
+        .await;
+    assert_eq!(
+        client.transaction_expectation().await.preview,
+        Some(test_preview("tx-bound", 0))
+    );
+}
+
+#[tokio::test]
+async fn an_older_inspection_cannot_replace_a_newer_queue_preview() {
+    let client = test_client("tenant");
+    client
+        .adopt_transaction_status(open_transaction("tx-bound", 1))
+        .await;
+    cache_test_preview(&client, "tx-bound", 1).await;
+    let mut described = wire_outcome("describe-1", completed(), "described");
+    described.inspection = Some(Box::new(TransactionInspection {
+        transaction: open_transaction("tx-bound", 0),
+        operation: None,
+        report: empty_report(),
+    }));
+
+    client
+        .record_commit_basis(&CommandOutcome::from(described))
+        .await;
+
+    assert_eq!(
+        client.transaction_expectation().await.preview,
+        Some(test_preview("tx-bound", 1))
+    );
+    assert_eq!(client.inner.previews.lock().await.len(), 1);
 }
 
 #[tokio::test]
@@ -729,6 +824,50 @@ async fn overflowing_subscription_rows_cannot_delay_a_command_reply() {
     assert!(matches!(command.reply.await, Ok(ReplyBody::Command(_))));
 }
 
+#[test]
+fn one_subscription_overflow_preserves_other_subscription_events() {
+    let queue = EventQueue::for_subscriptions();
+    let generation = Arc::new(());
+    queue.begin(&generation);
+    let full = subscription("full", 1);
+    let healthy = subscription("healthy", 1);
+    for _ in 0..32 {
+        queue.push(
+            &generation,
+            SubscriptionEvent::DeliveryLost(nervix_client_wire::SubscriptionDeliveryLost {
+                subscription: full.clone(),
+                dropped_rows: NonZeroU64::MIN,
+            }),
+            1,
+        );
+    }
+    queue.push(
+        &generation,
+        SubscriptionEvent::DeliveryLost(nervix_client_wire::SubscriptionDeliveryLost {
+            subscription: healthy.clone(),
+            dropped_rows: NonZeroU64::MIN,
+        }),
+        1,
+    );
+    queue.push(
+        &generation,
+        SubscriptionEvent::DeliveryLost(nervix_client_wire::SubscriptionDeliveryLost {
+            subscription: full.clone(),
+            dropped_rows: NonZeroU64::MIN,
+        }),
+        1,
+    );
+    let Some(SubscriptionEvent::ConsumerOverflow(overflowed)) = queue.try_next() else {
+        panic!("the full subscription reports terminal consumer overflow");
+    };
+    assert_eq!(overflowed, full);
+    let Some(SubscriptionEvent::DeliveryLost(delivered)) = queue.try_next() else {
+        panic!("the other subscription retains its event");
+    };
+    assert_eq!(delivered.subscription, healthy);
+    assert!(queue.try_next().is_none());
+}
+
 #[tokio::test]
 async fn event_queue_counts_retained_bytes_as_well_as_records() {
     let notices = EventQueue::new(10, 128);
@@ -737,6 +876,7 @@ async fn event_queue_counts_retained_bytes_as_well_as_records() {
     let (domains, _) = watch::channel(None);
     let sinks = EventSinks {
         subscriptions,
+        desired: crate::subscriptions::DesiredSubscriptions::new(),
         notices: notices.clone(),
         leadership,
         domains,
@@ -1513,6 +1653,26 @@ async fn a_create_subscription_statement_is_sent_as_a_subscribe_request() {
         .verified("an opened subscription is reported");
     assert_eq!(opened.subscription, subscription("live", 1));
     assert_eq!(opened.schema, orders_schema());
+    let generation = loopback
+        .client
+        .inner
+        .exchange
+        .lock()
+        .await
+        .generation
+        .clone();
+    loopback
+        .client
+        .inner
+        .events
+        .sinks
+        .close_generation(&generation);
+    let interrupted = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the session loss reports the acknowledged subscription's gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
 }
 
 #[tokio::test]
@@ -1556,6 +1716,12 @@ async fn subscription_diagnostics_address_the_query_the_caller_passed() {
         .assured("the subscribe task completes")
         .assured("the reply arrives");
     assert!(!outcome.succeeded());
+    assert_eq!(
+        loopback.client.subscription_lifecycle(
+            &SubscriptionName::parse("live").assured("the test name is valid")
+        ),
+        None
+    );
     let query = "  // live orders\n  CREATE SUBSCRIPTION live TO order;";
     let span = outcome.diagnostics[0]
         .span
@@ -1597,13 +1763,327 @@ async fn a_delete_subscription_statement_is_sent_as_an_unsubscribe_request() {
 }
 
 #[tokio::test]
+async fn deleting_while_creation_is_in_flight_drains_its_late_success_before_name_reuse() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let creating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let create_request = loopback.next_request().await;
+    assert!(matches!(
+        create_request.request,
+        ClientRequest::Subscribe(_)
+    ));
+    creating.abort();
+
+    let client = loopback.client.clone();
+    let deleting = tokio::spawn(async move { client.unsubscribe("live").await });
+    tokio::task::yield_now().await;
+    assert_eq!(
+        loopback
+            .client
+            .subscription_lifecycle(&SubscriptionName::parse("live").assured("test name is valid")),
+        Some(crate::SubscriptionLifecycle::Closing)
+    );
+    loopback
+        .answer(
+            create_request.request_id,
+            opened_reply(subscription("live", 1)),
+        )
+        .await;
+    let delete_request = loopback.next_request().await;
+    assert!(matches!(
+        delete_request.request,
+        ClientRequest::Unsubscribe(_)
+    ));
+    loopback
+        .answer(
+            delete_request.request_id,
+            ReplyBody::Unsubscribe(UnsubscribeOutcome {
+                disposition: UnsubscribeDisposition::Deleted(subscription("live", 1)),
+                message: "subscription deleted".to_string(),
+                diagnostics: Vec::new(),
+            }),
+        )
+        .await;
+    let deletion = deleting
+        .await
+        .assured("the deletion task completes")
+        .assured("the late success is cleaned up");
+    assert!(deletion.succeeded());
+    assert_eq!(
+        loopback
+            .client
+            .subscription_lifecycle(&SubscriptionName::parse("live").assured("test name is valid")),
+        None
+    );
+
+    let client = loopback.client.clone();
+    let recreating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let recreate_request = loopback.next_request().await;
+    assert!(matches!(
+        recreate_request.request,
+        ClientRequest::Subscribe(_)
+    ));
+    loopback
+        .answer(
+            recreate_request.request_id,
+            opened_reply(subscription("live", 2)),
+        )
+        .await;
+    let recreated = recreating
+        .await
+        .assured("the replacement task completes")
+        .assured("the name can be reused after deletion");
+    assert!(recreated.succeeded());
+}
+
+#[tokio::test]
+async fn an_acknowledged_subscription_retries_restoration_on_the_replacement_exchange() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let creating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let initial = loopback.next_request().await;
+    loopback
+        .answer(initial.request_id, opened_reply(subscription("live", 1)))
+        .await;
+    creating
+        .await
+        .assured("the create task completes")
+        .assured("the initial subscription opens");
+
+    loopback.replace_exchange().await;
+    let interrupted = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the old exchange reports its delivery gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
+    let first_restore = loopback.next_request().await;
+    let ClientRequest::Subscribe(request) = first_restore.request else {
+        panic!("restoration sends a typed subscribe request");
+    };
+    assert_eq!(request.domain, domain("tenant"));
+    assert_eq!(request.statement, "CREATE SUBSCRIPTION live TO orders;");
+    loopback
+        .answer(
+            first_restore.request_id,
+            ReplyBody::Subscribe(SubscribeOutcome {
+                disposition: SubscribeDisposition::Failed,
+                message: "relay is starting".to_string(),
+                diagnostics: Vec::new(),
+            }),
+        )
+        .await;
+
+    let second_restore = loopback.next_request().await;
+    assert!(matches!(
+        second_restore.request,
+        ClientRequest::Subscribe(_)
+    ));
+    loopback
+        .answer(
+            second_restore.request_id,
+            opened_reply(subscription("live", 2)),
+        )
+        .await;
+    let mut changed = loopback.client.inner.events.sinks.desired.watch();
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            tokio::task::consume_budget().await;
+            if let Some(crate::SubscriptionLifecycle::Active(handle)) =
+                loopback.client.subscription_lifecycle(
+                    &SubscriptionName::parse("live").assured("the test name is valid"),
+                )
+            {
+                assert_eq!(handle, subscription("live", 2));
+                break;
+            }
+            changed
+                .changed()
+                .await
+                .assured("the registry remains alive while the client is held");
+        }
+    })
+    .await
+    .assured("the replacement subscription becomes active within the deadline");
+}
+
+#[tokio::test]
+async fn a_session_lost_before_create_acknowledgement_does_not_restore_the_request() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let creating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = loopback.next_request().await;
+    assert!(matches!(request.request, ClientRequest::Subscribe(_)));
+    let generation = loopback
+        .client
+        .inner
+        .exchange
+        .lock()
+        .await
+        .generation
+        .clone();
+    loopback.pending.lock().close();
+    loopback
+        .client
+        .inner
+        .events
+        .sinks
+        .close_generation(&generation);
+    assert!(creating.await.assured("the create task completes").is_err());
+    let name = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(loopback.client.subscription_lifecycle(&name), None);
+
+    loopback.replace_exchange().await;
+    assert_eq!(loopback.client.subscription_lifecycle(&name), None);
+    assert!(loopback.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_session_lost_during_unsubscribe_releases_the_name_on_the_next_exchange() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let creating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = loopback.next_request().await;
+    loopback
+        .answer(request.request_id, opened_reply(subscription("live", 1)))
+        .await;
+    creating
+        .await
+        .assured("the create task completes")
+        .assured("the first subscription opens");
+
+    let client = loopback.client.clone();
+    let deleting = tokio::spawn(async move { client.unsubscribe("live").await });
+    let request = loopback.next_request().await;
+    assert!(matches!(request.request, ClientRequest::Unsubscribe(_)));
+    let generation = loopback
+        .client
+        .inner
+        .exchange
+        .lock()
+        .await
+        .generation
+        .clone();
+    loopback.pending.lock().close();
+    loopback
+        .client
+        .inner
+        .events
+        .sinks
+        .close_generation(&generation);
+    assert!(deleting.await.assured("the delete task completes").is_err());
+    let name = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(loopback.client.subscription_lifecycle(&name), None);
+
+    loopback.replace_exchange().await;
+    let client = loopback.client.clone();
+    let recreating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = loopback.next_request().await;
+    assert!(matches!(request.request, ClientRequest::Subscribe(_)));
+    loopback
+        .answer(request.request_id, opened_reply(subscription("live", 2)))
+        .await;
+    assert!(
+        recreating
+            .await
+            .assured("the replacement task completes")
+            .assured("the name can be reused")
+            .succeeded()
+    );
+}
+
+#[tokio::test]
+async fn cancelling_an_in_flight_restore_cleans_up_its_late_success() {
+    let mut loopback = Loopback::new(Some(domain("tenant")));
+    let client = loopback.client.clone();
+    let creating = tokio::spawn(async move {
+        client
+            .subscribe(&SubscriptionRequest::new("live", "orders"))
+            .await
+    });
+    let request = loopback.next_request().await;
+    loopback
+        .answer(request.request_id, opened_reply(subscription("live", 1)))
+        .await;
+    creating
+        .await
+        .assured("the initial create task completes")
+        .assured("the initial subscription opens");
+    loopback.replace_exchange().await;
+    let interrupted = loopback
+        .client
+        .next_subscription()
+        .await
+        .assured("the lost session reports a gap");
+    assert!(matches!(interrupted, SubscriptionEvent::Interrupted(_)));
+    let restore = loopback.next_request().await;
+    assert!(matches!(restore.request, ClientRequest::Subscribe(_)));
+
+    let client = loopback.client.clone();
+    let deleting = tokio::spawn(async move { client.unsubscribe("live").await });
+    tokio::task::yield_now().await;
+    let name = SubscriptionName::parse("live").assured("the test name is valid");
+    assert_eq!(
+        loopback.client.subscription_lifecycle(&name),
+        Some(crate::SubscriptionLifecycle::Closing)
+    );
+    loopback
+        .answer(restore.request_id, opened_reply(subscription("live", 2)))
+        .await;
+    let deletion = loopback.next_request().await;
+    assert!(matches!(deletion.request, ClientRequest::Unsubscribe(_)));
+    loopback
+        .answer(
+            deletion.request_id,
+            ReplyBody::Unsubscribe(UnsubscribeOutcome {
+                disposition: UnsubscribeDisposition::Deleted(subscription("live", 2)),
+                message: "subscription deleted".to_string(),
+                diagnostics: Vec::new(),
+            }),
+        )
+        .await;
+    assert!(
+        deleting
+            .await
+            .assured("the delete task completes")
+            .assured("the late restore was deleted")
+            .succeeded()
+    );
+    assert_eq!(loopback.client.subscription_lifecycle(&name), None);
+}
+
+#[tokio::test]
 async fn a_command_carries_the_expectation_of_the_attached_transaction() {
     let mut loopback = Loopback::new(Some(domain("default")));
     loopback
         .client
         .adopt_transaction_status(open_transaction("tx-1", 2))
         .await;
-    *loopback.client.inner.commit_basis.lock().await = Some(test_preview("tx-1", 2));
+    cache_test_preview(&loopback.client, "tx-1", 2).await;
     let client = loopback.client.clone();
     let execution = tokio::spawn(async move { client.execute("COMMIT;").await });
 

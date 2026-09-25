@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 use ahash_compile_time::{HashSet, HashSetExt};
 use chumsky::{
     input::{Stream, ValueInput},
@@ -7,8 +9,8 @@ use error_stack::Report;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, BuiltinFunctionName,
     CaseBranch, Expression, FieldName, FieldReference, FieldScope, Float64Literal, Inheritance,
-    InheritedField, Invocation, Literal, MembershipOperator, NameError, ParseAsType, RangeOperator,
-    RelayName, RouteConstruction, UdfName, UnaryOperator,
+    InheritedField, Invocation, JsonPath, Literal, MembershipOperator, NameError, ParseAsType,
+    RangeOperator, RelayName, RouteConstruction, UdfName, UnaryOperator,
 };
 
 use crate::{
@@ -139,6 +141,98 @@ where
         };
         Ok(ty)
     })
+}
+
+/// A declared result type: a scalar type as `cast_type` reads it, or a `VEC<...>` or
+/// `ARRAY<..., n>` of declared types written as a schema field declares them.
+fn declared_type<'src, I>()
+-> impl Parser<'src, I, ParseAsType, extra::Err<ParseError<'src>>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    recursive(|declared| {
+        let collection = |spelling: &'static str| {
+            raw_identifier()
+                .try_map(move |name, span| {
+                    if name.eq_ignore_ascii_case(spelling) {
+                        Ok(())
+                    } else {
+                        Err(Rich::custom(span, format!("expected {spelling}")))
+                    }
+                })
+                .labelled(spelling)
+        };
+        // The label goes on the number itself, as the schema grammar does, so the checks below
+        // keep their own explanation.
+        let array_len = select! { Token::Integer(value) => value }
+            .labelled("array_length")
+            .try_map(|value, span| {
+                let not_positive =
+                    || Rich::custom(span, "array length must be a positive unsigned integer");
+                let Ok(len) = u32::try_from(value) else {
+                    return Err(not_positive());
+                };
+                let Some(len) = NonZeroU32::new(len) else {
+                    return Err(not_positive());
+                };
+                // An array becomes an Arrow fixed-size list, whose length is an i32.
+                if i32::try_from(len.get()).is_err() {
+                    return Err(Rich::custom(
+                        span,
+                        "array length must not exceed 2147483647",
+                    ));
+                }
+                Ok(len)
+            });
+        let array = collection("ARRAY").ignore_then(
+            declared
+                .clone()
+                .then_ignore(keyword(Token::Comma))
+                .then(
+                    array_len
+                        .separated_by(keyword(Token::Comma))
+                        .at_least(1)
+                        .collect::<Vec<_>>(),
+                )
+                .delimited_by(keyword(Token::Lt), keyword(Token::Gt))
+                .map(|(element, lengths)| {
+                    // `ARRAY<F32, 2, 3>` is two arrays of three, so the last length is innermost.
+                    let mut declared = element;
+                    for len in lengths.into_iter().rev() {
+                        declared = ParseAsType::Array {
+                            element: Box::new(declared),
+                            len,
+                        };
+                    }
+                    declared
+                }),
+        );
+        let vector = collection("VEC").ignore_then(
+            declared
+                .delimited_by(keyword(Token::Lt), keyword(Token::Gt))
+                .map(|element| ParseAsType::Vec {
+                    element: Box::new(element),
+                }),
+        );
+        choice((array, vector, cast_type())).boxed()
+    })
+}
+
+/// The string literal naming a JSON path, parsed into the steps it takes.
+fn json_path<'src, I>() -> impl Parser<'src, I, JsonPath, extra::Err<ParseError<'src>>> + Clone
+where
+    I: ValueInput<'src, Token = Token, Span = Span>,
+{
+    select! { Token::String(text) => text }
+        .labelled("json_path")
+        .try_map(|text: String, span| {
+            JsonPath::parse(&text).map_err(|error| {
+                Rich::custom(
+                    span,
+                    format!("invalid JSON path '{text}': {}", error.current_context()),
+                )
+            })
+        })
 }
 
 /// One comparison-level operation, applied to the expression parsed before it.
@@ -453,6 +547,38 @@ where
                     expression: Box::new(expression),
                     target,
                 });
+            // `JSON_VALUE(<document>, '<path>' AS <type>)` and its tolerant form read one value
+            // of a declared type, and `JSON_EXISTS(<document>, '<path>')` tests for one.
+            let json_source = keyword(Token::LParen)
+                .ignore_then(expression.clone())
+                .then_ignore(keyword(Token::Comma))
+                .then(json_path());
+            let json_read = json_source
+                .clone()
+                .then_ignore(keyword(Token::As))
+                .then(declared_type())
+                .then_ignore(keyword(Token::RParen));
+            let json_value = keyword(Token::JsonValue)
+                .ignore_then(json_read.clone())
+                .map(|((document, path), target)| Expression::JsonValue {
+                    document: Box::new(document),
+                    path,
+                    target,
+                });
+            let try_json_value = keyword(Token::TryJsonValue).ignore_then(json_read).map(
+                |((document, path), target)| Expression::TryJsonValue {
+                    document: Box::new(document),
+                    path,
+                    target,
+                },
+            );
+            let json_exists = keyword(Token::JsonExists)
+                .ignore_then(json_source)
+                .then_ignore(keyword(Token::RParen))
+                .map(|(document, path)| Expression::JsonExists {
+                    document: Box::new(document),
+                    path,
+                });
             choice((
                 literal,
                 udf_call,
@@ -461,6 +587,9 @@ where
                 if_expression,
                 case_expression,
                 try_cast,
+                json_value,
+                try_json_value,
+                json_exists,
                 field_reference().map(Expression::Field),
                 expression
                     .clone()
@@ -1094,6 +1223,158 @@ mod tests {
         assert!(parse_expression("input.try_cast").is_err());
         assert!(parse_expression("try_cast").is_err());
         assert!(parse_expression("try_cast(input.raw)").is_err());
+    }
+
+    fn json_path(text: &str) -> JsonPath {
+        JsonPath::parse(text).expect("test paths are valid")
+    }
+
+    fn json_value(document: Expression, path: &str, target: ParseAsType) -> Expression {
+        Expression::JsonValue {
+            document: Box::new(document),
+            path: json_path(path),
+            target,
+        }
+    }
+
+    #[test]
+    fn parses_json_extractions_of_declared_scalar_and_collection_types() {
+        assert_eq!(
+            parsed("JSON_VALUE(input.doc, '$.count' AS I64)"),
+            json_value(field("doc"), "$.count", ParseAsType::I64)
+        );
+        assert_eq!(
+            parsed("json_value(input.doc, '$.tags' as vec<string>)"),
+            json_value(
+                field("doc"),
+                "$.tags",
+                ParseAsType::Vec {
+                    element: Box::new(ParseAsType::String),
+                },
+            )
+        );
+        assert_eq!(
+            parsed(r#"TRY_JSON_VALUE(input.doc AS STRING, '$["odd key"][0]' AS VEC<VEC<INT32>>)"#),
+            Expression::TryJsonValue {
+                document: Box::new(cast(field("doc"), ParseAsType::String)),
+                path: json_path(r#"$["odd key"][0]"#),
+                target: ParseAsType::Vec {
+                    element: Box::new(ParseAsType::Vec {
+                        element: Box::new(ParseAsType::I32),
+                    }),
+                },
+            }
+        );
+        assert_eq!(
+            parsed("JSON_VALUE(input.doc, '$.m' AS ARRAY<F32, 2, 3>)"),
+            json_value(
+                field("doc"),
+                "$.m",
+                ParseAsType::Array {
+                    element: Box::new(ParseAsType::Array {
+                        element: Box::new(ParseAsType::F32),
+                        len: NonZeroU32::new(3).expect("three is positive"),
+                    }),
+                    len: NonZeroU32::new(2).expect("two is positive"),
+                },
+            )
+        );
+        assert_eq!(
+            parsed("JSON_EXISTS(input.doc, '$') AND NOT Json_Exists(input.doc, '$.a')"),
+            Expression::Binary {
+                operator: BinaryOperator::And,
+                left: Box::new(Expression::JsonExists {
+                    document: Box::new(field("doc")),
+                    path: json_path("$"),
+                }),
+                right: Box::new(Expression::Unary {
+                    operator: UnaryOperator::Not,
+                    expression: Box::new(Expression::JsonExists {
+                        document: Box::new(field("doc")),
+                        path: json_path("$.a"),
+                    }),
+                }),
+            }
+        );
+        assert_eq!(
+            parsed("JSON_VALUE(input.doc, '$.n' AS I64) AS STRING"),
+            cast(
+                json_value(field("doc"), "$.n", ParseAsType::I64),
+                ParseAsType::String
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_json_extractions_without_their_path_or_declared_type() {
+        for source in [
+            "JSON_VALUE(input.doc)",
+            "JSON_VALUE(input.doc, '$.a')",
+            "JSON_VALUE(input.doc, input.path AS I64)",
+            "JSON_VALUE(input.doc '$.a' AS I64)",
+            "JSON_VALUE(input.doc, '$.a' AS VEC<I64)",
+            "JSON_VALUE(input.doc, '$.a' AS VEC)",
+            "JSON_VALUE(input.doc, '$.a' AS ARRAY<I64>)",
+            "JSON_VALUE(input.doc, '$.a' AS ARRAY<I64, 0>)",
+            "JSON_VALUE(input.doc, '$.a' AS ARRAY<I64, 2147483648>)",
+            "JSON_VALUE(input.doc, '$.a' AS I64",
+            "TRY_JSON_VALUE(input.doc, '$.a')",
+            "JSON_EXISTS(input.doc)",
+            "JSON_EXISTS(input.doc, '$.a' AS BOOL)",
+            "JSON_EXISTS input.doc, '$.a'",
+        ] {
+            assert!(
+                parse_expression(source).is_err(),
+                "`{source}` must be rejected"
+            );
+        }
+        let error = parse_expression("JSON_VALUE(input.doc, '$.a[-1]' AS I64)")
+            .expect_err("a malformed path must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid JSON path '$.a[-1]': expected an array index"),
+            "{error}"
+        );
+        let error = parse_expression("JSON_VALUE(input.doc, '$.a' AS ARRAY<I64, 0>)")
+            .expect_err("a zero-length array must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("array length must be a positive unsigned integer"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reserves_the_json_extraction_keywords_in_field_references() {
+        for source in [
+            "input.json_value",
+            "json_exists",
+            "try_json_value(input.doc)",
+            "input.JSON_EXISTS",
+        ] {
+            assert!(
+                parse_expression(source).is_err(),
+                "`{source}` must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rendered_json_extraction_reparses_to_the_same_expression() {
+        for source in [
+            "JSON_VALUE(input.doc, '$.count' AS I64)",
+            r#"TRY_JSON_VALUE(input.doc, "$[\"it's\"]" AS VEC<ARRAY<F64, 2>>)"#,
+            r#"JSON_VALUE(input.doc, '$["odd key"].y[3]' AS ARRAY<U8, 2, 2>) AS STRING"#,
+            "JSON_EXISTS(coalesce(input.doc, '{}'), '$.a.b')",
+            "NOT JSON_EXISTS(input.doc, '$')",
+        ] {
+            let expression = parsed(source);
+            let rendered = nervix_models::expression_to_nspl(&expression)
+                .unwrap_or_else(|error| panic!("`{source}` must render: {error}"));
+            assert_eq!(parsed(&rendered), expression, "`{rendered}` changed");
+        }
     }
 
     #[test]

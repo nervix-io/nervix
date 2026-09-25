@@ -18,7 +18,9 @@ mod canonical;
 mod cluster_node;
 mod command;
 mod domain_clock;
+mod emitter_batch;
 mod expression;
+mod json_path;
 mod message_error;
 mod model_index;
 mod names;
@@ -36,6 +38,7 @@ mod statement;
 mod timestamp;
 mod udf;
 mod wasm_state_generation;
+mod wasm_state_inspection;
 
 pub use canonical::{
     CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
@@ -52,12 +55,17 @@ pub use domain_clock::{
     DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,
     DomainClockProgress, DomainClockSkew, DomainClockState, DomainTimeRate,
 };
+pub use emitter_batch::{
+    BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,
+    EmitterBatchRequirement, PayloadSizeLimit,
+};
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
     ExternalValue, FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField,
     Invocation, Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
     OutputBranch, RangeOperator, RouteConstruction, UnaryOperator,
 };
+pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };
@@ -129,33 +137,34 @@ pub use statement::{
     AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation, AlterReorderer,
     AlterReordererError, AlterReordererOperation, AzureBlobConfigEntry, BranchEviction,
     BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, ClientConfigEntry,
-    ClientPoolBounds, ClientPoolBoundsError, ClientResourceMount, ClusterSchedule, CodecEncoding,
-    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CordonNode, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-    CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateResource, CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser,
-    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, DeleteSubscription,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
-    DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
-    DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode,
-    EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-    ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
+    ClientPoolBounds, ClientPoolBoundsError, ClientResourceMount, ClusterSchedule,
+    CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
+    CodecProtobufConfig, CodecWireFormat, CordonNode, CorrelationTimeoutAction,
+    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSignalingProtocol,
+    CreateStatement, CreateSubscription, CreateUser, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, DeleteSubscription, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint,
+    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink,
+    EmitterAckWindow, EmitterBatchContractError, EmitterPublishingMode, EndpointIngestMode,
+    EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
     IcebergCatalog, IcebergRestConfigEntry, IcebergStorageBackend, IcebergValueMapping,
     InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
     InferencerTensorSchema, InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode,
     IngestQuiesceOverflow, IngestSource, IngestTimestampSource, InputCollectPolicy,
-    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
-    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry,
+    InspectionFormat, KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
+    LookupQuery, MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry,
     MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos,
     MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping, NatsConfigEntry,
     NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric, OtelMetricKind,
@@ -172,8 +181,8 @@ pub use statement::{
     ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
     SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, TransactionReportFormat,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
     WasmRejectedStatePolicy, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
     WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
@@ -182,5 +191,9 @@ pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
 pub use wasm_state_generation::{
     InvalidWasmStateGeneration, WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations,
     WasmStateRecoveries, WasmStateRecovery, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
-    WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
+    WasmStateReset, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
+};
+pub use wasm_state_inspection::{
+    WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
+    WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
 };

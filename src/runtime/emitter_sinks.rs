@@ -27,6 +27,7 @@ use nervix_connector_sentry::{SentrySink, SentrySinkConfig};
 use nervix_connector_sqs::{SqsSink, SqsSinkConfig};
 use nervix_connector_syslog::{SyslogSink, SyslogSinkConfig};
 use nervix_connector_zeromq::{ZeroMqSink, ZeroMqSinkConfig};
+use nervix_models::PayloadSizeLimit;
 
 use super::{pooled_sink_clients::PooledSinkClient, *};
 
@@ -159,10 +160,12 @@ impl EmitterSinkStarter {
         codec: Option<&Arc<CompiledCodec>>,
     ) -> EmitterRuntimeResult<Box<dyn EmitterSink>> {
         let label = plan.sink.label();
+        let payload_limit = plan.sink.batch().map(|batch| batch.max_size);
         let sink = match &plan.sink {
             EmitterSinkPlan::Kafka(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 KafkaSink::new(
                     KafkaSinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -175,6 +178,7 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::Pulsar(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 PulsarSink::new(
                     PulsarSinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -188,6 +192,7 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::RabbitMq(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 RabbitMqSink::new(
                     RabbitMqSinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -203,6 +208,7 @@ impl EmitterSinkStarter {
                 Self::record(
                     label,
                     codec,
+                    payload_limit,
                     RedisSink::new(
                         RedisSinkConfig {
                             pool,
@@ -215,6 +221,7 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::Mqtt(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 MqttSink::new(
                     MqttSinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -233,6 +240,7 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::Nats(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 NatsSink::new(
                     NatsSinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -247,6 +255,7 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::ZeroMq(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 ZeroMqSink::new(
                     ZeroMqSinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -258,6 +267,7 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::Syslog(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 SyslogSink::new(
                     SyslogSinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -269,6 +279,7 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::Sqs(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 SqsSink::new(
                     SqsSinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -282,6 +293,7 @@ impl EmitterSinkStarter {
             EmitterSinkPlan::Sentry(sink) => Self::record(
                 label,
                 codec,
+                payload_limit,
                 SentrySink::new(
                     SentrySinkConfig {
                         config: sink.client.config.entries.clone(),
@@ -331,7 +343,7 @@ impl EmitterSinkStarter {
                     values: &sink.values,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.max_batch),
+                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 Self::row(
                     projection,
@@ -353,7 +365,7 @@ impl EmitterSinkStarter {
                     values: &sink.values,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.max_batch),
+                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let connections =
                     PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
@@ -380,7 +392,7 @@ impl EmitterSinkStarter {
                     values: &sink.values,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.max_batch),
+                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let connections =
                     PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
@@ -407,7 +419,7 @@ impl EmitterSinkStarter {
                     values: &sink.values,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.max_batch),
+                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let client = PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
                     .await
@@ -466,13 +478,15 @@ impl EmitterSinkStarter {
         Ok(sink)
     }
 
-    /// Pairs a record sink with the codec the host encodes its records with.
+    /// Pairs a record sink with the codec the host encodes its records with, and with the
+    /// `BATCH ... MAX SIZE` its encoded payloads are held to when the emitter declares one.
     ///
     /// The registry requires `ENCODE USING` on exactly the sinks that publish encoded records, so a
     /// record sink always receives its codec here.
     fn record<T>(
         label: &str,
         codec: Option<&Arc<CompiledCodec>>,
+        payload_limit: Option<PayloadSizeLimit>,
         started: SinkStartResult<T>,
     ) -> EmitterRuntimeResult<Box<dyn EmitterSink>>
     where
@@ -486,6 +500,7 @@ impl EmitterSinkStarter {
         let sink: Box<dyn EmitterSink> = Box::new(EncodedRecordSink {
             sink: Box::new(sink),
             codec: codec.clone(),
+            payload_limit,
         });
         Ok(sink)
     }
@@ -555,11 +570,13 @@ mod tests {
     fn only_a_syslog_client_that_could_never_open_is_rejected_before_the_emitter_starts() {
         let valid = plan(EmitterSinkPlan::Syslog(SyslogSinkPlan {
             client: client(&[("protocol", "udp"), ("addr", "127.0.0.1:5514")]),
+            batch: None,
         }));
         assert!(EmitterSinkStarter::check_client_config(&valid).is_ok());
 
         let unopenable = plan(EmitterSinkPlan::Syslog(SyslogSinkPlan {
             client: client(&[("protocol", "tcp"), ("addr", "missing-port")]),
+            batch: None,
         }));
         let Err(error) = EmitterSinkStarter::check_client_config(&unopenable) else {
             panic!("a Syslog address without a port must fail the client check")
@@ -576,6 +593,7 @@ mod tests {
 
         let unchecked = plan(EmitterSinkPlan::ZeroMq(ZeroMqSinkPlan {
             client: client(&[]),
+            batch: None,
         }));
         assert!(EmitterSinkStarter::check_client_config(&unchecked).is_ok());
     }
@@ -587,6 +605,7 @@ mod tests {
     fn a_connector_start_failure_leaves_the_sink_unavailable_with_its_own_message() {
         let started = EmitterSinkStarter::record::<NatsSink>(
             "nats",
+            None,
             None,
             Err(
                 Report::new(SinkStartError::InvalidConfiguration { sink: "NATS" })

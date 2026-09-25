@@ -10,6 +10,7 @@ use crate::{
     extremum::ClampBoundsDefect,
     ip_address::{IpFamily, NetworkDefect},
     ir::{RegisterRef, RegisterType},
+    json::JsonDefect,
     program::Span,
 };
 
@@ -83,6 +84,12 @@ pub enum SideErrorReason {
     /// has left.
     #[error("{0} result exceeds the text one STRING column holds")]
     TextTooLong(TextOperation),
+    #[error("contains_any pattern set exceeds 128 patterns or 64 KiB")]
+    PatternSetTooLarge,
+    #[error("LIKE pattern exceeds 4 KiB")]
+    LikePatternTooLong,
+    #[error("split result exceeds 65,536 parts")]
+    TooManySplitParts,
     #[error("{0} input is not valid encoded bytes")]
     InvalidBytesEncoding(BytesOperation),
     #[error("bytes_to_utf8 input is not valid UTF-8")]
@@ -120,6 +127,9 @@ pub enum SideErrorReason {
     /// millisecond field has no value for it.
     #[error("uuid_v7 execution time is before the Unix epoch")]
     UuidTimeBeforeEpoch,
+    /// A JSON extraction that could not read its document or value, or build its result.
+    #[error("{0}")]
+    Json(JsonDefect),
     /// A failure an injected function reported, with the code and text that function chose.
     #[error("{message}")]
     Injected { code: ErrorCode, message: String },
@@ -132,6 +142,7 @@ impl SideErrorReason {
             | Self::DatetimeOutOfRange(_)
             | Self::DateDiffOverflow
             | Self::TextTooLong(_)
+            | Self::TooManySplitParts
             | Self::BytesTooLong(_)
             | Self::QueryValuesTooLong
             | Self::UuidTimeBeforeEpoch => ErrorCode::Overflow,
@@ -139,6 +150,8 @@ impl SideErrorReason {
             Self::NegativeShiftCount(_)
             | Self::NonFiniteResult(_)
             | Self::InvalidRegularExpression(_)
+            | Self::PatternSetTooLarge
+            | Self::LikePatternTooLong
             | Self::SkippedLocalTime { .. }
             | Self::RepeatedLocalTime { .. }
             | Self::InvalidClampBounds(_)
@@ -153,6 +166,7 @@ impl SideErrorReason {
             | Self::UnreadableIpAddress
             | Self::InvalidUrl { .. }
             | Self::InvalidPercentEncoding(_) => ErrorCode::CastFailed,
+            Self::Json(defect) => defect.code(),
             Self::Injected { code, .. } => *code,
         }
     }
@@ -223,6 +237,14 @@ pub enum DatetimeOperation {
 pub enum TextOperation {
     #[strum(to_string = "repeat")]
     Repeat,
+    #[strum(to_string = "concat_ws")]
+    ConcatWs,
+    #[strum(to_string = "split")]
+    Split,
+    #[strum(to_string = "join")]
+    Join,
+    #[strum(to_string = "normalize_nfc")]
+    NormalizeNfc,
     #[strum(to_string = "lpad")]
     Lpad,
     #[strum(to_string = "rpad")]
@@ -607,6 +629,16 @@ pub enum RuntimeError {
         #[source]
         source: ArrowError,
     },
+    #[error("{operation} Arrow string kernel failed: {source}")]
+    TextKernel {
+        operation: &'static str,
+        #[source]
+        source: ArrowError,
+    },
+    #[error("text search kernel failed: {report}")]
+    TextSearchKernel {
+        report: Box<error_stack::Report<RuntimeError>>,
+    },
     #[error("collection kernel failed: {report}")]
     CollectionKernel {
         report: Box<error_stack::Report<RuntimeError>>,
@@ -671,6 +703,14 @@ pub enum CollectionLimit {
 impl From<error_stack::Report<RuntimeError>> for RuntimeError {
     fn from(report: error_stack::Report<RuntimeError>) -> Self {
         Self::CollectionKernel {
+            report: Box::new(report),
+        }
+    }
+}
+
+impl RuntimeError {
+    pub(crate) fn text_search_kernel(report: error_stack::Report<Self>) -> Self {
+        Self::TextSearchKernel {
             report: Box::new(report),
         }
     }

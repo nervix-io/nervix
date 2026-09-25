@@ -25,7 +25,8 @@ General rules:
 
 - function names are case-insensitive
 - there is no implicit cast insertion; `expr AS TYPE` and `TRY_CAST(expr AS TYPE)` convert
-  explicitly, as [Conversions](#conversions) describes
+  explicitly, as [Conversions](#conversions) describes, and `JSON_VALUE` reads a value of a declared
+  type from JSON text, as [JSON Documents](#json-documents) describes
 - argument and result types are validated when the statement is applied
 - sensitive values retain their sensitivity through expression evaluation; internal relay and node outputs may assign them to a non-sensitive field only with an explicit `leak_sensitive(...)`
 - every sensitive value crossing an emitter boundary requires `leak_sensitive(...)` or explicit
@@ -62,8 +63,10 @@ a function traverses its column, whether through an Arrow compute kernel, one pa
 value buffer, or a loop over its rows, is internal to the function and does not change its results.
 
 A pass over a value buffer is written so the compiler can turn it into the vector instructions of
-the CPU a Nervix binary is built for. Builtins contain no hand-written SIMD code, and the vector
-instructions a node's CPU offers never change a builtin's result.
+the CPU a Nervix binary is built for. The one builtin that uses hand-written SIMD code is JSON
+extraction, whose parser chooses at run time, from the instructions the node's CPU offers, the SIMD
+instructions that find a document's structure. The vector instructions a node's CPU offers never change a
+builtin's result.
 
 The compiler applies three optimizations that preserve results in the same way:
 
@@ -86,7 +89,7 @@ Every builtin follows these rules unless its own description says otherwise:
 | Property | Contract |
 | --- | --- |
 | Types | Arguments are never converted implicitly. A function that accepts several types, such as `abs` over every numeric type, takes each of them as it is. |
-| Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, `is_null`, `greatest`, and `least` define their own null handling, and `url_host`, `url_port`, `url_query`, `url_fragment`, and `url_query_value` are also null for a URL that lacks what they read. |
+| Nulls | A null argument produces a null result. `coalesce`, `nullif`, `concat`, `is_null`, `greatest`, and `least` define their own null handling, and `url_host`, `url_port`, `url_query`, `url_fragment`, and `url_query_value` are also null for a URL that lacks what they read. `JSON_VALUE` and `TRY_JSON_VALUE` are also null where the document has no value or JSON null. |
 | Sensitivity | A result is sensitive when any argument is sensitive, including results such as `length(...)`, `is_null(...)`, and `count(...)` that do not contain the argument's value. Only `leak_sensitive(...)` removes sensitivity. |
 | Volatility | Every builtin is deterministic except `now()`, which returns one value for an execution, and `uuid_v4()` and `uuid_v7()`, which return a new value for every message. |
 | Errors | A function that can fail reports a per-message error and yields null for that message. The error activates `ON MESSAGE ERROR`. Inside a conditional, only the selected arm can report one. |
@@ -348,6 +351,140 @@ below lists:
 | `BOOL` | `DATETIME` | Every value |
 | `DATETIME` | `BOOL` | Every value |
 
+## JSON Documents
+
+A `STRING` value holding a JSON document is read into typed values explicitly. Three forms read it,
+each naming a path to one value in the document:
+
+| Form | Result | A document or value that cannot be read |
+| --- | --- | --- |
+| `JSON_VALUE(<document>, '<path>' AS <type>)` | Optional `<type>` | Reports a per-message error that names the defect and yields null for that message, which activates `ON MESSAGE ERROR` |
+| `TRY_JSON_VALUE(<document>, '<path>' AS <type>)` | Optional `<type>` | Yields a typed null, and the message continues without an error |
+| `JSON_EXISTS(<document>, '<path>')` | `BOOL`, optional exactly when `<document>` is | Reports a per-message error, as `JSON_VALUE` does |
+
+`<document>` is any `STRING` expression; any other type rejects the statement when it is applied,
+with an error such as `JSON_VALUE document must be STRING, found Int64`. A null document yields null
+in all three forms and reports nothing. `<path>` is a string literal, parsed and checked when the
+statement is parsed, so a malformed path rejects the statement with an `invalid JSON path` error
+that names the defect. `JSON_VALUE`, `TRY_JSON_VALUE`, and `JSON_EXISTS` are reserved in
+expressions in the same way as the [conditional keywords](#conditional-expressions).
+
+```nspl,ignore
+SET customer_id = JSON_VALUE(input.payload, '$.customer.id' AS I64),
+    tags = JSON_VALUE(input.payload, '$.tags' AS VEC<STRING>),
+    first_quantity = TRY_JSON_VALUE(input.payload, '$.items[0].qty' AS U32),
+    has_note = JSON_EXISTS(input.payload, '$.note')
+```
+
+A value read from a document keeps the document's sensitivity, as every function result does.
+
+### Paths
+
+A path starts with `$`, which names the whole document, followed by any number of steps, at most 64:
+
+| Step | Leads to |
+| --- | --- |
+| `.name` | The member of an object named `name`, where `name` is letters, digits, and underscores not starting with a digit |
+| `["name"]` | The member of an object with any name, written as a JSON string with its escapes, such as `["unit price"]` or `["café"]` |
+| `[n]` | The element of an array at the zero-based index `n`, written without leading zeros |
+
+Member names are compared exactly, letter case included. Where an object repeats a member name, the
+last of them is the one read. A path finds no value when an object lacks the member, an array is
+shorter than the index, or a step leads into a value that is not an object or an array: `$.a.b`
+finds nothing where `a` is a number, a string, or JSON null.
+
+### Declared Types
+
+`<type>` is a scalar type written with the same spellings as in [Conversions](#conversions), or a
+`VEC<...>` or `ARRAY<..., n>` of declared types written as a schema field declares them, nested to
+any depth, such as `VEC<VEC<I32>>` or `ARRAY<F32, 2, 3>`. JSON has no date or byte type, so
+`DATETIME` and `BYTES` reject the statement with an error such as `JSON_VALUE cannot read DATETIME`;
+read the text as a `STRING` and convert it with [`parse_datetime`](#reading-text) or
+[`base64_decode`](#bytes-encodings-and-hashes). A value is never converted between kinds: a number is
+not read as text, and text is not read as a number.
+
+| Declared type | Reads | Fails for |
+| --- | --- | --- |
+| `BOOL` | `true` and `false` | Every other value |
+| `STRING` | A JSON string, with its escapes decoded | Every other value, numbers included |
+| An integer type | A JSON number with no fractional part, however it is written, so `2`, `2.0`, and `2e0` read as `2` | A number with a fractional part, a number outside the type's range, and every value that is not a number |
+| `F64` | A JSON number, as the nearest `F64` | Every value that is not a number |
+| `F32` | A JSON number, as the nearest `F32` | A number beyond the `F32` range, and every value that is not a number |
+| `VEC<type>` | A JSON array of any length, each element read as `type` | Every value that is not an array, and an array holding an element that `type` does not read |
+| `ARRAY<type, n>` | A JSON array of exactly `n` elements, each read as `type` | Every value that is not an array of `n` elements, and an array holding an element that `type` does not read |
+
+`VEC` and `ARRAY` elements are never null, so an array holding JSON null fails as any other element
+of the wrong kind does. A number is read by its value: an integer beyond the 64-bit range reads as
+the nearest `F64`, so it is out of range for every integer type, while a number whose magnitude is
+beyond the `F64` range, such as `1e400`, makes the document unreadable.
+
+### Missing Values, JSON Null, And Failures
+
+What each form yields depends on what the path finds:
+
+| The document | `JSON_VALUE` | `TRY_JSON_VALUE` | `JSON_EXISTS` |
+| --- | --- | --- | --- |
+| is not valid JSON | Error `cast_failed`: `JSON_VALUE document is not valid JSON` | Null | Error `cast_failed`: `JSON_EXISTS document is not valid JSON` |
+| has no value at the path | Null | Null | `FALSE` |
+| holds JSON null at the path | Null | Null | `TRUE` |
+| holds a value of another kind | Error `cast_failed`, such as `JSON_VALUE found a JSON string at $.count where I64 is declared` | Null | `TRUE` |
+| holds a number the type cannot hold | Error `cast_failed`, such as `JSON_VALUE number at $.level does not fit U8` | Null | `TRUE` |
+| holds an array of the wrong length for an `ARRAY` | Error `cast_failed`, such as `JSON_VALUE array at $.point has 3 elements where 2 are declared` | Null | `TRUE` |
+
+A defect inside a collection names the collection with `in`, such as `JSON_VALUE found JSON null in
+$.tags where I64 elements are declared`. An error names the path and the declared type but never a
+value from the document, so it can be reported for a sensitive document.
+
+`JSON_VALUE` and `TRY_JSON_VALUE` yield null both where the path finds nothing and where it finds
+JSON null; `JSON_EXISTS` tells the two apart. Test the forms together to classify a document without
+failing the message:
+
+```nspl,ignore
+SET amount = TRY_JSON_VALUE(input.payload, '$.amount' AS F64),
+    amount_state = CASE
+      WHEN is_null(input.payload) THEN 'no document'
+      WHEN NOT is_null(TRY_JSON_VALUE(input.payload, '$.amount' AS F64)) THEN 'read'
+      WHEN NOT is_null(TRY_JSON_VALUE(input.payload, '$.amount' AS STRING)) THEN 'text'
+      ELSE 'missing, null, or unreadable'
+    END
+```
+
+To tell a malformed document from a missing value, route the message through `JSON_EXISTS` or
+`JSON_VALUE` and read the error in `ON MESSAGE ERROR`, where the error names the defect.
+
+As with `TRY_CAST`, the result of `TRY_JSON_VALUE` and `JSON_VALUE` is optional, so it initializes a
+required field only through an expression that is never null, such as
+`coalesce(TRY_JSON_VALUE(input.payload, '$.qty' AS U32), 0 AS U32)`, and a statement that assigns
+it to a required field directly is rejected when it is applied. `TRY_JSON_VALUE` suppresses only the
+failures of reading its document: a failure of its document expression still fails the message.
+
+### Limits
+
+A document is read only when it holds at most 16,777,216 bytes and nests objects and arrays at most
+128 deep. A larger or deeper document fails `JSON_VALUE` and `JSON_EXISTS` with an
+`invalid_argument` error, such as `JSON_VALUE document exceeds 16777216 bytes` or `JSON_VALUE
+document nests deeper than 128 levels`, and yields null from `TRY_JSON_VALUE`. A result whose text
+or elements do not fit one column, as with [`repeat`](#string-functions), reports an `overflow`
+error such as `JSON_VALUE result exceeds what one VEC<STRING> column holds`, from `TRY_JSON_VALUE`
+too, since it is a limit of the batch rather than a defect of the document.
+
+Reading a document is bounded by these limits. Like every builtin, an extraction runs to completion
+for the batch it is evaluating, so stopping a node or a processor takes effect between batches.
+
+### Reading A Document Once
+
+Every extraction a route makes from the same document column reads one parse of each document,
+whether the extractions are in one `SET` assignment or several, in `WHERE`, or a mix of
+`JSON_VALUE`, `TRY_JSON_VALUE`, and `JSON_EXISTS`, so reading ten fields costs one parse rather than
+ten. A document is parsed with SIMD instructions that find its structure, and each path is then
+followed and its value written straight into a typed column of the declared type; no document is
+held as an untyped value. A document field that an earlier `SET` assignment rewrites is a new
+column, whose documents are parsed again.
+
+Inside a conditional arm, an extraction parses only the documents of the messages that select the
+arm, and an extraction in the arm does not share its parse with one outside it. A document written
+as a literal is parsed once for every message of a batch.
+
 ## Header Functions
 
 | Function | Returns | Notes |
@@ -386,8 +523,8 @@ evaluates it until domain time reaches the epoch. It never encodes another insta
 
 ## String Functions
 
-String functions count and select characters, meaning Unicode scalar values, rather than bytes.
-Positions count from 1.
+String functions count and select characters, meaning Unicode scalar values, rather than bytes or
+grapheme clusters. A combining mark counts as a separate character. Positions count from 1.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
@@ -400,6 +537,7 @@ Positions count from 1.
 | `length(text)` | `I64` | Character count |
 | `char_length(text)` | `I64` | Same as `length` |
 | `bit_length(text)` | `I64` | Eight times the UTF-8 byte length |
+| `octet_length(text)` | `I64` | UTF-8 byte length, read from the Arrow string offsets |
 | `ascii(text)` | `I64` | Unicode code point of the first character, or `0` for an empty string |
 | `initcap(text)` | `STRING` | Uppercases the first character of each run of letters and digits and lowercases the rest |
 | `left(text, count)` | `STRING` | The first `count` characters. A negative `count` removes that many characters from the end |
@@ -409,12 +547,16 @@ Positions count from 1.
 | `substring(text, start)` | `STRING` | Alias for `substr` |
 | `substring(text, start, length)` | `STRING` | Alias for `substr` |
 | `concat(a, b, ...)` | `STRING` | Joins the arguments in order. A null argument contributes nothing, so the result is never null. All arguments must be `STRING` |
+| `concat_ws(separator, a, b, ...)` | `STRING` | Joins non-null string arguments with `separator`; a null separator makes the result null |
 | `repeat(text, count)` | `STRING` | The text repeated `count` times, or an empty string when `count` is at most `0` |
 | `replace(text, from, to)` | `STRING` | Replaces every occurrence of `from`, matched as plain text |
 | `reverse(text)` | `STRING` | Reverses the characters |
 | `lpad(text, length, fill)` | `STRING` | Pads on the left with repetitions of `fill` to `length` characters |
 | `rpad(text, length, fill)` | `STRING` | Pads on the right with repetitions of `fill` to `length` characters |
 | `split_part(text, delimiter, index)` | `STRING` | The part at position `index` |
+| `split(text, delimiter)` | `VEC<STRING>` | All parts in order, including empty parts at the ends or between adjacent delimiters |
+| `join(parts, separator)` | `STRING` | Joins an `ARRAY<STRING>` or `VEC<STRING>`; null elements contribute nothing |
+| `normalize_nfc(text)` | `STRING` | Unicode canonical composition (NFC); does not change case or apply compatibility folding |
 | `strpos(text, needle)` | `I64` | Position of the first occurrence of `needle`, or `0` when it does not occur |
 | `translate(text, from_chars, to_chars)` | `STRING` | Replaces each character found in `from_chars` with the character at the same position in `to_chars`, and removes a character that has no counterpart |
 | `to_hex(value)` | `STRING` | Lowercase hexadecimal digits without a prefix. Integral input only; a negative value is written as its two's complement at the input's width |
@@ -436,6 +578,14 @@ empty string when `length` is at most `0`, and return shorter text unchanged whe
 
 `split_part` returns an empty string when `index` is at most `0` or past the last part. With an
 empty `delimiter`, the whole text is part `1`.
+
+`split` uses the same empty-delimiter rule: it returns one part containing the whole text. An
+empty input also produces one empty part. `join` on an empty list produces an empty string;
+`concat_ws` with no non-null values after the separator does the same. These functions preserve
+the written order. `split` permits at most 65,536 parts in one result, and reports an `overflow`
+message error when that limit or the Arrow list/string offset limit is exceeded. `concat_ws`,
+`join`, and `normalize_nfc` report `overflow` when their result cannot fit in the output
+`STRING` column. Their temporary output is built once per batch.
 
 `repeat`, `lpad`, and `rpad` compute the length of a result before they build it. The values one
 call produces for a batch share one `STRING` column, which holds at most 2,147,483,647 bytes of
@@ -645,13 +795,27 @@ SET scheme = url_scheme(input.referrer),
 
 ## String Predicates
 
-Matching is exact and case-sensitive.
+Plain substring matching is exact and case-sensitive.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
 | `contains(text, needle)` | `BOOL` | True when `needle` occurs in `text` |
 | `starts_with(text, prefix)` | `BOOL` | True when `text` begins with `prefix` |
 | `ends_with(text, suffix)` | `BOOL` | True when `text` ends with `suffix` |
+| `contains_any(text, patterns)` | `BOOL` | True when any non-null string in an `ARRAY<STRING>` or `VEC<STRING>` occurs in `text`; an empty set is false and an empty pattern matches every non-null text |
+| `like(text, pattern)` | `BOOL` | SQL LIKE: `%` matches zero or more Unicode characters and `_` matches one; a backslash quotes a following wildcard or backslash |
+| `ilike(text, pattern)` | `BOOL` | The same wildcard rules with Unicode loose case-insensitive matching |
+
+`like` and `ilike` match the entire text. A trailing backslash is a literal backslash.
+`ilike` follows Arrow's Unicode loose matching: it ignores case without expanding characters,
+so `ß` does not equal `SS`. For full Unicode case mapping, apply `lower` or `upper` explicitly;
+neither matching function normalizes text. Each LIKE pattern is limited to 4 KiB of UTF-8 text;
+an oversized pattern reports an `invalid_argument` error only on the message that evaluates it.
+`contains_any` uses exact case-sensitive text,
+including combining marks. A literal `ARRAY` or `VEC` set is compiled once with the program;
+dynamic sets are compiled by distinct set within each batch. A set has at most 128 non-null
+patterns and 64 KiB of combined pattern text; exceeding either limit reports an
+`invalid_argument` message error. The per-batch cache retains at most 64 distinct sets.
 
 ## Regular Expressions
 
@@ -672,6 +836,11 @@ other invalid pattern.
 | `regexp_like(text, pattern)` | `BOOL` | True when the pattern matches anywhere in the text |
 | `regexp_replace(text, pattern, replacement)` | `STRING` | Replaces every match. `$1` and `${name}` in `replacement` insert a capture group, and `$$` inserts `$` |
 | `regexp_substr(text, pattern)` | `STRING` | The first match, or null when the pattern does not match |
+| `regexp_extract(text, pattern, group)` | `STRING` | Numbered capture from the first leftmost match; group `0` is the complete match, and an absent group or match produces null |
+
+`regexp_extract` accepts any integral group index. A negative index produces null. Regex syntax
+uses Unicode classes by default and supports no backreferences or look-around; the engine keeps
+linear-time search guarantees rather than enabling backtracking features.
 
 ## Numeric Functions
 

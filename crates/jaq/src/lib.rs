@@ -472,14 +472,29 @@ impl JaqNativeFormat {
 
     /// Encode one value as a payload of this format.
     pub fn write_value(self, value: JsonValue) -> Result<Vec<u8>, JaqFormatError> {
+        let mut encoded = Vec::new();
+        self.write_value_into(value, &mut encoded)?;
+        Ok(encoded)
+    }
+
+    /// Encode one value as a payload of this format, streaming it into `output`.
+    ///
+    /// The writer receives the encoding piece by piece as the format writes it, so a writer that
+    /// refuses to grow past a limit stops the encoding at that point.
+    pub fn write_value_into(
+        self,
+        value: JsonValue,
+        output: &mut impl io::Write,
+    ) -> Result<(), JaqFormatError> {
         if self == Self::Raw {
             let JsonValue::String(value) = value else {
                 return Err(self.encode("RAW payloads require a string value"));
             };
-            return Ok(value.into_bytes());
+            return output
+                .write_all(value.as_bytes())
+                .map_err(|error| self.encode(error));
         }
         let value: JaqVal = serde_json::from_value(value).map_err(|error| self.encode(error))?;
-        let mut encoded = Vec::new();
         let writer = JaqWriter {
             format: self.jaq_format(),
             // YAML reads `{1:2}` as the key `"1:2"`, so a space after the separator is required
@@ -490,8 +505,7 @@ impl JaqNativeFormat {
             },
             join: true,
         };
-        jaq_write::write(&mut encoded, &writer, &value).map_err(|error| self.encode(error))?;
-        Ok(encoded)
+        jaq_write::write(output, &writer, &value).map_err(|error| self.encode(error))
     }
 
     fn decode(self, reason: impl Display) -> JaqFormatError {

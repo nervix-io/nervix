@@ -103,6 +103,7 @@ indexmap = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
+nervix-bounded-write = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-connector = { workspace = true }
@@ -221,6 +222,7 @@ mongodb = { workspace = true }
 # This is mysql_async's AWS-LC-backed Rustls feature; do not use default-rustls-ring.
 mysql_async = { workspace = true, features = ["default-rustls"] }
 nervix-client-core = { workspace = true }
+nervix-client-ffi = { workspace = true }
 nervix-test-environment = { workspace = true }
 nix = { workspace = true, features = ["signal"] }
 playwright-rs = { workspace = true }
@@ -267,7 +269,9 @@ members = [
   ".",
   "crates/approx-into",
   "crates/benchmark",
+  "crates/bounded-write",
   "crates/client-core",
+  "crates/client-ffi",
   "crates/client-wire",
   "crates/connector",
   "crates/connectors/clickhouse",
@@ -324,6 +328,7 @@ ahash-compile-time = { package = "ahash", version = "0.8", default-features = fa
   "compile-time-rng",
   "std",
 ] }
+aho-corasick = "1"
 alloc_count = "0.3.1"
 anyhow = "1"
 apache-avro = "0.21.0"
@@ -342,6 +347,7 @@ arrow-schema = "58"
 arrow-select = "58"
 arrow-string = "58"
 ascii-dag = "0.9"
+unicode-normalization = "0.1"
 # 0.49 uses provider-selectable rustls-webpki 0.103; the previous 0.42 line pulled in Ring.
 async-nats = { version = "0.49.1", default-features = false, features = [
   "aws-lc-rs",
@@ -435,7 +441,9 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 multer = "3"
 mysql_async = "0.36.2"
 nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
+nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
+nervix-client-ffi = { package = "nervix-client-ffi", path = "crates/client-ffi" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }
 nervix-connector-clickhouse = { package = "nervix-connector-clickhouse", path = "crates/connectors/clickhouse" }
@@ -607,7 +615,7 @@ url = "2.5"
 uuid = "1.18"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-wasmtime = { version = "48.0.0", default-features = false, features = [
+wasmtime = { version = "49.0.0", default-features = false, features = [
   "anyhow",
   "async",
   "cranelift",

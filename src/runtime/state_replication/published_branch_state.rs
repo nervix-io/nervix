@@ -44,13 +44,14 @@ impl PublishedBranchState {
         }
     }
 
-    fn snapshot_after(
+    async fn snapshot_after(
         &self,
         after_lsm: u64,
+        executor: &Executor,
     ) -> Result<Option<PersistedRuntimeStateEntry>, Report<RuntimePersistenceError>> {
         match self {
             Self::Deduplicator(state) => state.snapshot_after(Some(after_lsm)),
-            Self::WindowProcessor(state) => state.snapshot_after(Some(after_lsm)),
+            Self::WindowProcessor(state) => state.snapshot_after(Some(after_lsm), executor).await,
         }
     }
 
@@ -87,12 +88,14 @@ impl PublishedBranchState {
     /// This does not need the branch task: one that is gone can no longer publish, and what it
     /// published before is then the newest state anyone can restore. The encode reads the published
     /// value, so a branch that is still running keeps processing while it runs.
-    pub(super) fn persist_published(
+    pub(super) async fn persist_published(
         &self,
         store: &RuntimeStateStore,
+        executor: &Executor,
     ) -> RuntimeStateResult<Option<u64>> {
         let snapshot = self
-            .snapshot_after(self.last_persisted_lsm())
+            .snapshot_after(self.last_persisted_lsm(), executor)
+            .await
             .map_err(|error| {
                 RuntimeStateOperationError::persistence(error.current_context().clone())
             })?;

@@ -67,6 +67,7 @@ pub(crate) struct WasmStateResetPreparation {
     pub(super) scope: WasmStateResetScope,
     pub(super) branch_key: Option<BranchKey>,
     pub(super) published: bool,
+    pub(super) reason: nervix_models::WasmStateResetReason,
 }
 
 impl WasmStateResetPreparation {
@@ -76,6 +77,7 @@ impl WasmStateResetPreparation {
         scope: WasmStateResetScope,
         branch_key: Option<Vec<RemoteRuntimeField>>,
         published: bool,
+        reason: nervix_models::WasmStateResetReason,
     ) -> error_stack::Result<Self, WasmStateResetRuntimeError> {
         let branch_key = BranchKey::from_remote_key(branch_key).map_err(|reason| {
             Report::new(WasmStateResetRuntimeError::InvalidBranchKey {
@@ -88,6 +90,7 @@ impl WasmStateResetPreparation {
             scope,
             branch_key,
             published,
+            reason,
         })
     }
 }
@@ -131,7 +134,8 @@ impl BranchInstanceTemplate {
             processor: processor.clone(),
         };
         let mut branch = self
-            .instantiate(runtime, domain, key.clone())
+            .instantiate(runtime, domain, key.clone(), 1)
+            .await
             .change_context_lazy(fresh)?
             .into_inner();
         branch.refresh_domain_routing().change_context_lazy(fresh)?;

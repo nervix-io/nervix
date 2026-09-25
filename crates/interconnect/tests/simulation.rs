@@ -2,12 +2,15 @@
 //!
 //! Layer: test harness outside the product layer order.
 //!
-//! - **Owns.** The initial simulation smoke and failure-propagation checks.
-//! - **Depends on.** The Turmoil runner and Tokio test timers.
+//! - **Owns.** The initial simulation smoke and failure-propagation checks, and the checks of the
+//!   simulated clock, entropy and semantic trace the runner gives each host.
+//! - **Depends on.** The Turmoil runner, Tokio test timers, and the Rustls clock contract.
 //! - **Must not know.** Product graph or persistent cluster state.
 
 #[path = "simulation/runner.rs"]
 mod runner;
+#[path = "simulation/transport.rs"]
+mod transport;
 
 use std::{
     num::NonZeroUsize,
@@ -16,7 +19,13 @@ use std::{
 
 use meticulous::OptionExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
-use runner::{HostSupervisor, SimulationBounds, SimulationConfig, SimulationError, Topology};
+use nervix_interconnect::{PeerTarget, TransportEntropy};
+use nervix_models::NodeEndpoint;
+use runner::{
+    ClockSkew, HostSupervisor, SemanticTrace, SimulatedEntropy, SimulatedUtc, SimulationBounds,
+    SimulationConfig, SimulationError, Topology,
+};
+use rustls::time_provider::TimeProvider as _;
 
 fn config() -> SimulationConfig {
     SimulationConfig {
@@ -44,6 +53,21 @@ fn simulation_timer_smoke() {
         });
         simulation.client("observer", async {
             tokio::time::sleep(Duration::from_millis(5)).await;
+            Ok(())
+        });
+    });
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn peer_resolution_uses_simulated_dns() {
+    let result = config().run("peer resolution", |simulation| {
+        simulation.host("server", || async { Ok(()) });
+        simulation.client("observer", async {
+            let targets = PeerTarget::resolve(&NodeEndpoint::new("server", 7443)).await?;
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].addr.ip(), turmoil::lookup("server"));
+            assert_eq!(targets[0].server_name, "server");
             Ok(())
         });
     });
@@ -198,4 +222,73 @@ fn simulation_scheduler_panic_reaches_result() {
         "{error:?}"
     );
     assert!(error.to_string().contains("scheduler panic seed 41"));
+}
+
+#[test]
+fn simulated_utc_is_the_epoch_plus_simulated_elapsed_time() {
+    let configuration = config();
+    let epoch = configuration
+        .epoch
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("the configured epoch follows the Unix epoch");
+    let result = configuration.run("simulated UTC", move |simulation| {
+        simulation.client("observer", async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let elapsed = turmoil::elapsed();
+            let exact = SimulatedUtc::new(ClockSkew::Exact)
+                .current_time()
+                .expect("a simulated host has a UTC reading");
+            assert_eq!(exact.as_secs(), (epoch + elapsed).as_secs());
+            let ahead = SimulatedUtc::new(ClockSkew::Ahead(Duration::from_secs(90)))
+                .current_time()
+                .expect("a clock ahead of the simulation has a reading");
+            assert_eq!(ahead.as_secs(), exact.as_secs() + 90);
+            let behind = SimulatedUtc::new(ClockSkew::Behind(Duration::from_secs(90)))
+                .current_time()
+                .expect("a clock behind the simulation has a reading");
+            assert_eq!(behind.as_secs() + 90, exact.as_secs());
+            Ok(())
+        });
+    });
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        SimulatedUtc::new(ClockSkew::Exact).current_time().is_none(),
+        "outside a simulated host the clock must not fall back to the host's wall clock"
+    );
+}
+
+#[test]
+fn simulated_entropy_replays_each_seed_and_separates_streams() {
+    let sequence = |seed, stream| {
+        let entropy = SimulatedEntropy::new(seed, stream);
+        [(); 4].map(|()| entropy.next_u64())
+    };
+    assert_eq!(sequence(5, "node-a"), sequence(5, "node-a"));
+    assert_ne!(sequence(5, "node-a"), sequence(5, "node-b"));
+    assert_ne!(sequence(5, "node-a"), sequence(6, "node-a"));
+
+    let entropy = SimulatedEntropy::new(5, "node-a");
+    let source = TransportEntropy::from_source(move || entropy.next_u64());
+    assert_eq!(format!("{source:?}"), "TransportEntropy");
+}
+
+#[test]
+fn semantic_trace_records_hosts_in_simulated_order() {
+    let trace = SemanticTrace::default();
+    let recorder = trace.clone();
+    let result = config().run("trace order", move |simulation| {
+        simulation.client("observer", async move {
+            recorder.record("observer", "first");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            recorder.record("observer", "second");
+            Ok(())
+        });
+    });
+    assert!(result.is_ok(), "{result:?}");
+    let events = trace.events();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event, "first");
+    assert_eq!(events[1].at, events[0].at + Duration::from_millis(20));
+    let rendered = trace.render();
+    assert!(rendered.contains("observer second"), "{rendered}");
 }

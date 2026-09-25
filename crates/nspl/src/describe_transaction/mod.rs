@@ -11,22 +11,14 @@
 use chumsky::prelude::*;
 use nervix_models::{
     DescribeTransaction, TransactionInspectionRequest, TransactionInspectionTarget,
-    TransactionReportFormat,
 };
 
 use crate::{
     lexer::{Identifier, Token, Word},
-    parser_support::{ParseError, kw, tok, transaction_id, transaction_operation_number},
+    parser_support::{
+        ParseError, inspection_format, kw, tok, transaction_id, transaction_operation_number,
+    },
 };
-
-fn report_format<'src>()
--> impl Parser<'src, &'src [Token], TransactionReportFormat, extra::Err<ParseError<'src>>> + Clone {
-    choice((
-        kw(Identifier::Text).to(TransactionReportFormat::Text),
-        kw(Identifier::Json).to(TransactionReportFormat::Json),
-    ))
-    .boxed()
-}
 
 /// `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ]`.
 ///
@@ -43,7 +35,9 @@ pub fn describe_transaction_parser<'src>()
     let operation = kw(Identifier::Operation)
         .ignore_then(transaction_operation_number())
         .or_not();
-    let format = kw(Identifier::Format).ignore_then(report_format()).or_not();
+    let format = kw(Identifier::Format)
+        .ignore_then(inspection_format())
+        .or_not();
     kw(Identifier::Describe)
         .ignore_then(kw(Identifier::Transaction))
         .ignore_then(target)
@@ -97,8 +91,8 @@ mod tests {
 
     use meticulous::OptionExt as _;
     use nervix_models::{
-        DescribeTransaction, Statement, TransactionInspectionRequest, TransactionInspectionTarget,
-        TransactionOperationNumber, TransactionReportFormat,
+        DescribeTransaction, InspectionFormat, Statement, TransactionInspectionRequest,
+        TransactionInspectionTarget, TransactionOperationNumber,
     };
     use rstest::rstest;
 
@@ -113,7 +107,7 @@ mod tests {
     fn describe(
         target: TransactionInspectionTarget,
         operation: Option<TransactionOperationNumber>,
-        format: TransactionReportFormat,
+        format: InspectionFormat,
     ) -> Statement {
         Statement::DescribeTransaction(DescribeTransaction {
             request: TransactionInspectionRequest { target, operation },
@@ -130,83 +124,55 @@ mod tests {
     #[rstest]
     #[case::attached(
         "DESCRIBE TRANSACTION;",
-        describe(
-            TransactionInspectionTarget::Attached,
-            None,
-            TransactionReportFormat::Text
-        )
+        describe(TransactionInspectionTarget::Attached, None, InspectionFormat::Text)
     )]
     #[case::attached_without_terminator(
         "DESCRIBE TRANSACTION",
-        describe(
-            TransactionInspectionTarget::Attached,
-            None,
-            TransactionReportFormat::Text
-        )
+        describe(TransactionInspectionTarget::Attached, None, InspectionFormat::Text)
     )]
     #[case::operation(
         "DESCRIBE TRANSACTION OPERATION 2;",
         describe(
             TransactionInspectionTarget::Attached,
             Some(operation(2)),
-            TransactionReportFormat::Text
+            InspectionFormat::Text
         )
     )]
     #[case::explicit_text(
         "DESCRIBE TRANSACTION FORMAT TEXT;",
-        describe(
-            TransactionInspectionTarget::Attached,
-            None,
-            TransactionReportFormat::Text
-        )
+        describe(TransactionInspectionTarget::Attached, None, InspectionFormat::Text)
     )]
     #[case::attached_json(
         "DESCRIBE TRANSACTION FORMAT JSON;",
-        describe(
-            TransactionInspectionTarget::Attached,
-            None,
-            TransactionReportFormat::Json
-        )
+        describe(TransactionInspectionTarget::Attached, None, InspectionFormat::Json)
     )]
     #[case::identified(
         "DESCRIBE TRANSACTION '0199c1a0-7c1e-7b52';",
-        describe(named("0199c1a0-7c1e-7b52"), None, TransactionReportFormat::Text)
+        describe(named("0199c1a0-7c1e-7b52"), None, InspectionFormat::Text)
     )]
     #[case::double_quoted_identity(
         "DESCRIBE TRANSACTION \"tx.refresh.3\" FORMAT JSON;",
-        describe(named("tx.refresh.3"), None, TransactionReportFormat::Json)
+        describe(named("tx.refresh.3"), None, InspectionFormat::Json)
     )]
     #[case::every_clause(
         "DESCRIBE TRANSACTION 'transaction-id' OPERATION 2 FORMAT JSON;",
-        describe(
-            named("transaction-id"),
-            Some(operation(2)),
-            TransactionReportFormat::Json
-        )
+        describe(named("transaction-id"), Some(operation(2)), InspectionFormat::Json)
     )]
     #[case::lowercase_keywords(
         "describe transaction 'transaction-id' operation 7 format text;",
-        describe(
-            named("transaction-id"),
-            Some(operation(7)),
-            TransactionReportFormat::Text
-        )
+        describe(named("transaction-id"), Some(operation(7)), InspectionFormat::Text)
     )]
     #[case::mixed_case_keywords(
         "Describe Transaction OpErAtIoN 1 Format Json",
         describe(
             TransactionInspectionTarget::Attached,
             Some(operation(1)),
-            TransactionReportFormat::Json
+            InspectionFormat::Json
         )
     )]
     #[case::spread_over_lines(
         "DESCRIBE\nTRANSACTION\n  'transaction-id'\n  OPERATION 3\n  FORMAT JSON;",
-        describe(
-            named("transaction-id"),
-            Some(operation(3)),
-            TransactionReportFormat::Json
-        )
+        describe(named("transaction-id"), Some(operation(3)), InspectionFormat::Json)
     )]
     fn parses_every_optional_clause(#[case] source: &str, #[case] expected: Statement) {
         let parsed = parse_statement(source).expect("DESCRIBE TRANSACTION must parse");

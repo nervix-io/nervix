@@ -33,8 +33,8 @@ use crate::{
     SubjectName, SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest,
     UdfName, UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
     WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
-    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
-    WindowProcessorName, WireSchemaName,
+    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetReason,
+    WasmStateResetScope, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -917,6 +917,7 @@ pub struct DescribeWindowProcessor {
 )]
 pub struct DescribeWasmProcessor {
     pub name: WasmProcessorName,
+    pub format: InspectionFormat,
 }
 
 #[derive(
@@ -942,11 +943,11 @@ pub struct DescribePlacement {
 )]
 pub struct DescribeTransaction {
     pub request: TransactionInspectionRequest,
-    pub format: TransactionReportFormat,
+    pub format: InspectionFormat,
 }
 
-/// How `DESCRIBE TRANSACTION` renders the report it read. `TEXT` is the default; both formats
-/// render the same report, and the typed report travels beside either rendering.
+/// How an inspection statement renders the typed facts it read. `TEXT` is the default; the typed
+/// inspection travels beside either rendering.
 #[derive(
     Debug,
     Clone,
@@ -963,7 +964,7 @@ pub struct DescribeTransaction {
     AsRefStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum TransactionReportFormat {
+pub enum InspectionFormat {
     #[default]
     Text,
     Json,
@@ -1378,6 +1379,9 @@ pub struct CreateCodec<Version = u64> {
 pub struct CodecJaqTransformations {
     pub on_ingestion: Option<String>,
     pub on_emitting: Option<String>,
+    /// The program a batch of `on_emitting` outputs passes through, which yields the one value a
+    /// batching emitter publishes. It is only ever present beside `on_emitting`.
+    pub on_emitting_batch: Option<String>,
 }
 
 impl CodecJaqTransformations {
@@ -1490,6 +1494,35 @@ impl CodecWireFormat {
         }
     }
 
+    /// How this format frames the member values of one batch into a single payload.
+    pub fn batch_container(&self) -> CodecBatchContainer<'_> {
+        match self {
+            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => {
+                CodecBatchContainer::Format {
+                    transformation: None,
+                }
+            }
+            Self::JaqNative {
+                transformations, ..
+            } => CodecBatchContainer::Format {
+                transformation: transformations.on_emitting_batch.as_deref(),
+            },
+            Self::Protobuf(CodecProtobufConfig {
+                batch_message,
+                transformations,
+                ..
+            }) => {
+                let Some(message) = batch_message.as_deref() else {
+                    return CodecBatchContainer::Undeclared;
+                };
+                CodecBatchContainer::ProtobufMessage {
+                    message,
+                    transformation: transformations.on_emitting_batch.as_deref(),
+                }
+            }
+        }
+    }
+
     pub fn supports_encoding(&self) -> bool {
         match self {
             Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
@@ -1499,6 +1532,35 @@ impl CodecWireFormat {
             | Self::Protobuf(CodecProtobufConfig {
                 transformations, ..
             }) => transformations.on_emitting.is_some(),
+        }
+    }
+}
+
+/// The container a codec publishes one batch in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecBatchContainer<'a> {
+    /// The format's own container — an array, a sequence, a single-key table, a single root
+    /// element or a syslog `MSG` array — unless an `ON EMITTING BATCH` program replaces it.
+    Format { transformation: Option<&'a str> },
+    /// The protobuf `BATCH MESSAGE`: its single repeated field holds the members, or an
+    /// `ON EMITTING BATCH` program builds an instance of it.
+    ProtobufMessage {
+        message: &'a str,
+        transformation: Option<&'a str>,
+    },
+    /// A protobuf codec that names no `BATCH MESSAGE`. Protobuf has no self-delimiting sequence,
+    /// so such a codec has no container a batch could be published in.
+    Undeclared,
+}
+
+impl CodecBatchContainer<'_> {
+    /// The `ON EMITTING BATCH` program that builds the batch value, when the codec declares one.
+    pub const fn transformation(&self) -> Option<&str> {
+        match self {
+            Self::Format { transformation } | Self::ProtobufMessage { transformation, .. } => {
+                *transformation
+            }
+            Self::Undeclared => None,
         }
     }
 }
@@ -1547,6 +1609,9 @@ pub struct CodecProtobufConfig<Version = u64> {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<ClientConfigEntry>,
     pub message: String,
+    /// The message a batch is published as. Without a batch transformation it declares exactly one
+    /// field, `repeated <message>`, which holds the members.
+    pub batch_message: Option<String>,
     pub transformations: CodecJaqTransformations,
 }
 
@@ -1583,6 +1648,9 @@ pub struct CreateEmitter {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encode_using_codec: Option<CodecName>,
     pub sink: Box<EmitSink>,
+    /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
+    /// message. A sink whose [`EmitSink::batch_requirement`] is required never omits it.
+    pub batch: Option<crate::EmitterBatchPolicy>,
     pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
     pub publishing_mode: EmitterPublishingMode,
@@ -1606,7 +1674,36 @@ impl CreateEmitter {
         for operation in &alter.operations {
             candidate.apply_alter_operation(operation)?;
         }
+        candidate
+            .validate_batch()
+            .map_err(|report| AlterEmitterError::Batch(report.current_context().clone()))?;
         *self = candidate;
+        Ok(())
+    }
+
+    /// Checks the batching clause against what this emitter's sink requires of it: present where
+    /// the sink has no unbounded write, and no larger than a payload the destination can carry.
+    pub fn validate_batch(&self) -> error_stack::Result<(), EmitterBatchContractError> {
+        let sink = self.sink.transport_label();
+        let Some(batch) = &self.batch else {
+            return match self.sink.batch_requirement() {
+                crate::EmitterBatchRequirement::Optional => Ok(()),
+                crate::EmitterBatchRequirement::Required => {
+                    Err(Report::new(EmitterBatchContractError::Required { sink }))
+                }
+            };
+        };
+        if let Some(maximum) = self.sink.batch_size_maximum()
+            && batch.max_size.bytes() > maximum.bytes()
+        {
+            return Err(Report::new(
+                EmitterBatchContractError::SizeAboveSinkMaximum {
+                    sink,
+                    declared: batch.max_size,
+                    maximum,
+                },
+            ));
+        }
         Ok(())
     }
 
@@ -1713,6 +1810,14 @@ impl CreateEmitter {
                 }
                 self.publishing_mode = mode.clone();
             }
+            AlterEmitterOperation::SetBatch { policy } => {
+                self.batch = Some(*policy);
+            }
+            AlterEmitterOperation::DropBatch => {
+                if self.batch.take().is_none() {
+                    return Err(AlterEmitterError::BatchNotConfigured);
+                }
+            }
             AlterEmitterOperation::SetFlush { flush_policy } => {
                 self.flush_policy = flush_policy.clone();
             }
@@ -1803,6 +1908,10 @@ pub enum AlterEmitterOperation {
     SetPublishingMode {
         mode: EmitterPublishingMode,
     },
+    SetBatch {
+        policy: crate::EmitterBatchPolicy,
+    },
+    DropBatch,
     SetFlush {
         flush_policy: FlushPolicy,
     },
@@ -1833,6 +1942,29 @@ pub enum AlterEmitterError {
     CommitPolicyUnsupported,
     #[error("{sink} emitters do not support publishing mode {mode}")]
     PublishingModeUnsupported { sink: String, mode: String },
+    #[error("emitter batching is not configured")]
+    BatchNotConfigured,
+    #[error(transparent)]
+    Batch(#[from] EmitterBatchContractError),
+}
+
+/// Why an emitter's batching clause does not fit the sink it publishes to.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EmitterBatchContractError {
+    #[error(
+        "{sink} emitters require BATCH MAX MESSAGES <n> MAX SIZE <bytes>, because every write \
+         carries several rows"
+    )]
+    Required { sink: &'static str },
+    #[error(
+        "{sink} emitters accept BATCH MAX SIZE up to {maximum}, the largest message the \
+         destination carries, found {declared}"
+    )]
+    SizeAboveSinkMaximum {
+        sink: &'static str,
+        declared: crate::PayloadSizeLimit,
+        maximum: crate::PayloadSizeLimit,
+    },
 }
 
 #[derive(
@@ -2015,6 +2147,13 @@ impl SinkCapabilities {
     }
 }
 
+/// The SQS message size limit Nervix enforces, 256 KiB, which a batch payload cannot exceed.
+const SQS_MESSAGE_SIZE_MAXIMUM: crate::PayloadSizeLimit =
+    match crate::PayloadSizeLimit::new(nonzero_ext::nonzero!(256u64), crate::ByteSizeUnit::KiB) {
+        Some(maximum) => maximum,
+        None => panic!("256 KiB fits in a 64-bit byte count"),
+    };
+
 #[derive(
     Debug,
     Clone,
@@ -2082,14 +2221,12 @@ pub enum EmitSink {
         client: ClientName,
         table: TableName,
         values: Vec<ClickHouseValueMapping>,
-        max_batch: NonZeroU64,
     },
     Postgres {
         client: ClientName,
         table: TableName,
         values: Vec<PostgresValueMapping>,
         conflict_action: PostgresConflictAction,
-        max_batch: NonZeroU64,
     },
     #[strum(serialize = "MYSQL")]
     MySql {
@@ -2097,7 +2234,6 @@ pub enum EmitSink {
         table: TableName,
         values: Vec<MySqlValueMapping>,
         conflict_action: MySqlConflictAction,
-        max_batch: NonZeroU64,
     },
     #[strum(serialize = "MONGODB")]
     MongoDb {
@@ -2105,7 +2241,6 @@ pub enum EmitSink {
         collection: CollectionName,
         values: Vec<MongoDbValueMapping>,
         conflict_action: MongoDbConflictAction,
-        max_batch: NonZeroU64,
     },
     Iceberg {
         backend: IcebergStorageBackend,
@@ -2329,6 +2464,75 @@ impl EmitSink {
             | Self::MySql { .. }
             | Self::MongoDb { .. }
             | Self::Iceberg { .. } => false,
+        }
+    }
+
+    /// Whether an emitter publishing to this sink may omit the batching clause.
+    pub const fn batch_requirement(&self) -> crate::EmitterBatchRequirement {
+        match self {
+            Self::ClickHouse { .. }
+            | Self::Postgres { .. }
+            | Self::MySql { .. }
+            | Self::MongoDb { .. } => crate::EmitterBatchRequirement::Required,
+            Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Redis { .. }
+            | Self::Mqtt { .. }
+            | Self::Nats { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sqs { .. }
+            | Self::Sentry { .. }
+            | Self::Syslog { .. }
+            | Self::Otel { .. }
+            | Self::Iceberg { .. } => crate::EmitterBatchRequirement::Optional,
+        }
+    }
+
+    /// True when a batch can only be published through the codec's `ON EMITTING BATCH` value.
+    ///
+    /// A Sentry envelope carries at most one `event` item, so a batch is one event, and only the
+    /// codec's batch transformation can say where in that event the members go.
+    pub const fn requires_batch_transformation(&self) -> bool {
+        match self {
+            Self::Sentry { .. } => true,
+            Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Redis { .. }
+            | Self::Mqtt { .. }
+            | Self::Nats { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sqs { .. }
+            | Self::Syslog { .. }
+            | Self::Otel { .. }
+            | Self::ClickHouse { .. }
+            | Self::Postgres { .. }
+            | Self::MySql { .. }
+            | Self::MongoDb { .. }
+            | Self::Iceberg { .. } => false,
+        }
+    }
+
+    /// The largest batch payload the destination protocol itself admits, where it fixes one.
+    pub const fn batch_size_maximum(&self) -> Option<crate::PayloadSizeLimit> {
+        match self {
+            Self::Sqs { .. } => Some(SQS_MESSAGE_SIZE_MAXIMUM),
+            Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Redis { .. }
+            | Self::Mqtt { .. }
+            | Self::Nats { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sentry { .. }
+            | Self::Syslog { .. }
+            | Self::Otel { .. }
+            | Self::ClickHouse { .. }
+            | Self::Postgres { .. }
+            | Self::MySql { .. }
+            | Self::MongoDb { .. }
+            | Self::Iceberg { .. } => None,
         }
     }
 
@@ -4891,7 +5095,11 @@ impl ScheduledNode {
             generations.begin_every_branch();
         }
         self.wasm_state_generations = Some(generations);
-        self.wasm_state_reset = existing.wasm_state_reset.clone();
+        self.wasm_state_reset = if binding_changed {
+            None
+        } else {
+            existing.wasm_state_reset.clone()
+        };
         // A recovery attempt is spent on the lifetime it was admitted for. A changed binding
         // restarts every lifetime, so the attempts recorded against the previous ones no longer
         // name anything this entry can refuse.
@@ -4926,6 +5134,7 @@ impl ScheduledNode {
         &mut self,
         request: CommandExecutionReference,
         scope: WasmStateResetScope,
+        reason: WasmStateResetReason,
     ) -> bool {
         let Some(generations) = self.wasm_state_generations.as_mut() else {
             return false;
@@ -4938,7 +5147,7 @@ impl ScheduledNode {
             return false;
         }
         generations.begin_reset(&scope);
-        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope));
+        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope, reason));
         true
     }
 
@@ -5730,13 +5939,16 @@ mod tests {
         AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
         AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation,
         AlterReorderer, AlterReordererError, AlterReordererOperation, BranchSelection,
-        ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule, CreateDeduplicator,
-        CreateEmitter, CreateGenerator, CreatePlacement, CreateReingestor, CreateRelay,
-        CreateReorderer, CreateSchema, DomainSchedule, EmitSink, EmitterPublishingMode,
-        ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDimension,
-        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
-        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, PlacementPolicy,
-        RelayBranching, ResolvedBranching, RetryPolicy, ScheduledNode,
+        ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule, CodecBatchContainer,
+        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
+        CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement, CreateReingestor,
+        CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
+        EmitterBatchContractError, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
+        GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
+        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule,
+        MaterializedRelayState, Model, ModelKind, MongoDbConflictAction, MySqlConflictAction,
+        PlacementPolicy, PostgresConflictAction, RelayBranching, ResolvedBranching, RetryPolicy,
+        ScheduledNode,
     };
     use crate::{
         ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
@@ -6479,6 +6691,7 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink_a"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "1s".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -6549,6 +6762,255 @@ mod tests {
         assert_eq!(emitter, before, "failed ALTER must not partially apply");
     }
 
+    fn batch_policy(max_messages: u32, max_size: &str) -> crate::EmitterBatchPolicy {
+        crate::EmitterBatchPolicy {
+            max_messages: crate::BatchMessageLimit::try_from(max_messages)
+                .assured("the fixture message limit is within range"),
+            max_size: max_size
+                .parse()
+                .assured("the fixture size is a whole number of bytes"),
+        }
+    }
+
+    fn batching_emitter(sink: EmitSink, batch: Option<crate::EmitterBatchPolicy>) -> CreateEmitter {
+        CreateEmitter {
+            name: named("event_sink"),
+            from: ProcessorInputs::single(named("events")),
+            encode_using_codec: None,
+            sink: Box::new(sink),
+            batch,
+            flush_policy: FlushPolicy::Immediate,
+            error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+            mode: AckMode::Attached,
+            construction: crate::RouteConstruction::default(),
+            materialized_state: Vec::new(),
+        }
+    }
+
+    fn postgres_sink() -> EmitSink {
+        EmitSink::Postgres {
+            client: named("db"),
+            table: named("events"),
+            values: Vec::new(),
+            conflict_action: PostgresConflictAction::None,
+        }
+    }
+
+    #[test]
+    fn emitter_alter_sets_replaces_and_drops_the_batch_clause() {
+        let mut emitter = batching_emitter(
+            EmitSink::ZeroMq {
+                client: named("sink"),
+            },
+            None,
+        );
+        let set = |policy| AlterEmitter {
+            emitter: named("event_sink"),
+            operations: vec![AlterEmitterOperation::SetBatch { policy }],
+        };
+
+        emitter
+            .apply_alter(&set(batch_policy(500, "1MiB")))
+            .expect("SET BATCH adds the clause");
+        assert_eq!(emitter.batch, Some(batch_policy(500, "1MiB")));
+        emitter
+            .apply_alter(&set(batch_policy(10, "64KiB")))
+            .expect("SET BATCH replaces the clause");
+        assert_eq!(emitter.batch, Some(batch_policy(10, "64KiB")));
+
+        let drop = AlterEmitter {
+            emitter: named("event_sink"),
+            operations: vec![AlterEmitterOperation::DropBatch],
+        };
+        emitter.apply_alter(&drop).expect("DROP BATCH removes it");
+        assert_eq!(emitter.batch, None);
+        assert_eq!(
+            emitter.apply_alter(&drop),
+            Err(AlterEmitterError::BatchNotConfigured)
+        );
+    }
+
+    #[test]
+    fn emitter_alter_keeps_the_batch_clause_a_database_sink_requires() {
+        let base = batching_emitter(postgres_sink(), Some(batch_policy(500, "8MiB")));
+
+        let mut dropped = base.clone();
+        let error = dropped
+            .apply_alter(&AlterEmitter {
+                emitter: named("event_sink"),
+                operations: vec![AlterEmitterOperation::DropBatch],
+            })
+            .expect_err("a Postgres emitter cannot drop its batching clause");
+        assert_eq!(
+            error,
+            AlterEmitterError::Batch(EmitterBatchContractError::Required { sink: "POSTGRES" })
+        );
+        assert_eq!(dropped, base, "a failed ALTER must not partially apply");
+
+        let mut unbatched = batching_emitter(
+            EmitSink::ZeroMq {
+                client: named("sink"),
+            },
+            None,
+        );
+        let to_postgres = |operations| AlterEmitter {
+            emitter: named("event_sink"),
+            operations,
+        };
+        let sink_change = AlterEmitterOperation::SetSink {
+            sink: Box::new(postgres_sink()),
+            publishing_mode: EmitterPublishingMode::RequestAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            unbatched
+                .clone()
+                .apply_alter(&to_postgres(vec![sink_change.clone()])),
+            Err(AlterEmitterError::Batch(
+                EmitterBatchContractError::Required { sink: "POSTGRES" }
+            ))
+        );
+        unbatched
+            .apply_alter(&to_postgres(vec![
+                sink_change,
+                AlterEmitterOperation::SetBatch {
+                    policy: batch_policy(100, "1MiB"),
+                },
+            ]))
+            .expect("one ALTER may change the sink and declare its batching clause together");
+        assert_eq!(unbatched.batch, Some(batch_policy(100, "1MiB")));
+    }
+
+    /// The contract violation `emitter` reports, or none when its batching clause is valid.
+    fn batch_violation(emitter: &CreateEmitter) -> Option<EmitterBatchContractError> {
+        match emitter.validate_batch() {
+            Ok(()) => None,
+            Err(report) => Some(report.current_context().clone()),
+        }
+    }
+
+    #[test]
+    fn batch_size_is_bounded_by_the_largest_sqs_message() {
+        let sqs = || EmitSink::Sqs {
+            client: named("queue_client"),
+            queue: "events".to_string(),
+            fifo_group: None,
+        };
+
+        assert_eq!(
+            batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "256KiB")))),
+            None
+        );
+        assert_eq!(
+            batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "262145B")))),
+            Some(EmitterBatchContractError::SizeAboveSinkMaximum {
+                sink: "SQS",
+                declared: "262145B".parse().assured("a whole number of bytes"),
+                maximum: "256KiB".parse().assured("a whole number of bytes"),
+            })
+        );
+        let kafka = EmitSink::Kafka {
+            client: named("broker"),
+            topic: named("events"),
+        };
+        assert_eq!(
+            batch_violation(&batching_emitter(kafka, Some(batch_policy(10, "1GiB")))),
+            None
+        );
+    }
+
+    #[test]
+    fn database_sinks_require_the_batch_clause_and_the_others_do_not() {
+        let database_sinks = [
+            EmitSink::ClickHouse {
+                client: named("db"),
+                table: named("events"),
+                values: Vec::new(),
+            },
+            postgres_sink(),
+            EmitSink::MySql {
+                client: named("db"),
+                table: named("events"),
+                values: Vec::new(),
+                conflict_action: MySqlConflictAction::None,
+            },
+            EmitSink::MongoDb {
+                client: named("db"),
+                collection: named("events"),
+                values: Vec::new(),
+                conflict_action: MongoDbConflictAction::None,
+            },
+        ];
+        for sink in database_sinks {
+            let label = sink.transport_label();
+            assert_eq!(
+                batch_violation(&batching_emitter(sink.clone(), None)),
+                Some(EmitterBatchContractError::Required { sink: label })
+            );
+            assert_eq!(
+                batch_violation(&batching_emitter(sink, Some(batch_policy(1, "1B")))),
+                None
+            );
+        }
+        let sentry = EmitSink::Sentry {
+            client: named("sentry"),
+        };
+        assert_eq!(batch_violation(&batching_emitter(sentry, None)), None);
+    }
+
+    #[test]
+    fn codec_batch_containers_name_the_program_and_the_protobuf_message() {
+        let transformations = |batch: Option<&str>| CodecJaqTransformations {
+            on_ingestion: None,
+            on_emitting: Some(".".to_string()),
+            on_emitting_batch: batch.map(str::to_string),
+        };
+        let protobuf = |batch_message: Option<&str>, batch: Option<&str>| {
+            CodecWireFormat::Protobuf(CodecProtobufConfig {
+                resource: named("bundle"),
+                resource_version: 1,
+                config: Vec::new(),
+                message: "nervix.test.Notification".to_string(),
+                batch_message: batch_message.map(str::to_string),
+                transformations: transformations(batch),
+            })
+        };
+
+        assert_eq!(
+            CodecWireFormat::Syslog.batch_container(),
+            CodecBatchContainer::Format {
+                transformation: None
+            }
+        );
+        let jaq = CodecWireFormat::JaqNative {
+            format: CodecJaqFormat::Json,
+            transformations: transformations(Some("{records: .}")),
+        };
+        assert_eq!(jaq.batch_container().transformation(), Some("{records: .}"));
+        assert_eq!(
+            protobuf(None, None).batch_container(),
+            CodecBatchContainer::Undeclared
+        );
+        assert_eq!(
+            protobuf(Some("nervix.test.Batch"), Some("{items: .}")).batch_container(),
+            CodecBatchContainer::ProtobufMessage {
+                message: "nervix.test.Batch",
+                transformation: Some("{items: .}"),
+            }
+        );
+        assert_eq!(CodecBatchContainer::Undeclared.transformation(), None);
+    }
+
     #[test]
     fn emitter_alter_reports_name_and_commit_policy_errors() {
         let emitter = CreateEmitter {
@@ -6558,6 +7020,7 @@ mod tests {
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {

@@ -18,6 +18,7 @@ use meticulous::OptionExt as _;
 use strum::{AsRefStr, EnumString, IntoStaticStr, VariantNames};
 
 pub use crate::datetime::{DatetimeFormat, DatetimeParser, Zone};
+use crate::json::JsonExtraction;
 
 /// Identifies one semantic operation in a lowered VM program.
 ///
@@ -152,6 +153,12 @@ pub enum Expr {
         low: Box<SpannedExpr>,
         high: Box<SpannedExpr>,
     },
+    /// One extraction from the JSON text `document` holds. Every extraction a program makes from
+    /// one document column is answered by a single parse of each of its documents.
+    Json {
+        document: Box<SpannedExpr>,
+        extraction: JsonExtraction,
+    },
 }
 
 /// What a cast yields for a value its target type cannot hold.
@@ -231,7 +238,8 @@ impl Eq for CaseArm {}
 impl Expr {
     /// Whether evaluating this expression under a conditional arm may leave a null, rather than
     /// its value, on the rows the arm does not select. A call out of the VM is made for the
-    /// selected rows only, and a cast that yields null for a failure may convert only those rows.
+    /// selected rows only, a cast that yields null for a failure may convert only those rows, and
+    /// a JSON extraction parses only their documents.
     /// Every other operation confined to the selected rows can report an error, and an expression
     /// that can report one is never shared in the first place.
     pub(crate) fn may_answer_selected_rows_only(&self) -> bool {
@@ -297,6 +305,8 @@ impl Expr {
                     || low.inner.may_answer_selected_rows_only()
                     || high.inner.may_answer_selected_rows_only()
             }
+            // A scan parses only the documents of the rows its arm selects.
+            Self::Json { .. } => true,
         }
     }
 
@@ -312,6 +322,7 @@ impl Expr {
             Self::Case { .. } => 7,
             Self::Membership { .. } => 8,
             Self::Between { .. } => 9,
+            Self::Json { .. } => 10,
         }
     }
 }
@@ -415,6 +426,18 @@ impl Ord for Expr {
             ) => cmp_spanned(left_operand, right_operand)
                 .then_with(|| cmp_spanned(left_low, right_low))
                 .then_with(|| cmp_spanned(left_high, right_high)),
+            (
+                Self::Json {
+                    document: left_document,
+                    extraction: left_extraction,
+                },
+                Self::Json {
+                    document: right_document,
+                    extraction: right_extraction,
+                },
+            ) => left_extraction
+                .cmp(right_extraction)
+                .then_with(|| cmp_spanned(left_document, right_document)),
             _ => self.discriminant().cmp(&other.discriminant()),
         }
     }
@@ -448,6 +471,7 @@ pub enum FunctionName {
     Length,
     CharLength,
     BitLength,
+    OctetLength,
     Ascii,
     Coalesce,
     IsNull,
@@ -499,6 +523,13 @@ pub enum FunctionName {
     Round,
     Rpad,
     SplitPart,
+    Split,
+    Join,
+    ConcatWs,
+    Like,
+    ILike,
+    ContainsAny,
+    NormalizeNfc,
     Sqrt,
     Strpos,
     Substr,
@@ -546,6 +577,7 @@ pub enum FunctionName {
     RegexpLike,
     RegexpReplace,
     RegexpSubstr,
+    RegexpExtract,
     Datetime(DatetimeFunction),
     LeakSensitive,
     LookupHashMap,
@@ -984,6 +1016,7 @@ impl FunctionName {
             "length" => Self::Length,
             "char_length" => Self::CharLength,
             "bit_length" => Self::BitLength,
+            "octet_length" => Self::OctetLength,
             "ascii" => Self::Ascii,
             "coalesce" => Self::Coalesce,
             "is_null" => Self::IsNull,
@@ -1035,6 +1068,13 @@ impl FunctionName {
             "round" => Self::Round,
             "rpad" => Self::Rpad,
             "split_part" => Self::SplitPart,
+            "split" => Self::Split,
+            "join" => Self::Join,
+            "concat_ws" => Self::ConcatWs,
+            "like" => Self::Like,
+            "ilike" => Self::ILike,
+            "contains_any" => Self::ContainsAny,
+            "normalize_nfc" => Self::NormalizeNfc,
             "sqrt" => Self::Sqrt,
             "strpos" => Self::Strpos,
             "substr" | "substring" => Self::Substr,
@@ -1082,6 +1122,7 @@ impl FunctionName {
             "regexp_like" => Self::RegexpLike,
             "regexp_replace" => Self::RegexpReplace,
             "regexp_substr" => Self::RegexpSubstr,
+            "regexp_extract" => Self::RegexpExtract,
             "leak_sensitive" => Self::LeakSensitive,
             "lookup_hash_map" => Self::LookupHashMap,
             "read_header" => Self::ReadHeader,
@@ -1105,6 +1146,7 @@ impl FunctionName {
             Self::Length => "length",
             Self::CharLength => "char_length",
             Self::BitLength => "bit_length",
+            Self::OctetLength => "octet_length",
             Self::Ascii => "ascii",
             Self::Coalesce => "coalesce",
             Self::IsNull => "is_null",
@@ -1156,6 +1198,13 @@ impl FunctionName {
             Self::Round => "round",
             Self::Rpad => "rpad",
             Self::SplitPart => "split_part",
+            Self::Split => "split",
+            Self::Join => "join",
+            Self::ConcatWs => "concat_ws",
+            Self::Like => "like",
+            Self::ILike => "ilike",
+            Self::ContainsAny => "contains_any",
+            Self::NormalizeNfc => "normalize_nfc",
             Self::Sqrt => "sqrt",
             Self::Strpos => "strpos",
             Self::Substr => "substr",
@@ -1203,6 +1252,7 @@ impl FunctionName {
             Self::RegexpLike => "regexp_like",
             Self::RegexpReplace => "regexp_replace",
             Self::RegexpSubstr => "regexp_substr",
+            Self::RegexpExtract => "regexp_extract",
             Self::Datetime(function) => function.name().into(),
             Self::LeakSensitive => "leak_sensitive",
             Self::LookupHashMap => "lookup_hash_map",

@@ -85,8 +85,8 @@ base-to-final quiesce level at the current prefix; a lifecycle, domain, or resou
 that run, and a later run cannot repair it. `COMMIT` reports only the maximum level actually
 executed and does not repeat statement outputs. Correct a rejected statement and continue the same
 transaction. A `COMMIT` refused because the preview it expected no longer describes the transaction
-applies nothing and leaves the transaction open; commit again against the identity that refusal
-reports instead of starting the transaction over. Do not imply that one undivided request can mix
+applies nothing and leaves the transaction open; inspect the attached transaction again before
+retrying the commit against its reviewed basis. Do not imply that one undivided request can mix
 those phases.
 
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or
@@ -200,6 +200,11 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   from 0. Outside window processors, `count`, `sum`, `first`, `last`, and `nth` take one `ARRAY` or
   `VEC` value; inside a window processor route, `count`, `sum`, `first`, and `last` are window
   aggregates over retained input rows.
+- For text, use `octet_length` for UTF-8 bytes and `length` for Unicode scalar values;
+  `normalize_nfc` for canonical composition; `split` and `join` for string vectors;
+  `like`/`ilike` for wildcards, `contains_any` for literal substring sets, and
+  `regexp_extract` for numbered captures. Read `Filter-Map Functions` → `String Functions`,
+  `String Predicates`, and `Regular Expressions` for their exact Unicode, null, and size rules.
 - Pass counts and positions as any integer type; they are read at full value. `repeat`, `lpad`,
   and `rpad` fail only the message whose result would not fit the text one `STRING` column holds,
   and `uuid_v7()` fails every message while domain time is before the Unix epoch. Give routes that
@@ -290,6 +295,15 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `ip_family`, and `ip_unmap`, and write it with `ip_to_string`. Families never mix: an
   IPv4-mapped `::ffff:a.b.c.d` address matches no IPv4 network until `ip_unmap`. Write a literal
   network in exact CIDR form without host bits, or the statement is rejected.
+- Read embedded JSON text with `JSON_VALUE(doc, '$.path' AS TYPE)`, `TRY_JSON_VALUE(...)`, and
+  `JSON_EXISTS(doc, '$.path')`. Declare the exact result type, including `VEC<...>` and
+  `ARRAY<..., n>`; `DATETIME` and `BYTES` are not readable, so read text as `STRING` and convert
+  it. Paths are `$` followed by `.name`, `["any name"]`, and `[index]` steps. Missing values and
+  JSON null both read as null, so write results to `OPTIONAL` fields and use `JSON_EXISTS` to tell
+  them apart; `JSON_VALUE` fails the message for a malformed document, a value of another kind, a
+  number out of range, or an `ARRAY` of the wrong length, while `TRY_JSON_VALUE` yields null.
+  Extractions from one document column share one parse, so read many fields freely. Check
+  `Filter-Map Functions` → `JSON Documents` for paths, number rules, and limits.
 - Read URL parts with `url_scheme`, `url_host`, `url_port`, `url_path`, `url_query`,
   `url_fragment`, `url_query_value`, and `url_query_values`, and decode escapes with `url_decode`.
   Inputs must be absolute URLs; prefix a request target with a base explicitly. Host, port, query,
@@ -336,7 +350,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
   bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key.
-- Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
+- Write an emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
+  sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
+  MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. For
   SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
 - Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put
@@ -403,6 +420,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   selected branch must already exist. This command loses the selected computation state; a fresh
   command reference is a new reset, while retrying the same reference returns its original outcome.
   See the reset section in `Runtime Nodes` and `Command Completion` before suggesting it.
+- To inspect WASM guest-state progress, use `DESCRIBE WASM PROCESSOR <processor> [FORMAT TEXT|JSON];`.
+  Read its reset phase and generation beside the checkpoint revision and replica counts; both
+  formats use the same typed state inspection. See `Runtime Nodes` and `WASM Processor Guests` for
+  the meaning of each stage and the bounded branch details.
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.

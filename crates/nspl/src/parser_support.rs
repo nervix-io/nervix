@@ -21,13 +21,14 @@ use nervix_models::{
     ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName,
     EmitterAckWindow, EmitterName, EndpointName, Expression, FieldName, FlushPolicy,
     GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
-    JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarSubscriptionName, QueueGroupName,
-    QueueName, ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
-    RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, TopicName, TransactionOperationNumber, UdfName, UserName,
-    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    InspectionFormat, JunctionName, LookupName, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName,
+    RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
+    SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName,
+    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -148,6 +149,16 @@ pub fn kw<'src>(
         Token::Word(Word::KnownWord { iden: got, .. }) if got == iden => ()
     }
     .labelled(label)
+    .boxed()
+}
+
+/// The shared rendering choice for read-only inspection statements.
+pub fn inspection_format<'src>()
+-> impl Parser<'src, &'src [Token], InspectionFormat, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw(Identifier::Text).to(InspectionFormat::Text),
+        kw(Identifier::Json).to(InspectionFormat::Json),
+    ))
     .boxed()
 }
 
@@ -1374,6 +1385,28 @@ fn route_boundary_token(token: &Token) -> bool {
     )
 }
 
+/// The three words that open an emitter's `BATCH MAX MESSAGES` clause, which ends the route
+/// construction written before it.
+///
+/// The whole phrase is the boundary rather than its first word, so a field named `batch` stays
+/// usable inside a construction.
+fn emitter_batch_clause_start<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    let word = |expected: Identifier| {
+        any().filter(move |token: &Token| {
+            matches!(
+                token,
+                Token::Word(Word::KnownWord { iden, .. }) if *iden == expected
+            )
+        })
+    };
+    word(Identifier::Batch)
+        .then(word(Identifier::Max))
+        .then(word(Identifier::Messages))
+        .ignored()
+        .boxed()
+}
+
 pub(crate) fn from_where_boundary_token(token: &Token) -> bool {
     processor_output_boundary_token(token)
         || matches!(
@@ -1399,6 +1432,7 @@ fn route_construction_body<'src>(
 ) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
     any()
         .filter(|token: &Token| !route_boundary_token(token))
+        .and_is(emitter_batch_clause_start().not())
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()

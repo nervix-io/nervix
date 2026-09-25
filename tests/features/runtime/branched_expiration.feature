@@ -197,7 +197,7 @@ Feature: Branched branch expiration
 
       CREATE IF NOT EXISTS SCHEMA user_id_branch ( user_id I64 );
 
-      CREATE IF NOT EXISTS BRANCH by_correlated_users SCHEMA user_id_branch TTL 500ms;
+      CREATE IF NOT EXISTS BRANCH by_correlated_users SCHEMA user_id_branch TTL 5s;
 
       CREATE RELAY left_events SCHEMA notification BRANCHED BY by_correlated_users;
 

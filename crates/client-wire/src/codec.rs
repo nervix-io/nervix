@@ -20,6 +20,7 @@ use thiserror::Error;
 use crate::{
     frame::{EncodedFrame, FrameRoot},
     limits::SessionLimits,
+    wire,
 };
 
 /// Bytes a string or vector may add beyond its payload: a length prefix, a null terminator and
@@ -220,6 +221,19 @@ impl<'fbb> Encoder<'fbb> {
         Ok(self.builder.create_vector(value))
     }
 
+    /// Encodes a fingerprint as a table holding its 32 bytes.
+    pub(crate) fn fingerprint(
+        &mut self,
+        field: &'static str,
+        fingerprint: &[u8; 32],
+    ) -> Result<WIPOffset<wire::Fingerprint<'fbb>>, Report<WireEncodeError>> {
+        let bytes = self.bytes(field, fingerprint)?;
+        Ok(wire::Fingerprint::create(
+            self.fbb(),
+            &wire::FingerprintArgs { bytes: Some(bytes) },
+        ))
+    }
+
     pub(crate) fn scalars<T>(
         &mut self,
         field: &'static str,
@@ -413,6 +427,21 @@ impl<'l> Decoder<'l> {
         match value {
             Some(value) => Ok(Some(self.text(field, value)?)),
             None => Ok(None),
+        }
+    }
+
+    /// Reads a fingerprint, which holds exactly 32 bytes.
+    pub(crate) fn fingerprint(
+        &self,
+        field: &'static str,
+        fingerprint: wire::Fingerprint<'_>,
+    ) -> Result<[u8; 32], Report<WireDecodeError>> {
+        match <[u8; 32]>::try_from(fingerprint.bytes().bytes()) {
+            Ok(bytes) => Ok(bytes),
+            Err(_) => Err(Report::new(WireDecodeError::InvalidValue {
+                field,
+                kind: "32-byte fingerprint",
+            })),
         }
     }
 

@@ -322,8 +322,10 @@ unbranched windows have one state. A sketch's pane size is the greatest common d
 width and step, aligned to the Unix epoch. Each pane includes its starting timestamp and excludes
 the next pane's starting timestamp. Stepping removes records strictly before the step cutoff;
 records exactly at that cutoff remain. Panes are merged only from rows still in the active
-window and are rebuilt after stepping. Published branch snapshots carry retained rows and restore
-the same sketches when ownership moves or a node recovers.
+window and are rebuilt after stepping. Published branch snapshots share the retained Arrow input
+and argument columns, seal them in bounded sections, and rebuild the same sketches from those
+columns when ownership moves or a node recovers. Histogram delayed removals travel in bounded
+typed sections beside the columns.
 
 In a window route, `COUNT`, `SUM`, `FIRST`, and `LAST` always name window aggregates. The
 [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same names
@@ -492,8 +494,15 @@ replication failure can erase computation state. See
 A WASM processor acknowledges an input only after the guest-state checkpoint that covers it is on
 the stable storage of the branch's owner and of every replica the schedule assigns the processor.
 A checkpoint that cannot get there negatively acknowledges what it covers and recreates the branch's
-guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` reports how many of the answering
-node's branch checkpoints are awaiting local storage, awaiting replicas, or failed. See
+guest from its last completed checkpoint. `DESCRIBE WASM PROCESSOR` reads the committed binding,
+default state generation, latest coordinated reset and retained rejected-state recoveries together
+with the owner's current checkpoint stages and revisions. Each reported branch uses a fixed-size
+opaque fingerprint rather than a branch value. Required and confirmed replica counts are shown for
+checkpoints captured on the current owner; a restored checkpoint whose earlier boundary is unknown
+reports those counts as unknown. Counts cover every active branch, while detailed branch and
+recovery entries are bounded. `DESCRIBE WASM PROCESSOR <name> FORMAT JSON` serializes the same
+typed state inspection used by the text output; the command also returns it as a typed client
+outcome in either format. See
 [Checkpoints And Acknowledgements](wasm-processor-guests.md#checkpoints-and-acknowledgements).
 
 ### Reset guest state from NSPL
