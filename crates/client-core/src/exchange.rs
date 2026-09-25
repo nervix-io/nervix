@@ -15,7 +15,7 @@
 
 use std::{collections::VecDeque, fmt::Display, num::NonZeroU64};
 
-use ahash::HashMap;
+use ahash::{HashMap, HashSet};
 use meticulous::OptionExt as _;
 use nervix_client_wire::{
     self as wire, ClientFrame, DomainInfo, EncodedFrame, Leadership, Reply, ReplyBody, RequestId,
@@ -38,6 +38,7 @@ use crate::{
     connection::GrpcConnector,
     error::ClientError,
     events::{ServerEvent, SubscriptionEvent, SubscriptionRowsEvent},
+    subscriptions::DesiredSubscriptions,
 };
 
 /// The limits every frame of a client session is held to.
@@ -49,6 +50,8 @@ const REQUEST_FRAME_CAPACITY: usize = 32;
 /// Subscription events retained for one exchange, bounded both by records and retained bytes.
 const SUBSCRIPTION_EVENT_CAPACITY: usize = 128;
 pub(crate) const SUBSCRIPTION_EVENT_BYTES: usize = 8 * 1024 * 1024;
+const SUBSCRIPTION_RECORD_CAPACITY: usize = 32;
+const SUBSCRIPTION_RETAINED_BYTES: usize = 2 * 1024 * 1024;
 
 /// Server notices retained for one exchange, bounded both by records and retained bytes.
 const SERVER_NOTICE_CAPACITY: usize = 128;
@@ -72,6 +75,110 @@ struct EventQueueState<T> {
     events: VecDeque<QueuedEvent<T>>,
     bytes: usize,
     terminal: Option<EventQueueError>,
+    subscription_usage: HashMap<SubscriptionHandle, QueueUsage>,
+    overflowed_subscriptions: HashSet<SubscriptionHandle>,
+    overflow_events: VecDeque<T>,
+}
+
+impl<T> EventQueueState<T> {
+    fn push_subscription(
+        &mut self,
+        value: T,
+        bytes: usize,
+        policy: &SubscriptionQueuePolicy<T>,
+        max_records: usize,
+        max_bytes: usize,
+    ) -> bool {
+        let key = (policy.key)(&value);
+        if self.overflowed_subscriptions.contains(&key) {
+            return false;
+        }
+        let (records, retained_bytes) = match self.subscription_usage.get(&key) {
+            Some(usage) => (usage.records, usage.bytes),
+            None => (0, 0),
+        };
+        let next_subscription_bytes = retained_bytes.checked_add(bytes);
+        let next_total_bytes = self.bytes.checked_add(bytes);
+        let subscription_fits = records < policy.max_records
+            && next_subscription_bytes.is_some_and(|next| next <= policy.max_bytes);
+        let total_fits = self.events.len() < max_records
+            && next_total_bytes.is_some_and(|next| next <= max_bytes);
+        if !subscription_fits || !total_fits {
+            let mut retained = VecDeque::new();
+            while let Some(event) = self.events.pop_front() {
+                if (policy.key)(&event.value) == key {
+                    self.bytes = self.bytes.checked_sub(event.bytes).assured(
+                        "global retained bytes include every subscription event until removal",
+                    );
+                } else {
+                    retained.push_back(event);
+                }
+            }
+            self.events = retained;
+            self.subscription_usage.remove(&key).discarded(
+                "an event overflows its subscription whether or not that subscription already \
+                 retained events",
+            );
+            self.overflowed_subscriptions.insert(key);
+            self.overflow_events.push_back((policy.overflow)(&value));
+            return true;
+        }
+        let usage = self.subscription_usage.entry(key).or_default();
+        usage.records = usage
+            .records
+            .checked_add(1)
+            .assured("a subscription record count below its finite capacity has room for one more");
+        usage.bytes =
+            next_subscription_bytes.assured("a subscription event fits its retained byte capacity");
+        self.bytes = next_total_bytes.assured("a subscription event fits the global byte capacity");
+        self.events.push_back(QueuedEvent { value, bytes });
+        false
+    }
+
+    fn pop_event(&mut self, policy: Option<&SubscriptionQueuePolicy<T>>) -> Option<T> {
+        if let Some(overflow) = self.overflow_events.pop_front() {
+            return Some(overflow);
+        }
+        let event = self.events.pop_front()?;
+        self.bytes = self
+            .bytes
+            .checked_sub(event.bytes)
+            .assured("queued bytes include every retained event until it is removed");
+        if let Some(policy) = policy {
+            let key = (policy.key)(&event.value);
+            let usage = self
+                .subscription_usage
+                .get_mut(&key)
+                .assured("every retained subscription event has a usage entry");
+            usage.records = usage
+                .records
+                .checked_sub(1)
+                .assured("a retained subscription event contributes one to its record count");
+            usage.bytes = usage
+                .bytes
+                .checked_sub(event.bytes)
+                .assured("a retained subscription event contributes its bytes to the subscription");
+            if usage.records == 0 {
+                self.subscription_usage.remove(&key).discarded(
+                    "the popped event already removed the subscription's final retained record",
+                );
+            }
+        }
+        Some(event.value)
+    }
+}
+
+#[derive(Default)]
+struct QueueUsage {
+    records: usize,
+    bytes: usize,
+}
+
+struct SubscriptionQueuePolicy<T> {
+    key: fn(&T) -> SubscriptionHandle,
+    overflow: fn(&T) -> T,
+    max_records: usize,
+    max_bytes: usize,
 }
 
 struct EventQueueInner<T> {
@@ -79,6 +186,7 @@ struct EventQueueInner<T> {
     changed: watch::Sender<()>,
     max_records: usize,
     max_bytes: usize,
+    subscription: Option<SubscriptionQueuePolicy<T>>,
 }
 
 /// A generation-scoped event queue. An unread consumer cannot hold the exchange reader; if its
@@ -97,6 +205,14 @@ impl<T> Clone for EventQueue<T> {
 
 impl<T> EventQueue<T> {
     pub(crate) fn new(max_records: usize, max_bytes: usize) -> Self {
+        Self::with_policy(max_records, max_bytes, None)
+    }
+
+    fn with_policy(
+        max_records: usize,
+        max_bytes: usize,
+        subscription: Option<SubscriptionQueuePolicy<T>>,
+    ) -> Self {
         let (changed, _) = watch::channel(());
         Self {
             inner: Arc::new(EventQueueInner {
@@ -105,20 +221,27 @@ impl<T> EventQueue<T> {
                     events: VecDeque::new(),
                     bytes: 0,
                     terminal: None,
+                    subscription_usage: HashMap::default(),
+                    overflowed_subscriptions: HashSet::default(),
+                    overflow_events: VecDeque::new(),
                 }),
                 changed,
                 max_records,
                 max_bytes,
+                subscription,
             }),
         }
     }
 
-    fn begin(&self, generation: &Arc<()>) {
+    pub(crate) fn begin(&self, generation: &Arc<()>) {
         let mut state = self.inner.state.lock();
         state.generation = generation.clone();
         state.events.clear();
         state.bytes = 0;
         state.terminal = None;
+        state.subscription_usage.clear();
+        state.overflowed_subscriptions.clear();
+        state.overflow_events.clear();
         drop(state);
         self.inner.changed.send_replace(());
     }
@@ -131,15 +254,31 @@ impl<T> EventQueue<T> {
         state.events.clear();
         state.bytes = 0;
         state.terminal = Some(EventQueueError::Closed);
+        state.subscription_usage.clear();
+        state.overflowed_subscriptions.clear();
+        state.overflow_events.clear();
         drop(state);
         self.inner.changed.send_replace(());
     }
 
-    /// Retains one event without waiting on its consumer. Overflow closes only this event stream.
-    pub(crate) fn push(&self, generation: &Arc<()>, value: T, bytes: usize) {
+    /// Retains one event without waiting on its consumer. Subscription overflow ends only the
+    /// affected subscription's delivery; notice overflow closes the notice stream.
+    pub(crate) fn push(&self, generation: &Arc<()>, value: T, bytes: usize) -> bool {
         let mut state = self.inner.state.lock();
         if !Arc::ptr_eq(&state.generation, generation) || state.terminal.is_some() {
-            return;
+            return false;
+        }
+        if let Some(policy) = &self.inner.subscription {
+            let overflowed = state.push_subscription(
+                value,
+                bytes,
+                policy,
+                self.inner.max_records,
+                self.inner.max_bytes,
+            );
+            drop(state);
+            self.inner.changed.send_replace(());
+            return overflowed;
         }
         let next_bytes = state.bytes.checked_add(bytes);
         let exceeds_bytes = match next_bytes {
@@ -156,6 +295,7 @@ impl<T> EventQueue<T> {
         }
         drop(state);
         self.inner.changed.send_replace(());
+        false
     }
 
     pub(crate) async fn next(&self) -> error_stack::Result<T, EventQueueError> {
@@ -171,12 +311,8 @@ impl<T> EventQueue<T> {
                 if let Some(terminal) = state.terminal {
                     return Err(error_stack::Report::new(terminal));
                 }
-                if let Some(event) = state.events.pop_front() {
-                    state.bytes = state
-                        .bytes
-                        .checked_sub(event.bytes)
-                        .assured("queued bytes include every retained event until it is removed");
-                    return Ok(event.value);
+                if let Some(event) = state.pop_event(self.inner.subscription.as_ref()) {
+                    return Ok(event);
                 }
             }
             if changed.changed().await.is_err() {
@@ -188,12 +324,7 @@ impl<T> EventQueue<T> {
     #[cfg(test)]
     pub(crate) fn try_next(&self) -> Option<T> {
         let mut state = self.inner.state.lock();
-        let event = state.events.pop_front()?;
-        state.bytes = state
-            .bytes
-            .checked_sub(event.bytes)
-            .assured("queued bytes include every retained event until it is removed");
-        Some(event.value)
+        state.pop_event(self.inner.subscription.as_ref())
     }
 
     #[cfg(test)]
@@ -203,10 +334,26 @@ impl<T> EventQueue<T> {
     }
 }
 
+impl EventQueue<SubscriptionEvent> {
+    pub(crate) fn for_subscriptions() -> Self {
+        Self::with_policy(
+            SUBSCRIPTION_EVENT_CAPACITY,
+            SUBSCRIPTION_EVENT_BYTES,
+            Some(SubscriptionQueuePolicy {
+                key: |event| event.subscription().clone(),
+                overflow: |event| SubscriptionEvent::ConsumerOverflow(event.subscription().clone()),
+                max_records: SUBSCRIPTION_RECORD_CAPACITY,
+                max_bytes: SUBSCRIPTION_RETAINED_BYTES,
+            }),
+        )
+    }
+}
+
 /// Where the unsolicited messages of every exchange of one client go.
 #[derive(Clone)]
 pub(crate) struct EventSinks {
     pub(crate) subscriptions: EventQueue<SubscriptionEvent>,
+    pub(crate) desired: DesiredSubscriptions,
     pub(crate) notices: EventQueue<ServerEvent>,
     /// The latest leadership observation. It is replaced rather than queued, so an observation
     /// nobody read can never hold the exchange up.
@@ -224,6 +371,7 @@ impl EventSinks {
     }
 
     pub(crate) fn close_generation(&self, generation: &Arc<()>) {
+        self.desired.ended(generation);
         self.subscriptions.close(generation);
         self.notices.close(generation);
     }
@@ -238,13 +386,15 @@ pub(crate) struct SessionEvents {
 
 impl SessionEvents {
     pub(crate) fn new() -> Self {
-        let subscriptions = EventQueue::new(SUBSCRIPTION_EVENT_CAPACITY, SUBSCRIPTION_EVENT_BYTES);
+        let desired = DesiredSubscriptions::new();
+        let subscriptions = EventQueue::for_subscriptions();
         let notices = EventQueue::new(SERVER_NOTICE_CAPACITY, SERVER_NOTICE_BYTES);
         let (leadership, observed_leadership) = watch::channel(None);
         let (domains, observed_domains) = watch::channel(None);
         Self {
             sinks: EventSinks {
                 subscriptions: subscriptions.clone(),
+                desired,
                 notices: notices.clone(),
                 leadership,
                 domains,
@@ -535,6 +685,13 @@ impl ExchangeReader {
 
     /// Completes the waiter of the request a reply answers.
     async fn deliver(&mut self, reply: Reply) {
+        if let ReplyBody::Subscribe(outcome) = &reply.body
+            && let SubscribeDisposition::Opened(opened) = &outcome.disposition
+        {
+            self.sinks
+                .desired
+                .acknowledge(&opened.subscription, &self.generation);
+        }
         self.subscriptions.track(&reply.body);
         let waiter = self.pending.lock().take(reply.request_id);
         let Some(waiter) = waiter else {
@@ -627,10 +784,15 @@ impl ExchangeReader {
 
     /// Hands a subscription event to its bounded queue without delaying another reply.
     fn forward(&self, event: SubscriptionEvent) -> ReaderFlow {
+        let handle = event.subscription().clone();
         let bytes = event.queued_bytes();
-        self.sinks
+        let overflowed = self
+            .sinks
             .subscriptions
             .push(&self.generation, event, bytes);
+        if overflowed {
+            self.sinks.desired.overflow(&handle, &self.generation);
+        }
         ReaderFlow::Continue
     }
 

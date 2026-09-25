@@ -331,7 +331,7 @@ impl EmitterSinkStarter {
                     values: &sink.values,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.max_batch),
+                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 Self::row(
                     projection,
@@ -353,7 +353,7 @@ impl EmitterSinkStarter {
                     values: &sink.values,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.max_batch),
+                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let connections =
                     PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
@@ -380,7 +380,7 @@ impl EmitterSinkStarter {
                     values: &sink.values,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.max_batch),
+                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let connections =
                     PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
@@ -407,7 +407,7 @@ impl EmitterSinkStarter {
                     values: &sink.values,
                     input_schema: input_schema.arrow_schema(),
                     udfs: context.udfs.as_ref(),
-                    max_batch: Some(sink.max_batch),
+                    max_batch: Some(sink.batch.max_messages),
                 })?;
                 let client = PooledSinkClient::lease(context, &sink.client, sink.pooled_client())
                     .await
@@ -555,11 +555,13 @@ mod tests {
     fn only_a_syslog_client_that_could_never_open_is_rejected_before_the_emitter_starts() {
         let valid = plan(EmitterSinkPlan::Syslog(SyslogSinkPlan {
             client: client(&[("protocol", "udp"), ("addr", "127.0.0.1:5514")]),
+            batch: None,
         }));
         assert!(EmitterSinkStarter::check_client_config(&valid).is_ok());
 
         let unopenable = plan(EmitterSinkPlan::Syslog(SyslogSinkPlan {
             client: client(&[("protocol", "tcp"), ("addr", "missing-port")]),
+            batch: None,
         }));
         let Err(error) = EmitterSinkStarter::check_client_config(&unopenable) else {
             panic!("a Syslog address without a port must fail the client check")
@@ -576,6 +578,7 @@ mod tests {
 
         let unchecked = plan(EmitterSinkPlan::ZeroMq(ZeroMqSinkPlan {
             client: client(&[]),
+            batch: None,
         }));
         assert!(EmitterSinkStarter::check_client_config(&unchecked).is_ok());
     }

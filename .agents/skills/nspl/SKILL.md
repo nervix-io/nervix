@@ -296,6 +296,15 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   `ip_family`, and `ip_unmap`, and write it with `ip_to_string`. Families never mix: an
   IPv4-mapped `::ffff:a.b.c.d` address matches no IPv4 network until `ip_unmap`. Write a literal
   network in exact CIDR form without host bits, or the statement is rejected.
+- Read embedded JSON text with `JSON_VALUE(doc, '$.path' AS TYPE)`, `TRY_JSON_VALUE(...)`, and
+  `JSON_EXISTS(doc, '$.path')`. Declare the exact result type, including `VEC<...>` and
+  `ARRAY<..., n>`; `DATETIME` and `BYTES` are not readable, so read text as `STRING` and convert
+  it. Paths are `$` followed by `.name`, `["any name"]`, and `[index]` steps. Missing values and
+  JSON null both read as null, so write results to `OPTIONAL` fields and use `JSON_EXISTS` to tell
+  them apart; `JSON_VALUE` fails the message for a malformed document, a value of another kind, a
+  number out of range, or an `ARRAY` of the wrong length, while `TRY_JSON_VALUE` yields null.
+  Extractions from one document column share one parse, so read many fields freely. Check
+  `Filter-Map Functions` → `JSON Documents` for paths, number rules, and limits.
 - Read URL parts with `url_scheme`, `url_host`, `url_port`, `url_path`, `url_query`,
   `url_fragment`, `url_query_value`, and `url_query_values`, and decode escapes with `url_decode`.
   Inputs must be absolute URLs; prefix a request target with a base explicitly. Host, port, query,
@@ -342,7 +351,10 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
   bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key.
-- Require `WITH MAX BATCH <positive_n>` for ClickHouse, Postgres, MySQL, and MongoDB emitters. For
+- Write an emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
+  sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
+  MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
+  codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. For
   SQS, use `FIFO GROUP FROM BRANCH|<string_expression>` exactly when the externally provisioned
   queue name ends in `.fifo`; `FROM BRANCH` requires branched input.
 - Give every client resource mount an explicit `MOUNT <resource> VERSION <u64>|LATEST` clause. Put

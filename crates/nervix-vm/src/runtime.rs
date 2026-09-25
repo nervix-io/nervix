@@ -25,8 +25,8 @@ use arrow_arith::{
 use arrow_array::{
     Array, ArrayRef, ArrowNumericType, BinaryArray, BooleanArray, Datum, FixedSizeListArray,
     Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, ListArray,
-    PrimitiveArray, Scalar, StringArray, TimestampNanosecondArray, UInt8Array, UInt16Array,
-    UInt32Array, UInt64Array,
+    PrimitiveArray, Scalar, StringArray, StructArray, TimestampNanosecondArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
     builder::{BooleanBuilder, Int64Builder, PrimitiveBuilder, StringBuilder},
     make_array, new_empty_array, new_null_array,
     types::{
@@ -75,6 +75,7 @@ use crate::{
         InstructionKind, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace, RegisterType,
         ScalarValue, SelectArm,
     },
+    json::{self, JsonScanOutput},
     numeric::{
         self, Arithmetic, BinaryMathFunction, Checked, CheckedFloat, CheckedInteger, Comparison,
         DecimalRounding, F64Operand, IntegerRounding, MathFunction, Rounding, RoundingDigits,
@@ -1267,6 +1268,30 @@ impl Instruction {
                 row_errors,
                 |registers, _, _| execute_select(registers, arms, *otherwise),
             ),
+            InstructionKind::JsonScan {
+                dst,
+                input,
+                outputs,
+            } => {
+                let documents = registers.operand::<StringArray>(*input)?;
+                let (answers, shape) =
+                    scan_json_documents(documents, rows, row_count, outputs, row_errors);
+                let answers: ArrayRef = std::sync::Arc::new(answers);
+                registers.set(*dst, TypedArray::Generic(answers), shape)
+            }
+            InstructionKind::JsonField { dst, input, index } => {
+                let (answer, shape) = match registers.operand::<ArrayRef>(*input)? {
+                    Operand::Scalar(answers) => (json_answer(answers, *index), Shape::Scalar),
+                    Operand::Column(answers) => (json_answer(answers, *index), Shape::Column),
+                };
+                let Some(answer) = answer else {
+                    return Err(RuntimeError::InvalidRegisterType {
+                        reg: *input,
+                        expected: "the answers of a JSON scan",
+                    });
+                };
+                registers.set(*dst, array_ref_to_typed_array(answer)?, shape)
+            }
         }
     }
 
@@ -1339,15 +1364,19 @@ impl Instruction {
             InstructionKind::Binary { op, .. } => binary_arm_execution(*op),
             InstructionKind::Cast { input, target, .. } => cast_arm_execution(input.ty, *target),
             InstructionKind::Builtin { lowering, .. } => builtin_arm_execution(lowering),
-            // Calling out of the VM costs far more per row than narrowing.
-            InstructionKind::Inject { .. } => ArmExecution::SelectedRows,
+            // Calling out of the VM, or parsing a document, costs far more per row than
+            // narrowing.
+            InstructionKind::Inject { .. } | InstructionKind::JsonScan { .. } => {
+                ArmExecution::SelectedRows
+            }
             // These never carry a selection, so over the whole batch is how they always run.
             InstructionKind::Move { .. }
             | InstructionKind::Assign { .. }
             | InstructionKind::Literal { .. }
             | InstructionKind::NullLiteral { .. }
             | InstructionKind::Uninitialized { .. }
-            | InstructionKind::Select { .. } => ArmExecution::WholeBatch,
+            | InstructionKind::Select { .. }
+            | InstructionKind::JsonField { .. } => ArmExecution::WholeBatch,
         }
     }
 
@@ -1911,6 +1940,61 @@ macro_rules! define_array_ref_to_typed_array {
 }
 
 with_typed_registers!(define_array_ref_to_typed_array);
+
+/// Answers the outputs of a JSON scan for the rows its arm selects, and the shape the answers
+/// take.
+///
+/// Each selected document is parsed once, straight from the column, and a row the arm does not
+/// select parses nothing and answers nulls. A document every row shares is parsed once for all of
+/// them, and a failure to read it fails every selected row.
+fn scan_json_documents(
+    documents: Operand<'_, StringArray>,
+    rows: &ArmRows,
+    row_count: usize,
+    outputs: &[JsonScanOutput],
+    row_errors: &mut RowErrors,
+) -> (StructArray, Shape) {
+    match documents {
+        Operand::Scalar(document) => {
+            let any_selected = !matches!(rows, ArmRows::None);
+            let mut shared_errors = RowErrors::new(1);
+            let answers = json::scan(document, |_| any_selected, outputs, &mut shared_errors);
+            for error in shared_errors.row(0) {
+                match rows {
+                    ArmRows::All => {
+                        for row in 0..row_count {
+                            row_errors.push(row, error.clone());
+                        }
+                    }
+                    ArmRows::None => {}
+                    ArmRows::Some(selected) => {
+                        for row in selected.iter() {
+                            row_errors.push(row, error.clone());
+                        }
+                    }
+                }
+            }
+            (answers, Shape::Scalar)
+        }
+        Operand::Column(documents) => {
+            let answers = match rows {
+                ArmRows::All => json::scan(documents, |_| true, outputs, row_errors),
+                ArmRows::None => json::scan(documents, |_| false, outputs, row_errors),
+                ArmRows::Some(selected) => {
+                    json::scan(documents, |row| selected.contains(row), outputs, row_errors)
+                }
+            };
+            (answers, Shape::Column)
+        }
+    }
+}
+
+/// The column holding the answer to output `index` among a scan's `answers`, or `None` when the
+/// register does not hold a scan's answers.
+fn json_answer(answers: &ArrayRef, index: usize) -> Option<ArrayRef> {
+    let answers = answers.as_any().downcast_ref::<StructArray>()?;
+    answers.columns().get(index).cloned()
+}
 
 /// `coalesce` keeps the first non-null value of each row. The first argument is read as a column
 /// and each later one as an operand, so a literal fallback is zipped in as one scalar.
@@ -9579,6 +9663,9 @@ mod conversion_tests;
 #[cfg(test)]
 #[path = "runtime_datetime_tests.rs"]
 mod datetime_tests;
+#[cfg(test)]
+#[path = "runtime_json_tests.rs"]
+mod json_tests;
 #[cfg(test)]
 #[path = "runtime_network_tests.rs"]
 mod network_tests;

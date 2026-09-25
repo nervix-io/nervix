@@ -1257,4 +1257,36 @@ mod tests {
             &sensitivity
         ));
     }
+
+    /// A value read from a JSON document is as sensitive as the document it reads.
+    #[test]
+    fn json_extractions_keep_the_sensitivity_of_their_document() {
+        let sensitivity = VmSchemaSensitivity::from_sensitive_fields(["secret"]);
+        let path = nervix_models::JsonPath::parse("$.a").assured("the path is valid");
+        for document in ["secret", "reading"] {
+            let extractions = [
+                Expression::JsonValue {
+                    document: Box::new(input_field(document)),
+                    path: path.clone(),
+                    target: ParseAsType::F32,
+                },
+                Expression::TryJsonValue {
+                    document: Box::new(input_field(document)),
+                    path: path.clone(),
+                    target: ParseAsType::F32,
+                },
+                Expression::JsonExists {
+                    document: Box::new(input_field(document)),
+                    path: path.clone(),
+                },
+            ];
+            for extraction in extractions {
+                assert_eq!(
+                    expression_reads_sensitive_source(&extraction, &sensitivity),
+                    document == "secret",
+                    "{extraction:?}"
+                );
+            }
+        }
+    }
 }

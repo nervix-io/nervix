@@ -426,6 +426,7 @@ enum ModelChangeAspect : ubyte {
   EmitterMode,
   EmitterPublishingMode,
   EmitterFlushPolicy,
+  EmitterBatchPolicy,
   EmitterConstruction,
   EmitterErrorPolicies,
   EmitterMaterializedState,

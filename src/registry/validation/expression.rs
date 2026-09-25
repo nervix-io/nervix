@@ -354,6 +354,15 @@ fn rewrite_lookup_hash_map_expr(
             data_type: data_type.clone(),
             on_failure: *on_failure,
         },
+        Expr::Json {
+            document,
+            extraction,
+        } => Expr::Json {
+            document: Box::new(rewrite_lookup_hash_map_expr(
+                domain, identifier, models, document, calls, next_field,
+            )?),
+            extraction: extraction.clone(),
+        },
         Expr::Call { function, args } => {
             if let FunctionName::LookupHashMap = function {
                 if args.len() != 3 {
@@ -522,7 +531,7 @@ fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>)
         Expr::FieldRef(field_ref) => {
             refs.push((field_ref.relay.clone(), field_ref.field.clone()));
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             collect_expr_field_refs(expr, refs);
         }
         Expr::Binary { left, right, .. } => {
@@ -564,7 +573,9 @@ fn expr_uses_header_read(expr: &SpannedExpr) -> bool {
                 || expr_uses_header_read(low)
                 || expr_uses_header_read(high)
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expr_uses_header_read(expr),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
+            expr_uses_header_read(expr)
+        }
         Expr::Binary { left, right, .. } => {
             expr_uses_header_read(left) || expr_uses_header_read(right)
         }
@@ -650,4 +661,51 @@ pub(in crate::registry) fn add_udf_dependency_edges(
         graph.add_edge(udf, consumer, EdgeKind::RequiredBy);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use meticulous::ResultExt as _;
+    use nervix_models::JsonPath;
+    use nervix_vm::{
+        JsonExtraction, JsonOutput,
+        program::{Expr, FieldRef, FunctionName, SpannedExpr, SpannedNode},
+    };
+
+    use super::{collect_expr_field_refs, expr_uses_header_read};
+
+    fn spanned(inner: Expr) -> SpannedExpr {
+        SpannedNode {
+            inner,
+            span: (0..1).into(),
+        }
+    }
+
+    fn json_exists(document: Expr) -> SpannedExpr {
+        spanned(Expr::Json {
+            document: Box::new(spanned(document)),
+            extraction: JsonExtraction {
+                path: triomphe::Arc::new(JsonPath::parse("$.a").assured("the path is valid")),
+                output: JsonOutput::Exists,
+            },
+        })
+    }
+
+    #[test]
+    fn walkers_reach_the_document_of_a_json_extraction() {
+        let field = json_exists(Expr::FieldRef(FieldRef {
+            relay: "input".to_string(),
+            field: "doc".to_string(),
+        }));
+        let mut refs = Vec::new();
+        collect_expr_field_refs(&field, &mut refs);
+        assert_eq!(refs, [("input".to_string(), "doc".to_string())]);
+        assert!(!expr_uses_header_read(&field));
+
+        let header = json_exists(Expr::Call {
+            function: FunctionName::ReadHeader,
+            args: Vec::new(),
+        });
+        assert!(expr_uses_header_read(&header));
+    }
 }

@@ -246,9 +246,19 @@ pub(super) fn expression_reads_sensitive_source(
         }
         nervix_models::Expression::Unary { expression, .. }
         | nervix_models::Expression::Cast { expression, .. }
-        | nervix_models::Expression::TryCast { expression, .. } => {
-            expression_reads_sensitive_source(expression, sensitivity)
+        | nervix_models::Expression::TryCast { expression, .. }
+        | nervix_models::Expression::JsonValue {
+            document: expression,
+            ..
         }
+        | nervix_models::Expression::TryJsonValue {
+            document: expression,
+            ..
+        }
+        | nervix_models::Expression::JsonExists {
+            document: expression,
+            ..
+        } => expression_reads_sensitive_source(expression, sensitivity),
         nervix_models::Expression::Binary { left, right, .. } => {
             expression_reads_sensitive_source(left, sensitivity)
                 || expression_reads_sensitive_source(right, sensitivity)
@@ -2337,6 +2347,7 @@ mod tests {
                 client: named("kafka_main"),
                 topic: named("notifications_out"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -2459,6 +2470,7 @@ mod tests {
                 queue: "notifications.fifo".to_string(),
                 fifo_group: Some(SqsFifoGroup::Expression(expression(group))),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
                 max_batch_size: "1MiB".to_string(),

@@ -300,6 +300,9 @@ Common expression patterns include:
 - arithmetic expressions such as `(amount + fee) / divisor`
 - explicit casts such as `raw AS INT64`, and tolerant conversions such as
   `TRY_CAST(raw AS INT64)`, which yield a typed null instead of failing the message
+- typed reads of JSON text held in a `STRING` field, such as
+  `JSON_VALUE(raw, '$.order.id' AS INT64)`; see
+  [JSON Documents](filter-map-functions.md#json-documents)
 
 The expression type surface matches the full Nervix internal schema type set:
 

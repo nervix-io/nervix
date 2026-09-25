@@ -58,7 +58,8 @@ Feature: MySQL TLS resource mounts
           'addr' = '{{mysql_tls_addr}}',
           'tls_ca_file' = '{{dev_tls}}/ca.pem'
         };
-        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE tls_notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE tls_notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
