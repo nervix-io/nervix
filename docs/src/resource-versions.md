@@ -210,6 +210,12 @@ clause. Omitting the clause is a parse error.
 | `HASH MAP` | The file it names, decoded line by line through its codec into an in-memory index | When a node builds the domain's execution: on every live node, whatever the schedule assigns, for running and stopped domains |
 | `CLIENT ... MOUNT` | The version's content directory, linked into a temporary mount root; the connector reads the files it names from there | Whenever the client is instantiated, such as by an ingestor or emitter when it starts, or once per node for a pooled client; each client instance keeps its mount root for its lifetime |
 
+An HTTP emitter validates its referenced client's origin, attempt timeout and paired client
+certificate/key settings before its candidate graph activates. A TLS path rendered from `CLIENT
+... MOUNT` still names the pinned version in the client Model; validation does not fetch a newer
+version or probe the remote HTTP endpoint. Client instantiation reads the mounted CA or identity
+files at the existing load boundary above.
+
 ### The Pinning Invariant
 
 Three rules together guarantee that a consumer uses exactly the version its model names:

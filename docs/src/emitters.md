@@ -161,6 +161,29 @@ TO HTTP <client>
 the expression. `MODE ACK` has no acknowledgement window or `ACK TIMEOUT`, and `NO_ACK` is not
 available. The ordinary route-local `FLUSH` clause is required.
 
+The referenced client must be a `TYPE HTTP` client in the same domain. Its `endpoint` is an
+`http://` or `https://` origin with a host and optional port, and no credentials, non-root path,
+query or fragment. It requires a positive, schedulable `timeout_ms`; the client's polling `method`
+setting does not supply the emitter's `METHOD`. HTTPS retains certificate and hostname verification.
+The optional `tls_cert_file` and `tls_key_file` settings must be supplied together, and mounted TLS
+files use the client's pinned resource version. Validation does not probe the destination.
+
+Method, path and `write_header` name and value expressions must each be exact, non-null `STRING`
+values. Request expressions read the original `input` and, with a codec, finalized `output` and
+`message`. Without a body, `message` is the source and `output` is unavailable. Sensitive values
+in any request field or body require explicit leakage. Branch fields and source-envelope header
+reads are unavailable. A literal invalid method, target or header rejects configuration; the same
+rules are checked per record for computed values before publication.
+
+Methods are ASCII HTTP tokens of at most 64 bytes. `CONNECT` and `TRACE` are unavailable, and
+`GET` and `HEAD` require `WITHOUT BODY`. `PATH` begins with exactly one `/` and is parsed against
+the client origin. It cannot include a fragment, backslash, invalid percent escape, whitespace or
+control character; normalization must keep it on that origin and must not produce a leading `//`.
+The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field names and
+UTF-8 values without control characters or leading/trailing whitespace in a nonempty value.
+Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
+application headers and 32 KiB of name/value bytes are allowed.
+
 `ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
 absent request body and permits `WHERE` and `INVOKE` but no `INHERIT`, `SET` or `VALUES`. HTTP
 emitters publish one request per eligible source record, so they do not accept the optional

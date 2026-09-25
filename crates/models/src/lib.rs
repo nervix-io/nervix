@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** Every NSPL Model, the validated name types, `Timestamp`, branch and node references,
-//!   the index that keys a domain's Models by the node each one configures, structured message
-//!   errors, and the canonical NSPL rendering of a Model.
+//! - **Owns.** Every NSPL Model, validated name and HTTP request-field types, `Timestamp`, branch
+//!   and node references, the index that keys a domain's Models by the node each one configures,
+//!   structured message errors, and the canonical NSPL rendering of a Model.
 //! - **Depends on.** Serialization and primitive crates.
 //! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
 //!   no registry state, no Arrow array and no Tokio type belongs here.
@@ -20,6 +20,7 @@ mod command;
 mod domain_clock;
 mod emitter_batch;
 mod expression;
+mod http_request;
 mod json_path;
 mod message_error;
 mod model_index;
@@ -64,6 +65,10 @@ pub use expression::{
     ExternalValue, FieldReference, FieldScope, Float64Literal, Inheritance, InheritedField,
     Invocation, Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
     OutputBranch, RangeOperator, RouteConstruction, UnaryOperator,
+};
+pub use http_request::{
+    HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
+    HttpRequestFieldError, HttpTarget,
 };
 pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
