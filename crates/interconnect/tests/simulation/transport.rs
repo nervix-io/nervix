@@ -33,9 +33,12 @@ use rcgen::{
 use rkyv::{Archive, Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
-use super::runner::{
-    ClockSkew, HostSupervisor, SemanticTrace, SimulatedEntropy, SimulatedUtc, SimulationBounds,
-    SimulationConfig, Topology, TraceEvent,
+use super::{
+    runner::{
+        ClockSkew, HostSupervisor, NetworkParameters, SemanticTrace, SimulatedEntropy,
+        SimulatedUtc, SimulationBounds, SimulationConfig, SimulationError, Topology,
+    },
+    scenario::{Scenario, ScenarioRun},
 };
 
 mod isolation;
@@ -178,7 +181,11 @@ fn decode_arrow(ipc: &[u8]) -> usize {
         .as_any()
         .downcast_ref::<Int32Array>()
         .assured("the fixture Arrow field is Int32");
-    assert_eq!(values.values(), &[7, 11, 13]);
+    // Failure records never hold payload values, so the comparison does not print them.
+    assert!(
+        values.values() == &[7, 11, 13],
+        "the decoded Arrow column differs from the fixture batch"
+    );
     assert!(reader.next().is_none());
     batch.num_rows()
 }
@@ -188,6 +195,7 @@ fn config(seed: u64) -> SimulationConfig {
         seed,
         epoch: SystemTime::UNIX_EPOCH + Duration::from_secs(1_799_971_200),
         topology: Topology::Ipv4,
+        network: NetworkParameters::LOSSLESS,
         bounds: SimulationBounds {
             simulated_duration: Duration::from_secs(30),
             tick: Duration::from_millis(1),
@@ -260,25 +268,42 @@ async fn register_peer(transport: &Transport, name: &str) {
 
 #[test]
 fn production_transport_exchanges_typed_arrow_batch_over_simulated_tcp() {
+    let scenario = Scenario {
+        name: "typed Arrow exchange",
+        fault_plan: "none; the server rebinds its listener, then the client sends a typed Arrow \
+                     request and an Arrow relay",
+        seeds: &[49],
+    };
+    scenario.check(config, exchange_typed_arrow_batch);
+}
+
+fn exchange_typed_arrow_batch(run: ScenarioRun) -> Result<(), SimulationError> {
+    let seed = run.seed();
+    let client_seed = seed
+        .checked_add(1)
+        .assured("fixture seeds are below u64::MAX");
+    let server_trace = run.trace();
+    let client_trace = run.trace();
     let authority = Authority::new();
     let server_credentials = authority.issue("server");
     let client_credentials = authority.issue("client");
     let (ready_tx, ready_rx) = watch::channel(false);
     let (done_tx, done_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(0_usize);
-    let result = config(49).run("typed Arrow exchange", move |simulation| {
+    run.simulate(move |simulation| {
         let server_finished = finished_tx.clone();
         simulation.host("server", move || {
             let server_credentials = server_credentials.clone();
             let ready_tx = ready_tx.clone();
             let done_rx = done_rx.clone();
             let finished = server_finished.clone();
+            let trace = server_trace.clone();
             async move {
                 let result = HostSupervisor::run(async move {
-                    let first = bind("server", server_credentials.clone(), 49).await;
+                    let first = bind("server", server_credentials.clone(), seed).await;
                     first.shutdown().await;
                     let (server, mut incoming) =
-                        bind_with_incoming("server", server_credentials, 49).await;
+                        bind_with_incoming("server", server_credentials, seed).await;
                     server
                         .register_handler::<BatchRequest, _, _>(|context, request| async move {
                             BatchResponse {
@@ -308,6 +333,7 @@ fn production_transport_exchanges_typed_arrow_batch_over_simulated_tcp() {
                         .relay_admission
                         .assured("a received relay has an admission token")
                         .admit();
+                    trace.record("server", "Arrow relay from the client admitted");
                     let mut done = done_rx;
                     wait_for(&mut done).await;
                     server.shutdown().await;
@@ -328,9 +354,10 @@ fn production_transport_exchanges_typed_arrow_batch_over_simulated_tcp() {
             let ready_rx = ready_rx.clone();
             let done_tx = done_tx.clone();
             let finished = client_finished.clone();
+            let trace = client_trace.clone();
             async move {
                 let result = HostSupervisor::run(async move {
-                    let client = bind("client", client_credentials, 50).await;
+                    let client = bind("client", client_credentials, client_seed).await;
                     client.replace_live_nodes(&BTreeSet::from([
                         ClusterNodeName::parse("client").assured("fixture node name is valid"),
                         ClusterNodeName::parse("server").assured("fixture node name is valid"),
@@ -346,6 +373,7 @@ fn production_transport_exchanges_typed_arrow_batch_over_simulated_tcp() {
                         .assured("production TLS and HTTP/2 exchange succeeds");
                     assert_eq!(response.rows, 3);
                     assert_eq!(response.peer, *client.node_id());
+                    trace.record("client", "typed Arrow request answered");
                     let batch_ipc = Executor::default()
                         .try_charge_owned(MemoryClass::Relay, arrow_batch())
                         .assured("the Arrow fixture fits the relay memory budget");
@@ -370,6 +398,7 @@ fn production_transport_exchanges_typed_arrow_batch_over_simulated_tcp() {
                         .send(&server, Envelope::RelayPayload(relay))
                         .await
                         .assured("the production relay transfers the Arrow IPC batch");
+                    trace.record("client", "Arrow relay transferred");
                     done_tx.send_replace(true);
                     client.shutdown().await;
                     Ok::<(), std::io::Error>(())
@@ -388,8 +417,7 @@ fn production_transport_exchanges_typed_arrow_batch_over_simulated_tcp() {
             wait_for_count(&mut finished, 2).await;
             Ok(())
         });
-    });
-    assert!(result.is_ok(), "{result:?}");
+    })
 }
 
 async fn serve_peer(
@@ -425,6 +453,24 @@ async fn serve_peer(
 
 #[test]
 fn multiple_peers_and_invalid_authentication_use_production_transport_contract() {
+    let scenario = Scenario {
+        name: "multiple authenticated peers",
+        fault_plan: "none; the client exchanges with two peers, then dials one under a DNS \
+                     identity its certificate does not name",
+        seeds: &[57],
+    };
+    scenario.check(config, exchange_with_multiple_peers);
+}
+
+fn exchange_with_multiple_peers(run: ScenarioRun) -> Result<(), SimulationError> {
+    let server_seed = run.seed();
+    let third_seed = server_seed
+        .checked_add(1)
+        .assured("fixture seeds are below u64::MAX");
+    let client_seed = server_seed
+        .checked_add(2)
+        .assured("fixture seeds are below u64::MAX");
+    let client_trace = run.trace();
     let authority = Authority::new();
     let server_credentials = authority.issue("server");
     let third_credentials = authority.issue("third");
@@ -432,7 +478,7 @@ fn multiple_peers_and_invalid_authentication_use_production_transport_contract()
     let (ready_tx, ready_rx) = watch::channel(0_usize);
     let (done_tx, done_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(0_usize);
-    let result = config(57).run("multiple authenticated peers", move |simulation| {
+    run.simulate(move |simulation| {
         let server_ready = ready_tx.clone();
         let server_done = done_rx.clone();
         let server_finished = finished_tx.clone();
@@ -442,7 +488,7 @@ fn multiple_peers_and_invalid_authentication_use_production_transport_contract()
             let done = server_done.clone();
             let finished = server_finished.clone();
             async move {
-                let result = HostSupervisor::run(serve_peer("server", credentials, 57, ready, done)).await;
+                let result = HostSupervisor::run(serve_peer("server", credentials, server_seed, ready, done)).await;
                 finished.send_modify(|count| {
                     *count = count.checked_add(1).assured("only three fixture hosts finish");
                 });
@@ -458,7 +504,7 @@ fn multiple_peers_and_invalid_authentication_use_production_transport_contract()
             let done = third_done.clone();
             let finished = third_finished.clone();
             async move {
-                let result = HostSupervisor::run(serve_peer("third", credentials, 58, ready, done)).await;
+                let result = HostSupervisor::run(serve_peer("third", credentials, third_seed, ready, done)).await;
                 finished.send_modify(|count| {
                     *count = count.checked_add(1).assured("only three fixture hosts finish");
                 });
@@ -471,9 +517,10 @@ fn multiple_peers_and_invalid_authentication_use_production_transport_contract()
             let ready = ready_rx.clone();
             let done = done_tx.clone();
             let finished = client_finished.clone();
+            let trace = client_trace.clone();
             async move {
                 let result = HostSupervisor::run(async move {
-                    let client = bind("client", credentials, 59).await;
+                    let client = bind("client", credentials, client_seed).await;
                     let live = ["client", "server", "third"]
                         .into_iter()
                         .map(|name| {
@@ -494,6 +541,7 @@ fn multiple_peers_and_invalid_authentication_use_production_transport_contract()
                             .assured("typed Arrow exchange succeeds with each peer");
                         assert_eq!(response.rows, 3);
                         assert_eq!(response.peer, *client.node_id());
+                        trace.record("client", format!("typed Arrow exchange with {name}"));
                     }
                     let target = PeerTarget::resolve(&NodeEndpoint::new("server", PORT))
                         .await
@@ -510,6 +558,7 @@ fn multiple_peers_and_invalid_authentication_use_production_transport_contract()
                         matches!(error, TransportError::Io(ref io_error) if io_error.kind() == io::ErrorKind::InvalidData),
                         "{error:?}"
                     );
+                    trace.record("client", "certificate rejected an unrelated DNS identity");
                     done.send_replace(true);
                     client.shutdown().await;
                     Ok::<(), std::io::Error>(())
@@ -526,8 +575,7 @@ fn multiple_peers_and_invalid_authentication_use_production_transport_contract()
             wait_for_count(&mut finished, 3).await;
             Ok(())
         });
-    });
-    assert!(result.is_ok(), "{result:?}");
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -545,6 +593,37 @@ impl NetworkFault {
             Self::AsymmetricBeforeConnect => "one-way partition before connect",
             Self::HeldExchange => "held authenticated exchange",
             Self::PartitionedExchange => "partitioned authenticated exchange",
+        }
+    }
+
+    fn plan(self) -> &'static str {
+        match self {
+            Self::PartitionBeforeConnect => {
+                "partition client and server before the first dial for twelve simulated seconds of \
+                 failed setup, then repair and reconnect"
+            }
+            Self::AsymmetricBeforeConnect => {
+                "drop server-to-client messages before the first dial for twelve simulated \
+                 seconds, then repair that direction and reconnect"
+            }
+            Self::HeldExchange => {
+                "after one authenticated exchange, hold client-server messages past a one-second \
+                 liveness and a two-second request deadline, then release them"
+            }
+            Self::PartitionedExchange => {
+                "after one authenticated exchange, partition client and server past both \
+                 deadlines, repair, rebind the server's listener and retire the client pool"
+            }
+        }
+    }
+
+    /// The committed regression seeds.
+    fn seeds(self) -> &'static [u64] {
+        match self {
+            Self::PartitionBeforeConnect => &[61],
+            Self::AsymmetricBeforeConnect => &[62],
+            Self::HeldExchange => &[63],
+            Self::PartitionedExchange => &[64],
         }
     }
 
@@ -678,7 +757,15 @@ async fn bind_fault_server(credentials: Credentials, seed: u64) -> Transport {
     server
 }
 
-fn exercise_fault(fault: NetworkFault, seed: u64) -> Vec<TraceEvent> {
+fn fault_config(seed: u64) -> SimulationConfig {
+    let mut scenario_config = config(seed);
+    scenario_config.bounds.simulated_duration = Duration::from_secs(60);
+    scenario_config
+}
+
+fn exercise_fault(fault: NetworkFault, run: ScenarioRun) -> Result<(), SimulationError> {
+    let seed = run.seed();
+    let event_trace = run.trace();
     let authority = Authority::new();
     let server_credentials = authority.issue("server");
     let client_credentials = authority.issue("client");
@@ -687,11 +774,7 @@ fn exercise_fault(fault: NetworkFault, seed: u64) -> Vec<TraceEvent> {
     let (restart_tx, restart_rx) = watch::channel(false);
     let (restarted_tx, restarted_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(0_usize);
-    let trace = SemanticTrace::default();
-    let event_trace = trace.clone();
-    let mut scenario_config = config(seed);
-    scenario_config.bounds.simulated_duration = Duration::from_secs(60);
-    let result = scenario_config.run(fault.name(), move |simulation| {
+    run.simulate(move |simulation| {
         let server_finished = finished_tx.clone();
         simulation.host("server", move || {
             let credentials = server_credentials.clone();
@@ -864,21 +947,22 @@ fn exercise_fault(fault: NetworkFault, seed: u64) -> Vec<TraceEvent> {
             Ok(())
         });
         fault.install(simulation);
-    });
-    assert!(result.is_ok(), "fault {fault:?} seed {seed}: {result:?}");
-    trace.events()
+    })
 }
 
 #[test]
 fn network_disruption_respects_deadlines_and_repairs_authenticated_service() {
-    for (fault, seed) in [
-        (NetworkFault::PartitionBeforeConnect, 61),
-        (NetworkFault::AsymmetricBeforeConnect, 62),
-        (NetworkFault::HeldExchange, 63),
-        (NetworkFault::PartitionedExchange, 64),
+    for fault in [
+        NetworkFault::PartitionBeforeConnect,
+        NetworkFault::AsymmetricBeforeConnect,
+        NetworkFault::HeldExchange,
+        NetworkFault::PartitionedExchange,
     ] {
-        let first = exercise_fault(fault, seed);
-        let replay = exercise_fault(fault, seed);
-        assert_eq!(first, replay, "fault {fault:?} seed {seed} did not replay");
+        let scenario = Scenario {
+            name: fault.name(),
+            fault_plan: fault.plan(),
+            seeds: fault.seeds(),
+        };
+        scenario.check(fault_config, |run| exercise_fault(fault, run));
     }
 }
