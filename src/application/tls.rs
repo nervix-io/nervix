@@ -19,7 +19,7 @@ use blake3::Hasher;
 use error_stack::{Report, ResultExt as _};
 use nervix_interconnect::{
     HandlerRegistrationError, HttpsListenerInstallation, HttpsListenerInstallationRequest,
-    HttpsListenerInstallationResponse, TlsConfigBundle, Transport,
+    HttpsListenerInstallationResponse, TlsConfigBundle, Transport, TransportClock,
 };
 #[cfg(not(feature = "testing"))]
 use nervix_models::ClusterNodeName;
@@ -88,7 +88,12 @@ impl InterconnectTlsMaterial {
     pub(in crate::application) fn tls_bundle(
         &self,
     ) -> Result<TlsConfigBundle, Report<nervix_interconnect::TlsConfigError>> {
-        TlsConfigBundle::from_pem(&self.ca, &self.certificate, &self.private_key)
+        TlsConfigBundle::from_pem(
+            &self.ca,
+            &self.certificate,
+            &self.private_key,
+            TransportClock::system(),
+        )
     }
 }
 

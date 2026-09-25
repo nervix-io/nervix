@@ -9,10 +9,12 @@
 use std::{io, net::IpAddr, path::Path, sync::Arc as StdArc};
 
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_models::ClusterNodeName;
 use percent_encoding::percent_decode_str;
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
+    crypto::CryptoProvider,
     pki_types::{CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
 };
@@ -23,7 +25,7 @@ use x509_parser::{
     prelude::{FromDer as _, X509Certificate},
 };
 
-use super::TlsConfigError;
+use super::{TlsConfigError, TransportClock};
 
 const INTERCONNECT_ALPN: &[u8] = b"h2";
 
@@ -190,6 +192,7 @@ pub struct TlsConfigBundle {
     pub(crate) client_config: StdArc<ClientConfig>,
     pub(crate) server_config: StdArc<ServerConfig>,
     pub(crate) certificate: CertificateIdentity,
+    pub(crate) clock: TransportClock,
 }
 
 impl TlsConfigBundle {
@@ -197,6 +200,7 @@ impl TlsConfigBundle {
         ca_cert_path: impl AsRef<Path>,
         cert_path: impl AsRef<Path>,
         key_path: impl AsRef<Path>,
+        clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
         super::install_rustls_crypto_provider();
 
@@ -208,16 +212,20 @@ impl TlsConfigBundle {
             })?)?;
         let private_key = load_private_key(key_path.as_ref())?;
 
-        Self::from_parts(ca_certs, cert_chain, private_key, certificate)
+        Self::from_parts(ca_certs, cert_chain, private_key, certificate, clock)
     }
 
     /// Builds one immutable client/server TLS bundle from a consistent in-memory view of its PEM
     /// files. Callers that watch projected secrets can read all files before replacing a live
     /// bundle, without the parser reopening paths that may change between reads.
+    ///
+    /// `clock` judges certificate validity for Rustls verification on both sides of every
+    /// handshake and for the transport's own validity and expiry checks.
     pub fn from_pem(
         ca_cert_pem: &[u8],
         cert_pem: &[u8],
         key_pem: &[u8],
+        clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
         super::install_rustls_crypto_provider();
 
@@ -229,7 +237,7 @@ impl TlsConfigBundle {
             })?)?;
         let private_key = load_private_key_from_pem(key_pem, "node private-key PEM")?;
 
-        Self::from_parts(ca_certs, cert_chain, private_key, certificate)
+        Self::from_parts(ca_certs, cert_chain, private_key, certificate, clock)
     }
 
     fn from_parts(
@@ -237,24 +245,32 @@ impl TlsConfigBundle {
         cert_chain: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
         certificate: CertificateIdentity,
+        clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
         let mut roots = RootCertStore::empty();
         for cert in ca_certs {
             roots.add(cert).map_err(TlsConfigError::from)?;
         }
+        let crypto = CryptoProvider::get_default()
+            .verified("every public constructor installs the process crypto provider first");
 
         let mut client_config =
-            ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            ClientConfig::builder_with_details(StdArc::clone(crypto), clock.provider())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(TlsConfigError::from)?
                 .with_root_certificates(roots.clone())
                 .with_client_auth_cert(cert_chain.clone(), private_key.clone_key())
                 .map_err(TlsConfigError::from)?;
         client_config.alpn_protocols = vec![INTERCONNECT_ALPN.to_vec()];
 
-        let verifier = WebPkiClientVerifier::builder(StdArc::new(roots))
-            .build()
-            .map_err(|error| TlsConfigError::Io(io::Error::other(error.to_string())))?;
+        let verifier =
+            WebPkiClientVerifier::builder_with_provider(StdArc::new(roots), StdArc::clone(crypto))
+                .build()
+                .map_err(|error| TlsConfigError::Io(io::Error::other(error.to_string())))?;
         let mut server_config =
-            ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            ServerConfig::builder_with_details(StdArc::clone(crypto), clock.provider())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(TlsConfigError::from)?
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(cert_chain, private_key)
                 .map_err(TlsConfigError::from)?;
@@ -264,6 +280,7 @@ impl TlsConfigBundle {
             client_config: StdArc::new(client_config),
             server_config: StdArc::new(server_config),
             certificate,
+            clock,
         })
     }
 }

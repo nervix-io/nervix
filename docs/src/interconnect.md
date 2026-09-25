@@ -31,13 +31,46 @@ step. Turmoil can vary task ordering around it, but instruction-level CPU races 
 Shuttle or real-thread testing. Only bounded executor probes and interconnect codec jobs are
 approved for this suite; storage jobs, external drivers and unbounded CPU work are outside it.
 
+Transport deadlines are Tokio instants, so on a simulated host they follow the simulated clock:
+connection setup, request and progress timeouts, reconnect backoff, relay grant lifetimes, and the
+drain deadline derived from certificate expiry all expire after simulated, not real, elapsed time.
+Certificate validity is judged by the one UTC clock carried by each credential bundle. The runner
+gives every host a clock that reads the configured UTC epoch plus simulated elapsed time, with an
+optional per-host skew. Rustls verification on the client and the server, the transport's own
+check of its local certificate, the check of the authenticated peer certificate, and the mapping of
+certificate expiry onto a monotonic drain deadline all read that clock. Outside a simulated host
+the simulated clock has no reading, and a certificate check fails rather than consulting the host
+wall clock. The suite exercises not-yet-valid and expired boundaries of both the local and the
+peer certificate, rejection by the client's and by the server's Rustls verifier, the drain of an
+accepted session at the earlier expiry on both peers, and the setup deadline of a stalled handshake,
+over simulated TCP with fixed-validity certificate fixtures and real TLS 1.3 cryptography.
+
+The process epoch and relay grant identifiers are drawn from the transport's configured entropy.
+Production uses the operating system's secure random source; a simulated host is given a seeded
+source per host, so one scenario, seed and configuration allocates the same identities in every
+process. Randomness inside TLS stays real. Replay is compared by a semantic trace: each event
+records its simulated time, host, and the identity, admission decision or outcome it describes,
+and excludes key material, certificate bytes and ciphertext, which differ between runs without
+changing any decision. The suite runs one scenario in two fresh processes and requires identical
+traces; any causally relevant difference is a defect.
+
+The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes
+effects, the walk runs in the key's semantic order instead of map order: retiring removed or
+departed peer targets, cancelling a node's or every connection slot, re-establishing preconnected
+slots after a credential replacement, and sending relay progress reports. Walks that only count,
+take a maximum, or remove entries independently of one another keep map order, because it cannot
+change their result. Residual sources outside the simulated contract are Rustls and AWS-LC
+randomness, which changes cipher bytes but no decision; Tokio's per-runtime scheduling seed, which
+Turmoil derives from the simulation seed only when the build sets `tokio_unstable`, as the test
+recipe does; and the real listener, TCP connections and DNS resolution named below.
+
 The production listener, outbound TCP connections, and DNS resolution still use Tokio's real
-network APIs. Certificate validity still reads the process wall clock, while process-epoch
-generation uses OS randomness. External connectors, filesystem and database work, gossip and
-consensus randomness, and domain-clock authority are outside this simulation boundary. A simulated
+network APIs. External connectors, filesystem and database work, gossip and consensus randomness,
+and domain-clock authority are outside this simulation boundary. The transport clock is physical
+infrastructure time only; it neither defines domain time nor stamps connector arrivals. A simulated
 host crash tears down its runtime and is not evidence of power-loss or SIGKILL durability. A
-simulation result therefore makes no claim yet about production transport faults, authentication,
-or full-node recovery.
+simulation result therefore makes no claim yet about production transport faults or full-node
+recovery.
 
 ## Listener And Peer Topology
 
@@ -111,6 +144,10 @@ when all of the following are true:
 - its certificate is currently valid
 - TLS negotiates the `h2` application protocol
 
+"Currently valid" is judged by the UTC clock of the local credential bundle. Production bundles use
+the process wall clock. Rustls verification on both sides of the handshake and the transport's own
+validity and expiry checks read that one clock, so they cannot disagree about a certificate.
+
 The first HTTP/2 exchange binds the connection to its authenticated node, traffic class, advertised
 endpoint, current process epoch, and wire-contract fingerprint. The receiver cross-checks those
 claims against the TLS identity and the connection slot it is accepting. This prevents a valid peer
@@ -122,7 +159,8 @@ Three identities serve different purposes:
 - The discovery incarnation and endpoint generation identify the current cluster presence and
   advertised address of that node.
 - The process epoch identifies one running interconnect process and fences in-memory delivery state
-  across restarts.
+  across restarts. It is drawn from the transport's entropy when the transport binds, which in
+  production is the operating system's secure random source.
 
 Replacing an endpoint, restarting a process, and rotating a certificate therefore have distinct
 meanings even when the stable node identifier does not change.
