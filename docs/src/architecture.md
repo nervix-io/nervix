@@ -30,6 +30,11 @@ has scheduler-selected replicas.
 
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
 
+Each boundary carries its decisions forward as types: absence stays explicit, distinct states
+carry their own data, and required identities are validated before execution or recovery. The
+[Typed States And Validation Boundaries](./typed-states.md) chapter covers these rules across the
+language, registry, runtime, connectors, and clients.
+
 Consensus access is restricted by operation. Observers can read locally applied state and watch
 changes. Proposers can also attempt replicated mutations, administrators manage membership and
 leadership transfers, and protocol receivers apply Raft messages independently of those capabilities.

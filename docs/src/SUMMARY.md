@@ -55,6 +55,7 @@
 - [Rust WASM Guest SDK](./wasm-guest-sdk.md)
 - [Architecture And Internals](./architecture-and-internals.md)
   - [Architecture Overview](./architecture.md)
+  - [Typed States And Validation Boundaries](./typed-states.md)
   - [Connector Crates And The Connector Contract](./connector-contract.md)
   - [Domain Clock](./domain-clock.md)
   - [Cluster Interconnect](./interconnect.md)
