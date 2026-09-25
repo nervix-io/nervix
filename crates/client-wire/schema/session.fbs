@@ -774,6 +774,78 @@ table TransactionImpactReport {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Resource descriptions
+// ---------------------------------------------------------------------------------------------
+
+/// A directory inside a resource version. It has no bytes of its own.
+table ResourceDirectory {}
+
+/// A file inside a resource version.
+table ResourceFile {
+  size: ulong;
+  checksum: string (required);
+}
+
+union ResourceEntryContent {
+  ResourceDirectory,
+  ResourceFile
+}
+
+/// One entry of a resource version, addressed by its path inside the version.
+table ResourceEntry {
+  path: string (required);
+  content: ResourceEntryContent (required);
+}
+
+/// The entries of a version, in path order.
+table ResourceEntriesListed {
+  entries: [ResourceEntry] (required);
+}
+
+/// The node that served the description could not read the version's entries.
+table ResourceEntriesUnavailable {
+  reason: string (required);
+}
+
+union ResourceVersionEntries {
+  ResourceEntriesListed,
+  ResourceEntriesUnavailable
+}
+
+/// One published version of a described resource. The description names the resource.
+table ResourceVersionDescription {
+  /// Non-zero.
+  version: ulong;
+  root_checksum: string (required);
+  manifest_checksum: string (required);
+  file_count: ulong;
+  total_bytes: ulong;
+  /// Nanoseconds since the Unix epoch.
+  created_at: long;
+  created_by_node: string (required);
+  entries: ResourceVersionEntries (required);
+}
+
+/// A model bound to one version of a described resource.
+table ResourceUsage {
+  node: NodeRef (required);
+  /// Non-zero.
+  version: ulong;
+}
+
+/// What a resource description read: every published version of one resource with its entries,
+/// the newest completed version, and the models bound to each version.
+table ResourceDescription {
+  resource: string (required);
+  /// The newest completed version. Absent while no version has completed. Non-zero.
+  latest_version: ulong = null;
+  /// In ascending version order.
+  versions: [ResourceVersionDescription] (required);
+  /// In model order.
+  usages: [ResourceUsage] (required);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Rows
 // ---------------------------------------------------------------------------------------------
 //
@@ -1150,6 +1222,9 @@ table CommandOutcome {
   inspection: TransactionInspected;
   /// JSON serialization of the typed WASM state inspection returned by a processor description.
   wasm_state: string;
+  /// Present when the command described every version of a resource, beside the text its message
+  /// renders.
+  resource: ResourceDescription;
 }
 
 table TransactionAttached {

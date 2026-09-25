@@ -20,10 +20,12 @@ use nervix_models::{
     BranchSelection, CanonicalNsplError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
     CreateReorderer, CreateWindowProcessor, DomainName, EmitSink, EmitterBody, IcebergCatalog,
-    IngestSource, IngestTimestampSource, KafkaOffsetMode, Model, ModelName, MongoDbConflictAction,
-    MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ScheduledNode,
-    WasmStateInspection, expression_to_nspl, ingest_quiesce_to_nspl,
+    IngestSource, IngestTimestampSource, KafkaOffsetMode, Model, ModelKind, ModelName,
+    MongoDbConflictAction, MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy,
+    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion,
+    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
+    ResourceVersionEntries, ScheduledNode, WasmStateInspection, expression_to_nspl,
+    ingest_quiesce_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use tokio::time::Duration;
@@ -1164,6 +1166,100 @@ fn format_wasm_checkpoint_lines(inspection: Option<&WasmStateInspection>) -> Vec
     lines
 }
 
+/// The text `DESCRIBE RESOURCE <name>` prints for `description`.
+pub(in crate::application) fn format_resource_description(
+    description: &ResourceDescription,
+) -> String {
+    let latest = match description.latest_version {
+        Some(version) => version.to_string(),
+        None => "(none)".to_string(),
+    };
+    let version_numbers = if description.versions.is_empty() {
+        "(none)".to_string()
+    } else {
+        description
+            .versions
+            .iter()
+            .map(|version| version.version.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut lines = vec![
+        format!("resource: {}", description.resource.as_str()),
+        format!("latest: {latest}"),
+        format!("versions: {version_numbers}"),
+        "version_details:".to_string(),
+    ];
+    if description.versions.is_empty() {
+        lines.push("- none".to_string());
+    }
+    for version in &description.versions {
+        lines.push(format!(
+            "- version={} root_checksum={} manifest_checksum={} file_count={} total_bytes={} \
+             created_by_node={} created_at={}",
+            version.version,
+            version.root_checksum,
+            version.manifest_checksum,
+            version.file_count,
+            version.total_bytes,
+            version.created_by_node,
+            version.created_at
+        ));
+        lines.push("  entries:".to_string());
+        lines.extend(format_resource_entry_lines(&version.entries));
+    }
+    lines.extend(format_resource_usage_lines(&description.usages));
+    lines.join("\n")
+}
+
+/// The lines listing the entries of one resource version.
+pub(in crate::application) fn format_resource_entry_lines(
+    entries: &ResourceVersionEntries,
+) -> Vec<String> {
+    match entries {
+        ResourceVersionEntries::Listed(entries) if entries.is_empty() => {
+            vec!["  - none".to_string()]
+        }
+        ResourceVersionEntries::Listed(entries) => {
+            entries.iter().map(format_resource_manifest_entry).collect()
+        }
+        ResourceVersionEntries::Unavailable { reason } => {
+            vec![format!("  - unavailable error={reason}")]
+        }
+    }
+}
+
+fn format_resource_manifest_entry(entry: &ResourceManifestEntry) -> String {
+    let (entry_type, size, checksum) = match &entry.content {
+        ResourceEntryContent::File { size, checksum } => ("file", *size, checksum.as_str()),
+        ResourceEntryContent::Directory => ("directory", 0, "-"),
+    };
+    format!(
+        "  - type={} path={} size={} checksum={}",
+        entry_type, entry.path, size, checksum
+    )
+}
+
+/// The `usages` lines: one per model bound to a version of a resource.
+pub(in crate::application) fn format_resource_usage_lines(usages: &[ResourceUsage]) -> Vec<String> {
+    let mut lines = vec!["usages:".to_string()];
+    if usages.is_empty() {
+        lines.push("- none".to_string());
+    }
+    for usage in usages {
+        let kind = match usage.node.kind {
+            ModelKind::Lookup => "hash_map",
+            kind => kind.as_str(),
+        };
+        lines.push(format!(
+            "- kind={kind} name={} version={}",
+            usage.node.identifier.as_str(),
+            usage.version
+        ));
+    }
+    lines
+}
+
 pub(in crate::application) fn format_materialized_stream_state_output(
     relay: &RelayName,
     scheduled_node: &ScheduledNode,
@@ -1462,9 +1558,101 @@ pub(in crate::application) fn placement_groups_claimed_by_rule<'a>(
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::ModelKind;
+    use meticulous::OptionExt as _;
 
     use super::{super::test_fixtures::placement_member, *};
+
+    #[test]
+    fn a_resource_description_renders_every_version_entry_and_usage() {
+        let version = |number: u64, entries: ResourceVersionEntries| {
+            nervix_models::ResourceVersionDescription {
+                version: std::num::NonZeroU64::new(number).assured("the test version is non-zero"),
+                root_checksum: format!("root{number}"),
+                manifest_checksum: format!("manifest{number}"),
+                file_count: 1,
+                total_bytes: 5,
+                created_at: nervix_models::Timestamp::from_unix_nanos(0),
+                created_by_node: ClusterNodeName::parse("node-1").assured("a literal node name"),
+                entries,
+            }
+        };
+        let usage = |kind: ModelKind, name: &str, number: u64| ResourceUsage {
+            node: NodeRef::new(kind, ModelName::parse(name).assured("a literal model name")),
+            version: std::num::NonZeroU64::new(number).assured("the test version is non-zero"),
+        };
+        let description = ResourceDescription {
+            resource: nervix_models::ResourceName::parse("bundle").assured("a literal resource"),
+            latest_version: std::num::NonZeroU64::new(1),
+            versions: vec![
+                version(
+                    1,
+                    ResourceVersionEntries::Listed(vec![
+                        ResourceManifestEntry {
+                            path: "release notes.txt".to_string(),
+                            content: ResourceEntryContent::File {
+                                size: 5,
+                                checksum: "abc".to_string(),
+                            },
+                        },
+                        ResourceManifestEntry {
+                            path: "guides".to_string(),
+                            content: ResourceEntryContent::Directory,
+                        },
+                    ]),
+                ),
+                version(2, ResourceVersionEntries::Listed(Vec::new())),
+                version(
+                    3,
+                    ResourceVersionEntries::Unavailable {
+                        reason: "manifest missing".to_string(),
+                    },
+                ),
+            ],
+            usages: vec![
+                usage(ModelKind::Client, "store", 1),
+                usage(ModelKind::Lookup, "by_id", 1),
+            ],
+        };
+
+        assert_eq!(
+            format_resource_description(&description),
+            [
+                "resource: bundle",
+                "latest: 1",
+                "versions: 1,2,3",
+                "version_details:",
+                "- version=1 root_checksum=root1 manifest_checksum=manifest1 file_count=1 \
+                 total_bytes=5 created_by_node=node-1 created_at=1970-01-01 00:00:00 UTC",
+                "  entries:",
+                "  - type=file path=release notes.txt size=5 checksum=abc",
+                "  - type=directory path=guides size=0 checksum=-",
+                "- version=2 root_checksum=root2 manifest_checksum=manifest2 file_count=1 \
+                 total_bytes=5 created_by_node=node-1 created_at=1970-01-01 00:00:00 UTC",
+                "  entries:",
+                "  - none",
+                "- version=3 root_checksum=root3 manifest_checksum=manifest3 file_count=1 \
+                 total_bytes=5 created_by_node=node-1 created_at=1970-01-01 00:00:00 UTC",
+                "  entries:",
+                "  - unavailable error=manifest missing",
+                "usages:",
+                "- kind=client name=store version=1",
+                "- kind=hash_map name=by_id version=1",
+            ]
+            .join("\n")
+        );
+
+        let empty = ResourceDescription {
+            latest_version: None,
+            versions: Vec::new(),
+            usages: Vec::new(),
+            ..description
+        };
+        assert_eq!(
+            format_resource_description(&empty),
+            "resource: bundle\nlatest: (none)\nversions: (none)\nversion_details:\n- \
+             none\nusages:\n- none"
+        );
+    }
 
     #[test]
     fn placement_runtime_node_rendering_qualifies_only_kind_collisions() {

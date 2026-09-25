@@ -159,6 +159,11 @@ stale-preview refusal leaves the previously reviewed basis in place; inspect the
 transaction again before retrying `COMMIT`. A refused inspection is an unsuccessful outcome whose
 message names why nothing was read.
 
+`DESCRIBE RESOURCE <name>` is typed the same way: `CommandOutcome::resource` holds the
+`ResourceDescription` beside the printed text, with the highest completed version as an `Option`,
+every published version with its entries under their exact paths, and the models bound to each
+version.
+
 `Client::inspect_transaction(target, operation)` also returns the typed `InspectionOutcome` from
 the API. It follows leader redirects and reconnects with the session client's normal request-ID
 dispatch. A successful read of the attached transaction refreshes the same commit preview; a

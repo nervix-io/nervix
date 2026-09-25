@@ -111,6 +111,7 @@ fn command_outcome(
         transaction_admission: None,
         inspection: None,
         wasm_state: None,
+        resource: None,
     }))
 }
 

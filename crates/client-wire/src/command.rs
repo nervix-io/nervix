@@ -4,13 +4,14 @@ use error_stack::Report;
 use flatbuffers::WIPOffset;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    CommandExecutionReference, TransactionInspection, TransactionOperationAdmission,
-    TransactionPreviewIdentity, TransactionStatus,
+    CommandExecutionReference, ResourceDescription, TransactionInspection,
+    TransactionOperationAdmission, TransactionPreviewIdentity, TransactionStatus,
 };
 
 use crate::{
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_enum},
     common::{Diagnostic, LeaderRedirect, OutcomeOrigin},
+    resource::{decode_resource_description, encode_resource_description},
     transaction::{
         decode_inspection, decode_operation_number, decode_preview_identity,
         decode_transaction_status, encode_inspection, encode_operation_number,
@@ -334,6 +335,9 @@ pub struct CommandOutcome {
     pub inspection: Option<Box<TransactionInspection>>,
     /// The typed state read by a WASM processor description.
     pub wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
+    /// The versions, entries and bindings read by a description of every version of a resource,
+    /// whichever text its message renders them as.
+    pub resource: Option<Box<ResourceDescription>>,
 }
 
 impl CommandOutcome {
@@ -384,6 +388,10 @@ impl CommandOutcome {
             }
             None => None,
         };
+        let resource = match &self.resource {
+            Some(description) => Some(encode_resource_description(encoder, description)?),
+            None => None,
+        };
         let outcome = wire::CommandOutcome::create(
             encoder.fbb(),
             &wire::CommandOutcomeArgs {
@@ -398,6 +406,7 @@ impl CommandOutcome {
                 transaction_admission,
                 inspection,
                 wasm_state,
+                resource,
             },
         );
         Ok(EncodedUnion::new(wire::ReplyBody::CommandOutcome, outcome))
@@ -462,6 +471,10 @@ impl CommandOutcome {
             }
             None => None,
         };
+        let resource = match outcome.resource() {
+            Some(description) => Some(Box::new(decode_resource_description(decoder, description)?)),
+            None => None,
+        };
         Ok(Self {
             execution_reference,
             origin,
@@ -473,6 +486,7 @@ impl CommandOutcome {
             transaction_admission,
             inspection,
             wasm_state,
+            resource,
         })
     }
 }

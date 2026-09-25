@@ -14,6 +14,22 @@ Feature: Web console NSPL REPL
     And selector ".terminal" contains "{{domain}} status=Stopped"
     And selector ".terminal" is scrolled to bottom
 
+  Scenario Outline: Web console lets the server decide which commands need a selected domain
+    Given a <cluster_size> node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "SHOW CLUSTER STATUS;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "[schedule]"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA unselected_schema ( id I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "no active domain selected"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   @client_wire13
   Scenario: Web console bounds REPL history while commands remain responsive
     Given a 1 node nervix cluster is started
@@ -450,6 +466,35 @@ Feature: Web console NSPL REPL
     And selector ".resource-version-row[data-version='2'] .resource-usage-list" contains "CLIENT lookup_store"
     And selector ".resource-version-row[data-version='1'] .resource-usage-list" contains "none"
     And selector ".nav-item.resources:has-text('lookup_bundle')" contains "v2"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Web console lists each resource entry under the exact path it was uploaded with
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And node "node-1" has resource directory "spaced_upload_dir" containing
+      """
+      {
+        "release notes.txt": "notes",
+        "user guides/getting started.md": "guide"
+      }
+      """
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE RESOURCE spaced_bundle;
+      """
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".nav-item.resources:has-text('spaced_bundle')" is clicked
+    And selector ".resource-dialog .file-upload-input" uploads resource directory "spaced_upload_dir"
+    Then selector ".resource-upload-status" contains "uploaded resource version 1"
+    And selector ".resource-version-row[data-version='1'] .resource-file-row:has(strong:text-is('release notes.txt'))" contains "file | 5 bytes | checksum"
+    And selector ".resource-version-row[data-version='1'] .resource-file-row:has(strong:text-is('user guides/getting started.md'))" contains "file | 5 bytes | checksum"
+    And selector ".resource-version-row[data-version='1'] .resource-file-row:has(strong:text-is('user guides'))" contains "directory"
 
     Examples:
       | cluster_size |

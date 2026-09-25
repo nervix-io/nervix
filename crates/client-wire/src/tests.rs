@@ -8,6 +8,7 @@ mod frames;
 mod impact;
 mod replies;
 mod requests;
+mod resources;
 mod rows;
 mod samples;
 mod schema;

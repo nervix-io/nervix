@@ -28,13 +28,14 @@ use nervix_client_wire::{
     SessionLimits, SourceSpan, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
     SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
     SubscriptionType, UnknownOutcomeCause, UnsubscribeDisposition, UnsubscribeOutcome,
-    VerifiedFrame, WireDecodeError,
+    UploadDisposition, UploadFailure, UploadReply, VerifiedFrame, WireDecodeError,
 };
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainPace, DomainStatus, FieldName,
-    ImpactPlanningBasis, ImpactReportCompleteness, ParseAsType, RelayName, SchemaField,
-    SubscriptionName, TransactionImpactReport, TransactionInspection, TransactionLifecycle,
-    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
+    ImpactPlanningBasis, ImpactReportCompleteness, ParseAsType, RelayName, ResourceDescription,
+    ResourceName, ResourceUploadIdentity, SchemaField, SubscriptionName, TransactionImpactReport,
+    TransactionInspection, TransactionLifecycle, TransactionOperationNumber, TransactionPosition,
+    TransactionPreviewIdentity, TransactionStatus,
 };
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
@@ -43,8 +44,8 @@ use triomphe::Arc;
 use url::Url;
 
 use crate::{
-    Client, ClientError, CommandOutcome, ConnectOptions, RequestKind, ServerEvent,
-    SubscriptionEvent, SubscriptionRequest, TlsRequirement,
+    Client, ClientError, CommandOutcome, ConnectOptions, RequestKind, ResourceUploadOutcome,
+    ServerEvent, SubscriptionEvent, SubscriptionRequest, TlsRequirement,
     connection::{GrpcConnector, ServerDirectory},
     exchange::{
         EventQueue, EventQueueError, EventSinks, Exchange, ExchangeReader, ExchangeRequests,
@@ -123,6 +124,7 @@ fn wire_outcome(
         transaction_admission: None,
         inspection: None,
         wasm_state: None,
+        resource: None,
     }
 }
 
@@ -1388,6 +1390,13 @@ fn wire_outcomes_convert_into_public_outcomes() {
         span: Some(SourceSpan::new(3, 7).assured("the span starts before it ends")),
     }];
     refused.transaction = Some(open_transaction("tx-1", 2));
+    let description = ResourceDescription {
+        resource: ResourceName::parse("bundle").assured("the test resource name is valid"),
+        latest_version: None,
+        versions: Vec::new(),
+        usages: Vec::new(),
+    };
+    refused.resource = Some(Box::new(description.clone()));
 
     let outcome = CommandOutcome::from(refused);
 
@@ -1406,6 +1415,7 @@ fn wire_outcomes_convert_into_public_outcomes() {
     assert_eq!(outcome.transaction, Some(open_transaction("tx-1", 2)));
     assert_eq!(outcome.subscription, None);
     assert_eq!(outcome.resource_upload, None);
+    assert_eq!(outcome.resource.as_deref(), Some(&description));
 
     let existing = CommandOutcome::from(wire_outcome(
         "command-2",
@@ -1470,6 +1480,70 @@ fn reconnect_candidates_prefer_non_current_servers() {
             url("http://node-3"),
             url("http://node-2"),
         ]
+    );
+}
+
+#[test]
+fn upload_replies_keep_an_absent_version_absent() {
+    let identity =
+        ResourceUploadIdentity::parse("upload-1").assured("the test upload identity is valid");
+    let reply = |disposition: UploadDisposition| UploadReply {
+        request_id: None,
+        disposition,
+        message: "upload answered".to_string(),
+        diagnostics: Vec::new(),
+    };
+    let upload_of = |disposition: UploadDisposition| {
+        CommandOutcome::from_upload(reply(disposition), identity.clone())
+    };
+
+    let refused = upload_of(UploadDisposition::Failed {
+        upload_identity: Some(identity.clone()),
+        failure: UploadFailure::QuotaExceeded,
+        assigned_version: None,
+    });
+    assert_eq!(refused.disposition, CommandDisposition::Failed);
+    assert_eq!(
+        refused.resource_upload,
+        Some(ResourceUploadOutcome {
+            identity: identity.clone(),
+            version: None,
+            origin: None,
+            failure: Some(UploadFailure::QuotaExceeded),
+        })
+    );
+
+    let failed = upload_of(UploadDisposition::Failed {
+        upload_identity: Some(identity.clone()),
+        failure: UploadFailure::InstallationFailed,
+        assigned_version: NonZeroU64::new(3),
+    });
+    assert_eq!(
+        failed.resource_upload,
+        Some(ResourceUploadOutcome {
+            identity: identity.clone(),
+            version: NonZeroU64::new(3),
+            origin: None,
+            failure: Some(UploadFailure::InstallationFailed),
+        })
+    );
+
+    let redirected = upload_of(UploadDisposition::NotLeader(LeaderRedirect {
+        leader: None,
+    }));
+    assert_eq!(
+        redirected.disposition,
+        CommandDisposition::NotLeader(LeaderRedirect { leader: None })
+    );
+    assert_eq!(redirected.routing(), Routing::AwaitElection);
+    assert_eq!(
+        redirected.resource_upload,
+        Some(ResourceUploadOutcome {
+            identity,
+            version: None,
+            origin: None,
+            failure: None,
+        })
     );
 }
 
