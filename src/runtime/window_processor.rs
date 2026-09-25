@@ -7,6 +7,7 @@
 //!   domain time.
 //! - **Must not know.** NSPL parsing, placement decisions or connector transports.
 
+use ahash::{HashSet, HashSetExt as _};
 use error_stack::{Report, ResultExt as _};
 
 use super::*;
@@ -87,6 +88,12 @@ pub(super) enum WindowProcessorError {
     AggregateExprFieldMissing { field: String },
     #[error("window aggregate VM produced null '{field}' output")]
     AggregateExprNullOutput { field: String },
+    #[error("window needs {required} state bytes, exceeding MAX STATE SIZE {limit}B")]
+    StateBudgetExceeded { required: u128, limit: u64 },
+    #[error("window needs {panes} panes, exceeding its WIDTH/STEP pane limit {limit}")]
+    PaneLimitExceeded { panes: usize, limit: u64 },
+    #[error("approximate distinct estimate exceeds I64")]
+    SketchEstimateOverflow,
 }
 
 /// One row the window retains, with the message it arrived in.
@@ -460,14 +467,173 @@ impl WindowProcessorState {
             .enumerate()
         {
             accumulators.push(WindowAccumulator::restore(
-                compiled, demand, &entries, published,
+                compiled,
+                demand,
+                &entries,
+                published,
+                plan.sketch_layout,
             )?);
         }
-        Ok(Self {
+        let state = Self {
             entries,
             next_sequence: snapshot.next_sequence,
             accumulators,
-        })
+        };
+        state.check_admission(plan, &arguments, &[])?;
+        Ok(state)
+    }
+
+    /// Charge retained Arrow allocations, row handles, key storage and every pane's reserved
+    /// sketch capacity before changing any state. The branch limit in the model bounds the sum
+    /// across live branches by `MAX INSTANCES * MAX STATE SIZE`.
+    pub(super) fn check_admission(
+        &self,
+        plan: &WindowAccumulatorPlan,
+        arguments: &Arc<WindowArgumentColumns>,
+        incoming: &[WindowAdmission],
+    ) -> error_stack::Result<(), WindowProcessorError> {
+        let Some(limit) = plan.max_state_bytes else {
+            return Ok(());
+        };
+        let mut required = 1024_u128;
+        let mut panes = BTreeSet::new();
+        let mut charged_arguments = HashSet::new();
+        let mut charged_batches = HashSet::new();
+        for entry in &self.entries {
+            required = required
+                .checked_add(Self::admission_bytes(
+                    &entry.message,
+                    &entry.row.arguments,
+                    &mut charged_arguments,
+                    &mut charged_batches,
+                ))
+                .assured("addressable retained allocations fit u128");
+            if let Some(layout) = plan.sketch_layout {
+                panes.insert(layout.pane_of(entry.row.timestamp.unix_nanos()));
+            }
+        }
+        for admission in incoming {
+            required = required
+                .checked_add(Self::admission_bytes(
+                    &admission.message,
+                    arguments,
+                    &mut charged_arguments,
+                    &mut charged_batches,
+                ))
+                .assured("addressable incoming allocations fit u128");
+            if let Some(layout) = plan.sketch_layout {
+                panes.insert(layout.pane_of(message_timestamp(&admission.message).unix_nanos()));
+            }
+        }
+        if let Some(layout) = plan.sketch_layout {
+            let panes = panes.len();
+            if u64::try_from(panes).assured("addressable pane count fits u64")
+                > layout.maximum_panes
+            {
+                return Err(Report::new(WindowProcessorError::PaneLimitExceeded {
+                    panes,
+                    limit: layout.maximum_panes,
+                }));
+            }
+            let mut reserved = 0_u128;
+            for sketch in plan.demands().iter().filter_map(|demand| demand.sketch) {
+                reserved = reserved
+                    .checked_add(sketch.reserved_bytes())
+                    .assured("addressable sketch demands fit a u128 byte allowance");
+            }
+            // Emission merges the retained panes into one more sketch while they remain live.
+            let pane_allocations = u128::try_from(panes)
+                .assured("addressable pane count fits u128")
+                .checked_add(1)
+                .assured("addressable panes and one merged sketch fit u128");
+            required = required
+                .checked_add(
+                    reserved
+                        .checked_mul(pane_allocations)
+                        .assured("configured sketch bounds fit u128"),
+                )
+                .assured("configured sketch bounds and addressable rows fit u128");
+        }
+        if required > u128::from(limit.get()) {
+            return Err(Report::new(WindowProcessorError::StateBudgetExceeded {
+                required,
+                limit: limit.get(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn admission_bytes(
+        message: &RelayMessage,
+        arguments: &Arc<WindowArgumentColumns>,
+        charged_arguments: &mut HashSet<*const WindowArgumentColumns>,
+        charged_batches: &mut HashSet<*const RuntimeRecordBatch>,
+    ) -> u128 {
+        // A restored snapshot may hold each retained input row in its own one-row Arrow batch.
+        // Reserve array and batch headers per row so an admitted branch also fits after handoff.
+        let record_columns = u128::try_from(message.record.batch().batch().num_columns())
+            .assured("an addressable Arrow schema has fewer than 2^128 fields");
+        let row_handles = record_columns
+            .checked_add(1)
+            .assured("an addressable Arrow schema's field count fits u128");
+        let row_headers = row_handles
+            .checked_mul(256)
+            .assured("an addressable Arrow schema's row headers fit u128");
+        let mut bytes = row_headers;
+        if charged_arguments.insert(Arc::as_ptr(arguments)) {
+            bytes = bytes
+                .checked_add(arguments.allocated_bytes())
+                .assured("addressable Arrow argument allocations fit u128");
+        }
+        let batch = message.record.batch();
+        if charged_batches.insert(Arc::as_ptr(batch)) {
+            let mut actual = 0_u128;
+            let mut logical = 0_u128;
+            for column in batch.batch().columns() {
+                actual = actual
+                    .checked_add(
+                        u128::try_from(column.get_array_memory_size())
+                            .assured("an addressable Arrow allocation fits u128"),
+                    )
+                    .assured("addressable Arrow record allocations fit u128");
+                logical = logical
+                    .checked_add(
+                        u128::try_from(
+                            column
+                                .to_data()
+                                .get_slice_memory_size()
+                                .assured("a validated Arrow record has bounded slice memory"),
+                        )
+                        .assured("an addressable Arrow slice fits u128"),
+                    )
+                    .assured("addressable Arrow record slices fit u128");
+            }
+            let rows = u128::try_from(batch.batch().num_rows())
+                .assured("an addressable Arrow batch length fits u128");
+            let columns = u128::try_from(batch.batch().num_columns())
+                .assured("an addressable Arrow schema has fewer than 2^128 fields");
+            let elements = rows
+                .checked_mul(columns)
+                .assured("an addressable Arrow batch's element count fits u128");
+            let headers = elements
+                .checked_mul(128)
+                .assured("an addressable Arrow batch's array headers fit u128");
+            let payload = logical
+                .checked_mul(2)
+                .assured("an addressable Arrow batch's doubled payload fits u128");
+            let estimated = payload
+                .checked_add(headers)
+                .assured("an addressable Arrow batch's restored shape fits u128");
+            let batch_bytes = actual.max(estimated);
+            bytes = bytes
+                .checked_add(batch_bytes)
+                .assured("addressable Arrow record allocations fit u128");
+        }
+        let key_bytes = u128::try_from(format!("{:?}", message.key).len())
+            .assured("an addressable branch key fits u128");
+        bytes
+            .checked_add(key_bytes)
+            .assured("addressable branch state fits u128")
     }
 
     /// Admit `run`, consecutive rows of one evaluated batch in arrival order, into the window and
@@ -1186,7 +1352,21 @@ mod tests {
                 None,
             )
             .expect("the test window route should compile");
-            let plan = WindowAccumulatorPlan::new([&compiled.route]);
+            let sketch_layout = compiled
+                .route
+                .demands
+                .iter()
+                .any(|demand| demand.sketch.is_some())
+                .then(|| {
+                    WindowPaneLayout::for_width_and_step(
+                        Duration::from_secs(2),
+                        Duration::from_secs(1),
+                    )
+                    .verified("the test window has valid duration panes")
+                });
+            let max_state_bytes = sketch_layout.and_then(|_| NonZeroU64::new(1_048_576));
+            let plan =
+                WindowAccumulatorPlan::new([&compiled.route], sketch_layout, max_state_bytes);
             let state = WindowProcessorState::new(&plan);
             Self {
                 plan,
@@ -1235,7 +1415,14 @@ mod tests {
                 };
                 run.push(WindowAdmission { message, row });
             }
-            self.state.admit(&evaluated.columns, run);
+            if let Err(error) = self
+                .state
+                .check_admission(&self.plan, &evaluated.columns, &run)
+            {
+                refused.push(error.current_context().to_string());
+            } else {
+                self.state.admit(&evaluated.columns, run);
+            }
             refused
         }
 
@@ -1274,6 +1461,262 @@ mod tests {
 
     fn f64_value(value: f64) -> Option<RuntimeValue> {
         Some(RuntimeValue::F64(OrderedFloat(value)))
+    }
+
+    #[tokio::test]
+    async fn sketches_merge_panes_expire_rows_and_restore_from_snapshot() {
+        let mut window = TestWindow::new(
+            "SET distinct_values = APPROX_COUNT_DISTINCT(input.value, 10), median_value = \
+             APPROX_QUANTILE(input.value, 50, 128), frequent_values = APPROX_TOP_K(input.value, \
+             2, 16)",
+            &[optional("value", ParseAsType::I64)],
+            &[
+                field("distinct_values", ParseAsType::I64),
+                optional("median_value", ParseAsType::F64),
+                field(
+                    "frequent_values",
+                    ParseAsType::Vec {
+                        element: Box::new(ParseAsType::I64),
+                    },
+                ),
+            ],
+        );
+        let refused = window
+            .admit(
+                vec![int64([Some(10), Some(10), Some(20), None])],
+                &[0, 0, 1_000_000_000, 1_000_000_000],
+            )
+            .await;
+        assert!(refused.is_empty(), "{refused:?}");
+        let result = window.emitted().await;
+        assert_eq!(
+            batch_value(&result, "distinct_values"),
+            Some(RuntimeValue::I64(2))
+        );
+        assert_eq!(batch_value(&result, "median_value"), f64_value(10.0));
+        assert_eq!(
+            batch_value(&result, "frequent_values"),
+            Some(RuntimeValue::Vec(vec![
+                RuntimeValue::I64(10),
+                RuntimeValue::I64(20),
+            ]))
+        );
+
+        let snapshot = window
+            .state
+            .to_snapshot()
+            .assured("the admitted test window has valid snapshot state");
+        window.state = WindowProcessorState::from_snapshot(
+            &window.plan,
+            window.input_schema.as_ref(),
+            &snapshot,
+        )
+        .assured("the snapshot came from the same validated window plan");
+        let restored_snapshot = window
+            .state
+            .to_snapshot()
+            .assured("the restored test window has valid snapshot state");
+        let before_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&snapshot)
+            .assured("the snapshot contains only serializable test values");
+        let after_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&restored_snapshot)
+            .assured("the restored snapshot contains only serializable test values");
+        assert_eq!(before_bytes.as_slice(), after_bytes.as_slice());
+        let restored = window.emitted().await;
+        assert_eq!(
+            batch_value(&restored, "distinct_values"),
+            Some(RuntimeValue::I64(2))
+        );
+        assert_eq!(
+            batch_value(&restored, "frequent_values"),
+            batch_value(&result, "frequent_values")
+        );
+
+        window.step(2, 1_000_000_000);
+        let after_step = window.emitted().await;
+        assert_eq!(
+            batch_value(&after_step, "distinct_values"),
+            Some(RuntimeValue::I64(1))
+        );
+        assert_eq!(batch_value(&after_step, "median_value"), f64_value(20.0));
+        assert_eq!(
+            batch_value(&after_step, "frequent_values"),
+            Some(RuntimeValue::Vec(vec![RuntimeValue::I64(20)]))
+        );
+
+        window.step(1, 1_000_000_000);
+        let null_only = window.emitted().await;
+        assert_eq!(
+            batch_value(&null_only, "distinct_values"),
+            Some(RuntimeValue::I64(0))
+        );
+        assert_eq!(batch_value(&null_only, "median_value"), None);
+        assert_eq!(
+            batch_value(&null_only, "frequent_values"),
+            Some(RuntimeValue::Vec(vec![]))
+        );
+    }
+
+    #[tokio::test]
+    async fn sketch_window_rejects_pane_and_byte_budget_overruns_before_admission() {
+        let mut window = TestWindow::new(
+            "SET distinct_values = APPROX_COUNT_DISTINCT(input.value, 10)",
+            &[field("value", ParseAsType::I64)],
+            &[field("distinct_values", ParseAsType::I64)],
+        );
+        window.plan.max_state_bytes = NonZeroU64::new(1024);
+        let refused = window.admit(vec![int64([Some(1)])], &[0]).await;
+        assert!(
+            refused
+                .iter()
+                .any(|reason| reason.contains("MAX STATE SIZE")),
+            "{refused:?}"
+        );
+        assert!(window.state.entries.is_empty());
+
+        window.plan.max_state_bytes = NonZeroU64::new(1_048_576);
+        let refused = window
+            .admit(
+                vec![int64([Some(1), Some(2), Some(3), Some(4), Some(5)])],
+                &[
+                    0,
+                    1_000_000_000,
+                    2_000_000_000,
+                    3_000_000_000,
+                    4_000_000_000,
+                ],
+            )
+            .await;
+        assert!(
+            refused.iter().any(|reason| reason.contains("pane limit")),
+            "{refused:?}"
+        );
+        assert!(window.state.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn each_top_k_demand_charges_its_own_large_string_keys() {
+        let input = &[field("value", ParseAsType::String)];
+        let output = &[field(
+            "frequent_values",
+            ParseAsType::Vec {
+                element: Box::new(ParseAsType::String),
+            },
+        )];
+        let value = "x".repeat(40_000);
+        let one_column: ArrayRef = StdArc::new(StringArray::from(vec![Some(value.as_str())]));
+        let mut one = TestWindow::new(
+            "SET frequent_values = APPROX_TOP_K(input.value, 1, 16)",
+            input,
+            output,
+        );
+        one.plan.max_state_bytes = NonZeroU64::new(200_000);
+        assert!(one.admit(vec![one_column], &[0]).await.is_empty());
+
+        let two_columns: ArrayRef = StdArc::new(StringArray::from(vec![Some(value.as_str())]));
+        let mut two = TestWindow::new(
+            "SET frequent_values = APPROX_TOP_K(input.value, 1, 16), other_values = \
+             APPROX_TOP_K(input.value, 2, 16)",
+            input,
+            &[
+                field(
+                    "frequent_values",
+                    ParseAsType::Vec {
+                        element: Box::new(ParseAsType::String),
+                    },
+                ),
+                field(
+                    "other_values",
+                    ParseAsType::Vec {
+                        element: Box::new(ParseAsType::String),
+                    },
+                ),
+            ],
+        );
+        two.plan.max_state_bytes = NonZeroU64::new(200_000);
+        let refused = two.admit(vec![two_columns], &[0]).await;
+        assert!(
+            refused
+                .iter()
+                .any(|reason| reason.contains("MAX STATE SIZE")),
+            "{refused:?}"
+        );
+        assert!(two.state.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sketch_snapshot_restores_at_the_admitted_state_limit() {
+        let mut window = TestWindow::new(
+            "SET distinct_values = APPROX_COUNT_DISTINCT(input.value, 10)",
+            &[field("value", ParseAsType::I64)],
+            &[field("distinct_values", ParseAsType::I64)],
+        );
+        let values = (0..100_i64).map(Some).collect::<Vec<_>>();
+        let timestamps = vec![0_i64; values.len()];
+        assert!(
+            window
+                .admit(vec![int64(values)], &timestamps)
+                .await
+                .is_empty()
+        );
+        let arguments = &window
+            .state
+            .entries
+            .front()
+            .verified("the test admitted one hundred rows")
+            .row
+            .arguments;
+        let mut tight_plan = window.plan.clone();
+        tight_plan.max_state_bytes = NonZeroU64::new(1);
+        let error = window
+            .state
+            .check_admission(&tight_plan, arguments, &[])
+            .expect_err("one byte cannot hold a populated sketch window");
+        let required = match error.current_context() {
+            WindowProcessorError::StateBudgetExceeded { required, .. } => Some(*required),
+            _ => None,
+        }
+        .verified("one byte fails only the populated window's byte allowance");
+        tight_plan.max_state_bytes = NonZeroU64::new(
+            u64::try_from(required).assured("one hundred test rows require fewer than 2^64 bytes"),
+        );
+        let snapshot = window
+            .state
+            .to_snapshot()
+            .assured("the admitted test window has valid snapshot state");
+        let restored = WindowProcessorState::from_snapshot(
+            &tight_plan,
+            window.input_schema.as_ref(),
+            &snapshot,
+        )
+        .assured("the admitted window fits its allowance after snapshot restore");
+        assert_eq!(restored.entries.len(), window.state.entries.len());
+    }
+
+    #[tokio::test]
+    async fn quantile_sketch_refuses_non_finite_rows_without_exposing_values() {
+        let mut window = TestWindow::new(
+            "SET median_value = APPROX_QUANTILE(input.value, 50, 128)",
+            &[field("value", ParseAsType::F64)],
+            &[field("median_value", ParseAsType::F64)],
+        );
+        let refused = window
+            .admit(
+                vec![float64([Some(f64::NAN), Some(f64::INFINITY)])],
+                &[0, 1],
+            )
+            .await;
+        assert_eq!(refused.len(), 2);
+        assert!(
+            refused
+                .iter()
+                .all(|reason| reason.contains("finite floating-point arguments"))
+        );
+        assert!(
+            refused
+                .iter()
+                .all(|reason| !reason.contains("NaN") && !reason.contains("inf"))
+        );
+        assert!(window.state.entries.is_empty());
     }
 
     #[tokio::test]

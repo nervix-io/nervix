@@ -2095,6 +2095,7 @@ impl Application {
                                     &request.subscriber,
                                     request.domain.as_str(),
                                     request.relay.as_str(),
+                                    request.minimum_version,
                                 )
                                 .await;
                             Ok(())

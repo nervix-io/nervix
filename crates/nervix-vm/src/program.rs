@@ -526,6 +526,15 @@ pub enum FunctionName {
     Least,
     Clamp,
     Concat,
+    Array,
+    Vec,
+    Overlap,
+    Slice,
+    Min,
+    Max,
+    Mean,
+    Dot,
+    Distance,
     Sum,
     Last,
     First,
@@ -827,6 +836,9 @@ impl DateBinWidth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsRefStr, EnumString)]
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum WindowAggregateFunction {
+    ApproxCountDistinct,
+    ApproxQuantile,
+    ApproxTopK,
     ArgMax,
     ArgMin,
     Avg,
@@ -901,6 +913,8 @@ impl WindowAggregateFunction {
     pub const fn expected_arity(self) -> usize {
         match self {
             Self::PercentileLinearHistogram => 6,
+            Self::ApproxQuantile | Self::ApproxTopK => 3,
+            Self::ApproxCountDistinct => 2,
             Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => 2,
             Self::Avg
             | Self::BoolAnd
@@ -925,6 +939,9 @@ impl WindowAggregateFunction {
         match self {
             Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => true,
             Self::Avg
+            | Self::ApproxCountDistinct
+            | Self::ApproxQuantile
+            | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
             | Self::Count
@@ -1045,6 +1062,15 @@ impl FunctionName {
             "least" => Self::Least,
             "clamp" => Self::Clamp,
             "concat" => Self::Concat,
+            "array" => Self::Array,
+            "vec" => Self::Vec,
+            "overlap" => Self::Overlap,
+            "slice" => Self::Slice,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "mean" => Self::Mean,
+            "dot" => Self::Dot,
+            "distance" => Self::Distance,
             "sum" => Self::Sum,
             "last" => Self::Last,
             "first" => Self::First,
@@ -1157,6 +1183,15 @@ impl FunctionName {
             Self::Least => "least",
             Self::Clamp => "clamp",
             Self::Concat => "concat",
+            Self::Array => "array",
+            Self::Vec => "vec",
+            Self::Overlap => "overlap",
+            Self::Slice => "slice",
+            Self::Min => "min",
+            Self::Max => "max",
+            Self::Mean => "mean",
+            Self::Dot => "dot",
+            Self::Distance => "distance",
             Self::Sum => "sum",
             Self::Last => "last",
             Self::First => "first",

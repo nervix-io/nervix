@@ -1,5 +1,5 @@
 Feature: Gossip subscription interest
-  Scenario: Published interest starts and stops remote subscription fan-out
+  Scenario: Published interest starts, reopens, and stops remote subscription fan-out
     Given the production sticky scheduler is configured
     And a 3 node nervix cluster is started
     And the leader node is configured with these NSPL commands
@@ -53,10 +53,22 @@ Feature: Gossip subscription interest
     When these NSPL commands are executed on the active session
       """
       DELETE SUBSCRIPTION remote_events;
+      CREATE SUBSCRIPTION remote_events TO events;
       """
-    And physical time passes for "3s"
     And http payload is posted to node "node-1" with host "subscription-interest-{{test_id}}.example.com" path "/events"
       """
       {"id":2}
+      """
+    Then within "5s" the relay subscription receives a payload
+      """
+      {"id":2}
+      """
+    When these NSPL commands are executed on the active session
+      """
+      DELETE SUBSCRIPTION remote_events;
+      """
+    And http payload is posted to node "node-1" with host "subscription-interest-{{test_id}}.example.com" path "/events"
+      """
+      {"id":3}
       """
     Then the relay subscription does not receive a payload within "2s"

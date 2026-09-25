@@ -21,14 +21,23 @@ a test harness outside product ownership, with a fixed seed, UTC epoch, network 
 duration, step limit, and real wall-clock escape bound. It supervises host tasks so their failures
 fail the scenario.
 
-The initial runner qualifies bounded scheduling and Tokio timers. The production listener,
-outbound TCP connections, and DNS resolution still use Tokio's real network APIs; execution jobs
-still use Tokio's blocking pool. Certificate validity still reads the process wall clock, while
-process-epoch generation uses OS randomness. External connectors, filesystem and database work,
-gossip and consensus randomness, and domain-clock authority are outside this first simulation
-boundary. A simulated host crash tears down its runtime and is not evidence of power-loss or
-SIGKILL durability. A simulation result therefore makes no claim yet about production transport
-faults, authentication, or full-node recovery.
+The runner exercises the interconnect's actual bounded rkyv encode and decode path through
+`nervix-execution`. In this build mode, admitted CPU jobs run as Tokio tasks on the simulated
+scheduler; production and Shuttle builds continue to use the blocking pool. Queue slots, per-class
+worker reservations, memory charges, and cooperative cancellation follow the same policy in both
+modes. A queued caller that leaves releases its slot and charge; a running job keeps its worker and
+charge until it exits, even if its caller leaves. Each synchronous CPU job body is one scheduler
+step. Turmoil can vary task ordering around it, but instruction-level CPU races inside a job need
+Shuttle or real-thread testing. Only bounded executor probes and interconnect codec jobs are
+approved for this suite; storage jobs, external drivers and unbounded CPU work are outside it.
+
+The production listener, outbound TCP connections, and DNS resolution still use Tokio's real
+network APIs. Certificate validity still reads the process wall clock, while process-epoch
+generation uses OS randomness. External connectors, filesystem and database work, gossip and
+consensus randomness, and domain-clock authority are outside this simulation boundary. A simulated
+host crash tears down its runtime and is not evidence of power-loss or SIGKILL durability. A
+simulation result therefore makes no claim yet about production transport faults, authentication,
+or full-node recovery.
 
 ## Listener And Peer Topology
 
@@ -480,11 +489,16 @@ peer that is itself stopping fail at once, instead of holding teardown for the r
 
 Session subscription interest also propagates through gossip. The key encoding is private to the
 cluster layer: whenever the live-node state watcher changes, each node rebuilds an immutable index
-from domain and relay to the interested node incarnations and publishes it through `ArcSwap`. A
-relay owner loads that snapshot and performs borrowed domain and relay lookups, so per-batch remote
-fan-out neither formats a gossip key nor waits on the gossip mutex. Subscription creation waits for
-the exact subscriber incarnation to appear in every live node's published index before it reports
-success. A withdrawal disappears from fan-out when the next gossip state snapshot is published.
+from domain and relay to the interested node incarnations and advertisement versions and publishes
+it through `ArcSwap`. A relay owner loads that snapshot and performs borrowed domain and relay
+lookups, so per-batch remote fan-out neither formats a gossip key nor waits on the gossip mutex.
+Subscription creation waits for the exact subscriber incarnation and at least the current interest
+key's gossip version to appear in every live node's published index before it reports success.
+The creating subscription holds its lease while capturing that version and waiting for visibility.
+After withdrawal and reopening, an
+advertisement from before the withdrawal cannot satisfy this handshake, even when the subscriber
+node has not restarted. A withdrawal disappears from fan-out when the next gossip state snapshot is
+published.
 
 A node advertises interest in a relay exactly while at least one of its session subscriptions
 holds a lease on it. Every subscription takes one lease before it attaches and releases it exactly

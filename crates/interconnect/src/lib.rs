@@ -289,6 +289,8 @@ pub struct SubscriptionInterestVisibilityRequest {
     pub subscriber: ClusterNodeIdentity,
     pub domain: DomainName,
     pub relay: RelayName,
+    /// The renewed interest must be visible even if an earlier advertisement is still present.
+    pub minimum_version: u64,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

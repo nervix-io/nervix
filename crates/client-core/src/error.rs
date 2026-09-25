@@ -9,7 +9,7 @@
 use nervix_client_wire::{
     CancellationStage, ClientRequest, ReplyBody, RequestRejection, WireDecodeError, WireEncodeError,
 };
-use nervix_models::{NameError, ResourceUploadIdentity};
+use nervix_models::{CommandExecutionReference, NameError, ResourceUploadIdentity};
 use thiserror::Error;
 use tonic::metadata::errors::InvalidMetadataValue;
 
@@ -38,6 +38,14 @@ pub enum RequestKind {
     UploadResource,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum EventStreamKind {
+    #[strum(serialize = "subscription")]
+    Subscription,
+    #[strum(serialize = "server notice")]
+    ServerNotice,
+}
+
 impl From<&ClientRequest> for RequestKind {
     fn from(request: &ClientRequest) -> Self {
         match request {
@@ -60,6 +68,12 @@ pub enum ClientError {
     InvalidServerUri(#[source] tonic::codegen::http::uri::InvalidUri),
     #[error("invalid server URL")]
     InvalidServerUrl(#[source] url::ParseError),
+    #[error("server endpoint must be an HTTP or HTTPS origin without credentials or a path")]
+    InvalidServerEndpoint,
+    #[error("{field} must be between one millisecond and one day")]
+    InvalidDeadline { field: &'static str },
+    #[error("{count} configured seed servers exceeds the limit of 32")]
+    TooManySeedServers { count: usize },
     #[error("TLS is required but the server URI is not https")]
     TlsRequired,
     #[error("failed to configure TLS for server connection")]
@@ -68,10 +82,28 @@ pub enum ClientError {
     ConnectServer(#[source] tonic::transport::Error),
     #[error("failed to start session exchange: {0}")]
     StartSession(#[source] Box<tonic::Status>),
+    #[error("session exchange opening exceeded its deadline")]
+    SessionOpenDeadline,
     #[error("failed to build authentication metadata")]
     BuildAuthenticationMetadata(#[source] InvalidMetadataValue),
     #[error("session exchange closed")]
     SessionClosed,
+    #[error("session exchange failed: {0}")]
+    Transport(#[source] Box<tonic::Status>),
+    #[error("the {request} request exceeded its deadline")]
+    RequestDeadline { request: RequestKind },
+    #[error("the {request} request lost its session after its frame was queued")]
+    RequestInterrupted { request: RequestKind },
+    #[error("session retry deadline expired")]
+    RetryDeadline,
+    #[error("command outcome for execution '{reference}' is uncertain")]
+    UncertainCommand {
+        reference: CommandExecutionReference,
+        #[source]
+        source: Box<ClientError>,
+    },
+    #[error("the {stream} event consumer exceeded its bounded queue")]
+    EventOverflow { stream: EventStreamKind },
     #[error("failed to attach transaction: {0}")]
     AttachTransaction(String),
     /// The request needs a selected domain, and the session has none.
@@ -114,8 +146,19 @@ pub enum ClientError {
     BuildUploadArchive,
     #[error("upload request failed: {0}")]
     UploadResource(#[source] Box<tonic::Status>),
+    #[error("upload outcome for identity '{identity}' is uncertain")]
+    UncertainUpload {
+        identity: ResourceUploadIdentity,
+        #[source]
+        source: Box<ClientError>,
+    },
     #[error("the upload reply does not decode")]
     InvalidUploadReply(#[source] WireDecodeError),
+    #[error("command reply execution '{received}' does not match request execution '{expected}'")]
+    ExecutionReferenceMismatch {
+        expected: CommandExecutionReference,
+        received: CommandExecutionReference,
+    },
     #[error("upload response identity '{received}' does not match request identity '{expected}'")]
     UploadIdentityMismatch {
         expected: ResourceUploadIdentity,
@@ -126,6 +169,57 @@ pub enum ClientError {
 }
 
 impl ClientError {
+    pub(crate) fn can_hide_installed_upload(&self) -> bool {
+        match self {
+            Self::UploadResource(status) => matches!(
+                status.code(),
+                tonic::Code::Cancelled
+                    | tonic::Code::Unknown
+                    | tonic::Code::DeadlineExceeded
+                    | tonic::Code::Unavailable
+            ),
+            _ => self.can_hide_admitted_work(),
+        }
+    }
+
+    pub(crate) fn can_hide_admitted_work(&self) -> bool {
+        match self {
+            Self::RequestDeadline { .. }
+            | Self::RequestInterrupted { .. }
+            | Self::ConnectServer(_)
+            | Self::SessionOpenDeadline
+            | Self::RetryDeadline => true,
+            Self::Transport(_) => self.retryable_session_failure(),
+            Self::StartSession(status) => matches!(
+                status.code(),
+                tonic::Code::Cancelled
+                    | tonic::Code::Unknown
+                    | tonic::Code::DeadlineExceeded
+                    | tonic::Code::Unavailable
+            ),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn retryable_session_failure(&self) -> bool {
+        match self {
+            Self::SessionClosed
+            | Self::RequestDeadline { .. }
+            | Self::RequestInterrupted { .. } => true,
+            Self::Transport(status) => {
+                if let tonic::Code::Cancelled
+                | tonic::Code::Unknown
+                | tonic::Code::DeadlineExceeded
+                | tonic::Code::Unavailable = status.code()
+                {
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// The error a reply stands for when it is not the outcome `request` waits for.
     pub(crate) fn unexpected_reply(request: RequestKind, body: ReplyBody) -> Self {
         match body {

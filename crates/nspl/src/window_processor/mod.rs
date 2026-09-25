@@ -1,14 +1,18 @@
+use std::num::NonZeroU64;
+
 use chumsky::prelude::*;
-use meticulous::OptionExt as _;
-use nervix_models::{AckMode, CreateStatement, CreateWindowProcessor, WindowBound};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{
+    AckMode, CreateStatement, CreateWindowProcessor, WindowBound, WindowStateLimit,
+};
 
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, boxed_choice, branch_selection,
-        duration_lit, explicit_processor_outputs, filter_where_clause, from_relay_clauses,
-        if_not_exists_clause, into_parse_error, kw, lex_input, materialized_state_dependencies,
-        suggest_from, tok, window_processor_name,
+        byte_size_lit, duration_lit, explicit_processor_outputs, filter_where_clause,
+        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase3, lex_input,
+        materialized_state_dependencies, suggest_from, tok, window_processor_name,
     },
 };
 
@@ -164,6 +168,31 @@ fn validate_step<'src>(
     Ok(())
 }
 
+fn state_limit<'src>()
+-> impl Parser<'src, &'src [Token], WindowStateLimit, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Identifier::Max, Identifier::State, Identifier::Size)
+        .ignore_then(byte_size_lit())
+        .try_map(|value, span| {
+            let bytes = value
+                .parse::<ubyte::ByteUnit>()
+                .verified("byte_size_lit accepts only valid byte sizes")
+                .as_u64();
+            let Some(bytes) = NonZeroU64::new(bytes) else {
+                return Err(Rich::custom(
+                    span,
+                    "MAX STATE SIZE must be greater than zero",
+                ));
+            };
+            Ok(WindowStateLimit::MaxBytes(bytes))
+        })
+        .or_not()
+        .map(|limit| match limit {
+            Some(limit) => limit,
+            None => WindowStateLimit::Unbounded,
+        })
+        .boxed()
+}
+
 pub fn create_window_processor_parser<'src>()
 -> impl Parser<'src, &'src [Token], CreateStatement<CreateWindowProcessor>, extra::Err<ParseError<'src>>>
 + Clone {
@@ -180,41 +209,33 @@ pub fn create_window_processor_parser<'src>()
         .then(width_and_step())
         .map(|(head, (width, step))| ((head, width), step))
         .boxed()
+        .then(state_limit())
         .then(branch_selection())
         .then(materialized_state_dependencies())
         .then(explicit_processor_outputs())
         .then_ignore(tok(Token::Semicolon).or_not())
-        .try_map(
-            |(
-                (
-                    (
-                        (
-                            (((((if_not_exists, mode), name), from_input), filter_where), width),
-                            step,
-                        ),
-                        branched_by,
-                    ),
+        .try_map(|(parsed, outputs), _span| {
+            let (parsed, materialized_state) = parsed;
+            let (parsed, branched_by) = parsed;
+            let (parsed, state_limit) = parsed;
+            let ((head, width), step) = parsed;
+            let ((((if_not_exists, mode), name), from_input), filter_where) = head;
+            Ok(CreateStatement::new(
+                CreateWindowProcessor {
+                    name,
+                    from: from_input,
+                    output_routes: outputs,
+                    branched_by,
+                    width,
+                    step,
+                    state_limit,
+                    mode: mode.unwrap_or(AckMode::Attached),
+                    filter_where,
                     materialized_state,
-                ),
-                outputs,
-            ),
-             _span| {
-                Ok(CreateStatement::new(
-                    CreateWindowProcessor {
-                        name,
-                        from: from_input,
-                        output_routes: outputs,
-                        branched_by,
-                        width,
-                        step,
-                        mode: mode.unwrap_or(AckMode::Attached),
-                        filter_where,
-                        materialized_state,
-                    },
-                    if_not_exists,
-                ))
-            },
-        )
+                },
+                if_not_exists,
+            ))
+        })
         .boxed()
 }
 
@@ -269,6 +290,7 @@ mod tests {
                 FROM s1
                 WIDTH 100 MESSAGES 10s DURATION
                 STEP 10 MESSAGES 1s DURATION
+                MAX STATE SIZE 1MiB
                 BRANCHED BY tenant
                 TO s2
                 SET latency_p99 = PERCENTILE_LINEAR_HISTOGRAM(input.latency, 99, 2048, 0, 10000, '2s'),
@@ -295,6 +317,10 @@ mod tests {
         assert_eq!(parsed.width.duration.as_deref(), Some("10s"));
         assert_eq!(parsed.step.messages, Some(10));
         assert_eq!(parsed.step.duration.as_deref(), Some("1s"));
+        assert!(matches!(
+            parsed.state_limit,
+            WindowStateLimit::MaxBytes(bytes) if bytes.get() == 1_048_576
+        ));
         assert!(
             !parsed.output_routes.routes[0]
                 .construction
@@ -321,6 +347,23 @@ mod tests {
         assert_eq!(parsed.width.duration, None);
         assert_eq!(parsed.step.messages, Some(100));
         assert_eq!(parsed.step.duration, None);
+        assert_eq!(parsed.state_limit, WindowStateLimit::Unbounded);
+    }
+
+    #[test]
+    fn rejects_zero_state_limit() {
+        let input = "CREATE WINDOW PROCESSOR p FROM s WIDTH 2s DURATION STEP 1s DURATION MAX \
+                     STATE SIZE 0B UNBRANCHED TO out SET n = COUNT(input.value) ON MESSAGE ERROR \
+                     LOG;";
+        assert!(parse_create_window_processor_tokens(&to_tokens(input)).is_err());
+    }
+
+    #[test]
+    fn suggests_state_limit_after_window_step() {
+        let input = "CREATE WINDOW PROCESSOR p FROM s WIDTH 2s DURATION STEP 1s DURATION ";
+        let suggestions = suggest_create_window_processor(input, input.len());
+        assert!(suggestions.contains(&"MAX STATE SIZE".to_string()));
+        assert!(suggestions.contains(&"BRANCHED BY".to_string()));
     }
 
     #[test]

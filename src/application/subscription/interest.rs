@@ -164,6 +164,17 @@ impl SubscriptionInterests {
 }
 
 impl SubscriptionInterestLease {
+    /// The current advertisement a creation handshake must observe. This lease prevents its
+    /// withdrawal while that handshake is in flight.
+    pub(in crate::application) async fn advertisement_version(&self) -> u64 {
+        self.interests
+            .inner
+            .cluster
+            .local_subscription_interest_version(self.key.domain.as_str(), self.key.relay.as_str())
+            .await
+            .assured("an acquired lease keeps its published interest advertised until release")
+    }
+
     /// Releases the lease, and withdraws the node's interest in the relay when it was the last.
     pub(in crate::application) async fn release(mut self) {
         self.held = false;

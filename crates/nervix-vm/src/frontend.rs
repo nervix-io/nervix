@@ -151,8 +151,6 @@ pub enum FrontendErrorKind {
     },
     #[error("INHERIT must be expanded against the input and output schemas")]
     UnexpandedInheritance,
-    #[error("array expressions are valid only in window SET values")]
-    ArrayExpressionOutsideWindow,
     #[error("cast target expected {expected}, found {found:?}")]
     UnsupportedCollectionCast {
         expected: CastTargetKind,
@@ -1478,12 +1476,13 @@ fn lower_expression_with_span(
                 .map(|argument| lower_expression_with_span(argument, scope_policy, span))
                 .collect::<FrontendResult<Vec<_>>>()?,
         },
-        ModelExpression::Array(_) => {
-            return Err(FrontendError::report(
-                span,
-                FrontendErrorKind::ArrayExpressionOutsideWindow,
-            ));
-        }
+        ModelExpression::Array(items) => Expr::Call {
+            function: FunctionName::Array,
+            args: items
+                .iter()
+                .map(|item| lower_expression_with_span(item, scope_policy, span))
+                .collect::<FrontendResult<Vec<_>>>()?,
+        },
         ModelExpression::If {
             condition,
             then_result,
@@ -2452,14 +2451,6 @@ mod tests {
                 SemanticScopePolicy::read_write("input", "output"),
             ),
             FrontendErrorKind::UnexpandedInheritance,
-        );
-
-        assert_frontend_error(
-            lower_expression(
-                &ModelExpression::Array(Vec::new()),
-                SemanticScopePolicy::read_only("input"),
-            ),
-            FrontendErrorKind::ArrayExpressionOutsideWindow,
         );
 
         let target = ParseAsType::Vec {

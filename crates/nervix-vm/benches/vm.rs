@@ -5,6 +5,7 @@ use arrow_array::{
     BinaryArray, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray,
     StringArray, TimestampNanosecondArray, UInt32Array, types::Int64Type,
 };
+use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use error_stack::{Report, ResultExt as _};
@@ -284,6 +285,49 @@ fn list_batch(row_count: usize) -> TypedBatch {
         ],
     )
     .expect("benchmark batch must build")
+}
+
+fn collection_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new(
+            "values",
+            DataType::List(StdArc::new(Field::new("item", DataType::Int64, false))),
+            true,
+        ),
+        Field::new("index", DataType::Int64, true),
+    ]))
+}
+
+fn collection_batch(row_count: usize) -> TypedBatch {
+    let mut lengths = Vec::with_capacity(row_count);
+    let mut validity = Vec::with_capacity(row_count);
+    let mut children = Vec::new();
+    for row in 0..row_count {
+        let valid = row % 7 != 0;
+        let length = if valid { row % 4 } else { 0 };
+        lengths.push(length);
+        validity.push(valid);
+        for item in 0..length {
+            children.push(benchmark_row_i64(row) + benchmark_row_i64(item));
+        }
+    }
+    let field = StdArc::new(Field::new("item", DataType::Int64, false));
+    let values = ListArray::try_new(
+        field,
+        OffsetBuffer::from_lengths(lengths),
+        StdArc::new(Int64Array::from(children)),
+        Some(NullBuffer::from(validity)),
+    )
+    .expect("benchmark list offsets and values must agree");
+    let index = Int64Array::from_iter((0..row_count).map(|row| Some(benchmark_row_i64(row % 4))));
+    TypedBatch::try_new(
+        collection_schema(),
+        vec![
+            TypedArray::Generic(StdArc::new(values)),
+            TypedArray::Int64(index),
+        ],
+    )
+    .expect("benchmark collection batch must build")
 }
 
 fn long_tail_schema() -> StdArc<Schema> {
@@ -606,6 +650,37 @@ fn compile_list() -> Arc<CompiledProgram> {
     )
     .map(Arc::new)
     .expect("benchmark program must compile")
+}
+
+fn compile_fixed_collection() -> Arc<CompiledProgram> {
+    let item = StdArc::new(Field::new("item", DataType::Int64, false));
+    compile_numeric_program(
+        "SET constructed = [input.index, input.index], product = dot([input.index, input.index], \
+         [input.index, input.index])",
+        list_schema(),
+        &[
+            ("constructed", DataType::FixedSizeList(item, 2)),
+            ("product", DataType::Int64),
+        ],
+    )
+}
+
+fn compile_ragged_collection() -> Arc<CompiledProgram> {
+    let item = StdArc::new(Field::new("item", DataType::Int64, false));
+    compile_numeric_program(
+        "SET sliced = slice(input.values, 0, 2), member = contains(input.values, input.index), \
+         shared = overlap(input.values, input.values), least = min(input.values), average = \
+         mean(input.values), distance_value = distance(input.values, input.values)",
+        collection_schema(),
+        &[
+            ("sliced", DataType::List(item)),
+            ("member", DataType::Boolean),
+            ("shared", DataType::Boolean),
+            ("least", DataType::Int64),
+            ("average", DataType::Float64),
+            ("distance_value", DataType::Float64),
+        ],
+    )
 }
 
 /// The outputs of the literal-operand programs: each pairs a column with a constant operand.
@@ -2433,6 +2508,8 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
     let nullable_casts_compiled = compile_nullable_casts();
     let text_transform_compiled = compile_text_transform();
     let list_compiled = compile_list();
+    let fixed_collection_compiled = compile_fixed_collection();
+    let ragged_collection_compiled = compile_ragged_collection();
     let key_projection_compiled = compile_key_projection();
     let window_aggregate_input_compiled = compile_window_aggregate_input();
     let correlate_where_compiled = compile_correlate_where();
@@ -2551,6 +2628,31 @@ fn batch_size_sweep_benches(c: &mut Criterion) {
                 ))
             })
         });
+        group.bench_with_input(BenchmarkId::new("fixed_collection", rows), &rows, |b, _| {
+            b.iter(|| {
+                runtime
+                    .block_on(execute_benchmark_program(
+                        black_box(&fixed_collection_compiled),
+                        black_box(&batch),
+                    ))
+                    .assured("the fixed collection benchmark has valid inputs")
+            })
+        });
+        let batch = collection_batch(rows);
+        group.bench_with_input(
+            BenchmarkId::new("ragged_collection", rows),
+            &rows,
+            |b, _| {
+                b.iter(|| {
+                    runtime
+                        .block_on(execute_benchmark_program(
+                            black_box(&ragged_collection_compiled),
+                            black_box(&batch),
+                        ))
+                        .assured("the ragged collection benchmark has valid inputs")
+                })
+            },
+        );
 
         let batch = stateful_batch(&key_projection_compiled, rows);
         group.bench_with_input(BenchmarkId::new("key_projection", rows), &rows, |b, _| {

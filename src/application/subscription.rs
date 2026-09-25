@@ -820,6 +820,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         relay: &RelayName,
+        minimum_version: u64,
     ) -> Result<(), String> {
         let subscriber = self.inner.cluster.local_node_identity().await;
         // Subscription delivery may begin as soon as a prepared schedule activates. A member can
@@ -846,6 +847,7 @@ impl SessionServiceImpl {
                             &subscriber,
                             domain,
                             relay,
+                            minimum_version,
                         )
                         .await;
                     (node_id, result)
@@ -878,6 +880,7 @@ impl SessionServiceImpl {
         subscriber: &ClusterNodeIdentity,
         domain: &DomainName,
         relay: &RelayName,
+        minimum_version: u64,
     ) -> Result<(), String> {
         let response = self
             .inner
@@ -888,6 +891,7 @@ impl SessionServiceImpl {
                     subscriber: subscriber.clone(),
                     domain: domain.clone(),
                     relay: relay.clone(),
+                    minimum_version,
                 },
             )
             .await
@@ -1164,8 +1168,9 @@ impl SessionServiceImpl {
             .subscription_interests
             .acquire(domain, &relay)
             .await;
+        let minimum_version = lease.advertisement_version().await;
         if let Err(error) = self
-            .wait_for_subscription_interest_visibility(domain, &relay)
+            .wait_for_subscription_interest_visibility(domain, &relay, minimum_version)
             .await
         {
             lease.release().await;

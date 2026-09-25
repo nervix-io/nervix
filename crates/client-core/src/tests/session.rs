@@ -19,9 +19,14 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainPace, DomainStatus, FieldName, ParseAsType,
-    RelayName, SchemaField, SubscriptionName,
+    RelayName, SchemaField, SubscriptionName, TransactionInspectionRejection,
+    TransactionInspectionTarget,
 };
-use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, mpsc},
+    task::JoinHandle,
+};
 use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::{
     Request, Response, Status, Streaming,
@@ -31,18 +36,21 @@ use tonic::{
     transport::Server,
 };
 use triomphe::Arc;
+use url::Url;
 
+#[cfg(feature = "autocomplete")]
+use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind};
 use crate::{
-    Client, CommandDisposition, DomainName, Leadership, OutcomeOrigin, ResourceUploadIdentity,
-    ResourceUploadOutcome, SubscriptionEvent, SubscriptionRequest,
+    Client, ClientError, CommandDisposition, ConnectOptions, DomainName, Leadership, OutcomeOrigin,
+    ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent, SubscriptionRequest,
     wire::{
         ClientFrame, ClientMessage, ClientRequest, DomainInfo, DomainList, DomainsObserved,
-        EncodedFrame, LeaderRedirect, LeadershipObserved, NoticeLevel, Reply, ReplyBody,
-        ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice, SessionLimitSettings,
-        SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
-        SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
-        SubscriptionType, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
-        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
+        EncodedFrame, InspectionOutcome, LeaderEndpoints, LeaderRedirect, LeadershipObserved,
+        NoticeLevel, Reply, ReplyBody, ReplyDelivery, RequestId, RowSchema, ServerFrame,
+        ServerNotice, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
+        SubscriptionEndReason, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
+        SubscriptionRowsEncoder, SubscriptionType, UploadDisposition, UploadFailure, UploadFrame,
+        UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
         grpc::{
             EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec, ServerUploadCodec,
             UPLOAD_RESOURCE_PATH,
@@ -167,6 +175,15 @@ struct ReceivedUpload {
 struct SessionService {
     exchanges: mpsc::Sender<ServerExchange>,
     uploads: mpsc::Sender<ReceivedUpload>,
+    fail_upload_replies: Arc<AtomicU64>,
+    upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
+}
+
+enum UploadReplyMode {
+    WrongIdentity,
+    WrongRequestId,
+    Redirect(Url),
+    Reject,
 }
 
 impl NamedService for SessionService {
@@ -196,6 +213,8 @@ impl Service<http::Request<Body>> for SessionService {
                 let mut grpc = Grpc::new(ServerUploadCodec::new(limits()));
                 let upload = InstallUpload {
                     uploads: service.uploads,
+                    fail_upload_replies: service.fail_upload_replies,
+                    upload_reply_mode: service.upload_reply_mode,
                 };
                 Ok(grpc.client_streaming(upload, request).await)
             }),
@@ -235,6 +254,8 @@ impl StreamingService<VerifiedFrame<ClientFrame>> for OpenExchange {
 /// Installs an upload whose chunks add up to its declared size as version 7.
 struct InstallUpload {
     uploads: mpsc::Sender<ReceivedUpload>,
+    fail_upload_replies: Arc<AtomicU64>,
+    upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
 }
 
 impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
@@ -243,6 +264,8 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
 
     fn call(&mut self, request: Request<Streaming<VerifiedFrame<UploadFrame>>>) -> Self::Future {
         let uploads = self.uploads.clone();
+        let fail_upload_replies = self.fail_upload_replies.clone();
+        let upload_reply_mode = self.upload_reply_mode.clone();
         Box::pin(async move {
             let mut inbound = request.into_inner();
             let Some(first) = inbound.message().await? else {
@@ -279,12 +302,40 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
                     assigned_version: None,
                 }
             };
-            let reply = UploadReply {
+            let mut reply = UploadReply {
                 request_id: Some(start.request_id),
                 disposition,
                 message: format!("received {received} bytes"),
                 diagnostics: Vec::new(),
             };
+            let mode = upload_reply_mode.lock().await.take();
+            let reject = matches!(mode.as_ref(), Some(UploadReplyMode::Reject));
+            match mode {
+                Some(UploadReplyMode::WrongIdentity) => {
+                    if let UploadDisposition::Installed {
+                        upload_identity, ..
+                    } = &mut reply.disposition
+                    {
+                        *upload_identity = ResourceUploadIdentity::parse("another-upload")
+                            .assured("the test upload identity is valid");
+                    }
+                }
+                Some(UploadReplyMode::WrongRequestId) => {
+                    reply.request_id = Some(RequestId::new(
+                        NonZeroU64::new(2).assured("the test request identity is non-zero"),
+                    ));
+                }
+                Some(UploadReplyMode::Redirect(leader)) => {
+                    reply.disposition = UploadDisposition::NotLeader(LeaderRedirect {
+                        leader: Some(LeaderEndpoints {
+                            node: node("leader"),
+                            grpc_uri: Some(leader),
+                            web_console_uri: None,
+                        }),
+                    });
+                }
+                Some(UploadReplyMode::Reject) | None => {}
+            }
             let reply = reply
                 .encode(&limits())
                 .map_err(|error| Status::internal(error.to_string()))?;
@@ -295,6 +346,17 @@ impl ClientStreamingService<VerifiedFrame<UploadFrame>> for InstallUpload {
             {
                 return Err(Status::unavailable("the test takes no more uploads"));
             }
+            if reject {
+                return Err(Status::permission_denied("the upload is not authorized"));
+            }
+            if fail_upload_replies
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(Status::unavailable("the installed upload's reply was lost"));
+            }
             Ok(Response::new(reply))
         })
     }
@@ -304,6 +366,8 @@ struct TestServer {
     address: SocketAddr,
     exchanges: mpsc::Receiver<ServerExchange>,
     uploads: mpsc::Receiver<ReceivedUpload>,
+    fail_upload_replies: Arc<AtomicU64>,
+    upload_reply_mode: Arc<Mutex<Option<UploadReplyMode>>>,
     task: JoinHandle<()>,
 }
 
@@ -323,9 +387,13 @@ impl TestServer {
             .assured("a bound listener has an address");
         let (exchange_sender, exchanges) = mpsc::channel(4);
         let (upload_sender, uploads) = mpsc::channel(4);
+        let fail_upload_replies = Arc::new(AtomicU64::new(0));
+        let upload_reply_mode = Arc::new(Mutex::new(None));
         let service = SessionService {
             exchanges: exchange_sender,
             uploads: upload_sender,
+            fail_upload_replies: fail_upload_replies.clone(),
+            upload_reply_mode: upload_reply_mode.clone(),
         };
         let task = tokio::spawn(async move {
             Server::builder()
@@ -338,6 +406,8 @@ impl TestServer {
             address,
             exchanges,
             uploads,
+            fail_upload_replies,
+            upload_reply_mode,
             task,
         }
     }
@@ -357,6 +427,324 @@ impl TestServer {
             .await
             .assured("the server keeps handing exchanges to the test")
     }
+}
+
+#[tokio::test]
+async fn configured_seed_connects_when_the_primary_is_unavailable() {
+    let mut seed = TestServer::start().await;
+    let unused = TcpListener::bind("127.0.0.1:0")
+        .await
+        .assured("loopback accepts a test listener");
+    let primary = unused
+        .local_addr()
+        .assured("a bound listener has an address");
+    drop(unused);
+    let seed_url =
+        Url::parse(&format!("http://{}", seed.address)).assured("the test seed is an HTTP origin");
+    let options = ConnectOptions {
+        seed_servers: vec![seed_url],
+        connect_timeout: Duration::from_millis(250),
+        ..ConnectOptions::default()
+    };
+    let client = within_deadline(Client::connect_with_options(
+        format!("http://{primary}"),
+        Some(domain("tenant")),
+        options,
+    ))
+    .await
+    .assured("the configured seed accepts the session");
+    let mut exchange = seed.next_exchange().await;
+    let listing_client = client.clone();
+    let listing = tokio::spawn(async move { listing_client.list_domains().await });
+    let request = exchange.next_request().await;
+    assert!(matches!(request.request, ClientRequest::ListDomains));
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainList(DomainList {
+                domains: tenant_domains(),
+            }),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(listing)
+            .await
+            .assured("the listing task completes")
+            .assured("the seed answers the listing"),
+        tenant_domains()
+    );
+}
+
+#[tokio::test]
+async fn a_closed_session_recovers_through_a_configured_seed() {
+    let mut primary = TestServer::start().await;
+    let mut seed = TestServer::start().await;
+    let seed_url =
+        Url::parse(&format!("http://{}", seed.address)).assured("the test seed is an HTTP origin");
+    let options = ConnectOptions {
+        seed_servers: vec![seed_url],
+        retry_timeout: Duration::from_secs(5),
+        ..ConnectOptions::default()
+    };
+    let client = within_deadline(Client::connect_with_options(
+        format!("http://{}", primary.address),
+        Some(domain("tenant")),
+        options,
+    ))
+    .await
+    .assured("the primary accepts the session");
+    let exchange = primary.next_exchange().await;
+    drop(exchange);
+    assert!(matches!(
+        within_deadline(client.next_server_event()).await,
+        Err(ClientError::SessionClosed)
+    ));
+
+    let command_client = client.clone();
+    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let mut recovered = seed.next_exchange().await;
+    let request = recovered.next_request().await;
+    let ClientRequest::Command(sent) = request.request else {
+        panic!("the command is retried through the seed");
+    };
+    assert_eq!(sent.domain, Some(domain("tenant")));
+    recovered
+        .reply(
+            request.request_id,
+            command_outcome(&sent.execution_reference, completed(), "recovered"),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(command)
+        .await
+        .assured("the command task completes")
+        .assured("the seed answers the command");
+    assert!(outcome.succeeded());
+    let recovered_requests = client.inner.exchange.lock().await.requests();
+    assert!(matches!(
+        client
+            .recover_session(crate::client::RecoveryMode::IfClosed)
+            .await,
+        Ok(crate::client::SessionRecovery::Ready)
+    ));
+    let current_requests = client.inner.exchange.lock().await.requests();
+    assert!(
+        Arc::ptr_eq(&recovered_requests, &current_requests),
+        "a concurrent caller must keep the session already recovered by another caller"
+    );
+}
+
+#[tokio::test]
+async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
+    let mut primary = TestServer::start().await;
+    let mut seed = TestServer::start().await;
+    let seed_url =
+        Url::parse(&format!("http://{}", seed.address)).assured("the test seed is an HTTP origin");
+    let options = ConnectOptions {
+        seed_servers: vec![seed_url],
+        retry_timeout: Duration::from_secs(5),
+        ..ConnectOptions::default()
+    };
+    let client = within_deadline(Client::connect_with_options(
+        format!("http://{}", primary.address),
+        Some(domain("tenant")),
+        options,
+    ))
+    .await
+    .assured("the primary accepts the session");
+    let mut first_exchange = primary.next_exchange().await;
+    let target = TransactionInspectionTarget::Transaction {
+        transaction_id: "tx-1".to_string(),
+    };
+    let inspector = client.clone();
+    let inspection = tokio::spawn(async move { inspector.inspect_transaction(target, None).await });
+    let first = first_exchange.next_request().await;
+    assert!(matches!(
+        first.request,
+        ClientRequest::InspectTransaction(_)
+    ));
+    drop(first_exchange);
+
+    let mut recovered_exchange = seed.next_exchange().await;
+    let retried = recovered_exchange.next_request().await;
+    let ClientRequest::InspectTransaction(request) = retried.request else {
+        panic!("inspection must be retried on the recovered exchange");
+    };
+    assert_eq!(
+        request.target,
+        TransactionInspectionTarget::Transaction {
+            transaction_id: "tx-1".to_string(),
+        }
+    );
+    let rejected = InspectionOutcome::Rejected {
+        rejection: TransactionInspectionRejection::TransactionNotFound,
+        message: "transaction not found".to_string(),
+    };
+    recovered_exchange
+        .reply(
+            retried.request_id,
+            ReplyBody::Inspection(rejected.clone()),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(inspection)
+            .await
+            .assured("the inspection task completes")
+            .assured("the seed answers the inspection"),
+        rejected
+    );
+}
+
+#[tokio::test]
+async fn attaching_a_transaction_adopts_its_domain_and_status() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let attaching = client.clone();
+    let task = tokio::spawn(async move { attaching.attach_transaction("tx-1").await });
+    let request = exchange.next_request().await;
+    let ClientRequest::AttachTransaction(sent) = request.request else {
+        panic!("an attach request is sent");
+    };
+    assert_eq!(sent.transaction_id, "tx-1");
+    let status = crate::TransactionStatus::new(
+        "tx-1".to_string(),
+        domain("bound"),
+        crate::TransactionLifecycle::Open,
+        crate::TransactionPosition::new(0),
+        0,
+    )
+    .assured("a newly opened test transaction is consistent");
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::Attach(crate::wire::AttachOutcome {
+                disposition: crate::wire::AttachDisposition::Attached(status.clone()),
+                message: "attached".to_string(),
+                diagnostics: Vec::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    assert!(
+        within_deadline(task)
+            .await
+            .assured("the attach task completes")
+            .assured("the server answers the attach")
+            .succeeded()
+    );
+    assert_eq!(client.domain().await, Some(domain("bound")));
+    assert_eq!(client.transaction_status().await, Some(status));
+}
+
+#[tokio::test]
+async fn lost_begin_append_and_commit_replies_retry_the_exact_request() {
+    for query in [
+        "BEGIN TRANSACTION;",
+        "CREATE SCHEMA recovered_record (id I64);",
+        "COMMIT;",
+    ] {
+        tokio::task::consume_budget().await;
+        let mut primary = TestServer::start().await;
+        let mut seed = TestServer::start().await;
+        let seed_url = Url::parse(&format!("http://{}", seed.address))
+            .assured("the test seed is an HTTP origin");
+        let options = ConnectOptions {
+            seed_servers: vec![seed_url],
+            retry_timeout: Duration::from_secs(5),
+            ..ConnectOptions::default()
+        };
+        let client = within_deadline(Client::connect_with_options(
+            format!("http://{}", primary.address),
+            Some(domain("tenant")),
+            options,
+        ))
+        .await
+        .assured("the primary accepts the session");
+        let mut first_exchange = primary.next_exchange().await;
+        let execution = client.prepare_execution(query).await;
+        let command_client = client.clone();
+        let task = tokio::spawn(async move { command_client.execute_prepared(&execution).await });
+        let first = first_exchange.next_request().await;
+        let ClientRequest::Command(first_command) = first.request else {
+            panic!("the client submitted a command");
+        };
+        drop(first_exchange);
+
+        let mut recovered_exchange = seed.next_exchange().await;
+        let recovered = recovered_exchange.next_request().await;
+        let ClientRequest::Command(recovered_command) = recovered.request else {
+            panic!("the client retried the lost command");
+        };
+        assert_eq!(recovered_command.query, first_command.query);
+        assert_eq!(recovered_command.domain, first_command.domain);
+        assert_eq!(
+            recovered_command.execution_reference,
+            first_command.execution_reference
+        );
+        assert_eq!(
+            recovered_command.expected_transaction_position,
+            first_command.expected_transaction_position
+        );
+        assert_eq!(
+            recovered_command.expected_preview,
+            first_command.expected_preview
+        );
+        let mut outcome = command_outcome(
+            &recovered_command.execution_reference,
+            completed(),
+            "recovered exact command",
+        );
+        if let ReplyBody::Command(command) = &mut outcome {
+            command.origin = OutcomeOrigin::Recovered;
+        }
+        recovered_exchange
+            .reply(recovered.request_id, outcome, &limits())
+            .await;
+        let result = within_deadline(task)
+            .await
+            .assured("the command task completes")
+            .assured("the exact retry is answered");
+        assert!(result.succeeded());
+        assert_eq!(result.origin, Some(OutcomeOrigin::Recovered));
+    }
+}
+
+#[tokio::test]
+async fn an_unanswered_command_ends_with_a_reusable_uncertain_identity() {
+    let mut server = TestServer::start().await;
+    let options = ConnectOptions {
+        request_timeout: Duration::from_millis(50),
+        retry_timeout: Duration::from_millis(250),
+        ..ConnectOptions::default()
+    };
+    let client = within_deadline(Client::connect_with_options(
+        format!("http://{}", server.address),
+        Some(domain("tenant")),
+        options,
+    ))
+    .await
+    .assured("the test server accepts the session");
+    let mut exchange = server.next_exchange().await;
+    let execution = client.prepare_execution("SHOW CLUSTER STATUS;").await;
+    let expected = execution.reference().clone();
+    let command_client = client.clone();
+    let task = tokio::spawn(async move { command_client.execute_prepared(&execution).await });
+    let request = exchange.next_request().await;
+    let ClientRequest::Command(sent) = request.request else {
+        panic!("the command was sent");
+    };
+    assert_eq!(sent.execution_reference, expected);
+    let error = within_deadline(task)
+        .await
+        .assured("the command task ends")
+        .expect_err("no reply can prove success");
+    let ClientError::UncertainCommand { reference, .. } = error else {
+        panic!("the deadline must report uncertainty");
+    };
+    assert_eq!(reference, expected);
 }
 
 #[tokio::test]
@@ -433,6 +821,166 @@ async fn replies_reach_their_requests_in_whatever_order_they_arrive() {
         .await
         .assured("the observed domain list is current");
     assert_eq!(observed, tenant_domains());
+}
+
+#[tokio::test]
+async fn a_domain_list_recovers_after_its_session_closes() {
+    let mut primary = TestServer::start().await;
+    let mut seed = TestServer::start().await;
+    let seed_url =
+        Url::parse(&format!("http://{}", seed.address)).assured("the seed is an HTTP origin");
+    let client = Client::connect_with_options(
+        format!("http://{}", primary.address),
+        Some(domain("tenant")),
+        ConnectOptions {
+            seed_servers: vec![seed_url],
+            retry_timeout: Duration::from_secs(5),
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    .assured("the primary accepts the session");
+    let mut first_exchange = primary.next_exchange().await;
+    let listing_client = client.clone();
+    let listing = tokio::spawn(async move { listing_client.list_domains().await });
+    let first = first_exchange.next_request().await;
+    assert!(matches!(first.request, ClientRequest::ListDomains));
+    drop(first_exchange);
+
+    let mut recovered_exchange = seed.next_exchange().await;
+    let retried = recovered_exchange.next_request().await;
+    assert!(matches!(retried.request, ClientRequest::ListDomains));
+    recovered_exchange
+        .reply(
+            retried.request_id,
+            ReplyBody::DomainList(DomainList {
+                domains: tenant_domains(),
+            }),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(listing)
+            .await
+            .assured("the listing task finishes")
+            .assured("the recovered listing succeeds"),
+        tenant_domains()
+    );
+}
+
+#[cfg(feature = "autocomplete")]
+#[tokio::test]
+async fn a_suggestion_recovers_after_its_session_closes() {
+    let mut primary = TestServer::start().await;
+    let mut seed = TestServer::start().await;
+    let seed_url =
+        Url::parse(&format!("http://{}", seed.address)).assured("the seed is an HTTP origin");
+    let client = Client::connect_with_options(
+        format!("http://{}", primary.address),
+        Some(domain("tenant")),
+        ConnectOptions {
+            seed_servers: vec![seed_url],
+            retry_timeout: Duration::from_secs(5),
+            ..ConnectOptions::default()
+        },
+    )
+    .await
+    .assured("the primary accepts the session");
+    let mut first_exchange = primary.next_exchange().await;
+    let suggestion_client = client.clone();
+    let suggestion = tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7).await });
+    let first = first_exchange.next_request().await;
+    assert!(matches!(first.request, ClientRequest::Suggest(_)));
+    drop(first_exchange);
+
+    let mut recovered_exchange = seed.next_exchange().await;
+    let retried = recovered_exchange.next_request().await;
+    assert!(matches!(retried.request, ClientRequest::Suggest(_)));
+    recovered_exchange
+        .reply(
+            retried.request_id,
+            ReplyBody::Suggest(SuggestOutcome {
+                suggestions: vec![Suggestion {
+                    value: "SCHEMA".to_string(),
+                    kind: SuggestionKind::Text,
+                }],
+            }),
+            &limits(),
+        )
+        .await;
+    let suggestions = within_deadline(suggestion)
+        .await
+        .assured("the suggestion task finishes")
+        .assured("the recovered suggestion succeeds");
+    assert_eq!(suggestions[0].value, "SCHEMA");
+}
+
+#[cfg(feature = "autocomplete")]
+#[tokio::test]
+async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    for order in [[2, 0, 1], [1, 2, 0], [0, 1, 2]] {
+        let suggestion_client = client.clone();
+        let suggestion = tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7).await });
+        let listing_client = client.clone();
+        let listing = tokio::spawn(async move { listing_client.list_domains().await });
+        let command_client = client.clone();
+        let command =
+            tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            tokio::task::consume_budget().await;
+            requests.push(exchange.next_request().await);
+        }
+        for index in order {
+            tokio::task::consume_budget().await;
+            let request = &requests[index];
+            let body = match &request.request {
+                ClientRequest::Suggest(suggest) => {
+                    assert_eq!(suggest.input(), "CREATE ");
+                    ReplyBody::Suggest(SuggestOutcome {
+                        suggestions: vec![Suggestion {
+                            value: "SCHEMA".to_string(),
+                            kind: SuggestionKind::Text,
+                        }],
+                    })
+                }
+                ClientRequest::ListDomains => ReplyBody::DomainList(DomainList {
+                    domains: tenant_domains(),
+                }),
+                ClientRequest::Command(command) => command_outcome(
+                    &command.execution_reference,
+                    completed(),
+                    "cluster is healthy",
+                ),
+                other => panic!("the client sent an unexpected request: {other:?}"),
+            };
+            exchange.reply(request.request_id, body, &limits()).await;
+        }
+        let suggestions = within_deadline(suggestion)
+            .await
+            .assured("the suggestion task finishes")
+            .assured("the suggestion request succeeds");
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].value, "SCHEMA");
+        assert_eq!(
+            within_deadline(listing)
+                .await
+                .assured("the listing task finishes")
+                .assured("the listing request succeeds"),
+            tenant_domains()
+        );
+        assert!(
+            within_deadline(command)
+                .await
+                .assured("the command task finishes")
+                .assured("the command request succeeds")
+                .succeeded()
+        );
+    }
 }
 
 #[tokio::test]
@@ -678,6 +1226,70 @@ async fn a_command_waits_for_an_election_and_is_sent_again_with_its_reference() 
     );
 }
 
+#[tokio::test]
+async fn a_command_redirect_keeps_its_execution_reference() {
+    let mut primary = TestServer::start().await;
+    let mut leader = TestServer::start().await;
+    let client = primary.connect().await;
+    let mut first_exchange = primary.next_exchange().await;
+    let command_client = client.clone();
+    let command = tokio::spawn(async move {
+        command_client
+            .execute("CREATE SCHEMA redirected (id I64);")
+            .await
+    });
+    let first = first_exchange.next_request().await;
+    let ClientRequest::Command(first_command) = first.request else {
+        panic!("the command is sent to the first node");
+    };
+    let original_domain = first_command.domain.clone();
+    client.set_domain(Some(domain("another_domain"))).await;
+    let leader_url =
+        Url::parse(&format!("http://{}", leader.address)).assured("the leader is an HTTP origin");
+    first_exchange
+        .reply(
+            first.request_id,
+            command_outcome(
+                &first_command.execution_reference,
+                CommandDisposition::NotLeader(LeaderRedirect {
+                    leader: Some(LeaderEndpoints {
+                        node: node("leader"),
+                        grpc_uri: Some(leader_url),
+                        web_console_uri: None,
+                    }),
+                }),
+                "follow the leader",
+            ),
+            &limits(),
+        )
+        .await;
+    let mut redirected_exchange = leader.next_exchange().await;
+    let retried = redirected_exchange.next_request().await;
+    let ClientRequest::Command(retried_command) = retried.request else {
+        panic!("the command is retried on the leader");
+    };
+    assert_eq!(retried_command.query, first_command.query);
+    assert_eq!(retried_command.domain, original_domain);
+    assert_eq!(
+        retried_command.execution_reference,
+        first_command.execution_reference
+    );
+    redirected_exchange
+        .reply(
+            retried.request_id,
+            command_outcome(&retried_command.execution_reference, completed(), "created"),
+            &limits(),
+        )
+        .await;
+    assert!(
+        within_deadline(command)
+            .await
+            .assured("the command task completes")
+            .assured("the leader answers the retry")
+            .succeeded()
+    );
+}
+
 fn write_file(path: &Path, bytes: &[u8]) {
     std::fs::write(path, bytes).assured("the test directory accepts files");
 }
@@ -704,6 +1316,7 @@ async fn an_upload_streams_its_archive_and_reports_the_installed_version() {
     let outcome = within_deadline(client.upload_resource_from_directory_with_identity(
         "model",
         directory.path(),
+        domain("tenant"),
         identity.clone(),
         move |bytes| {
             reported.fetch_add(bytes, Ordering::Relaxed);
@@ -735,4 +1348,171 @@ async fn an_upload_streams_its_archive_and_reports_the_installed_version() {
             failure: None,
         })
     );
+}
+
+#[tokio::test]
+async fn a_lost_upload_reply_retries_with_the_same_identity_and_archive() {
+    let mut primary = TestServer::start().await;
+    let mut seed = TestServer::start().await;
+    primary.fail_upload_replies.store(1, Ordering::SeqCst);
+    let seed_url =
+        Url::parse(&format!("http://{}", seed.address)).assured("the test seed is an HTTP origin");
+    let options = ConnectOptions {
+        seed_servers: vec![seed_url],
+        retry_timeout: Duration::from_secs(5),
+        ..ConnectOptions::default()
+    };
+    let client = within_deadline(Client::connect_with_options(
+        format!("http://{}", primary.address),
+        Some(domain("tenant")),
+        options,
+    ))
+    .await
+    .assured("the primary accepts the session");
+    let _exchange = primary.next_exchange().await;
+    let directory = tempfile::tempdir().assured("a temporary directory is available");
+    write_file(&directory.path().join("payload.bin"), &[3_u8; 1000]);
+    let identity =
+        ResourceUploadIdentity::parse("stable-upload").assured("the test identity is valid");
+
+    let outcome = within_deadline(client.upload_resource_from_directory_with_identity(
+        "model",
+        directory.path(),
+        domain("tenant"),
+        identity.clone(),
+        |_| {},
+    ))
+    .await
+    .assured("the upload retry completes");
+
+    let first = within_deadline(primary.uploads.recv())
+        .await
+        .assured("the primary received the first upload");
+    let second = within_deadline(seed.uploads.recv())
+        .await
+        .assured("the seed received the retry");
+    assert_eq!(first.start.upload_identity, identity);
+    assert_eq!(second.start.upload_identity, identity);
+    assert_eq!(second.start.domain, first.start.domain);
+    assert_eq!(second.start.resource, first.start.resource);
+    assert_eq!(second.archive, first.archive);
+    assert!(outcome.succeeded());
+}
+
+#[tokio::test]
+async fn an_upload_redirect_keeps_its_identity_and_archive() {
+    let mut primary = TestServer::start().await;
+    let mut leader = TestServer::start().await;
+    let leader_url =
+        Url::parse(&format!("http://{}", leader.address)).assured("the leader is an HTTP origin");
+    *primary.upload_reply_mode.lock().await = Some(UploadReplyMode::Redirect(leader_url));
+    let client = primary.connect().await;
+    let _exchange = primary.next_exchange().await;
+    let directory = tempfile::tempdir().assured("a temporary directory is available");
+    write_file(&directory.path().join("payload.bin"), &[7_u8; 1000]);
+    let identity =
+        ResourceUploadIdentity::parse("redirected-upload").assured("the test identity is valid");
+
+    let outcome = within_deadline(client.upload_resource_from_directory_with_identity(
+        "model",
+        directory.path(),
+        domain("tenant"),
+        identity.clone(),
+        |_| {},
+    ))
+    .await
+    .assured("the redirected upload completes");
+
+    let first = within_deadline(primary.uploads.recv())
+        .await
+        .assured("the primary received the first attempt");
+    let second = within_deadline(leader.uploads.recv())
+        .await
+        .assured("the leader received the retry");
+    assert_eq!(first.start.upload_identity, identity);
+    assert_eq!(second.start.upload_identity, identity);
+    assert_eq!(second.archive, first.archive);
+    assert!(outcome.succeeded());
+}
+
+#[tokio::test]
+async fn a_prepared_upload_uses_its_captured_domain() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let _exchange = server.next_exchange().await;
+    let directory = tempfile::tempdir().assured("a temporary directory is available");
+    write_file(&directory.path().join("payload.bin"), &[7_u8; 1000]);
+    let query = format!(
+        "UPLOAD RESOURCE model VERSION '{}';",
+        directory.path().display()
+    );
+    let prepared = client.prepare_execution(query).await;
+    client.set_domain(Some(domain("another_domain"))).await;
+
+    let outcome = within_deadline(client.execute_prepared(&prepared))
+        .await
+        .assured("the upload completes");
+    let received = within_deadline(server.uploads.recv())
+        .await
+        .assured("the server received the upload");
+    assert!(outcome.succeeded());
+    assert_eq!(received.start.domain, domain("tenant"));
+    assert_eq!(received.start.upload_identity, *prepared.upload_identity());
+}
+
+#[tokio::test]
+async fn malformed_upload_replies_are_rejected_by_their_correlations() {
+    for mode in [
+        UploadReplyMode::WrongIdentity,
+        UploadReplyMode::WrongRequestId,
+    ] {
+        tokio::task::consume_budget().await;
+        let mut server = TestServer::start().await;
+        *server.upload_reply_mode.lock().await = Some(mode);
+        let client = server.connect().await;
+        let _exchange = server.next_exchange().await;
+        let directory = tempfile::tempdir().assured("a temporary directory is available");
+        write_file(&directory.path().join("payload.bin"), &[7_u8; 1000]);
+        let identity = ResourceUploadIdentity::parse("correlated-upload")
+            .assured("the test identity is valid");
+        let error = within_deadline(client.upload_resource_from_directory_with_identity(
+            "model",
+            directory.path(),
+            domain("tenant"),
+            identity,
+            |_| {},
+        ))
+        .await
+        .expect_err("a reply for another upload or request cannot report success");
+        assert!(matches!(
+            error,
+            ClientError::UploadIdentityMismatch { .. } | ClientError::UnexpectedReply { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn upload_permission_denial_is_reported_without_retry() {
+    let mut server = TestServer::start().await;
+    *server.upload_reply_mode.lock().await = Some(UploadReplyMode::Reject);
+    let client = server.connect().await;
+    let _exchange = server.next_exchange().await;
+    let directory = tempfile::tempdir().assured("a temporary directory is available");
+    write_file(&directory.path().join("payload.bin"), &[7_u8; 1000]);
+    let identity =
+        ResourceUploadIdentity::parse("denied-upload").assured("the test identity is valid");
+
+    let error = within_deadline(client.upload_resource_from_directory_with_identity(
+        "model",
+        directory.path(),
+        domain("tenant"),
+        identity,
+        |_| {},
+    ))
+    .await
+    .expect_err("the server denied the upload");
+    let ClientError::UploadResource(status) = error else {
+        panic!("permission denial has a typed upload status");
+    };
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
 }
