@@ -10,7 +10,8 @@
 use std::{io, net::SocketAddr};
 
 use nervix_models::NodeEndpoint;
-use tokio::net::lookup_host;
+
+use crate::socket::lookup_host;
 
 /// One advertised address and the certificate name expected there.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]

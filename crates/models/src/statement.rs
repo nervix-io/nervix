@@ -33,8 +33,8 @@ use crate::{
     SubjectName, SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest,
     UdfName, UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
     WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
-    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
-    WindowProcessorName, WireSchemaName,
+    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetReason,
+    WasmStateResetScope, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -917,6 +917,7 @@ pub struct DescribeWindowProcessor {
 )]
 pub struct DescribeWasmProcessor {
     pub name: WasmProcessorName,
+    pub format: InspectionFormat,
 }
 
 #[derive(
@@ -942,11 +943,11 @@ pub struct DescribePlacement {
 )]
 pub struct DescribeTransaction {
     pub request: TransactionInspectionRequest,
-    pub format: TransactionReportFormat,
+    pub format: InspectionFormat,
 }
 
-/// How `DESCRIBE TRANSACTION` renders the report it read. `TEXT` is the default; both formats
-/// render the same report, and the typed report travels beside either rendering.
+/// How an inspection statement renders the typed facts it read. `TEXT` is the default; the typed
+/// inspection travels beside either rendering.
 #[derive(
     Debug,
     Clone,
@@ -963,7 +964,7 @@ pub struct DescribeTransaction {
     AsRefStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum TransactionReportFormat {
+pub enum InspectionFormat {
     #[default]
     Text,
     Json,
@@ -5149,7 +5150,11 @@ impl ScheduledNode {
             generations.begin_every_branch();
         }
         self.wasm_state_generations = Some(generations);
-        self.wasm_state_reset = existing.wasm_state_reset.clone();
+        self.wasm_state_reset = if binding_changed {
+            None
+        } else {
+            existing.wasm_state_reset.clone()
+        };
         // A recovery attempt is spent on the lifetime it was admitted for. A changed binding
         // restarts every lifetime, so the attempts recorded against the previous ones no longer
         // name anything this entry can refuse.
@@ -5184,6 +5189,7 @@ impl ScheduledNode {
         &mut self,
         request: CommandExecutionReference,
         scope: WasmStateResetScope,
+        reason: WasmStateResetReason,
     ) -> bool {
         let Some(generations) = self.wasm_state_generations.as_mut() else {
             return false;
@@ -5196,7 +5202,7 @@ impl ScheduledNode {
             return false;
         }
         generations.begin_reset(&scope);
-        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope));
+        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope, reason));
         true
     }
 

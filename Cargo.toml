@@ -103,6 +103,7 @@ indexmap = { workspace = true }
 meticulous = { workspace = true }
 multer = { workspace = true }
 nervix-approx-into = { workspace = true }
+nervix-bounded-write = { workspace = true }
 nervix-client-core = { workspace = true }
 nervix-client-wire = { workspace = true }
 nervix-connector = { workspace = true }
@@ -267,6 +268,7 @@ members = [
   ".",
   "crates/approx-into",
   "crates/benchmark",
+  "crates/bounded-write",
   "crates/client-core",
   "crates/client-wire",
   "crates/connector",
@@ -437,6 +439,7 @@ mongodb = { version = "3.6.0", default-features = false, features = [
 multer = "3"
 mysql_async = "0.36.2"
 nervix-approx-into = { package = "nervix-approx-into", path = "crates/approx-into" }
+nervix-bounded-write = { package = "nervix-bounded-write", path = "crates/bounded-write" }
 nervix-client-core = { package = "nervix-client-core", path = "crates/client-core" }
 nervix-client-wire = { package = "nervix-client-wire", path = "crates/client-wire" }
 nervix-connector = { package = "nervix-connector", path = "crates/connector" }

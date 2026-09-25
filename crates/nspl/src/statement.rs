@@ -196,6 +196,8 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
             vec!["VERSION".to_string()]
         } else if open && let Statement::DescribeTransaction(describe) = &statement {
             crate::describe_transaction::describe_transaction_tail(describe, &tokens)
+        } else if open && matches!(&statement, Statement::DescribeWasmProcessor(_)) {
+            crate::describe_wasm_processor::describe_wasm_processor_tail(&tokens)
         } else if open && let Statement::RebindResource(rebind) = &statement {
             if matches!(
                 rebind.selection,
@@ -2035,6 +2037,7 @@ mod tests {
             parsed,
             Statement::DescribeWasmProcessor(nervix_models::DescribeWasmProcessor {
                 name: WasmProcessorName::parse("filter_even").expect("valid name"),
+                format: nervix_models::InspectionFormat::Text,
             })
         );
     }
@@ -2044,6 +2047,17 @@ mod tests {
         let input = "DESCRIBE RESOURCE fraud_model ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"VERSION".to_string()));
+    }
+
+    #[test]
+    fn wasm_description_offers_the_shared_inspection_format() {
+        let input = "DESCRIBE WASM PROCESSOR filter_even ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"FORMAT".to_string()));
+        let input = "DESCRIBE WASM PROCESSOR filter_even FORMAT ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"JSON".to_string()));
+        assert!(suggestions.contains(&"TEXT".to_string()));
     }
 
     #[test]

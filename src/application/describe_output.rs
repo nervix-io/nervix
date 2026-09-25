@@ -7,8 +7,11 @@
 //! - **Depends on.** The Models and the runtime reports it renders.
 //! - **Must not know.** Where the values it renders were gathered.
 
+use std::fmt::Write as _;
+
 use ahash::{HashMap, HashSet};
 use arch_into::ArchInto;
+use meticulous::ResultExt as _;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
     DataflowNodeStatusEnvelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
@@ -20,7 +23,7 @@ use nervix_models::{
     IngestSource, IngestTimestampSource, KafkaOffsetMode, Model, ModelName, MongoDbConflictAction,
     MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
     ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ScheduledNode,
-    WasmStateResetScope, expression_to_nspl, ingest_quiesce_to_nspl,
+    WasmStateInspection, expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use tokio::time::Duration;
@@ -1005,7 +1008,7 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
     name: impl Into<ModelName>,
     processor: &nervix_models::CreateWasmProcessor,
     scheduled_node: Option<&ScheduledNode>,
-    state_lines: Vec<String>,
+    inspection: Option<&WasmStateInspection>,
 ) -> String {
     let name = name.into();
     let mut lines = vec![
@@ -1040,9 +1043,37 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
         "replicated state: true".to_string(),
     ]);
     lines.extend(format_processor_output_lines(&processor.output_routes));
-    lines.extend(format_wasm_state_recovery_lines(scheduled_node));
-    lines.extend(state_lines);
+    lines.extend(format_wasm_state_reset_lines(inspection));
+    lines.extend(format_wasm_state_recovery_lines(inspection));
+    lines.extend(format_wasm_checkpoint_lines(inspection));
     lines.join("\n")
+}
+
+fn format_wasm_state_reset_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+    let Some(inspection) = inspection else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "state default generation: {}",
+        inspection.default_generation
+    )];
+    let Some(reset) = &inspection.reset else {
+        return lines;
+    };
+    let scope = reset.reset.scope().kind();
+    lines.push(format!(
+        "state reset: {}, {scope}, generation {}",
+        reset.reset.phase().as_ref(),
+        reset.generation
+    ));
+    lines.push(format!(
+        "state reset reason: {}",
+        reset.reset.reason().as_ref()
+    ));
+    if let Some(readiness) = inspection.reset_readiness {
+        lines.push(format!("state reset readiness: {}", readiness.as_ref()));
+    }
+    lines
 }
 
 /// What became of the one recovery attempt each refused guest-state lifetime was worth.
@@ -1051,22 +1082,83 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
 /// its attempt without producing a usable lifetime are the three states an operator acts on, so all
 /// three are reported. The branch is named by the scope alone, because a branch key may carry
 /// payload values.
-fn format_wasm_state_recovery_lines(scheduled_node: Option<&ScheduledNode>) -> Vec<String> {
-    let Some(recoveries) = scheduled_node.and_then(ScheduledNode::wasm_state_recoveries) else {
+fn format_wasm_state_recovery_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+    let Some(inspection) = inspection else {
         return Vec::new();
     };
     let mut lines = Vec::new();
-    for (scope, recovery) in recoveries.iter() {
-        let selected = match scope {
-            WasmStateResetScope::Unbranched => "unbranched",
-            WasmStateResetScope::Branch(_) => "branch",
-            WasmStateResetScope::AllBranches => "all branches",
-        };
+    for recovery in &inspection.recoveries {
+        let selected = recovery.scope.kind();
         lines.push(format!(
             "rejected state recovery: {selected}, {}, {} (generation {})",
-            recovery.rejection(),
-            recovery.outcome(),
-            recovery.generation()
+            recovery.rejection, recovery.outcome, recovery.generation
+        ));
+    }
+    if inspection.omitted_recoveries > 0 {
+        lines.push(format!(
+            "rejected state recoveries omitted: {}",
+            inspection.omitted_recoveries
+        ));
+    }
+    lines
+}
+
+fn format_wasm_checkpoint_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+    let Some(inspection) = inspection else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for checkpoint in &inspection.checkpoints {
+        let mut branch = "unbranched".to_string();
+        if let Some(fingerprint) = checkpoint.branch {
+            branch.clear();
+            for byte in fingerprint.fingerprint() {
+                write!(branch, "{byte:02x}")
+                    .assured("writing fixed-size fingerprint bytes to String cannot fail");
+            }
+        }
+        let committed = match checkpoint.committed_revision {
+            Some(revision) => revision.to_string(),
+            None => "none".to_string(),
+        };
+        let latest = match checkpoint.latest_revision {
+            Some(revision) => revision.to_string(),
+            None => "none".to_string(),
+        };
+        let required = match checkpoint.required_replicas {
+            Some(count) => count.to_string(),
+            None => "unknown".to_string(),
+        };
+        let confirmed = match checkpoint.confirmed_replicas {
+            Some(count) => count.to_string(),
+            None => "unknown".to_string(),
+        };
+        lines.push(format!(
+            "checkpoint branch={branch} generation={} committed_revision={committed} \
+             latest_revision={latest} stage={} required_replicas={required} \
+             confirmed_replicas={confirmed}",
+            checkpoint.generation,
+            checkpoint.stage.as_ref(),
+        ));
+    }
+    let counts = &inspection.checkpoint_counts;
+    lines.insert(0, format!("state structures: {}", counts.total));
+    lines.insert(
+        1,
+        format!("checkpoints awaiting local storage: {}", counts.captured),
+    );
+    lines.insert(
+        2,
+        format!(
+            "checkpoints awaiting replicas: {}",
+            counts.awaiting_replicas
+        ),
+    );
+    lines.insert(3, format!("failed checkpoints: {}", counts.failed));
+    if inspection.omitted_checkpoints > 0 {
+        lines.push(format!(
+            "checkpoints omitted: {}",
+            inspection.omitted_checkpoints
         ));
     }
     lines

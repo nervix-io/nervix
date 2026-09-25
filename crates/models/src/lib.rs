@@ -38,6 +38,7 @@ mod statement;
 mod timestamp;
 mod udf;
 mod wasm_state_generation;
+mod wasm_state_inspection;
 
 pub use canonical::{
     CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
@@ -162,8 +163,8 @@ pub use statement::{
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
     InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, InputCollectPolicy, KafkaConfigEntry, KafkaIngestMode,
-    KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, MaterializedRelayState,
+    IngestSource, IngestTimestampSource, InputCollectPolicy, InspectionFormat, KafkaConfigEntry,
+    KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, MaterializedRelayState,
     MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry, MongoDbConflictAction,
     MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
     MySqlConflictAction, MySqlValueMapping, NatsConfigEntry, NatsIngestMode,
@@ -181,15 +182,19 @@ pub use statement::{
     SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
     SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
     StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
-    SubscriptionLiteral, SyslogConfigEntry, TransactionReportFormat, UncordonNode,
-    UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
-    WasmRejectedStatePolicy, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    SubscriptionLiteral, SyslogConfigEntry, UncordonNode, UniquelyKindedModel, UploadResource,
+    VhostTlsResource, WasmProcessorLimits, WasmRejectedStatePolicy, WebsocketsConfigEntry,
+    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry,
+    ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
 pub use wasm_state_generation::{
     InvalidWasmStateGeneration, WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations,
     WasmStateRecoveries, WasmStateRecovery, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
-    WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
+    WasmStateReset, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
+};
+pub use wasm_state_inspection::{
+    WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
+    WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
 };

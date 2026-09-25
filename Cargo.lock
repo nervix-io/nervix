@@ -6398,6 +6398,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-bounded-write"
+version = "0.1.0-dev"
+dependencies = [
+ "meticulous",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nervix-cli"
 version = "0.1.0-dev"
 dependencies = [
@@ -6963,6 +6971,9 @@ dependencies = [
  "ahash",
  "alloc_count",
  "arch-into",
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
  "bytes",
  "dashmap 6.2.1",
  "error-stack",
@@ -7179,6 +7190,7 @@ dependencies = [
  "multer",
  "mysql_async",
  "nervix-approx-into",
+ "nervix-bounded-write",
  "nervix-client-core",
  "nervix-client-wire",
  "nervix-connector",

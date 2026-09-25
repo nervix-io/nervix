@@ -191,6 +191,7 @@ pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome
             preview: preview(1),
         }),
         inspection: None,
+        wasm_state: None,
     }
 }
 

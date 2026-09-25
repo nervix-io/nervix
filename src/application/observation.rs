@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use arch_into::ArchInto;
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_dataflow_graph::DataflowNodeHealth;
 use nervix_execution::MemoryClass;
 use nervix_interconnect::{
@@ -34,9 +34,9 @@ use nervix_models::{
     DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor,
     DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay,
     DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
-    DescribeWindowProcessor, DomainName, DomainStatus, LookupName, LookupQuery, Model, ModelKind,
-    ModelName, NodeRef, ParseAsType, RelayName, ResourceId, ScheduledNode,
-    ShowRelayMaterializedState, UniquelyKindedModel,
+    DescribeWindowProcessor, DomainName, DomainStatus, InspectionFormat, LookupName, LookupQuery,
+    Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ResourceId, ScheduledNode,
+    ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tokio::time::Duration;
@@ -810,10 +810,10 @@ impl SessionServiceImpl {
         metric_kind: &str,
     ) -> RemoteDescribeMetricsEnvelope {
         let identifier = identifier.into();
-        let state = if let ModelKind::WasmProcessor = kind {
+        let checkpoints = if let ModelKind::WasmProcessor = kind {
             self.inner
                 .runtime
-                .describe_wasm_processor_state_for(domain, identifier.clone())
+                .inspect_wasm_processor_state_for(domain, identifier.clone())
         } else {
             Vec::new()
         };
@@ -822,7 +822,7 @@ impl SessionServiceImpl {
                 .inner
                 .runtime
                 .describe_metrics_for(domain, metric_kind, identifier),
-            state,
+            checkpoints,
         }
     }
 
@@ -1396,15 +1396,26 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(message),
         };
-        command_ok(append_metrics_lines(
-            format_wasm_processor_describe_output(
-                &describe.name,
-                &processor,
-                scheduled_node.as_ref(),
-                runtime_details.state,
+        let inspection = scheduled_node
+            .as_ref()
+            .and_then(|node| WasmStateInspection::of_scheduled(node, runtime_details.checkpoints));
+        let message = match describe.format {
+            InspectionFormat::Text => append_metrics_lines(
+                format_wasm_processor_describe_output(
+                    &describe.name,
+                    &processor,
+                    scheduled_node.as_ref(),
+                    inspection.as_ref(),
+                ),
+                runtime_details.metrics,
             ),
-            runtime_details.metrics,
-        ))
+            InspectionFormat::Json => serde_json::to_string_pretty(&inspection).assured(
+                "WASM inspection contains only strings, numbers, sequences and tagged enums",
+            ),
+        };
+        let mut result = command_ok(message);
+        result.wasm_state = inspection.map(Box::new);
+        result
     }
 
     /// The `M` named `identifier` in `domain`, with the schedule entry that places it.

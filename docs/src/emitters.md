@@ -242,8 +242,19 @@ The database sinks bound every sequential insert or bulk write by `MAX MESSAGES`
 below describe. The complete contract for batch payloads — packing, containers per wire format,
 exact size measurement and failure attribution for every sink — is defined in
 [Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
-Until an emitter's sink implements that contract, a declared clause is validated, stored and
-rendered, and the emitter publishes one record per message exactly as it does without it.
+Until an emitter's sink implements that contract, it publishes one record per message exactly as
+it does without the clause, but `MAX SIZE` already holds on every Kafka, Pulsar, RabbitMQ, Redis,
+MQTT, NATS, ZeroMQ, SQS, Sentry and Syslog emitter that declares it. `MAX SIZE` is the exact length
+of what the codec writes: escaping, UTF-8, base64, field names, separators and length prefixes all
+count, and an `ON EMITTING` transformation is measured by the bytes of its output, not by the record
+it read. Nervix never estimates the size. It encodes the record into a buffer that refuses to grow
+past the limit and abandons the encoding at the first byte that would not fit, so an oversize
+payload is never built in full and never reaches the destination. A payload of exactly `MAX SIZE`
+bytes is published. A record whose payload would exceed it follows `ON MESSAGE ERROR` with code
+`validation`, operation `encode` and a message naming the codec, its encoding and the limit, such as
+`emitter 'bounded_events' codec 'event_codec' JSON payload exceeds MAX SIZE 32B`, and the records
+after it are published as usual. The bound covers the payload only: keys, headers and the framing a
+transport adds around the payload are outside it.
 
 ## Altering emitters
 

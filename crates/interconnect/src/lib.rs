@@ -58,6 +58,7 @@ mod shuttle_test;
 #[cfg(all(test, feature = "turmoil"))]
 #[path = "../tests/simulation/runner.rs"]
 mod simulation_runner;
+mod socket;
 mod wasm_state;
 mod wire;
 
@@ -597,7 +598,7 @@ pub struct DescribeMetricsResponse {
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DescribeMetricsEnvelope {
     pub metrics: Vec<String>,
-    pub state: Vec<String>,
+    pub checkpoints: Vec<nervix_models::WasmCheckpointInspection>,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

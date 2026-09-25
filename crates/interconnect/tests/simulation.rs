@@ -9,6 +9,8 @@
 
 #[path = "simulation/runner.rs"]
 mod runner;
+#[path = "simulation/transport.rs"]
+mod transport;
 
 use std::{
     num::NonZeroUsize,
@@ -17,7 +19,8 @@ use std::{
 
 use meticulous::OptionExt as _;
 use nervix_execution::{CpuClass, Executor, MemoryClass};
-use nervix_interconnect::TransportEntropy;
+use nervix_interconnect::{PeerTarget, TransportEntropy};
+use nervix_models::NodeEndpoint;
 use runner::{
     ClockSkew, HostSupervisor, SemanticTrace, SimulatedEntropy, SimulatedUtc, SimulationBounds,
     SimulationConfig, SimulationError, Topology,
@@ -50,6 +53,21 @@ fn simulation_timer_smoke() {
         });
         simulation.client("observer", async {
             tokio::time::sleep(Duration::from_millis(5)).await;
+            Ok(())
+        });
+    });
+    assert!(result.is_ok(), "{result:?}");
+}
+
+#[test]
+fn peer_resolution_uses_simulated_dns() {
+    let result = config().run("peer resolution", |simulation| {
+        simulation.host("server", || async { Ok(()) });
+        simulation.client("observer", async {
+            let targets = PeerTarget::resolve(&NodeEndpoint::new("server", 7443)).await?;
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].addr.ip(), turmoil::lookup("server"));
+            assert_eq!(targets[0].server_name, "server");
             Ok(())
         });
     });

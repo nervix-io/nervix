@@ -15083,6 +15083,28 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
     }
 }
 
+#[then(expr = "the last client outcome reports WASM reset phase {string} at generation {int}")]
+fn then_last_client_outcome_reports_wasm_reset(
+    world: &mut ScenarioWorld,
+    phase: String,
+    generation: u64,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .assured("the preceding step executed a client command");
+    let state = outcome
+        .wasm_state
+        .as_ref()
+        .assured("the preceding command described a WASM processor");
+    let reset = state
+        .reset
+        .as_ref()
+        .assured("the preceding transaction published a WASM state reset");
+    assert_eq!(reset.reset.phase().as_ref(), phase);
+    assert_eq!(u64::from(reset.generation), generation);
+}
+
 /// Assert that one of two emitters reports the given text.
 ///
 /// Which of two peers contending for the last connection ends up holding it and which ends up
@@ -21146,6 +21168,82 @@ async fn then_within_duration_the_observed_broker_receives_exactly_messages(
         duplicate.is_none(),
         "observed an extra broker message after receiving exactly {count}: {duplicate:?}; \
          observed payload counts: {payload_counts:?}"
+    );
+}
+
+/// Every docstring line is one exact payload. The broker must deliver exactly those payloads, in
+/// any order, and nothing else: a payload the emitter was required to withhold must never arrive,
+/// so the closing window only strengthens the assertion.
+#[then(expr = "within {string} the observed broker receives exactly these payloads")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_payloads(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let duration =
+        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+    let mut remaining = BTreeMap::<String, usize>::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let payload = expand_placeholders(world, line);
+        *remaining.entry(payload).or_insert(0) += 1;
+    }
+    assert!(
+        !remaining.is_empty(),
+        "step docstring must contain at least one expected payload"
+    );
+
+    let deadline = Instant::now() + duration;
+    let mut observed = Vec::new();
+    while !remaining.is_empty() {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for broker payloads; expected remaining {remaining:?}, observed \
+             {observed:?}"
+        );
+        let payload = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_payload(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for exact broker payloads");
+        let Some(payload) = payload else {
+            panic!(
+                "timed out waiting for broker payloads; expected remaining {remaining:?}, \
+                 observed {observed:?}"
+            );
+        };
+        let Some(count) = remaining.get_mut(&payload) else {
+            panic!(
+                "observed an unexpected broker payload {payload:?} ({} bytes); expected remaining \
+                 {remaining:?}, observed before it {observed:?}",
+                payload.len()
+            );
+        };
+        *count -= 1;
+        if *count == 0 {
+            remaining.remove(&payload);
+        }
+        world.last_broker_payload = Some(payload.clone());
+        observed.push(payload);
+    }
+
+    let extra = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion")
+        .try_next_payload(Duration::from_secs(2))
+        .await
+        .expect("failed while checking for an unexpected broker payload");
+    assert!(
+        extra.is_none(),
+        "observed a broker payload beyond the expected ones: {extra:?}; observed {observed:?}"
     );
 }
 
