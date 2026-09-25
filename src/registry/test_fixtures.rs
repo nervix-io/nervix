@@ -722,7 +722,9 @@ pub(in crate::registry) fn emitter(
     Model::Emitter(CreateEmitter {
         name: EmitterName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
-        encode_using_codec: Some(CodecName::parse(codec).expect("valid identifier")),
+        body: nervix_models::EmitterBody::Codec {
+            codec: CodecName::parse(codec).expect("valid identifier"),
+        },
         sink: Box::new(EmitSink::Kafka {
             client: ClientName::parse(client).expect("valid identifier"),
             topic: TopicName::parse("topic").expect("valid topic identifier"),
