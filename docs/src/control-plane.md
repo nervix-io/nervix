@@ -590,6 +590,13 @@ promotes a live replica or chooses a fresh owner. Failover does not wait for the
 If a former owner disappears while a planned hold is active, that hold aborts without publishing its
 candidate; ordinary failover then relocates from the last committed schedule.
 
+Failover acts on a voter that gossip no longer reports live. A leader whose reconciliation has just
+started, as the first node to lead after a whole cluster restarts does, can reach a quorum before
+gossip has heard from the other voters. For its first ten seconds, it therefore makes no automatic
+scheduling decision while any voter is neither reported live nor declared dead. A voter that is
+still starting rejoins and keeps its work and the state that node holds; a voter that has not
+appeared by the end of the grace is failed over as before.
+
 Forced recovery stages the destination's checkpoint inventory under the destination process
 incarnation and the complete target-schedule fingerprint. Applying staged checkpoints accepts only
 that exact preparation. A missing or mismatched preparation does not imply a reset; without an

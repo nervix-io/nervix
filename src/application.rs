@@ -88,6 +88,7 @@ use observability_http::serve_observability_http;
 use ownership_handoff::{FORCED_OWNERSHIP_RECOVERY_BUDGET, ForcedOwnershipRecoveryCoordinator};
 use scheduling::{
     KafkaPartitionWatcherKey, KafkaPartitionWatcherTask, LEADER_KAFKA_PARTITION_WATCH_INTERVAL,
+    VOTER_OBSERVATION_GRACE,
 };
 use session::grpc::SessionGrpcService;
 pub use session_service::SessionServiceImpl;
@@ -1126,6 +1127,7 @@ impl Application {
         }
         background_tasks.push(tokio::spawn(async move {
             sleep(Duration::from_millis(500)).await;
+            let reconcile_started = tokio::time::Instant::now();
             let mut default_user_resolved = false;
             let mut missing_init_default_user_password_warned = false;
             loop {
@@ -1271,6 +1273,22 @@ impl Application {
                                 .insert(node.node_id.clone(), node.incarnation);
                         }
                         let topology = automatic_schedule_input.topology();
+                        // A leader that has just started cannot yet tell a voter that is still
+                        // starting from one that failed, and treating it as failed would move its
+                        // work without the state it holds. Until gossip has heard from or given up
+                        // on every voter, or the observation grace has passed, no automatic
+                        // decision is made.
+                        let unobserved_voters =
+                            scheduling_availability.unobserved_node_ids(topology.voters());
+                        if !unobserved_voters.is_empty()
+                            && reconcile_started.elapsed() < VOTER_OBSERVATION_GRACE
+                        {
+                            debug!(
+                                unobserved_voters = unobserved_voters.len(),
+                                "automatic scheduling waits for gossip to observe every voter"
+                            );
+                            break;
+                        }
                         let live_voters = live_node_ids
                             .into_iter()
                             .filter(|node| topology.voters().contains(node))

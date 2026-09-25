@@ -274,6 +274,14 @@ checkpoint as it waits for any other outstanding acknowledgement. The checkpoint
 deadline bounds that wait: a checkpoint that cannot complete fails and negatively acknowledges what
 it held.
 
+Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
+branch tasks one of its own. A processor task still stopping its branches when its grace ends is
+ended together with every branch task it holds. A branch still waiting for its checkpoint therefore
+never outlives its node: it cannot keep the node's runtime database open past terminal teardown,
+continue a checkpoint, or settle acknowledgements after the node stopped. Its unreleased
+acknowledgements are negatively acknowledged, and a restart finds whatever that checkpoint had
+already written to the node's storage, exactly as after a forced ending.
+
 A coordinated WASM state reset is serialized with domain lifecycle, placement, ownership movement,
 resource rebinding, and model mutation by the domain alteration lease and its entity gate. If node
 shutdown interrupts a preparation before reset publication, the old generation remains
@@ -595,6 +603,15 @@ owns the work.
 
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
+
+### Whole-Cluster Restart Keeps Ownership
+
+When every node restarts, the first node to lead can form a quorum while the others are still
+starting and gossip has not heard from them yet. Its automatic scheduling therefore waits, for the
+first ten seconds of its reconciliation, while any voter is neither reported live nor declared dead.
+Each owner that returns in that time keeps its work and restores it from its own storage and
+replicas, instead of having it failed over without its state. See
+[Planned Ownership Handoffs And Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ### Checkpoint Identity
 

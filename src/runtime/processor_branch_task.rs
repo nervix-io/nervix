@@ -53,7 +53,11 @@ pub(super) enum ProcessorBranchCommand {
 pub(super) struct ProcessorBranchTask {
     pub(super) input: mpsc::Sender<ProcessorBranchInput>,
     pub(super) commands: mpsc::Sender<ProcessorBranchCommand>,
-    pub(super) task: parking_lot::Mutex<Option<JoinHandle<()>>>,
+    /// The branch's task. It is ended when this handle is dropped, so a branch never outlives the
+    /// processor task that owns it: a processor task ended before it could stop its branches, as a
+    /// shutdown grace ends one, ends every branch with it rather than leaving them running without
+    /// an owner.
+    pub(super) task: parking_lot::Mutex<Option<AbortOnDropHandle<()>>>,
 }
 
 pub(super) struct ProcessorBranchInput {
@@ -1238,7 +1242,7 @@ pub(super) async fn spawn_processor_branch_task(
     Ok(ProcessorBranchTask {
         input: input_tx,
         commands: command_tx,
-        task: parking_lot::Mutex::new(Some(task)),
+        task: parking_lot::Mutex::new(Some(AbortOnDropHandle::new(task))),
     })
 }
 
@@ -1985,6 +1989,34 @@ mod tests {
         ));
     }
 
+    /// A processor task ended before it stopped its branches, as a shutdown grace ends one, drops
+    /// the handles of every branch it still holds. Each of those branches ends with its handle, so
+    /// none keeps running, holding the node's state store or settling acknowledgements, after the
+    /// processor that owned it is gone.
+    #[tokio::test]
+    async fn a_branch_task_ends_with_the_handle_its_processor_task_holds() {
+        let (ended_tx, ended_rx) = tokio::sync::oneshot::channel::<()>();
+        let (input, _input_rx) = mpsc::channel(1);
+        let (commands, _command_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            let _ended = ended_tx;
+            std::future::pending::<()>().await;
+        });
+        let entry = ProcessorBranchTask {
+            input,
+            commands,
+            task: parking_lot::Mutex::new(Some(AbortOnDropHandle::new(task))),
+        };
+
+        drop(entry);
+
+        let ended = timeout(Duration::from_secs(5), ended_rx).await;
+        assert!(
+            ended.is_ok(),
+            "a branch task kept running after the handle its processor task held was dropped"
+        );
+    }
+
     #[tokio::test]
     async fn processor_branch_tasks_are_created_and_reused_per_branch_key() {
         let runtime = Runtime::default();
@@ -2164,7 +2196,7 @@ mod tests {
             ProcessorBranchTask {
                 input: input_tx,
                 commands,
-                task: parking_lot::Mutex::new(Some(task)),
+                task: parking_lot::Mutex::new(Some(AbortOnDropHandle::new(task))),
             },
         );
 
@@ -2231,7 +2263,7 @@ mod tests {
             ProcessorBranchTask {
                 input: input_tx,
                 commands,
-                task: parking_lot::Mutex::new(Some(task)),
+                task: parking_lot::Mutex::new(Some(AbortOnDropHandle::new(task))),
             },
         );
         let domain_clock = runtime
