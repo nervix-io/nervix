@@ -656,6 +656,7 @@ fn outcome(disposition: CommandDisposition, subscription: bool) -> Outcome {
         transaction: None,
         transaction_admission: None,
         inspection: None,
+        wasm_state: None,
         subscription: subscription.then(|| Box::new(opened)),
         resource_upload: None,
     })
