@@ -33,7 +33,7 @@ use nervix_client_core::{
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
     TransactionStatus,
 };
-use nervix_models::{ClusterNodeName, Statement, TransactionReportFormat};
+use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statements, parse_upload_resource_query,
     upload_resource_path_fragment,
@@ -395,7 +395,7 @@ fn is_json_inspection_command(query: &str) -> bool {
     else {
         return false;
     };
-    describe.format == TransactionReportFormat::Json
+    describe.format == InspectionFormat::Json
 }
 
 async fn run_json_inspection_mode(
