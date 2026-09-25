@@ -1558,7 +1558,7 @@ pub(in crate::application) fn placement_groups_claimed_by_rule<'a>(
 
 #[cfg(test)]
 mod tests {
-    use meticulous::{OptionExt as _, ResultExt as _};
+    use meticulous::OptionExt as _;
 
     use super::{super::test_fixtures::placement_member, *};
 
