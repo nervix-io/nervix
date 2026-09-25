@@ -31,6 +31,15 @@ step. Turmoil can vary task ordering around it, but instruction-level CPU races 
 Shuttle or real-thread testing. Only bounded executor probes and interconnect codec jobs are
 approved for this suite; storage jobs, external drivers and unbounded CPU work are outside it.
 
+The dedicated Turmoil build selects simulated TCP listeners, outbound sockets and DNS lookups at
+the interconnect I/O boundary. The same production TLS, HTTP/2, request, relay-envelope and Arrow
+IPC paths run above those sockets. Each transport, credential bundle, executor and peer topology is
+constructed inside its own simulated host; live sockets and transports are never shared between
+hosts. The test harness shares only bounded readiness and completion signals. It shuts down every
+transport before its host exits, so listener cleanup and rebinding are observable in the same host.
+The two-host exchange transfers an Arrow batch both in a typed request and as a relay payload; a
+three-host scenario resolves and exchanges with two peers and checks certificate-name rejection.
+
 Transport deadlines are Tokio instants, so on a simulated host they follow the simulated clock:
 connection setup, request and progress timeouts, reconnect backoff, relay grant lifetimes, and the
 drain deadline derived from certificate expiry all expire after simulated, not real, elapsed time.
@@ -62,14 +71,16 @@ take a maximum, or remove entries independently of one another keep map order, b
 change their result. Residual sources outside the simulated contract are Rustls and AWS-LC
 randomness, which changes cipher bytes but no decision; Tokio's per-runtime scheduling seed, which
 Turmoil derives from the simulation seed only when the build sets `tokio_unstable`, as the test
-recipe does; and the real listener, TCP connections and DNS resolution named below.
+recipe does.
 
-The production listener, outbound TCP connections, and DNS resolution still use Tokio's real
-network APIs. External connectors, filesystem and database work, gossip and consensus randomness,
-and domain-clock authority are outside this simulation boundary. The transport clock is physical
-infrastructure time only; it neither defines domain time nor stamps connector arrivals. A simulated
-host crash tears down its runtime and is not evidence of power-loss or SIGKILL durability. A
-simulation result therefore makes no claim yet about production transport faults or full-node
+Production builds use Tokio's operating-system TCP and DNS APIs. The Turmoil build uses only
+simulated TCP and DNS for the interconnect, so transport fault scenarios cannot escape to the host
+network within that boundary. External connectors, filesystem and database work, gossip and
+consensus randomness, and domain-clock authority are outside this simulation boundary. The
+transport clock is physical infrastructure time only; it neither defines domain time nor stamps
+connector arrivals. A simulated host crash tears down its runtime and is not evidence of
+power-loss or SIGKILL durability. A simulation result therefore makes no claim yet about production
+transport faults or full-node
 recovery.
 
 ## Listener And Peer Topology

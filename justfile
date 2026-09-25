@@ -319,9 +319,10 @@ coverage-turmoil output:
     cargo llvm-cov --no-report \
         --package nervix-execution --features turmoil --lib
     cargo llvm-cov --no-report \
-        --package nervix-interconnect --features turmoil --lib
+        --package nervix-interconnect --features turmoil --lib -- \
+        wire::simulation_checks authentication::simulation_tests --test-threads=1
     cargo llvm-cov --no-report \
-        --package nervix-interconnect --features turmoil --test simulation
+        --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
     cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
