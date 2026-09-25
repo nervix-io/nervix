@@ -224,6 +224,37 @@ passed to the test binaries, so a test name filter narrows the run:
 just test-connectors <filter>
 ```
 
+### Deterministic concurrency checks
+
+Run the in-process scheduling checks for the execution, interconnect, and server crates with:
+
+```bash
+just test-shuttle
+```
+
+Each check runs in its own process under bounded Shuttle schedules, then runs through the
+uncontrolled-nondeterminism detector. A substring selects a focused check or protocol family:
+
+```bash
+just test-shuttle force_flush
+```
+
+On failure, the runner writes a schedule below
+`target/shuttle-failures/<package>/<fully-qualified-test-name>/`. Pass the resulting schedule file
+to the replay recipe; its parent directories identify the exact package and check:
+
+```bash
+just test-shuttle-replay target/shuttle-failures/<package>/<fully-qualified-test-name>/<schedule-file>
+```
+
+Keep the schedule with the failure report while fixing the owning protocol, then run the focused
+check and the full suite. To verify schedule persistence and replay without changing a protocol,
+set `SHUTTLE_FORCE_FAILURE=1` for a focused run, which deliberately fails after its invariant has
+completed, and replay the written schedule with the same variable set. Remove the variable for
+normal verification. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explored step count when
+setting a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md)
+defines what these checks model, their limits, and the invariant held by each protocol.
+
 ### The scenario suite's execution budget
 
 The Cucumber suite bounds its own run. A step, a teardown diagnostic or a node stop that never
