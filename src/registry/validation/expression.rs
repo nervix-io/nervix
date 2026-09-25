@@ -149,6 +149,10 @@ pub(in crate::registry) fn visit_model_expressions(
                     visitor(argument);
                 }
             }
+            if let EmitSink::Http { method, path, .. } = model.sink.as_ref() {
+                visitor(method);
+                visitor(path);
+            }
             if let EmitSink::Otel {
                 values,
                 attributes,

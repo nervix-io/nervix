@@ -8,22 +8,25 @@
 //! - **Depends on.** The connector Models and the schema rules.
 //! - **Must not know.** How a connector is instantiated or driven.
 
+use std::time::Duration;
+
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use error_stack::Report;
-use meticulous::ResultExt;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
-    Assignment, AssignmentTarget, CodecBatchContainer, CreateCodec, CreateEmitter, CreateIngestor,
-    CreateSchema, CreateSignalingProtocol, DomainName, EmitSink, EndpointName, Expression,
-    FieldName, IngestSource, IngestTimestampSource, Model, ModelIndex, ModelName,
-    OtelAggregationTemporality, OtelMetricKind, OtelSignal, OtelValueMapping, ParseAsType,
-    ProcessorOutput, RelayName, RouteConstruction, SchemaField, SchemaName, SignalingWireFormat,
-    SqsFifoGroup, VhostName,
+    Assignment, AssignmentTarget, CodecBatchContainer, CreateClientHttp, CreateCodec,
+    CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName, EmitSink,
+    EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode, HttpHeaderName,
+    HttpHeaderValue, HttpMethod, HttpOrigin, IngestSource, IngestTimestampSource, Model,
+    ModelIndex, ModelName, OtelAggregationTemporality, OtelMetricKind, OtelSignal,
+    OtelValueMapping, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField,
+    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
 };
 use nervix_vm::{
-    CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
-    compile_program_with_options_for_bindings_with_sensitivity, lower_route_construction,
-    lower_transforming_route, program::FunctionName,
+    CompileBinding, CompileOptions, CompiledProgram, OutputMode, SchemaSensitivity,
+    SemanticScopePolicy, compile_program_with_options_for_bindings_with_sensitivity,
+    lower_route_construction, lower_transforming_route, program::FunctionName,
 };
 
 use crate::registry::{
@@ -539,15 +542,37 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
     Ok(())
 }
 
+/// The validated request fields and client settings carried by an active HTTP emitter graph node.
+/// The next data-plane stage can evaluate these programs without lowering its Models again.
+#[derive(Debug, Clone)]
+pub(crate) struct HttpEmitterRequestPlan {
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) client: HttpEmitterClientPlan,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) body: HttpBodyMode,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) fields: CompiledProgram,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) route: Option<CompiledProgram>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HttpEmitterClientPlan {
+    pub(crate) origin: HttpOrigin,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) timeout: Duration,
+}
+
 pub(in crate::registry) fn validate_http_request_expressions(
     domain: &DomainName,
     identifier: &ModelName,
     models: &ModelIndex,
     emitter: &CreateEmitter,
     input_schema: &CreateSchema,
-) -> Result<(), Report<RegistryError>> {
+    payload_schema: &CreateSchema,
+) -> Result<Option<CompiledProgram>, Report<RegistryError>> {
     let EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
 
     let mut fields = Vec::with_capacity(2);
@@ -570,15 +595,13 @@ pub(in crate::registry) fn validate_http_request_expressions(
             .assured("HTTP request schema name is a valid literal"),
         fields,
     };
-    let input_arrow_schema = arrow_schema_for_internal_schema(input_schema);
     let output_arrow_schema = arrow_schema_for_internal_schema(&output_schema);
-    let parsed = lower_transforming_route(
+    let parsed = lower_route_construction(
         &RouteConstruction {
             assignments,
             ..RouteConstruction::default()
         },
-        input_arrow_schema.as_ref(),
-        output_arrow_schema.as_ref(),
+        SemanticScopePolicy::read_write("message", "http_request"),
     )
     .map_err(|reason| {
         Report::new(RegistryError::InvalidModel {
@@ -594,9 +617,27 @@ pub(in crate::registry) fn validate_http_request_expressions(
     } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
     let mut bindings = vec![
         readonly_binding_for_internal_schema("input", input_schema),
-        writable_binding_for_internal_schema("output", &output_schema),
+        writable_binding_for_internal_schema("http_request", &output_schema),
     ];
-    let local_namespaces = HashSet::from_iter(["input".to_string(), "output".to_string()]);
+    let working_schema = if emitter.body.codec().is_some() {
+        bindings.push(readonly_binding_for_internal_schema(
+            "output",
+            payload_schema,
+        ));
+        payload_schema
+    } else {
+        input_schema
+    };
+    bindings.push(readonly_binding_for_internal_schema(
+        "message",
+        working_schema,
+    ));
+    let local_namespaces = HashSet::from_iter([
+        "input".to_string(),
+        "message".to_string(),
+        "output".to_string(),
+        "http_request".to_string(),
+    ]);
     bindings.extend(referenced_materialized_stream_bindings(
         domain,
         identifier,
@@ -606,7 +647,7 @@ pub(in crate::registry) fn validate_http_request_expressions(
         "HTTP request expression",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    compile_program_with_options_for_bindings_with_sensitivity(
+    let program = compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_arrow_schema,
         schema_sensitivity_for_internal_schema(&output_schema),
@@ -631,6 +672,175 @@ pub(in crate::registry) fn validate_http_request_expressions(
         })
     })?;
 
+    Ok(Some(program))
+}
+
+/// The origin accepted by an HTTP emitter. The returned URL is safe to use as the base for
+/// request-target validation; its credentials, path, query and fragment have been ruled out.
+pub(in crate::registry) fn validate_http_emitter_client(
+    domain: &DomainName,
+    identifier: &ModelName,
+    client: &CreateClientHttp,
+) -> Result<HttpEmitterClientPlan, Report<RegistryError>> {
+    let invalid = |reason: &'static str| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: reason.to_string(),
+        })
+    };
+    let entry = |key: &str| {
+        client
+            .config
+            .iter()
+            .find(|entry| entry.key.eq_ignore_ascii_case(key))
+            .map(|entry| entry.value.as_str())
+    };
+
+    let endpoint = entry("endpoint").ok_or_else(|| invalid("HTTP client requires endpoint"))?;
+    let origin = HttpOrigin::parse(endpoint)
+        .map_err(|_| invalid("HTTP client endpoint must be an http or https origin"))?;
+
+    let timeout =
+        entry("timeout_ms").ok_or_else(|| invalid("HTTP emitter client requires timeout_ms"))?;
+    if timeout.is_empty() || !timeout.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid(
+            "HTTP emitter client timeout_ms must be a positive schedulable integer",
+        ));
+    }
+    let timeout = timeout.parse::<u64>().map_err(|_| {
+        invalid("HTTP emitter client timeout_ms must be a positive schedulable integer")
+    })?;
+    if timeout == 0 || Duration::from_millis(timeout).as_nanos() > u128::from(u64::MAX / 2) {
+        return Err(invalid(
+            "HTTP emitter client timeout_ms must be a positive schedulable integer",
+        ));
+    }
+
+    if entry("tls_cert_file").is_some() != entry("tls_key_file").is_some() {
+        return Err(invalid(
+            "HTTP client TLS requires both tls_cert_file and tls_key_file",
+        ));
+    }
+    Ok(HttpEmitterClientPlan {
+        origin,
+        timeout: Duration::from_millis(timeout),
+    })
+}
+
+pub(in crate::registry) fn validate_http_literal_request_fields(
+    domain: &DomainName,
+    identifier: &ModelName,
+    origin: &HttpOrigin,
+    emitter: &CreateEmitter,
+) -> Result<(), Report<RegistryError>> {
+    struct KnownHeader {
+        invocation: usize,
+        name: HttpHeaderName,
+        value: HttpHeaderValue,
+    }
+
+    let EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
+        return Ok(());
+    };
+    let invalid = |reason: String| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason,
+        })
+    };
+
+    if let Expression::Literal(nervix_models::Literal::String(value)) = method {
+        let body = match emitter.body {
+            nervix_models::EmitterBody::Codec { .. } => HttpBodyMode::Codec,
+            nervix_models::EmitterBody::WithoutBody => HttpBodyMode::WithoutBody,
+            nervix_models::EmitterBody::Values => {
+                return Err(invalid(
+                    "HTTP publish method requires ENCODE USING or WITHOUT BODY".to_string(),
+                ));
+            }
+        };
+        HttpMethod::parse(value, body)
+            .map_err(|error| invalid(format!("HTTP publish method {}", error.current_context())))?;
+    }
+
+    if let Expression::Literal(nervix_models::Literal::String(value)) = path {
+        origin
+            .target(value)
+            .map_err(|_| invalid("HTTP publish path is invalid".to_string()))?;
+    }
+
+    let mut known_headers = Vec::new();
+    let mut all_headers_known = true;
+    for (index, invocation) in emitter.construction.invocations.iter().enumerate() {
+        let invocation_index = index
+            .checked_add(1)
+            .assured("an index into an in-memory invocation vector is below isize::MAX");
+        let [name, value] = invocation.arguments.as_slice() else {
+            continue;
+        };
+        let name = if let Expression::Literal(nervix_models::Literal::String(name)) = name {
+            Some(HttpHeaderName::parse(name).map_err(|_| {
+                invalid(format!(
+                    "HTTP invoke #{invocation_index} header name is invalid or reserved"
+                ))
+            })?)
+        } else {
+            all_headers_known = false;
+            None
+        };
+        let value = if let Expression::Literal(nervix_models::Literal::String(value)) = value {
+            Some(HttpHeaderValue::parse(value).map_err(|_| {
+                invalid(format!(
+                    "HTTP invoke #{invocation_index} header value is invalid"
+                ))
+            })?)
+        } else {
+            all_headers_known = false;
+            None
+        };
+        if let (Some(name), Some(value)) = (name, value) {
+            let size = name
+                .as_str()
+                .len()
+                .checked_add(value.as_str().len())
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "HTTP invoke #{invocation_index} header exceeds 32 KiB"
+                    ))
+                })?;
+            if size > 32 * 1024 {
+                return Err(invalid(format!(
+                    "HTTP invoke #{invocation_index} header exceeds 32 KiB"
+                )));
+            }
+            known_headers.push(KnownHeader {
+                invocation: invocation_index,
+                name,
+                value,
+            });
+        }
+    }
+    if all_headers_known {
+        let mut headers = HttpApplicationHeaders::default();
+        let final_invocation = known_headers.last().map(|header| header.invocation);
+        for known in known_headers {
+            headers.write(known.name, known.value).map_err(|_| {
+                invalid(format!(
+                    "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
+                    known.invocation
+                ))
+            })?;
+        }
+        if headers.validate_total().is_err() {
+            let invocation = final_invocation
+                .assured("a nonzero total requires at least one literal header invocation");
+            return Err(invalid(format!(
+                "HTTP invoke #{invocation} application headers exceed the 32 KiB limit"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -970,7 +1180,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
     emitter: &nervix_models::CreateEmitter,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-) -> Result<CreateSchema, Report<RegistryError>> {
+) -> Result<(CreateSchema, Option<CompiledProgram>), Report<RegistryError>> {
     let codec_route = emitter.body.codec().is_some();
     let has_output_construction =
         emitter.construction.inherit.is_some() || !emitter.construction.assignments.is_empty();
@@ -989,7 +1199,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         }));
     }
     if emitter.construction.is_empty() && !codec_route {
-        return Ok(input_schema.clone());
+        return Ok((input_schema.clone(), None));
     }
     let input_arrow_schema = arrow_schema_for_internal_schema(input_schema);
     let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
@@ -1058,10 +1268,14 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         "emitter route",
     )?);
     body_bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    compile_program_with_options_for_bindings_with_sensitivity(
+    let output_sensitivity = match (emitter.sink.as_ref(), codec_route) {
+        (EmitSink::Http { .. }, true) => SchemaSensitivity::default(),
+        _ => schema_sensitivity_for_internal_schema(output_schema),
+    };
+    let program = compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_arrow_schema,
-        schema_sensitivity_for_internal_schema(output_schema),
+        output_sensitivity,
         body_bindings,
         udf_compile_options(
             models,
@@ -1085,7 +1299,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         })
     })?;
 
-    Ok(output_schema.clone())
+    Ok((output_schema.clone(), Some(program)))
 }
 
 pub(in crate::registry) fn validate_vhost_hostnames(
