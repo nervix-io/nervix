@@ -34,7 +34,8 @@ pub trait Processor: Sized {
     }
 
     /// Releases everything the processor is still holding because the host is quiescing this
-    /// branch, either to hand it to a replacement node or to shut it down.
+    /// branch: for an entity or domain pause, an ownership move, a coordinated reset, or a
+    /// shutdown.
     ///
     /// Emit every buffered output envelope through [`GuestContext::emit`]. Any input the
     /// processor keeps beyond this call stays unacknowledged until the branch resumes and never

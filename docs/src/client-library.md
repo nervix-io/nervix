@@ -164,6 +164,16 @@ message names why nothing was read.
 every published version with its entries under their exact paths, and the models bound to each
 version.
 
+`DESCRIBE WASM PROCESSOR <name>` is typed too: `CommandOutcome::wasm_state` holds the
+`WasmStateInspection` beside the text or JSON rendering, with the pinned module binding, the default
+guest-state generation, the latest reset with its request reference, scope, phase, and reason, the
+recorded rejected-state recoveries, and each current branch's checkpoint stage, revisions, and
+replica counts under its opaque fingerprint. `RESET WASM PROCESSOR ... STATE` is an ordinary
+command: its success arrives only once the new lifetime is usable, and a retry the client makes
+after an uncertain outcome reuses the same `execution_reference`, so it recovers the original
+reset's outcome rather than starting another. See
+[WASM State And Recovery](./wasm-state.md#observability).
+
 `Client::inspect_transaction(target, operation)` also returns the typed `InspectionOutcome` from
 the API. It follows leader redirects and reconnects with the session client's normal request-ID
 dispatch. A successful read of the attached transaction refreshes the same commit preview; a

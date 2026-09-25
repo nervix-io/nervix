@@ -257,7 +257,7 @@ the currently installed domain clock. The snapshot belongs only to that initiali
 it is not inherited from the branch instance being replaced. Publication cancels the old branch
 instance and all timeout handles it owned. A fresh initialization may request its own timeouts, but
 no deadline armed by the replaced instance can fire in the new state lifetime even though domain
-logical time continued across the reset.
+logical time continued across the reset. See [Coordinated Reset](./wasm-state.md#coordinated-reset).
 
 Checkpoint and reset inspection samples existing state without taking a domain execution snapshot
 or advancing the logical frontier. A reported checkpoint revision and reset generation describe

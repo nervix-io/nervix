@@ -416,7 +416,9 @@ every checkpoint whose acknowledgements the lost owner released, because the own
 only after its replicas had synchronized the checkpoint, so forced recovery continues each branch
 from at least the state its acknowledged inputs produced. The promoted replica restores every
 staged checkpoint into a guest before the schedule is published, from the module it compiled while
-it was a replica, so the recovery does not wait for the module to compile.
+it was a replica, so the recovery does not wait for the module to compile. A preparation that fails,
+including a guest that cannot restore a staged checkpoint, publishes the recovery with recreated
+state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
 ## Topology Cases
 
@@ -579,6 +581,7 @@ Durability is not uniform across those rows, and the difference is operationally
   schedule assigns, before the source acknowledgements it covers are released, so every checkpoint
   that released an acknowledgement survives a host power loss. Checkpoints that branches take at the
   same time share one synchronization. See
+  [Failure At Each Boundary](wasm-state.md#failure-at-each-boundary) and
   [WASM Processor Guests](wasm-processor-guests.md#recovery-replay-and-duplicates) for what a
   recovered branch continues from and which inputs its source redelivers.
 

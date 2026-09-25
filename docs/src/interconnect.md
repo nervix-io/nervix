@@ -226,8 +226,9 @@ the leader uses that reference when invoking this same coordinator request. A re
 leader resumes the recorded step with the same identity. No separate public reset wire request or
 JSON command path is introduced.
 
-The management pool exposes one typed coordinator request for internal administrative, SDK, and
-recovery callers. It carries the stable execution reference and exact reset target to the leader,
+The management pool carries one typed coordinator request, which a node sends to the leader for a
+reset that starts outside the ordered transaction path, such as a guest's request for a new lifetime
+of its own branch. It carries the stable execution reference and exact reset target to the leader,
 which runs the single control-plane operation. Its lower-level runtime requests have three actions.
 `Prepare` reaches only the scheduled processor owner and creates fresh guest state while retaining
 enough stopped branch state to abort before publication. `ActivateCommittedSchedule` reaches every
@@ -753,7 +754,8 @@ checkpoint fails after its ten-second deadline. The owner announces a WASM proce
 its replicas as soon as the branch appears. A replica that receives a checkpoint of a branch its
 replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
 refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
-owner has evicted.
+owner has evicted. [WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint
+these acknowledgements complete.
 The owner publishes an empty final window checkpoint when it evicts a concrete window branch. A
 replica that installs that revision replaces the evicted branch's rows and sketch panes with the
 empty state. The branch lifecycle checkpoint records an incarnation for each concrete branch;

@@ -464,9 +464,11 @@ reset is committed but not usable and leaves the scope fenced. Repeating the sam
 reference resumes the same generation and missing durability work; it does not start another
 lifetime. Restart, leadership change, and owner recovery read the published phase and follow the
 same path. Offline replicas catch up under the new generation, and a stale former owner, replica, or
-handoff preparation cannot reinstall bytes from the generation that was replaced. The control-plane
-operation is the single owner that later administrative, SDK, or restore interfaces call; it is not
-currently a separate NSPL graph statement.
+handoff preparation cannot reinstall bytes from the generation that was replaced. This one
+operation serves every trigger: the `RESET WASM PROCESSOR ... STATE` statement, which a transaction
+records as an ordered effect rather than a model mutation, a guest's request for a new lifetime of
+its own branch, and `ON REJECTED STATE RESET`. See
+[Coordinated Reset](./wasm-state.md#coordinated-reset).
 
 ## Planned Ownership Handoffs And Failover
 

@@ -121,7 +121,8 @@ to stable storage, waits for the replicas the checkpoint names, and only then pu
 committed checkpoint a recreated instance restores. The branch runs no further callback until that
 checkpoint completes or fails. The publications retain the saved buffer rather than copying it for
 every persistence or replication reader. Input buffered by the guest host and ACK tokens remain
-execution state and are never included in a guest save.
+execution state and are never included in a guest save. See
+[WASM State And Recovery](./wasm-state.md#the-checkpoint) for the checkpoint's stages.
 
 Each branch publishes checkpoint revision, boundary, and stage together through one immutable
 observation. An inspection read samples that publication and replica progress without taking the
