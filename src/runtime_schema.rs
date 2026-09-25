@@ -12,7 +12,7 @@
 
 use std::{borrow::Cow, fmt, io::Cursor, num::NonZeroU32, sync::Arc as StdArc};
 
-use ahash::{HashMap, HashSet};
+use ahash::HashMap;
 use apache_avro::{
     Schema as AvroSchema, from_avro_datum, to_avro_datum,
     types::{Value as AvroValue, ValueKind as AvroValueKind},
@@ -48,9 +48,8 @@ use nervix_approx_into::ApproxInto;
 use nervix_jaq::{CompiledJaqProgram, JaqNativeFormat};
 use nervix_models::{
     AvroType, CodecJaqTransformations, CreateCodec, CreateSchema, CreateWireSchema, JsonType,
-    ModelName, ParseAsType, RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, ResolvedCodecWireFormat, Timestamp,
-    WireSchemaField, WireSchemaStrictness,
+    ModelName, ParseAsType, RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata,
+    RemoteRuntimeValue, ResolvedCodecWireFormat, Timestamp, WireSchemaField, WireSchemaStrictness,
 };
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
@@ -485,47 +484,6 @@ impl CompiledSchema {
             builder.finish_row()?;
         }
         builder.finish()
-    }
-
-    /// Rebuild one row from the scalar-field form window-processor state is still persisted in.
-    ///
-    /// Materialized relay snapshots no longer travel this way; they carry Arrow columns. Window
-    /// entries have not been converted yet, so this conversion remains for them alone.
-    pub(crate) fn runtime_row_from_remote(
-        &self,
-        record: &RemoteRuntimeRecord,
-    ) -> error_stack::Result<RuntimeRow, RuntimeSchemaError> {
-        let metadata = RuntimeRecordMetadata::from_remote(record.metadata.clone());
-        let mut seen = HashSet::default();
-        for field in &record.fields {
-            if !seen.insert(field.name.as_str()) {
-                return Err(Report::new(RuntimeSchemaError::DuplicateField {
-                    record: RuntimeRecordSource::Persisted,
-                    field: field.name.clone(),
-                }));
-            }
-            if !self
-                .fields
-                .iter()
-                .any(|expected| expected.name == field.name)
-            {
-                return Err(Report::new(RuntimeSchemaError::UnknownField {
-                    record: RuntimeRecordSource::Persisted,
-                    field: field.name.clone(),
-                }));
-            }
-        }
-        let mut builder = self.batch_builder(1);
-        for expected in &self.fields {
-            let value = record
-                .fields
-                .iter()
-                .find(|field| field.name == expected.name)
-                .map(|field| RuntimeValue::from_remote(field.value.clone()));
-            builder.append(value.as_ref())?;
-        }
-        builder.finish_row()?;
-        builder.finish()?.runtime_row(0, metadata)
     }
 
     fn validate_arrow_batch(
@@ -1309,6 +1267,10 @@ impl RuntimeRow {
         &self.batch
     }
 
+    pub(crate) fn row_index(&self) -> usize {
+        self.row
+    }
+
     #[cfg(test)]
     pub(crate) fn arrow_schema(&self) -> StdArc<ArrowSchema> {
         self.batch.schema()
@@ -1361,24 +1323,6 @@ impl RuntimeRow {
     ) -> error_stack::Result<String, RuntimeSchemaError> {
         self.batch.row_to_json_string_masking(self.row, sensitivity)
     }
-
-    /// Render this row in the scalar-field form window-processor state is still persisted in.
-    /// See [`CompiledSchema::runtime_row_from_remote`] for why it remains.
-    pub(crate) fn to_remote(&self) -> error_stack::Result<RemoteRuntimeRecord, RuntimeSchemaError> {
-        let mut fields = Vec::with_capacity(self.batch.schema_ref().fields().len());
-        for (column_index, field) in self.batch.schema_ref().fields().iter().enumerate() {
-            if let Some(value) = self.value_at(column_index)? {
-                fields.push(RemoteRuntimeField {
-                    name: field.name().clone(),
-                    value: value.to_remote(),
-                });
-            }
-        }
-        Ok(RemoteRuntimeRecord {
-            fields,
-            metadata: self.metadata.to_remote(),
-        })
-    }
 }
 
 impl RuntimeRecordBatchBuilder {
@@ -1393,6 +1337,7 @@ impl RuntimeRecordBatchBuilder {
         Ok(index)
     }
 
+    #[cfg(any(test, feature = "benchmarks"))]
     pub(crate) fn append(
         &mut self,
         value: Option<&RuntimeValue>,
@@ -1776,14 +1721,12 @@ pub enum JsonValueKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeRecordSource {
     TestRow(usize),
-    Persisted,
 }
 
 impl fmt::Display for RuntimeRecordSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TestRow(row) => write!(formatter, "test Arrow row {row}"),
-            Self::Persisted => formatter.write_str("persisted runtime record"),
         }
     }
 }

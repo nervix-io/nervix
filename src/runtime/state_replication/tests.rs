@@ -1432,11 +1432,14 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
             snapshot_request_tx,
         )
         .expect("persisted runtime should spawn a snapshot task");
-    let live_state = WindowProcessorState::new(&window_plan(
-        "SET count = COUNT(input.latency)",
-        ParseAsType::I64,
-        &[("count", ParseAsType::I64)],
-    ));
+    let live_state = WindowProcessorState::new(
+        &window_plan(
+            "SET count = COUNT(input.latency)",
+            ParseAsType::I64,
+            &[("count", ParseAsType::I64)],
+        ),
+        1,
+    );
     let snapshot_state = state.clone();
     let snapshot_branch = placement.branch_key.clone();
     let snapshot_owner = tokio::spawn(async move {
@@ -1444,11 +1447,12 @@ async fn window_processor_snapshot_task_persists_published_state_on_interval() {
             .await
             .expect("snapshot task should ask the branch task to publish")
             .expect("snapshot request channel should remain open");
-        let published = snapshot_state.replace_state(&live_state).map_err(|error| {
-            Report::new(error).change_context(ProcessorLiveStateError {
-                branch: snapshot_branch,
-            })
-        });
+        let published =
+            snapshot_state
+                .replace_state(&live_state)
+                .change_context(ProcessorLiveStateError {
+                    branch: snapshot_branch,
+                });
         response
             .send(published)
             .expect("the snapshot task waits for the publication it asked for");
@@ -1484,11 +1488,14 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
     };
     let state = ReplicatedWindowProcessorState::new(placement, None)
         .expect("window processor state should initialize");
-    let live_state = WindowProcessorState::new(&window_plan(
-        "SET count = COUNT(input.latency)",
-        ParseAsType::I64,
-        &[("count", ParseAsType::I64)],
-    ));
+    let live_state = WindowProcessorState::new(
+        &window_plan(
+            "SET count = COUNT(input.latency)",
+            ParseAsType::I64,
+            &[("count", ParseAsType::I64)],
+        ),
+        1,
+    );
     state
         .replace_state(&live_state)
         .expect("the first window state should publish");
@@ -1506,6 +1513,45 @@ fn a_window_state_publication_proceeds_while_a_snapshot_reads_the_previous_one()
         !std::sync::Arc::ptr_eq(&snapshot_read, &latest),
         "publishing replaced the window a snapshot was reading in place"
     );
+}
+
+#[tokio::test]
+async fn a_recreated_window_branch_refuses_the_previous_lifetime_checkpoint() {
+    let placement = RuntimeStatePlacement {
+        domain: domain("default"),
+        state: RuntimeState::WindowProcessor {
+            schema: unchanged_schema_fingerprint(),
+        },
+        kind: ModelKind::WindowProcessor,
+        identifier: named("latency_window"),
+        branch_key: string_branch_key("tenant", "acme"),
+    };
+    let plan = window_plan(
+        "SET count = COUNT(input.latency)",
+        ParseAsType::I64,
+        &[("count", ParseAsType::I64)],
+    );
+    let input_schema = test_schema(&[("latency", ParseAsType::I64)]);
+    let state = ReplicatedWindowProcessorState::new(placement, None)
+        .expect("window processor state should initialize");
+    state
+        .replace_state(&WindowProcessorState::new(&plan, 7))
+        .expect("the first lifetime should publish");
+
+    let resumed = state
+        .restore_state(&plan, &input_schema, 7, &Executor::default())
+        .await
+        .expect("the matching lifetime should restore");
+    assert_eq!(resumed.incarnation, 7);
+    assert!(!state.generations.is_live_dirty());
+
+    let recreated = state
+        .restore_state(&plan, &input_schema, 8, &Executor::default())
+        .await
+        .expect("a new lifetime should start empty");
+    assert_eq!(recreated.incarnation, 8);
+    assert!(recreated.entries.is_empty());
+    assert!(state.generations.is_live_dirty());
 }
 
 #[test]

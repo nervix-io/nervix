@@ -7021,6 +7021,7 @@ async fn when_node_is_gracefully_stopped(world: &mut ScenarioWorld, node_id: Str
         world.cluster_config.graceful_shutdown_drain,
         "graceful shutdown drain must be configured before cluster startup"
     );
+    let node_id = expand_placeholders(world, &node_id);
     let started = Instant::now();
     world
         .cluster_mut()

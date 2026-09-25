@@ -352,6 +352,21 @@ impl RelayProcessorNode {
         }
     }
 
+    /// Begin a new window lifetime without rows or panes from an earlier appearance of its key.
+    /// Eviction also uses this before publishing the final empty checkpoint.
+    pub(super) fn reset_window_state(&mut self) {
+        if let RelayProcessorOperationNode::WindowProcessor {
+            plan,
+            state,
+            replicated_state,
+            ..
+        } = &mut self.operation
+        {
+            *state = WindowProcessorState::new(plan, state.incarnation);
+            replicated_state.generations.mark_live_dirty();
+        }
+    }
+
     async fn filter_input_batch_with_kind(
         &mut self,
         branch: &mut BranchRuntime,
@@ -894,7 +909,9 @@ impl RelayProcessorNode {
                             state.admission_run_len(&pending, *width_messages, *width_duration)
                         };
                         let run = pending.drain(..run_len).collect::<Vec<_>>();
-                        if let Err(error) = state.check_admission(plan, &evaluated.columns, &run) {
+                        if let Err(error) =
+                            state.check_admission(plan, Some(&evaluated.columns), &run)
+                        {
                             if run.len() > 1 {
                                 // Retry one row at a time so a large batch cannot cause rows
                                 // that individually fit to be refused with the oversized run.
