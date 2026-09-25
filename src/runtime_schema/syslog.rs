@@ -111,7 +111,10 @@ pub(super) fn decode(
     append_row(codec, &parsed, builder)
 }
 
-pub(super) fn encode_row(row: &ArrowCodecRow<'_>, payload: &mut Vec<u8>) -> Result<(), CodecError> {
+pub(super) fn encode_row(
+    row: &ArrowCodecRow<'_>,
+    output: &mut impl std::io::Write,
+) -> Result<(), CodecError> {
     let facility = required_u8(row, "facility")?;
     if facility > 23 {
         return Err(encode_field_error(
@@ -152,9 +155,8 @@ pub(super) fn encode_row(row: &ArrowCodecRow<'_>, payload: &mut Vec<u8>) -> Resu
         None => "-".to_string(),
     };
     let priority = u16::from(facility) * 8 + u16::from(severity);
-    use std::io::Write as _;
     write!(
-        payload,
+        output,
         "<{priority}>1 {timestamp} {} {} {} {} {} {message}",
         hostname.unwrap_or("-"),
         app_name.unwrap_or("-"),
