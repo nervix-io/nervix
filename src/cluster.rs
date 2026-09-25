@@ -90,7 +90,17 @@ pub struct ClusterHandle {
 /// borrowed `str` keys, then iterates the node map without formatting a gossip key or allocating.
 #[derive(Debug, Default)]
 pub(crate) struct SubscriptionInterestIndex {
-    domains: BTreeMap<String, BTreeMap<String, BTreeMap<ClusterNodeName, ClusterNodeIncarnation>>>,
+    domains: BTreeMap<
+        String,
+        BTreeMap<String, BTreeMap<ClusterNodeName, AdvertisedSubscriptionInterest>>,
+    >,
+}
+
+/// One live advertisement, fenced by both the node incarnation and its interest key's version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AdvertisedSubscriptionInterest {
+    incarnation: ClusterNodeIncarnation,
+    version: u64,
 }
 
 impl SubscriptionInterestIndex {
@@ -104,16 +114,24 @@ impl SubscriptionInterestIndex {
                 let Some((domain, relay)) = subscription_interest_from_key(key) else {
                     continue;
                 };
+                let version = state
+                    .get_versioned(key)
+                    .assured("key_values yields a live entry from this same immutable node state")
+                    .version;
+                let advertisement = AdvertisedSubscriptionInterest {
+                    incarnation: identity.incarnation(),
+                    version,
+                };
                 let relays = index.domains.entry(domain.to_string()).or_default();
                 let interested_nodes = relays.entry(relay.to_string()).or_default();
                 match interested_nodes.entry(identity.node_id().clone()) {
                     std::collections::btree_map::Entry::Occupied(mut current) => {
-                        if identity.incarnation() > *current.get() {
-                            current.insert(identity.incarnation());
+                        if advertisement > *current.get() {
+                            current.insert(advertisement);
                         }
                     }
                     std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(identity.incarnation());
+                        entry.insert(advertisement);
                     }
                 }
             }
@@ -125,16 +143,26 @@ impl SubscriptionInterestIndex {
         &self,
         domain: &str,
         relay: &str,
-    ) -> Option<&BTreeMap<ClusterNodeName, ClusterNodeIncarnation>> {
+    ) -> Option<&BTreeMap<ClusterNodeName, AdvertisedSubscriptionInterest>> {
         let relays = self.domains.get(domain)?;
         relays.get(relay)
     }
 
-    fn contains(&self, subscriber: &ClusterNodeIdentity, domain: &str, relay: &str) -> bool {
+    fn contains(
+        &self,
+        subscriber: &ClusterNodeIdentity,
+        domain: &str,
+        relay: &str,
+        minimum_version: u64,
+    ) -> bool {
         let Some(nodes) = self.nodes(domain, relay) else {
             return false;
         };
-        nodes.get(subscriber.node_id()) == Some(&subscriber.incarnation())
+        let Some(advertisement) = nodes.get(subscriber.node_id()) else {
+            return false;
+        };
+        advertisement.incarnation == subscriber.incarnation()
+            && advertisement.version >= minimum_version
     }
 }
 
@@ -162,11 +190,20 @@ impl SubscriptionInterestPublication {
         self.index.load()
     }
 
-    async fn wait_for(&self, subscriber: &ClusterNodeIdentity, domain: &str, relay: &str) {
+    async fn wait_for(
+        &self,
+        subscriber: &ClusterNodeIdentity,
+        domain: &str,
+        relay: &str,
+        minimum_version: u64,
+    ) {
         let mut changes = self.changed.subscribe();
         loop {
             tokio::task::consume_budget().await;
-            if self.load().contains(subscriber, domain, relay) {
+            if self
+                .load()
+                .contains(subscriber, domain, relay, minimum_version)
+            {
                 return;
             }
             changes.changed().await.assured(
@@ -1422,13 +1459,29 @@ impl ClusterHandle {
         }
     }
 
-    /// Whether this node's own gossip state advertises interest in `relay`.
-    #[cfg(test)]
-    pub(crate) async fn advertises_subscription_interest(&self, domain: &str, relay: &str) -> bool {
+    /// The version of this node's current interest advertisement, absent after withdrawal.
+    pub(crate) async fn local_subscription_interest_version(
+        &self,
+        domain: &str,
+        relay: &str,
+    ) -> Option<u64> {
         let key = subscription_interest_key(domain, relay);
         let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
-        chitchat.self_node_state().contains_key(&key)
+        let state = chitchat.self_node_state();
+        let advertisement = state.get_versioned(&key)?;
+        if advertisement.is_deleted() {
+            return None;
+        }
+        Some(advertisement.version)
+    }
+
+    /// Whether this node's own gossip state advertises interest in `relay`.
+    #[cfg(test)]
+    pub(crate) async fn advertises_subscription_interest(&self, domain: &str, relay: &str) -> bool {
+        self.local_subscription_interest_version(domain, relay)
+            .await
+            .is_some()
     }
 
     pub(crate) fn subscription_interest_index(&self) -> Guard<Arc<SubscriptionInterestIndex>> {
@@ -1436,15 +1489,17 @@ impl ClusterHandle {
     }
 
     /// Wait until this node's live Chitchat view contains the interest advertised by the exact
-    /// subscriber incarnation. The interconnect request that calls this method owns the deadline.
+    /// subscriber incarnation at or beyond the requested interest key version. The interconnect
+    /// request that calls this method owns the deadline.
     pub(crate) async fn wait_for_subscription_interest(
         &self,
         subscriber: &ClusterNodeIdentity,
         domain: &str,
         relay: &str,
+        minimum_version: u64,
     ) {
         self.subscription_interest
-            .wait_for(subscriber, domain, relay)
+            .wait_for(subscriber, domain, relay, minimum_version)
             .await;
     }
 
@@ -1934,11 +1989,17 @@ mod tests {
         let expected = BTreeMap::from([
             (
                 ClusterNodeName::parse("node-1").assured("the test node name is valid"),
-                ClusterNodeIncarnation::new(7),
+                AdvertisedSubscriptionInterest {
+                    incarnation: ClusterNodeIncarnation::new(7),
+                    version: 1,
+                },
             ),
             (
                 ClusterNodeName::parse("node-2").assured("the test node name is valid"),
-                ClusterNodeIncarnation::new(9),
+                AdvertisedSubscriptionInterest {
+                    incarnation: ClusterNodeIncarnation::new(9),
+                    version: 1,
+                },
             ),
         ]);
         assert_eq!(
@@ -1947,7 +2008,7 @@ mod tests {
                 .assured("both test nodes advertise sales events"),
             &expected
         );
-        assert!(index.contains(&health_identity("node-2", 9), "sales", "events"));
+        assert!(index.contains(&health_identity("node-2", 9), "sales", "events", 1));
         assert!(index.nodes("incomplete", "").is_none());
 
         live_nodes
@@ -1962,7 +2023,57 @@ mod tests {
         assert!(remaining.contains_key(
             &ClusterNodeName::parse("node-1").assured("the test node name is valid")
         ));
-        assert!(!withdrawn.contains(&health_identity("node-2", 9), "sales", "events"));
+        assert!(!withdrawn.contains(&health_identity("node-2", 9), "sales", "events", 1));
+    }
+
+    #[tokio::test]
+    async fn subscription_interest_visibility_requires_the_current_advertisement() {
+        let (node_id, mut state) = subscription_state("node-1", 7, 7101, &[("sales", "events")]);
+        let subscriber = health_identity("node-1", 7);
+        let key = subscription_interest_key("sales", "events");
+        let previous = BTreeMap::from([(node_id.clone(), state.clone())]);
+        let publication = SubscriptionInterestPublication::new();
+        publication.publish(&previous);
+
+        state.delete(&key);
+        let withdrawn = BTreeMap::from([(node_id.clone(), state.clone())]);
+        state.set(&key, "1");
+        let minimum_version = state
+            .get_versioned(&key)
+            .assured("the interest was just advertised again")
+            .version;
+        let mut visible =
+            std::pin::pin!(publication.wait_for(&subscriber, "sales", "events", minimum_version,));
+
+        assert!(
+            !publication
+                .load()
+                .contains(&subscriber, "sales", "events", minimum_version),
+            "reopening must not accept the advertisement that preceded withdrawal"
+        );
+        assert!(futures_util::poll!(&mut visible).is_pending());
+        publication.publish(&withdrawn);
+        assert!(
+            !publication
+                .load()
+                .contains(&subscriber, "sales", "events", minimum_version)
+        );
+        assert!(futures_util::poll!(&mut visible).is_pending());
+        publication.publish(&BTreeMap::from([(node_id, state)]));
+        assert!(
+            publication
+                .load()
+                .contains(&subscriber, "sales", "events", minimum_version)
+        );
+        tokio::time::timeout(Duration::from_secs(30), visible)
+            .await
+            .assured("publishing the renewed interest releases its visibility wait");
+        assert!(!publication.load().contains(
+            &health_identity("node-1", 8),
+            "sales",
+            "events",
+            minimum_version,
+        ));
     }
 
     #[test]

@@ -285,6 +285,8 @@ All nodes in a running cluster use one current wire contract. A fixed fingerprin
 supported operations and their encoded shapes. A fingerprint mismatch rejects connection setup;
 there is no version negotiation or alternate decoding path. A wire-contract change therefore
 requires a coordinated cluster stop and start with all nodes on the same version.
+The subscription-interest visibility request includes the advertisement version, and its current
+wire fingerprint fences that request shape during connection setup.
 
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
@@ -626,11 +628,16 @@ peer that is itself stopping fail at once, instead of holding teardown for the r
 
 Session subscription interest also propagates through gossip. The key encoding is private to the
 cluster layer: whenever the live-node state watcher changes, each node rebuilds an immutable index
-from domain and relay to the interested node incarnations and publishes it through `ArcSwap`. A
-relay owner loads that snapshot and performs borrowed domain and relay lookups, so per-batch remote
-fan-out neither formats a gossip key nor waits on the gossip mutex. Subscription creation waits for
-the exact subscriber incarnation to appear in every live node's published index before it reports
-success. A withdrawal disappears from fan-out when the next gossip state snapshot is published.
+from domain and relay to the interested node incarnations and advertisement versions and publishes
+it through `ArcSwap`. A relay owner loads that snapshot and performs borrowed domain and relay
+lookups, so per-batch remote fan-out neither formats a gossip key nor waits on the gossip mutex.
+Subscription creation waits for the exact subscriber incarnation and at least the current interest
+key's gossip version to appear in every live node's published index before it reports success.
+The creating subscription holds its lease while capturing that version and waiting for visibility.
+After withdrawal and reopening, an
+advertisement from before the withdrawal cannot satisfy this handshake, even when the subscriber
+node has not restarted. A withdrawal disappears from fan-out when the next gossip state snapshot is
+published.
 
 A node advertises interest in a relay exactly while at least one of its session subscriptions
 holds a lease on it. Every subscription takes one lease before it attaches and releases it exactly

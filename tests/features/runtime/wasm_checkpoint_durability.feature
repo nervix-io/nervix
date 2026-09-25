@@ -324,6 +324,8 @@ Feature: WASM guest-state checkpoint durability
     And runtime state replica installations succeed again on every node
     Then node "{{promoted_replica}}" eventually observes a stable leader
     And within "60s" node "{{promoted_replica}}" eventually reports scheduled "wasm_processor" "filter_even_rows" owner equals placeholder "promoted_replica"
+    # Settle the failed input before the next state probe: its rejection can rewind this partition.
+    And within "90s" Kafka consumer group "wasm_checkpoint_failover_group_{{test_id}}" next offset for topic "wasm_checkpoint_failover_in_{{test_id}}" partition 0 is "at least 7"
     When Kafka message is published to topic "wasm_checkpoint_failover_in_{{test_id}}"
       """
       {"value":14,"tenant":"beta"}

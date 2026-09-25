@@ -53,7 +53,9 @@ subscription belongs to the session that created it and moves through one lifecy
 
 - **Creating.** The server validates the statement, makes the node's interest in the relay visible
   to every live node, and attaches to the relay. A refusal at any step leaves nothing behind: no
-  interest, no attachment, and the name remains free.
+  interest, no attachment, and the name remains free. Reopening after the last subscription closed
+  waits for the renewed interest to become visible; an advertisement from before that closure does
+  not establish readiness.
 - **Active.** The reply that opens the subscription carries the schema of its rows, and no row
   precedes it. When that reply cannot be delivered, because the request was cancelled, the session
   ended, or the reply did not fit the session limits, the subscription is abandoned before it
