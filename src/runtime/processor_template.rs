@@ -449,11 +449,12 @@ impl RelayProcessorTemplate {
         }
     }
 
-    pub(super) fn instantiate(
+    pub(super) async fn instantiate(
         &self,
         runtime: &Runtime,
         domain: &DomainName,
         key: &Option<BranchKey>,
+        incarnation: u64,
     ) -> error_stack::Result<RelayProcessorNode, ProcessorTemplateError> {
         Ok(RelayProcessorNode {
             kind: self.kind,
@@ -545,7 +546,8 @@ impl RelayProcessorTemplate {
                             processor: self.processor.clone(),
                         })?;
                     let state = replicated_state
-                        .restore_state(plan, &input_schema)
+                        .restore_state(plan, &input_schema, incarnation, &runtime.inner.executor)
+                        .await
                         .change_context_lazy(|| ProcessorTemplateError::WindowRestore {
                             processor: self.processor.clone(),
                             branch: key.clone(),
@@ -720,11 +722,12 @@ impl BranchInstanceTemplate {
         Ok(())
     }
 
-    pub(super) fn instantiate(
+    pub(super) async fn instantiate(
         &self,
         runtime: &Runtime,
         domain: &DomainName,
         key: Option<BranchKey>,
+        incarnation: u64,
     ) -> error_stack::Result<Mutex<BranchRuntime>, ProcessorTemplateError> {
         let relays = self
             .relays
@@ -749,7 +752,10 @@ impl BranchInstanceTemplate {
         let materialized_states = HashMap::default();
         let mut processors = HashMap::default();
         for (processor, template) in &self.processors {
-            let node = template.instantiate(runtime, domain, &key)?;
+            tokio::task::consume_budget().await;
+            let node = template
+                .instantiate(runtime, domain, &key, incarnation)
+                .await?;
             processors.insert(processor.clone(), node);
         }
         let dispatcher = runtime.inner.remote_dispatcher.load();
@@ -863,8 +869,8 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn processor_template_refresh_is_not_junction_specific() {
+    #[tokio::test]
+    async fn processor_template_refresh_is_not_junction_specific() {
         let runtime = Runtime::default();
         let domain = domain("default");
         publish_state_identity(
@@ -903,7 +909,8 @@ mod tests {
             },
         };
         let mut node = template
-            .instantiate(&runtime, &domain, &None)
+            .instantiate(&runtime, &domain, &None, 1)
+            .await
             .expect("deduplicator template must instantiate");
 
         let mut desired = template.clone();
@@ -953,8 +960,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn processor_template_refresh_rejects_other_targets_topologies_and_kinds() {
+    #[tokio::test]
+    async fn processor_template_refresh_rejects_other_targets_topologies_and_kinds() {
         let runtime = Runtime::default();
         let domain = domain("default");
         publish_state_identity(
@@ -995,7 +1002,8 @@ mod tests {
             },
         };
         let mut node = template
-            .instantiate(&runtime, &domain, &None)
+            .instantiate(&runtime, &domain, &None, 1)
+            .await
             .expect("deduplicator template must instantiate");
         let refusal = |node: &mut RelayProcessorNode, desired: RelayProcessorTemplate| {
             node.apply_node_template(desired)

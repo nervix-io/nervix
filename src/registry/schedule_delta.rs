@@ -833,10 +833,11 @@ mod tests {
         let mut publishing = existing.clone();
         let request = CommandExecutionReference::parse("reset-counting-guest")
             .expect("the reset reference must be valid");
-        assert!(
-            publishing.nodes[0]
-                .begin_wasm_state_reset(request.clone(), WasmStateResetScope::Unbranched,)
-        );
+        assert!(publishing.nodes[0].begin_wasm_state_reset(
+            request.clone(),
+            WasmStateResetScope::Unbranched,
+            nervix_models::WasmStateResetReason::Operator,
+        ));
         let publishing_reset = publishing.nodes[0]
             .wasm_state_reset()
             .expect("the reset was published")

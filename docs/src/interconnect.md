@@ -31,6 +31,15 @@ step. Turmoil can vary task ordering around it, but instruction-level CPU races 
 Shuttle or real-thread testing. Only bounded executor probes and interconnect codec jobs are
 approved for this suite; storage jobs, external drivers and unbounded CPU work are outside it.
 
+The dedicated Turmoil build selects simulated TCP listeners, outbound sockets and DNS lookups at
+the interconnect I/O boundary. The same production TLS, HTTP/2, request, relay-envelope and Arrow
+IPC paths run above those sockets. Each transport, credential bundle, executor and peer topology is
+constructed inside its own simulated host; live sockets and transports are never shared between
+hosts. The test harness shares only bounded readiness and completion signals. It shuts down every
+transport before its host exits, so listener cleanup and rebinding are observable in the same host.
+The two-host exchange transfers an Arrow batch both in a typed request and as a relay payload; a
+three-host scenario resolves and exchanges with two peers and checks certificate-name rejection.
+
 Transport deadlines are Tokio instants, so on a simulated host they follow the simulated clock:
 connection setup, request and progress timeouts, reconnect backoff, relay grant lifetimes, and the
 drain deadline derived from certificate expiry all expire after simulated, not real, elapsed time.
@@ -62,14 +71,16 @@ take a maximum, or remove entries independently of one another keep map order, b
 change their result. Residual sources outside the simulated contract are Rustls and AWS-LC
 randomness, which changes cipher bytes but no decision; Tokio's per-runtime scheduling seed, which
 Turmoil derives from the simulation seed only when the build sets `tokio_unstable`, as the test
-recipe does; and the real listener, TCP connections and DNS resolution named below.
+recipe does.
 
-The production listener, outbound TCP connections, and DNS resolution still use Tokio's real
-network APIs. External connectors, filesystem and database work, gossip and consensus randomness,
-and domain-clock authority are outside this simulation boundary. The transport clock is physical
-infrastructure time only; it neither defines domain time nor stamps connector arrivals. A simulated
-host crash tears down its runtime and is not evidence of power-loss or SIGKILL durability. A
-simulation result therefore makes no claim yet about production transport faults or full-node
+Production builds use Tokio's operating-system TCP and DNS APIs. The Turmoil build uses only
+simulated TCP and DNS for the interconnect, so transport fault scenarios cannot escape to the host
+network within that boundary. External connectors, filesystem and database work, gossip and
+consensus randomness, and domain-clock authority are outside this simulation boundary. The
+transport clock is physical infrastructure time only; it neither defines domain time nor stamps
+connector arrivals. A simulated host crash tears down its runtime and is not evidence of
+power-loss or SIGKILL durability. A simulation result therefore makes no claim yet about production
+transport faults or full-node
 recovery.
 
 ## Listener And Peer Topology
@@ -614,6 +625,9 @@ current one.
 The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
 activate after a later one is committed.
+Window state also binds to its current window model. A model replacement with unchanged schemas
+therefore addresses a different checkpoint and cannot install rows accumulated under the preceding
+window definition.
 
 The same rule fences a coordinated reset. Once its `Publishing` schedule is committed, every
 runtime-state request for the replaced WASM generation is stale even while the new initial
@@ -621,6 +635,15 @@ checkpoint is still being made durable. Replicas that were offline install the c
 before accepting state, then synchronize only the new placement. A reset does not delete old bytes
 through an unbounded cluster sweep; generation-addressed reads make them unreachable immediately,
 and the existing bounded state-store retention removes them locally.
+
+The leader forwards coordinated reset requests with a typed reason, so a guest request, operator
+request, transaction effect, and rejected-snapshot recovery keep their provenance across nodes.
+The existing remote describe exchange returns typed checkpoint facts from the execution owner:
+generation, revisions, stage, and required and confirmed replica counts. The receiver combines
+them with its scheduled binding, reset, and recovery facts, accepting only checkpoints of the
+schedule's current generation. This read does not request synchronization, take ownership, or
+change a checkpoint's completion state. A stored checkpoint whose previous replica boundary is
+unknown is reported as such rather than treated as newly confirmed.
 
 A replica acknowledges a branch-state checkpoint — WASM guest state, deduplicator and window state,
 and the branch lifecycle that names the branches — only after it has written the checkpoint to its
@@ -636,6 +659,19 @@ its replicas as soon as the branch appears. A replica that receives a checkpoint
 replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
 refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
 owner has evicted.
+The owner publishes an empty final window checkpoint when it evicts a concrete window branch. A
+replica that installs that revision replaces the evicted branch's rows and sketch panes with the
+empty state. The branch lifecycle checkpoint records an incarnation for each concrete branch;
+restoring a window checkpoint with a different incarnation starts an empty window. Reusing a branch
+key after eviction therefore cannot attach a prior lifetime's retained rows, even when the earlier
+checkpoint remains on a replica.
+Window checkpoints carry a sealed container with separate bounded Arrow sections for retained
+input and aggregate arguments, plus bounded typed sections for delayed histogram removals. Its
+revision, row count, and branch incarnation are checked across the sections before restoration;
+the ownership handoff and replica installation fences still govern whether the checkpoint can be
+installed. A section that exceeds its bulk limit or disagrees with the container fails to open.
+Sealing also refuses a container that cannot fit the available bulk memory reservation, instead
+of waiting for a reservation larger than that budget.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution

@@ -1,0 +1,3 @@
+# Conformance frames are exact FlatBuffers bytes: never convert line endings or diff them as text.
+crates/client-wire/conformance/*.nxcm binary
+crates/client-wire/conformance/*.nxsm binary

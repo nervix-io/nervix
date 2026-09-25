@@ -98,6 +98,22 @@ A window and its aggregate accumulators belong to one branch task. The task muta
 directly and publishes a complete immutable window generation for persistence, replication,
 handoff, and restoration. Snapshot encoding reads that generation instead of holding the branch
 runtime while it serializes.
+The publication shares the retained input and aggregate-argument Arrow columns through row views.
+The snapshot task seals those views as bounded Arrow sections on the bulk executor, while a
+separate bounded typed section carries each group of histogram delayed removals. Encoding never
+materializes a scalar-field copy of the retained payload. Restore opens the sections on the bulk
+executor and reuses their columns to rebuild exact accumulators and sketch panes.
+
+Evicting a concrete branch resets its retained window rows and aggregate structures before the
+branch task's final publication. The published generation is empty, so a later appearance of the
+same branch key cannot inherit the evicted window or its sketch panes. After the final checkpoint,
+the owner releases the evicted branch's in-memory publication. A branch that appears without a
+restored lifecycle entry also publishes an empty initial window, even if a previous lifetime of its
+key left a checkpoint behind. Stopping a branch for an ownership handoff follows the normal
+finalization path and publishes its retained window instead.
+The branch lifecycle and window checkpoint carry the same incarnation, assigned when the concrete
+branch appears. A restore whose incarnations differ begins with empty window state and marks it
+for publication, so a delayed checkpoint from the preceding lifetime cannot restore its panes.
 
 A WASM guest instance likewise belongs to one branch task. At the end of every guest callback the
 task asks the guest to save its computation state and checkpoints the returned buffer: it writes it
@@ -106,6 +122,12 @@ committed checkpoint a recreated instance restores. The branch runs no further c
 checkpoint completes or fails. The publications retain the saved buffer rather than copying it for
 every persistence or replication reader. Input buffered by the guest host and ACK tokens remain
 execution state and are never included in a guest save.
+
+Each branch publishes checkpoint revision, boundary, and stage together through one immutable
+observation. An inspection read samples that publication and replica progress without taking the
+branch task's execution lane or advancing durability. A failure before guest state was captured is
+an explicit observation without a new revision; any earlier committed checkpoint remains the
+restore source. The published observation contains no guest bytes.
 
 Every branch save is addressed by the guest-state generation in the committed schedule. Forced
 recovery publishes a new generation with the replacement schedule, so a late save, replica

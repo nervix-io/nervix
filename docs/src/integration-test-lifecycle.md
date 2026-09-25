@@ -38,6 +38,7 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | CLI sessions | Child processes executing `nervix-cli`; a scenario reader retains at most 256 output lines | The scenario world, `tests/scenarios.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
 client coverage recipes place those executables beside their instrumented server binary, where the
@@ -499,6 +500,8 @@ longest of five minutes, the node's configured shutdown timeout, and its configu
 the application drain when graceful drain is enabled plus the runtime's branch stop timeout for the
 configured domain drain. A scenario that configures a longer product deadline raises the watchdog
 with it, so the harness never cuts a product deadline short.
+Node-specific stop steps resolve a saved scenario placeholder before selecting the node, including
+the graceful stop used to exercise ownership handoff during drain.
 
 A stop that ends cleanly is followed by a check that the node released its node and consensus
 database locks. The step fails when the node's task panicked, when the watchdog passed and the task
@@ -599,6 +602,31 @@ scenario cleanup forced: HTTP receiver <name>: <the same record>
 The second line appears only when a connection or the accept loop had to be aborted, or panicked.
 A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
 cleanup, once the nodes that dialed it have ended.
+
+## Client Probes
+
+The cross-language conformance scenarios in `client_conformance.feature` run a small client of each
+runtime against a scenario's cluster, or against the checked-in conformance corpus. The in-process
+probe drives the shared Rust binding's C ABI from a blocking task of the binary's runtime, because
+every call of the binding blocks its caller; every other probe is a child process that the fixture
+starts with its target in `NERVIX_PROBE_*` variables and its standard input closed. A probe prints
+one report line per observation on standard output, and the fixture keeps every line it read.
+
+A probe's waits are bounded twice. The step that starts it waits at most 180 seconds for the line
+that says its subscription is open, and the step that reads its report waits the duration the step
+names for the probe to end, 180 seconds against a cluster and 60 against the corpus. Each probe also
+ends itself: it gives up on its rows after 120 seconds, or on its whole run after 170. A failure
+quotes every report line read so far, the exit status, and the probe's standard error. Dropping the
+fixture kills a child process, so a failed scenario never leaves a probe running; the in-process
+probe ends when its session fails against the stopped cluster, or at its own deadline.
+
+Every example of a runtime other than the in-process probe is tagged `@client_conformance_toolchain`
+and one `@client_probe_<runtime>` tag, and the suite excludes the first tag unless a run selects its
+own tags, because those examples need toolchains the suite's job does not install. `just
+test-client-conformance` builds every probe artifact and runs them; its first argument is the tag
+expression that selects runtimes. The `client-conformance` CI job runs it on its own runner with a
+60-minute limit and a 15-minute suite budget, which leaves the builds before the scenarios up to 40
+minutes of the limit and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 

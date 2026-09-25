@@ -286,6 +286,145 @@ jobs:
           path: tests/logs
           if-no-files-found: ignore
 
+  # The cross-language client probes: C, C++, Python, Java and Ruby over the shared Rust binding,
+  # and independent Go and TypeScript implementations on Node.js and Bun. They need toolchains the
+  # suite job does not install and run a feature of their own, so they are a job of their own
+  # beside the suite rather than minutes added to its critical path.
+  client-conformance:
+    name: client-conformance
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    # The suite budget below is derived from this limit: builds before the scenarios, then at most
+    # the budget, then the reserve the harness keeps for its own cleanup and the log upload.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+      NERVIX_TEST_CONCURRENCY_FACTOR: "2"
+      # Nineteen scenarios finish in a few minutes. A short budget leaves the builds before them
+      # up to 40 minutes of the job limit instead of the suite job's 18.
+      NERVIX_TEST_SUITE_BUDGET: "15m"
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli,trunk,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      # The same toolchain and flags the other jobs build with, so their compilations are
+      # interchangeable in the shared cache rather than a second set of artifacts.
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "clang-23"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+
+      - name: Install TinyGo
+        run: |
+          set -euo pipefail
+          arch="$(dpkg --print-architecture)"
+          case "${arch}" in
+            amd64|arm64) ;;
+            *) echo "unsupported TinyGo CI architecture: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/tinygo.deb "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo_${TINYGO_VERSION}_${arch}.deb"
+          sudo dpkg -i /tmp/tinygo.deb
+          tinygo version
+
+      # The Foreign Function and Memory API the Java probe uses is final from Java 22.
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # Fiddle's boolean type, which the Ruby probe's signatures use, ships with Ruby 3.3.
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
+      - name: Install apt deps
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            libcurl4-openssl-dev \
+            protobuf-compiler
+
+      - name: Setup flatc
+        uses: Nugine/setup-flatc@v1
+        with:
+          version: "25.12.19"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Client conformance
+        run: just test-client-conformance
+
+      - name: Kache stats
+        continue-on-error: true
+        if: always()
+        run: kache stats
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-conformance-logs
+          path: tests/logs
+          if-no-files-found: ignore
+
   # The checks that answer for the workspace rather than for the scenario suite: undefined
   # behaviour, mutation coverage, benchmark bodies, modeled concurrency and completion
   # reachability. None of them reads the suite's result, so they run beside it instead of queueing

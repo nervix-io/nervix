@@ -486,3 +486,99 @@ Feature: Emitter batching configuration
       CREATE CODEC batch_only FROM JSON TO SCHEMA event
         WITH JAQ TRANSFORMATIONS ON INGESTION '.' ON EMITTING BATCH '{records: .}';
       """
+
+  @emitter_batching_payload_limit
+  Scenario Outline: A batching emitter never publishes a payload larger than MAX SIZE
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "bounded_events_{{test_id}}" exists with 1 partitions
+    And Kafka topic "bounded_events_{{test_id}}" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA event ( seq I64, note STRING );
+      CREATE SCHEMA rejected_event (
+        seq I64,
+        error_code STRING,
+        error_message STRING,
+        operation STRING
+      );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT ( seq integer, note string );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY events SCHEMA event UNBRANCHED;
+      CREATE RELAY rejected_events SCHEMA rejected_event UNBRANCHED;
+      CREATE VHOST edge http-{{test_id}}.example.com;
+      CREATE ENDPOINT events_endpoint ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR http_events
+        FROM ENDPOINT events_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO events
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT kafka_main TYPE KAFKA CONFIG {
+        'bootstrap.servers' = '{{kafka_addr}}'
+      };
+      CREATE EMITTER bounded_events FROM events
+        TO KAFKA kafka_main TOPIC bounded_events_{{test_id}}
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING event_codec
+        INHERIT ALL
+        BATCH MAX MESSAGES 10 MAX SIZE 32B
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR SEND TO rejected_events
+          SET seq = input.seq,
+              error_code = error.code,
+              error_message = error.message,
+              operation = error.operation
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_events_subscription TO rejected_events;
+      START;
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":1,"note":"exactly-fit13"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":2,"note":"one-byte-over!"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":3,"note":"quote\"escaped"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":4,"note":"ééééééx"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":5,"note":"éééééééx"}
+      """
+    And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
+      """
+      {"seq":6,"note":"ok"}
+      """
+    Then within "30s" the observed broker receives exactly these payloads
+      """
+      {"seq":1,"note":"exactly-fit13"}
+      {"seq":4,"note":"ééééééx"}
+      {"seq":6,"note":"ok"}
+      """
+    And within "30s" the relay subscription receives payloads containing all fragments
+      """
+      "seq":2 | "error_code":"validation" | "operation":"encode" | exceeds MAX SIZE 32B
+      "seq":3 | "error_code":"validation" | "operation":"encode" | exceeds MAX SIZE 32B
+      "seq":5 | "error_code":"validation" | "operation":"encode" | exceeds MAX SIZE 32B
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

@@ -37,7 +37,6 @@ use nervix_models::{
 };
 use strum::EnumCount as _;
 use tokio::{
-    net::{TcpListener, TcpStream},
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc},
     time::{Instant, sleep, sleep_until, timeout},
 };
@@ -58,6 +57,7 @@ use crate::{
         TransportObservations, TransportSnapshot,
     },
     request::RequestAdmission,
+    socket::{TcpListener, TcpStream},
     wire::{
         ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
         RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,

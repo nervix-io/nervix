@@ -84,8 +84,8 @@ use nervix_models::{
     RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
     RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
     SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmRejectedStatePolicy,
-    WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
+    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -266,7 +266,9 @@ use branch_buffering::{
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, RuntimeWake,
     wait_for_branch_buffer_deadlines,
 };
-use branch_instance_registry::BranchInstanceRegistry;
+use branch_instance_registry::{
+    BranchInstanceRegistry, BranchInstanceSnapshotEntry, GetOrCreateBranchInstance,
+};
 use branch_key::branch_key_display;
 use branch_lru_state::{
     BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,
@@ -543,8 +545,7 @@ use wasm_processor::{
 };
 use wasm_state::{
     CapturedWasmCheckpoint, CompletedWasmCheckpoint, LocallyDurableWasmCheckpoint,
-    ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary,
-    WasmCheckpointProgress, WasmGuestState,
+    ReplicatedWasmProcessorState, RestorableGuestState, WasmCheckpointBoundary, WasmGuestState,
 };
 use wasm_state_recovery::RaisedWasmStateRecoveries;
 pub(crate) use wasm_state_recovery::WasmStateRecoveryRequest;
