@@ -46,8 +46,9 @@ namespace nervix.session;
 // ---------------------------------------------------------------------------------------------
 
 /// A 32-byte opaque fingerprint.
-struct Fingerprint {
-  bytes: [ubyte:32];
+table Fingerprint {
+  /// Exactly 32 bytes.
+  bytes: [ubyte] (required);
 }
 
 /// A byte range of the NSPL source text a request carried. Offsets are UTF-8 byte offsets on

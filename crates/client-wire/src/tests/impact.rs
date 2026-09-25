@@ -22,6 +22,8 @@ struct RawReport {
     configuration_attributions: Vec<Vec<u64>>,
     /// The selected branch keys of a topology node, when the node selects keys.
     selected_keys: Option<Vec<[u8; 32]>>,
+    /// The bytes of the report's planning basis fingerprint.
+    planning_basis: Vec<u8>,
     /// The discriminant a node's coverage is stored under, when a test overrides the one its
     /// value has.
     coverage_type: Option<wire::NodeBranchCoverage>,
@@ -44,6 +46,7 @@ impl Default for RawReport {
             incomplete_diagnostics: None,
             configuration_attributions: vec![vec![1]],
             selected_keys: None,
+            planning_basis: vec![7; 32],
             coverage_type: None,
             requested_version_type: None,
             subgraph_attributions: None,
@@ -68,7 +71,10 @@ impl RawReport {
         let (branches_type, branches) = match &self.selected_keys {
             Some(keys) => {
                 let branch = builder.create_string("tenants");
-                let fingerprints = keys.iter().map(wire::Fingerprint::new).collect::<Vec<_>>();
+                let fingerprints = keys
+                    .iter()
+                    .map(|key| fingerprint(builder, key))
+                    .collect::<Vec<_>>();
                 let keys = builder.create_vector(&fingerprints);
                 let selected = wire::SelectedBranchCoverage::create(
                     builder,
@@ -369,13 +375,13 @@ impl RawReport {
         let steps = builder.create_vector(&[step]);
         let domain = builder.create_string("tenant");
         let complete = wire::ImpactComplete::create(&mut builder, &wire::ImpactCompleteArgs {});
-        let basis = wire::Fingerprint::new(&[7; 32]);
+        let basis = fingerprint(&mut builder, &self.planning_basis);
         let report = wire::TransactionImpactReport::create(
             &mut builder,
             &wire::TransactionImpactReportArgs {
                 domain: Some(domain),
                 position: self.position,
-                planning_basis: Some(&basis),
+                planning_basis: Some(basis),
                 completeness_type: wire::ImpactCompleteness::ImpactComplete,
                 completeness: Some(complete.as_union_value()),
                 operations: Some(operations),
@@ -434,6 +440,11 @@ fn topology(
             edges: Some(edges),
         },
     )
+}
+
+fn fingerprint(builder: &mut Builder, bytes: &[u8]) -> WIPOffset<wire::Fingerprint<'static>> {
+    let bytes = builder.create_vector(bytes);
+    wire::Fingerprint::create(builder, &wire::FingerprintArgs { bytes: Some(bytes) })
 }
 
 fn transaction_status(builder: &mut Builder) -> WIPOffset<wire::TransactionStatus<'static>> {
@@ -545,6 +556,23 @@ fn selected_branch_keys_are_a_non_empty_ascending_set() {
         assert_eq!(
             report.decode_error(),
             WireDecodeError::NonCanonicalSet { field }
+        );
+    }
+}
+
+#[test]
+fn a_fingerprint_holds_exactly_32_bytes() {
+    for planning_basis in [vec![7; 31], vec![7; 33], Vec::new()] {
+        let report = RawReport {
+            planning_basis,
+            ..RawReport::default()
+        };
+        assert_eq!(
+            report.decode_error(),
+            WireDecodeError::InvalidValue {
+                field: "TransactionImpactReport.planning_basis",
+                kind: "32-byte fingerprint",
+            }
         );
     }
 }
