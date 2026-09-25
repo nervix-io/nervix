@@ -24,7 +24,7 @@ use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 use byte_unit::{Byte, UnitType};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use error_stack::Report as StackReport;
+use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_client_core::{
     AutocompleteSuggestion, Client, ClientError as CoreClientError, CommandDisposition,
     CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic, DomainName,
@@ -158,8 +158,8 @@ enum ClientError {
     ReadLine,
     #[error("failed to read password")]
     ReadPassword,
-    #[error("invalid subscription WHERE expression: {reason}")]
-    InvalidSubscriptionWhere { reason: String },
+    #[error("invalid subscription WHERE expression")]
+    InvalidSubscriptionWhere,
     #[error("transaction inspection failed: {message}")]
     InspectionFailed { message: String },
 }
@@ -623,8 +623,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
         options.delivery_behavior,
         options.batch_sample_rate.as_deref(),
         options.where_clause.as_deref(),
-    )
-    .map_err(|reason| StackReport::new(ClientError::InvalidSubscriptionWhere { reason }))?;
+    )?;
     let query = request.to_query();
     let result = client
         .subscribe(&request)
@@ -1130,7 +1129,7 @@ fn subscribe_request(
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<&str>,
     where_clause: Option<&str>,
-) -> Result<SubscriptionRequest, String> {
+) -> Result<SubscriptionRequest, StackReport<ClientError>> {
     let request = match delivery_behavior {
         SubscriptionDeliveryBehavior::Blocking => SubscriptionRequest::new(name, relay).blocking(),
         SubscriptionDeliveryBehavior::Dropping => SubscriptionRequest::new(name, relay).dropping(),
@@ -1139,14 +1138,12 @@ fn subscribe_request(
         Some(batch_sample_rate) => request.with_batch_sample_rate(batch_sample_rate),
         None => request,
     };
-    where_clause
-        .map(nervix_nspl::parse_expression)
-        .transpose()
-        .map_err(|error| format!("invalid subscription WHERE expression: {error:?}"))
-        .map(|where_clause| match where_clause {
-            Some(where_clause) => request.with_where_clause(where_clause),
-            None => request,
-        })
+    let Some(where_clause) = where_clause else {
+        return Ok(request);
+    };
+    let where_clause = nervix_nspl::parse_expression(where_clause)
+        .change_context(ClientError::InvalidSubscriptionWhere)?;
+    Ok(request.with_where_clause(where_clause))
 }
 
 fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) {
@@ -1415,6 +1412,27 @@ mod tests {
             .to_query(),
             "CREATE SUBSCRIPTION sampled_myss TO myss DROPPING BATCH SAMPLE RATE 0.1 WHERE \
              input.tenant = 'acme';"
+        );
+    }
+
+    #[test]
+    fn subscribe_request_rejects_an_unparsable_where_clause() {
+        let error = subscribe_request(
+            "live_myss",
+            "myss",
+            SubscriptionDeliveryBehavior::Blocking,
+            None,
+            Some("input.tenant ="),
+        )
+        .expect_err("an incomplete WHERE expression must be rejected");
+
+        assert!(matches!(
+            error.current_context(),
+            ClientError::InvalidSubscriptionWhere
+        ));
+        assert!(
+            format!("{error:#}").starts_with("invalid subscription WHERE expression: parse error"),
+            "unexpected error: {error:#}"
         );
     }
 

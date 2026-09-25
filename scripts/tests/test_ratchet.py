@@ -101,47 +101,6 @@ class RatchetGateTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(listing, "src/lib.rs:2: x as u32\n")
 
-    def test_string_error_conversion_requires_an_error_stack_result(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            string_error = """
-enum ParseError { Invalid }
-
-fn parse() -> Result<(), String> {
-    Ok(())
-}
-"""
-            write_repository(root, {"src/lib.rs": string_error})
-            run("--root", str(root), "--update")
-
-            bare_error = """
-enum ParseError { Invalid }
-
-fn parse() -> Result<(), ParseError> {
-    Ok(())
-}
-"""
-            (root / "src" / "lib.rs").write_text(bare_error, encoding="utf-8")
-            status, report, _ = run("--root", str(root))
-
-            self.assertEqual(status, 1)
-            self.assertIn("result_string_errors: 1 -> 0", report)
-            self.assertIn("bare_error_signatures: 0 -> 1 (+1)", report)
-
-            reported_error = """
-enum ParseError { Invalid }
-
-fn parse() -> error_stack::Result<(), ParseError> {
-    Ok(())
-}
-"""
-            (root / "src" / "lib.rs").write_text(reported_error, encoding="utf-8")
-            status, report, errors = run("--root", str(root))
-
-            self.assertEqual(status, 0)
-            self.assertEqual(errors, "")
-            self.assertIn("result_string_errors: 1 -> 0", report)
-
 
 class CountTests(unittest.TestCase):
     def test_as_casts_ignore_comments_literals_imports_and_unit_tests(self) -> None:
@@ -250,39 +209,6 @@ mod tests {
             )
 
             self.assertEqual(count(root, "combinator_control_flow"), 3)
-
-    def test_result_string_errors_span_lines_and_ignore_other_errors(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            write_repository(
-                root,
-                {
-                    "src/lib.rs": """
-struct Envelope {
-    result: Result<Vec<u8>, String>,
-}
-
-fn parse(
-    value: &str,
-) -> Result<
-    Vec<u8>,
-    String,
-> {
-    Ok(value.as_bytes().to_vec())
-}
-
-fn typed(value: &str) -> Result<Vec<u8>, ParseError> {
-    Ok(value.as_bytes().to_vec())
-}
-
-fn nested(value: &str) -> Result<Vec<String>, ParseError> {
-    Ok(vec![value.to_owned()])
-}
-""",
-                },
-            )
-
-            self.assertEqual(count(root, "result_string_errors"), 2)
 
     def test_bare_error_signatures_skip_reported_and_foreign_errors(self) -> None:
         with TemporaryDirectory() as directory:

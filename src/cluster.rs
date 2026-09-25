@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use chitchat::{
     Chitchat, ChitchatHandle, ChitchatId, ChitchatMessage, Deserializable as _, NodeState,
@@ -46,7 +47,7 @@ use tokio::{
 use tokio_real as chitchat_tokio;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
@@ -747,8 +748,35 @@ struct GossipExchange {
     payload: Vec<u8>,
 }
 
+/// Why a node refused one gossip exchange.
+///
+/// The refusal is the exchange's answer on the wire, so the sending node learns why its message was
+/// not taken without parsing text.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
+enum GossipExchangeRefusal {
+    #[error("a gossip message of {size} bytes exceeds the {limit}-byte bound")]
+    Oversized { size: u64, limit: u64 },
+    #[error("the answering node could not register the sending node as an outbound peer")]
+    PeerRegistration,
+    #[error("the answering node's gossip receiver has shut down")]
+    ReceiverClosed,
+}
+
+impl GossipExchange {
+    /// Refuses a message larger than one gossip exchange may carry.
+    fn check_size(&self) -> Result<(), GossipExchangeRefusal> {
+        if self.payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
+            return Err(GossipExchangeRefusal::Oversized {
+                size: self.payload.len().arch_into(),
+                limit: MAX_GOSSIP_MESSAGE_BYTES.arch_into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl InterconnectRequest for GossipExchange {
-    type Response = Result<(), String>;
+    type Response = Result<(), GossipExchangeRefusal>;
 
     const NAME: &'static str = "gossip_exchange";
     const CLASS: PoolClass = PoolClass::Management;
@@ -827,17 +855,21 @@ impl InterconnectGossipTransport {
         &self,
         context: RequestContext,
         request: GossipExchange,
-    ) -> Result<(), String> {
-        if request.payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
-            return Err(format!(
-                "gossip message exceeds {MAX_GOSSIP_MESSAGE_BYTES} bytes"
-            ));
-        }
+    ) -> Result<(), GossipExchangeRefusal> {
+        request.check_size()?;
         let target = PeerTarget::new(request.from, context.peer_advertised_host().to_string());
-        self.inner
+        let registration = self
+            .inner
             .interconnect
-            .register_outbound_target(context.peer_node_id().clone(), target.clone())
-            .map_err(|error| error.to_string())?;
+            .register_outbound_target(context.peer_node_id().clone(), target.clone());
+        if let Err(error) = registration {
+            debug!(
+                peer = %context.peer_node_id(),
+                error = %error,
+                "refused a gossip exchange from a peer that could not be registered"
+            );
+            return Err(GossipExchangeRefusal::PeerRegistration);
+        }
         self.inner.routes.insert(
             request.from,
             GossipRoute {
@@ -852,7 +884,7 @@ impl InterconnectGossipTransport {
                 payload: request.payload,
             })
             .await
-            .map_err(|_| "gossip receiver has shut down".to_string())
+            .map_err(|_| GossipExchangeRefusal::ReceiverClosed)
     }
 
     fn refresh_routes(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
@@ -935,7 +967,7 @@ impl InterconnectGossipTransport {
             )
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        response.map_err(anyhow::Error::msg)?;
+        response?;
         Ok(())
     }
 }
@@ -1705,6 +1737,35 @@ pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gossip_exchange_larger_than_one_message_is_refused() {
+        let from = SocketAddr::from(([127, 0, 0, 1], 7946));
+        let largest = GossipExchange {
+            from,
+            payload: vec![0; MAX_GOSSIP_MESSAGE_BYTES],
+        };
+        assert_eq!(largest.check_size(), Ok(()));
+
+        let oversized = GossipExchange {
+            from,
+            payload: vec![0; MAX_GOSSIP_MESSAGE_BYTES + 1],
+        };
+        let refusal = oversized
+            .check_size()
+            .expect_err("a message past the bound is refused");
+        assert_eq!(
+            refusal,
+            GossipExchangeRefusal::Oversized {
+                size: 61_441,
+                limit: 61_440,
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "a gossip message of 61441 bytes exceeds the 61440-byte bound"
+        );
+    }
 
     fn health_identity(node: &str, incarnation: u64) -> ClusterNodeIdentity {
         ClusterNodeIdentity::new(
