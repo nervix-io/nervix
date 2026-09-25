@@ -325,6 +325,10 @@ test-coverage: tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets --all-features --workspace \
         "${workspace_exclusions[@]}"
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-cli") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
@@ -342,6 +346,8 @@ test-coverage: tests-deps
         cargo llvm-cov --no-report --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
     cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
+    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
+        --package nervix-server --lcov --output-path lcov.info
 
 # Measure changed server lines against its unit tests and selected Cucumber features while iterating.
 # The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.
@@ -356,6 +362,37 @@ test-coverage-feature +features: tests-deps
             --test scenarios -- --input "${feature}" --concurrency 1
     done
     cargo llvm-cov report --lcov --output-path lcov.info
+
+# Measure browser and CLI binary tests together with their public session scenarios.
+test-coverage-clients: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --bins \
+        --package nervix-web-console --package nervix-cli
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-cli") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib
+    for feature in \
+        tests/features/web-console/connection_status.feature \
+        tests/features/web-console/nspl_repl.feature \
+        tests/features/tools/cli_session.feature; do
+        cargo llvm-cov --no-report --features testing --package nervix-server \
+            --test scenarios -- --input "${feature}" --concurrency 1
+    done
+    just coverage-clients-report
+
+coverage-clients-report:
+    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
+        --package nervix-server --lcov --output-path lcov.info
+
+coverage-clients-units:
+    cargo llvm-cov --no-report --bins \
+        --package nervix-web-console --package nervix-cli
+    just coverage-clients-report
 
 # Write the line coverage of the unit tests of the packages named in `args`, such as
 # `--package nervix-vm --package nervix-nspl`, as LCOV to `output`. It checks the patch coverage of

@@ -38,7 +38,7 @@ use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statements, parse_upload_resource_query,
     upload_resource_path_fragment,
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
+use nervix_recovery::{Discarded as _, Reported as _};
 use reedline::{
     Completer, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
     KeyCode, KeyModifiers, ListMenu, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
@@ -49,6 +49,13 @@ use tokio::{runtime::Handle, signal, task::block_in_place};
 use triomphe::Arc;
 
 const HISTORY_FILE: &str = ".nervix_client_history";
+const EVENT_BUFFER_RECORDS: usize = 128;
+const EVENT_LINE_BYTES: usize = 8 * 1024;
+const EVENT_BUFFER_BYTES: usize = EVENT_BUFFER_RECORDS * EVENT_LINE_BYTES;
+const EVENT_LINE_SUFFIX: &str = "… [line truncated]";
+const EVENT_LINE_PREFIX_BYTES: usize = EVENT_LINE_BYTES - EVENT_LINE_SUFFIX.len();
+const _: () = assert!(EVENT_LINE_BYTES > EVENT_LINE_SUFFIX.len());
+const _: () = assert!(EVENT_BUFFER_BYTES == 1024 * 1024);
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-cli")]
@@ -203,10 +210,8 @@ impl Completer for GrpcCompleter {
 
 fn word_start(line: &str, pos: usize) -> usize {
     let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let boundary = line[..pos.min(line.len())]
-        .char_indices()
-        .rev()
-        .find(|(_, c)| !is_word(*c));
+    let pos = line.floor_char_boundary(pos.min(line.len()));
+    let boundary = line[..pos].char_indices().rev().find(|(_, c)| !is_word(*c));
     match boundary {
         Some((index, character)) => index + character.len_utf8(),
         None => 0,
@@ -308,8 +313,9 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
             .await
             .map_err(|err| StackReport::new(ClientError::from(err)))?;
-    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(128);
-    spawn_event_collectors(client.clone(), event_sender);
+    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+    let event_sender = EventLineSender::new(event_sender);
+    spawn_event_collectors(client.clone(), event_sender.clone());
     if let Some(command) = args.command {
         execute_and_print(&client, command).await?;
         return Ok(());
@@ -333,7 +339,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             client.domain().await.as_ref(),
             client.transaction_status().await.as_ref(),
         );
-        drain_event_queue(&mut event_receiver);
+        drain_event_queue(&mut event_receiver, &event_sender);
         let prompt = if buffer.is_empty() {
             DefaultPrompt::new(
                 DefaultPromptSegment::Basic(format!("nervix[{prompt_domain}]")),
@@ -372,7 +378,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 if command_buffer_is_complete(&buffer) {
                     let payload = std::mem::take(&mut buffer);
                     execute_and_print(&client, payload).await?;
-                    drain_event_queue(&mut event_receiver);
+                    drain_event_queue(&mut event_receiver, &event_sender);
                 }
             }
             Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => break,
@@ -924,30 +930,48 @@ fn human_bytes(bytes: u64) -> String {
     format!("{adjusted:.1}")
 }
 
-fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::Sender<String>) {
-    let subscription_client = client.clone();
-    let subscription_sender = sender.clone();
-    tokio::spawn(async move {
-        while let Ok(event) = subscription_client.next_subscription().await {
-            tokio::task::consume_budget().await;
-            for line in format_subscription_event(&event) {
-                subscription_sender
-                    .send(line)
-                    .await
-                    .means_shutdown("terminal event printer");
-            }
-        }
-    });
+#[derive(Clone)]
+struct EventLineSender {
+    sender: tokio::sync::mpsc::Sender<String>,
+    dropped: Arc<AtomicU64>,
+}
 
-    tokio::spawn(async move {
-        while let Ok(event) = client.next_server_event().await {
-            tokio::task::consume_budget().await;
-            sender
-                .send(format_server_event(&event))
-                .await
-                .means_shutdown("terminal event printer");
+impl EventLineSender {
+    fn new(sender: tokio::sync::mpsc::Sender<String>) -> Self {
+        Self {
+            sender,
+            dropped: Arc::new(AtomicU64::new(0)),
         }
-    });
+    }
+
+    /// Event readers never wait for a terminal. A full queue drops the new line and records the
+    /// gap for the printer; every retained line has a fixed maximum byte length.
+    fn push(&self, mut line: String) {
+        if line.len() > EVENT_LINE_BYTES {
+            let boundary = line.floor_char_boundary(EVENT_LINE_PREFIX_BYTES);
+            line.truncate(boundary);
+            line.push_str(EVENT_LINE_SUFFIX);
+        }
+        match self.sender.try_send(line) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.dropped
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                        // The displayed gap count clamps once it reaches its representable limit.
+                        Some(match count.checked_add(1) {
+                            Some(next) => next,
+                            None => count,
+                        })
+                    })
+                    .discarded("the updated drop count is read when the terminal next drains");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    fn take_dropped(&self) -> u64 {
+        self.dropped.swap(0, Ordering::Relaxed)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -965,13 +989,23 @@ impl EventOutput {
     }
 }
 
-fn spawn_event_loggers(client: Client, output: EventOutput) {
+fn print_event_gap(dropped: u64, output: EventOutput) {
+    if dropped > 0 {
+        output.print(&format!(
+            "[events] notice: {dropped} event lines were omitted because terminal output could \
+             not keep up"
+        ));
+    }
+}
+
+fn spawn_event_collectors(client: Client, sender: EventLineSender) {
     let subscription_client = client.clone();
+    let subscription_sender = sender.clone();
     tokio::spawn(async move {
         while let Ok(event) = subscription_client.next_subscription().await {
             tokio::task::consume_budget().await;
             for line in format_subscription_event(&event) {
-                output.print(&line);
+                subscription_sender.push(line);
             }
         }
     });
@@ -979,15 +1013,33 @@ fn spawn_event_loggers(client: Client, output: EventOutput) {
     tokio::spawn(async move {
         while let Ok(event) = client.next_server_event().await {
             tokio::task::consume_budget().await;
-            output.print(&format_server_event(&event));
+            sender.push(format_server_event(&event));
         }
     });
 }
 
-fn drain_event_queue(receiver: &mut tokio::sync::mpsc::Receiver<String>) {
-    while let Ok(line) = receiver.try_recv() {
-        println!("{line}");
+fn spawn_event_loggers(client: Client, output: EventOutput) {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+    let sender = EventLineSender::new(sender);
+    let dropped = sender.dropped.clone();
+    spawn_event_collectors(client, sender);
+    tokio::task::spawn_blocking(move || {
+        while let Some(line) = receiver.blocking_recv() {
+            print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
+            output.print(&line);
+        }
+        print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
+    });
+}
+
+fn drain_event_queue(receiver: &mut tokio::sync::mpsc::Receiver<String>, sender: &EventLineSender) {
+    for _ in 0..EVENT_BUFFER_RECORDS {
+        let Ok(line) = receiver.try_recv() else {
+            break;
+        };
+        EventOutput::Stdout.print(&line);
     }
+    print_event_gap(sender.take_dropped(), EventOutput::Stdout);
 }
 
 /// The terminal lines of one subscription event: one line per row of a batch, or one notice.
@@ -1144,6 +1196,59 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
+
+    #[test]
+    fn event_line_queue_bounds_records_and_bytes_without_waiting_for_the_printer() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+        let sink = EventLineSender::new(sender);
+        for _ in 0..EVENT_BUFFER_RECORDS {
+            sink.push("é".repeat(EVENT_LINE_BYTES));
+        }
+        sink.push("one more line".to_string());
+        assert_eq!(sink.take_dropped(), 1);
+        let mut retained_bytes = 0;
+        for _ in 0..EVENT_BUFFER_RECORDS {
+            let line = receiver
+                .try_recv()
+                .verified("the test filled the bounded queue with this many lines");
+            assert!(line.len() <= EVENT_LINE_BYTES);
+            assert!(line.ends_with(EVENT_LINE_SUFFIX));
+            retained_bytes += line.len();
+        }
+        assert!(retained_bytes <= EVENT_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn draining_events_resets_the_visible_gap_after_a_full_queue() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let sink = EventLineSender::new(sender);
+        sink.push("first".to_string());
+        sink.push("second".to_string());
+        sink.push("dropped".to_string());
+
+        drain_event_queue(&mut receiver, &sink);
+
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            sink.take_dropped(),
+            0,
+            "the gap was reported during the drain"
+        );
+    }
+
+    #[test]
+    fn an_event_gap_clamps_and_a_closed_printer_discards_new_lines() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let sink = EventLineSender::new(sender);
+        sink.push("retained".to_string());
+        sink.dropped.store(u64::MAX, Ordering::Relaxed);
+        sink.push("overflow".to_string());
+        assert_eq!(sink.take_dropped(), u64::MAX);
+
+        drop(receiver);
+        sink.push("printer stopped".to_string());
+        assert_eq!(sink.take_dropped(), 0);
+    }
 
     #[test]
     fn one_shot_json_mode_requires_one_complete_inspection_statement() {
@@ -1319,6 +1424,8 @@ mod tests {
         assert_eq!(word_start("tenant_id", "tenant_id".len()), 0);
         assert_eq!(word_start("WHERE (tenant", "WHERE (tenant".len()), 7);
         assert_eq!(word_start("tenant", usize::MAX), 0);
+        assert_eq!(word_start("évalue", 1), 0);
+        assert_eq!(word_start("évalue", "évalue".len()), "é".len());
     }
 
     #[test]
@@ -1771,6 +1878,70 @@ mod tests {
             [
                 "[events] subscription [live] from [orders]: {\"id\":1}",
                 "[events] subscription [live] from [orders]: {\"id\":2}",
+            ]
+        );
+    }
+
+    #[test]
+    fn subscription_rows_display_branch_null_and_redaction_from_typed_cells() {
+        use nervix_client_core::wire::{
+            RowBranch, ServerEvent as WireEvent, ServerMessage, SessionLimits,
+            SubscriptionRowsEncoder,
+        };
+        use nervix_models::{FieldName, ParseAsType, SchemaField};
+
+        let field = |name: &str, ty: ParseAsType, optional: bool, sensitive: bool| SchemaField {
+            name: FieldName::parse(name).assured("the test field name is valid"),
+            ty,
+            optional,
+            sensitive,
+        };
+        let mut batch = SubscriptionRowsEncoder::branched(
+            live_subscription(),
+            &SessionLimits::DEFAULT,
+            |key| key.push_string("north"),
+        )
+        .assured("the branch key fits the frame");
+        batch
+            .push_row(|cells| {
+                cells.push_u64(7)?;
+                cells.push_null()?;
+                cells.push_redacted()
+            })
+            .assured("the typed row fits the frame");
+        let frame = batch
+            .finish()
+            .assured("the batch fits the frame")
+            .verify(&SessionLimits::DEFAULT)
+            .assured("the encoded frame verifies");
+        let ServerMessage::Event(WireEvent::SubscriptionRows(rows)) =
+            ServerMessage::decode(&frame).assured("the encoded frame decodes")
+        else {
+            panic!("the frame contains typed subscription rows");
+        };
+        let branch = RowBranch::new(
+            nervix_models::BranchName::parse("by_tenant").assured("the test branch name is valid"),
+            vec![field("tenant", ParseAsType::String, false, false)],
+        )
+        .assured("the branch has a key field");
+        let schema = nervix_client_core::RowSchema {
+            fields: vec![
+                field("id", ParseAsType::U64, false, false),
+                field("note", ParseAsType::String, true, false),
+                field("secret", ParseAsType::String, false, true),
+            ],
+            branch: Some(branch),
+        };
+        let event = SubscriptionEvent::Rows(nervix_client_core::SubscriptionRowsEvent {
+            relay: nervix_models::RelayName::parse("orders").assured("the relay name is valid"),
+            schema: Arc::new(schema),
+            rows,
+        });
+        assert_eq!(
+            format_subscription_event(&event),
+            [
+                "[events] subscription [live] from [orders]: key={\"tenant\":\"north\"} \
+                 payload={\"id\":7,\"secret\":\"<masked>\"}"
             ]
         );
     }
