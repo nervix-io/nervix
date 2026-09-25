@@ -80,10 +80,25 @@ pub(super) enum WasmCheckpointProgress {
 }
 
 #[derive(Debug, Clone)]
-struct ObservedWasmCheckpoint {
-    revision: NonZeroU64,
-    boundary: WasmCheckpointBoundary,
-    progress: WasmCheckpointProgress,
+enum ObservedWasmCheckpoint {
+    /// The boundary or guest save failed before a new checkpoint had a revision.
+    FailedBeforeCapture,
+    Captured {
+        revision: NonZeroU64,
+        boundary: WasmCheckpointBoundary,
+        progress: WasmCheckpointProgress,
+    },
+}
+
+impl ObservedWasmCheckpoint {
+    fn captured(&self) -> Option<(NonZeroU64, &WasmCheckpointBoundary)> {
+        match self {
+            Self::FailedBeforeCapture => None,
+            Self::Captured {
+                revision, boundary, ..
+            } => Some((*revision, boundary)),
+        }
+    }
 }
 
 /// The boundary a checkpoint has to reach before the success acknowledgements it covers are
@@ -297,7 +312,8 @@ impl ReplicatedWasmProcessorState {
     #[cfg(test)]
     pub(super) fn progress(&self) -> WasmCheckpointProgress {
         match self.latest.load().as_deref() {
-            Some(observed) => observed.progress,
+            Some(ObservedWasmCheckpoint::Captured { progress, .. }) => *progress,
+            Some(ObservedWasmCheckpoint::FailedBeforeCapture) => WasmCheckpointProgress::Failed,
             None => WasmCheckpointProgress::Committed,
         }
     }
@@ -307,10 +323,15 @@ impl ReplicatedWasmProcessorState {
             .latest
             .load_full()
             .assured("checkpoint progress changes only after capture published its observation");
-        self.latest.store(Some(StdArc::new(ObservedWasmCheckpoint {
-            progress,
-            ..(*observed).clone()
-        })));
+        let (revision, boundary) = observed
+            .captured()
+            .assured("local durability and commit follow a captured checkpoint");
+        self.latest
+            .store(Some(StdArc::new(ObservedWasmCheckpoint::Captured {
+                revision,
+                boundary: boundary.clone(),
+                progress,
+            })));
     }
 
     /// A read-only observation of the latest checkpoint and its completed predecessor. Replica
@@ -319,43 +340,53 @@ impl ReplicatedWasmProcessorState {
         let committed = self.committed.load_full();
         let committed_revision = NonZeroU64::new(committed.revision);
         let latest = self.latest.load_full();
-        let Some(latest) = latest else {
-            return WasmCheckpointInspection {
-                branch: self
-                    .placement
-                    .branch_key
-                    .as_ref()
-                    .map(|key| key.fingerprint()),
-                generation: self.generation(),
+        let (latest_revision, stage, required_replicas, confirmed_replicas) = match latest
+            .as_deref()
+        {
+            None => (
                 committed_revision,
-                latest_revision: committed_revision,
-                stage: match committed_revision {
+                match committed_revision {
                     Some(_) => WasmCheckpointStage::LocallyDurable,
                     None => WasmCheckpointStage::Empty,
                 },
-                required_replicas: None,
-                confirmed_replicas: None,
-            };
-        };
-        let (required_replicas, confirmed_replicas) = match &latest.boundary {
-            WasmCheckpointBoundary::LocalStorage => (Some(0), Some(0)),
-            WasmCheckpointBoundary::Replicas(replicas) => {
-                let required = u32::try_from(replicas.nodes().len())
-                    .assured("a cluster cannot contain more than u32::MAX nodes");
-                let awaiting = self.replicas_awaiting(replicas, latest.revision.get());
-                let confirmed = required
-                    .checked_sub(u32::try_from(awaiting.len()).assured(
-                        "the awaiting set is a subset of the u32-bounded required replicas",
-                    ))
-                    .assured("the awaiting set cannot exceed the required replicas");
-                (Some(required), Some(confirmed))
+                None,
+                None,
+            ),
+            Some(ObservedWasmCheckpoint::FailedBeforeCapture) => {
+                (None, WasmCheckpointStage::Failed, None, None)
             }
-        };
-        let stage = match latest.progress {
-            WasmCheckpointProgress::Committed => WasmCheckpointStage::ReplicaConfirmed,
-            WasmCheckpointProgress::Captured => WasmCheckpointStage::Captured,
-            WasmCheckpointProgress::LocallyDurable => WasmCheckpointStage::LocallyDurable,
-            WasmCheckpointProgress::Failed => WasmCheckpointStage::Failed,
+            Some(ObservedWasmCheckpoint::Captured {
+                revision,
+                boundary,
+                progress,
+            }) => {
+                let (required_replicas, confirmed_replicas) = match boundary {
+                    WasmCheckpointBoundary::LocalStorage => (Some(0), Some(0)),
+                    WasmCheckpointBoundary::Replicas(replicas) => {
+                        let required = u32::try_from(replicas.nodes().len())
+                            .assured("a cluster cannot contain more than u32::MAX nodes");
+                        let awaiting = self.replicas_awaiting(replicas, revision.get());
+                        let confirmed = required
+                            .checked_sub(u32::try_from(awaiting.len()).assured(
+                                "the awaiting set is a subset of the u32-bounded required replicas",
+                            ))
+                            .assured("the awaiting set cannot exceed the required replicas");
+                        (Some(required), Some(confirmed))
+                    }
+                };
+                let stage = match progress {
+                    WasmCheckpointProgress::Committed => WasmCheckpointStage::ReplicaConfirmed,
+                    WasmCheckpointProgress::Captured => WasmCheckpointStage::Captured,
+                    WasmCheckpointProgress::LocallyDurable => WasmCheckpointStage::LocallyDurable,
+                    WasmCheckpointProgress::Failed => WasmCheckpointStage::Failed,
+                };
+                (
+                    Some(*revision),
+                    stage,
+                    required_replicas,
+                    confirmed_replicas,
+                )
+            }
         };
         WasmCheckpointInspection {
             branch: self
@@ -365,7 +396,7 @@ impl ReplicatedWasmProcessorState {
                 .map(|key| key.fingerprint()),
             generation: self.generation(),
             committed_revision,
-            latest_revision: Some(latest.revision),
+            latest_revision,
             stage,
             required_replicas,
             confirmed_replicas,
@@ -385,11 +416,12 @@ impl ReplicatedWasmProcessorState {
         });
         let revision = NonZeroU64::new(saved.revision)
             .assured("a captured checkpoint advances the revision beyond zero");
-        self.latest.store(Some(StdArc::new(ObservedWasmCheckpoint {
-            revision,
-            boundary: boundary.clone(),
-            progress: WasmCheckpointProgress::Captured,
-        })));
+        self.latest
+            .store(Some(StdArc::new(ObservedWasmCheckpoint::Captured {
+                revision,
+                boundary: boundary.clone(),
+                progress: WasmCheckpointProgress::Captured,
+            })));
         CapturedWasmCheckpoint { saved, boundary }
     }
 
@@ -414,7 +446,20 @@ impl ReplicatedWasmProcessorState {
     /// Record that the latest checkpoint did not reach its boundary. The committed checkpoint
     /// stays where it was.
     pub(super) fn record_failed(&self) {
-        self.record_progress(WasmCheckpointProgress::Failed);
+        let latest = self.latest.load_full();
+        let failed = match latest.as_deref() {
+            Some(ObservedWasmCheckpoint::Captured {
+                revision,
+                boundary,
+                progress: WasmCheckpointProgress::Captured | WasmCheckpointProgress::LocallyDurable,
+            }) => ObservedWasmCheckpoint::Captured {
+                revision: *revision,
+                boundary: boundary.clone(),
+                progress: WasmCheckpointProgress::Failed,
+            },
+            _ => ObservedWasmCheckpoint::FailedBeforeCapture,
+        };
+        self.latest.store(Some(StdArc::new(failed)));
     }
 
     /// The committed checkpoint, as an ownership handoff transfers it.
@@ -647,6 +692,33 @@ mod tests {
 
         let retried = state.capture(vec![3], WasmCheckpointBoundary::LocalStorage);
         assert_eq!(retried.revision(), 3);
+    }
+
+    #[test]
+    fn failure_before_capture_keeps_the_committed_revision_without_claiming_a_new_one() {
+        let state = ReplicatedWasmProcessorState::new(placement(), None);
+        state.record_failed();
+        let failed = state.inspection();
+        assert_eq!(failed.stage, WasmCheckpointStage::Failed);
+        assert_eq!(failed.committed_revision, None);
+        assert_eq!(failed.latest_revision, None);
+        assert_eq!(failed.required_replicas, None);
+
+        let captured = state.capture(vec![1], WasmCheckpointBoundary::LocalStorage);
+        let durable = state.record_locally_durable(captured);
+        state.commit(durable.completed());
+        state.record_failed();
+        let failed = state.inspection();
+        assert_eq!(failed.stage, WasmCheckpointStage::Failed);
+        assert_eq!(failed.committed_revision, NonZeroU64::new(1));
+        assert_eq!(failed.latest_revision, None);
+
+        state.capture(vec![2], WasmCheckpointBoundary::LocalStorage);
+        state.record_failed();
+        let failed_capture = state.inspection();
+        assert_eq!(failed_capture.stage, WasmCheckpointStage::Failed);
+        assert_eq!(failed_capture.committed_revision, NonZeroU64::new(1));
+        assert_eq!(failed_capture.latest_revision, NonZeroU64::new(2));
     }
 
     #[test]

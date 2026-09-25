@@ -621,7 +621,9 @@ checkpoint stage, and required and confirmed replica counts. `CAPTURED` has not 
 storage, `LOCALLY_DURABLE` reached it but has not completed the replica boundary, and
 `REPLICA_CONFIRMED` completed its boundary. A restored checkpoint whose earlier replica boundary
 cannot be reconstructed reports replica counts as unknown rather than claiming confirmation.
-`FAILED` leaves the previous committed revision current until another checkpoint succeeds. Branch
+`FAILED` leaves the previous committed revision current until another checkpoint succeeds. When
+the failure occurred before capture, the latest revision and replica counts are absent because no
+new checkpoint exists. Branch
 identities are fixed-size opaque fingerprints; guest bytes and branch field values never enter the
 inspection. Counts cover all current branches, while detailed branch and recovery entries have a
 fixed report limit. `FORMAT JSON` serializes the same typed inspection; it is also returned to
