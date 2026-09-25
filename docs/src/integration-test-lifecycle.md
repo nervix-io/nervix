@@ -35,8 +35,14 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
+| CLI sessions | Child processes executing `nervix-cli`; a scenario reader retains at most 256 output lines | The scenario world, `tests/scenarios.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
 | HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+
+`tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
+client coverage recipes place those executables beside their instrumented server binary, where the
+scenario runner resolves child processes. The child processes exercise the public interfaces; the
+focused recipe measures their changed lines with instrumented binary unit tests.
 
 The number of scenarios that run at once is the number of CPUs times the concurrency factor, set by
 `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default. Cucumber's
@@ -103,6 +109,7 @@ second module runs the operation, it is named after the owner.
 | Stopping a scenario's HTTP receivers | `http_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
 | An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
+| A one-shot CLI command or a subscription output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for an expected subscription line | The step fails with the process result or retained output lines |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
 | The whole scenario run | `suite_watchdog.rs` | 37 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
@@ -370,6 +377,10 @@ queued -> started -> body complete -> teardown started -> teardown diagnostics -
 `finished` is published only once cleanup has completed. A scenario holding any other phase has not
 finished, and a scenario whose log ends at a phase marker is still inside that phase.
 
+Browser assertions that wait for an acknowledged subscription tab to disappear poll for up to 10
+seconds. This bounds the server reply and browser update together; on expiry, the step reports the
+tab text that remains visible.
+
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is
 visible while it waits. Its entry holds:
@@ -410,7 +421,8 @@ teardown started      release paused health responses, domain-clock progress pau
      |                commit delays
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
      |
-stopping              drop HTTP load, held uploads, server processes, and observers;
+stopping              abort CLI output readers and kill their child processes;
+     |                drop HTTP load, held uploads, server processes, and observers;
      |                stop HTTP receivers within 6 s; close the browser and the session;
      |                stop the cluster within 60 s;
      |                release proxies, silent peers, permits, and fixture ports
@@ -468,8 +480,9 @@ passed when retried.
 Harness state goes back only after the tasks that used it have ended, so the next scenario never
 finds a port, a fault, or a proxy taken.
 
-- Background HTTP load, held uploads, and server processes are dropped first. Dropping a server
-  process kills it and returns its ports.
+- CLI output readers are aborted and their `kill_on_drop` child processes are dropped before node
+  teardown. Background HTTP load, held uploads, and server processes are also dropped first.
+  Dropping a server process kills it and returns its ports.
 - Broker and syslog observers, HTTP receivers, the browser, and the session are closed before the
   cluster stops.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released

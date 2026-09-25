@@ -29,6 +29,32 @@ Feature: Web console connection status
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     And selector ".terminal" contains "connected to leader '{{new_leader}}'"
 
+  Scenario: Web console keeps the session during a server outage
+    Given a 1 node nervix cluster is started
+    Then the current leader node is saved as placeholder "stopped_node"
+    When the web console is opened on node "{{stopped_node}}"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When node "{{stopped_node}}" is stopped
+    Then selector ".topbar-status .pill.waiting" contains "WAITING"
+    And selector ".auth-panel" does not contain "Connect"
+
+  Scenario: Web console asks for credentials after authentication fails
+    Given a 1 node nervix cluster is started
+    When the web console is opened on the leader node with password "incorrect_password"
+    Then selector ".auth-panel" contains "Connect"
+    And selector ".auth-error" contains "Authentication failed"
+
+  Scenario: Web console keeps a command submitted immediately after authentication
+    Given a 1 node nervix cluster is started
+    When the web console is opened on the leader node with password "incorrect_password"
+    Then selector ".auth-error" contains "Authentication failed"
+    When selector ".auth-password" is filled with "nervix-test-password"
+    And selector ".auth-submit" is clicked
+    And selector ".prompt-row input" is filled with "CREATE DOMAIN after_login;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    And selector ".terminal" contains "created domain 'after_login'"
+
   Scenario Outline: A server with an active web console session fully terminates before restart
     Given a <cluster_size> node nervix cluster is started
     Then the current leader node is saved as placeholder "stopped_node"
