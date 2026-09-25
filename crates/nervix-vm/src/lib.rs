@@ -42,6 +42,7 @@ mod extremum;
 mod frontend;
 mod ip_address;
 mod ir;
+mod json;
 mod membership;
 mod numeric;
 mod operand;
@@ -88,6 +89,10 @@ pub use ir::{
     CompiledPredicate, CompiledProgram, InputBinding, Instruction, InstructionKind,
     InvocationBinding, OutputBinding, RegisterLayout, RegisterLayouts, RegisterRef, RegisterSpace,
     RegisterType, ScalarValue,
+};
+pub use json::{
+    JsonDefect, JsonExtraction, JsonKind, JsonOperation, JsonOutput, JsonPlace, JsonScanOutput,
+    JsonTarget, JsonTargetDefect, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_DEPTH,
 };
 pub use membership::{MembershipSet, SMALL_SET_CAPACITY};
 pub use regexp::{

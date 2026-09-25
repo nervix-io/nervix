@@ -20,6 +20,7 @@ mod command;
 mod domain_clock;
 mod emitter_batch;
 mod expression;
+mod json_path;
 mod message_error;
 mod model_index;
 mod names;
@@ -63,6 +64,7 @@ pub use expression::{
     Invocation, Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
     OutputBranch, RangeOperator, RouteConstruction, UnaryOperator,
 };
+pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };

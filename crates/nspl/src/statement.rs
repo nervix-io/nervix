@@ -234,6 +234,10 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[path = "statement_json_completion_tests.rs"]
+mod json_completion_tests;
+
+#[cfg(test)]
 mod tests {
     use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 
@@ -449,7 +453,7 @@ mod tests {
             };
         }
 
-        match g.next_u8() % 10 {
+        match g.next_u8() % 12 {
             0..=3 => {
                 let operator = g.choose(&[
                     BinaryOperator::Or,
@@ -511,6 +515,37 @@ mod tests {
                     nervix_models::ParseAsType::Datetime,
                 ]),
             },
+            9 | 10 => {
+                let document = Box::new(gen_expression(g, depth - 1));
+                let path = gen_json_path(g);
+                let target = g.choose(&[
+                    nervix_models::ParseAsType::I64,
+                    nervix_models::ParseAsType::String,
+                    nervix_models::ParseAsType::Vec {
+                        element: Box::new(nervix_models::ParseAsType::U8),
+                    },
+                    nervix_models::ParseAsType::Array {
+                        element: Box::new(nervix_models::ParseAsType::Array {
+                            element: Box::new(nervix_models::ParseAsType::F32),
+                            len: nonzero_ext::nonzero!(3_u32),
+                        }),
+                        len: nonzero_ext::nonzero!(2_u32),
+                    },
+                ]);
+                match g.next_u8() % 3 {
+                    0 => Expression::JsonValue {
+                        document,
+                        path,
+                        target,
+                    },
+                    1 => Expression::TryJsonValue {
+                        document,
+                        path,
+                        target,
+                    },
+                    _ => Expression::JsonExists { document, path },
+                }
+            }
             _ => Expression::Range {
                 operator: g.choose(&[RangeOperator::Between, RangeOperator::NotBetween]),
                 operand: Box::new(gen_expression(g, depth - 1)),
@@ -518,6 +553,24 @@ mod tests {
                 high: Box::new(gen_expression(g, depth - 1)),
             },
         }
+    }
+
+    /// A JSON path whose canonical form needs each quoting the renderer can choose.
+    fn gen_json_path(g: &mut ByteGen) -> nervix_models::JsonPath {
+        use nervix_models::{JsonPath, JsonPathStep};
+
+        let step_count = g.next_u8() % 4;
+        let mut steps = Vec::new();
+        for _ in 0..step_count {
+            let step = match g.next_u8() % 4 {
+                0 => JsonPathStep::Element(u32::from(g.next_u8())),
+                1 => JsonPathStep::Member(format!("m_{}", g.ident().as_str())),
+                2 => JsonPathStep::Member("odd \"key\" \\ it's".to_string()),
+                _ => JsonPathStep::Member("caf\u{e9}".to_string()),
+            };
+            steps.push(step);
+        }
+        JsonPath::new(steps).expect("the generator takes fewer steps than a path allows")
     }
 
     fn gen_model(bytes: &[u8]) -> Model<RequestedResourceVersion> {

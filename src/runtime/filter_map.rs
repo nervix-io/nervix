@@ -246,9 +246,19 @@ pub(super) fn expression_reads_sensitive_source(
         }
         nervix_models::Expression::Unary { expression, .. }
         | nervix_models::Expression::Cast { expression, .. }
-        | nervix_models::Expression::TryCast { expression, .. } => {
-            expression_reads_sensitive_source(expression, sensitivity)
+        | nervix_models::Expression::TryCast { expression, .. }
+        | nervix_models::Expression::JsonValue {
+            document: expression,
+            ..
         }
+        | nervix_models::Expression::TryJsonValue {
+            document: expression,
+            ..
+        }
+        | nervix_models::Expression::JsonExists {
+            document: expression,
+            ..
+        } => expression_reads_sensitive_source(expression, sensitivity),
         nervix_models::Expression::Binary { left, right, .. } => {
             expression_reads_sensitive_source(left, sensitivity)
                 || expression_reads_sensitive_source(right, sensitivity)
