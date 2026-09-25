@@ -28,8 +28,8 @@ use tokio::time::{Instant, sleep_until};
 use crate::{
     TlsConfigBundle, TransportClock, TransportEntropy, TransportError,
     simulation_runner::{
-        ClockSkew, HostSupervisor, SemanticTrace, SimulatedEntropy, SimulatedUtc, SimulationBounds,
-        SimulationConfig, Topology,
+        ClockSkew, HostSupervisor, NetworkParameters, SemanticTrace, SimulatedEntropy,
+        SimulatedUtc, SimulationBounds, SimulationConfig, Topology,
     },
 };
 
@@ -120,6 +120,7 @@ fn simulation(seed: u64, simulated_duration: Duration) -> SimulationConfig {
         seed,
         epoch: SystemTime::UNIX_EPOCH + Duration::from_secs(EPOCH_UNIX_SECONDS),
         topology: Topology::Ipv4,
+        network: NetworkParameters::LOSSLESS,
         bounds: SimulationBounds {
             simulated_duration,
             tick: TICK,

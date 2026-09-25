@@ -329,7 +329,9 @@ mod simulation_checks {
     use nervix_execution::{CpuClass, Executor, MemoryClass};
 
     use super::{RelayGrantDisposition, RelayGrantResponse, decode_rkyv, encode_rkyv};
-    use crate::simulation_runner::{HostSupervisor, SimulationBounds, SimulationConfig, Topology};
+    use crate::simulation_runner::{
+        HostSupervisor, NetworkParameters, SimulationBounds, SimulationConfig, Topology,
+    };
 
     #[test]
     fn seeded_wire_round_trips_use_the_execution_owner() {
@@ -343,6 +345,7 @@ mod simulation_checks {
                 seed,
                 epoch: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
                 topology,
+                network: NetworkParameters::LOSSLESS,
                 bounds: SimulationBounds {
                     simulated_duration: Duration::from_secs(1),
                     tick: Duration::from_millis(1),

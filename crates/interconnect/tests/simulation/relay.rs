@@ -31,6 +31,37 @@ impl RelayCase {
         }
     }
 
+    fn plan(self) -> &'static str {
+        match self {
+            Self::ResponseLostAfterAdmission => {
+                "drop the receiver's replies once it takes an Arrow relay and admits it, reconnect \
+                 to the same receiver process, retry the relay and cancel it late"
+            }
+            Self::CancelBeforeGrant => {
+                "fence the relay by cancelling it before it is sent, then send it; no fault on the \
+                 link"
+            }
+            Self::CancelWhileReplyIsLost => {
+                "drop the receiver's replies once it takes an Arrow relay, cancel while the reply \
+                 is lost, reconnect and retry"
+            }
+            Self::CancelDuringReconnect => {
+                "drop the receiver's replies once it takes an Arrow relay, cancel while \
+                 reconnecting to the same receiver process, then retry"
+            }
+        }
+    }
+
+    /// The committed regression seeds.
+    fn seeds(self) -> &'static [u64] {
+        match self {
+            Self::ResponseLostAfterAdmission => &[71],
+            Self::CancelBeforeGrant => &[72],
+            Self::CancelWhileReplyIsLost => &[73],
+            Self::CancelDuringReconnect => &[74],
+        }
+    }
+
     fn delivery(self) -> RelayDelivery {
         let incarnation = match self {
             Self::ResponseLostAfterAdmission => 71,
@@ -78,7 +109,10 @@ fn relay_payload(delivery: RelayDelivery, ack_id: u64, sender: &Transport) -> Re
     }
 }
 
-fn exercise_relay(case: RelayCase, seed: u64) -> Vec<TraceEvent> {
+fn exercise_relay(case: RelayCase, run: ScenarioRun) -> Result<(), SimulationError> {
+    let seed = run.seed();
+    let server_trace = run.trace();
+    let client_trace = run.trace();
     let authority = Authority::new();
     let server_credentials = authority.issue("server");
     let client_credentials = authority.issue("client");
@@ -86,12 +120,7 @@ fn exercise_relay(case: RelayCase, seed: u64) -> Vec<TraceEvent> {
     let (received_tx, received_rx) = watch::channel(false);
     let (done_tx, done_rx) = watch::channel(false);
     let (finished_tx, finished_rx) = watch::channel(0_usize);
-    let trace = SemanticTrace::default();
-    let server_trace = trace.clone();
-    let client_trace = trace.clone();
-    let mut scenario_config = config(seed);
-    scenario_config.bounds.simulated_duration = Duration::from_secs(60);
-    let result = scenario_config.run(case.name(), move |simulation| {
+    run.simulate(move |simulation| {
         let server_finished = finished_tx.clone();
         simulation.host("server", move || {
             let credentials = server_credentials.clone();
@@ -370,29 +399,23 @@ fn exercise_relay(case: RelayCase, seed: u64) -> Vec<TraceEvent> {
             wait_for_count(&mut finished, 2).await;
             Ok(())
         });
-    });
-    assert!(
-        result.is_ok(),
-        "case {case:?} seed {seed}: {result:?}\n{}",
-        trace.render()
-    );
-    trace.events()
+    })
 }
 
 #[test]
 fn relay_reconciliation_and_cancellation_survive_lost_replies() {
-    for (case, seed) in [
-        (RelayCase::ResponseLostAfterAdmission, 71),
-        (RelayCase::CancelBeforeGrant, 72),
-        (RelayCase::CancelWhileReplyIsLost, 73),
-        (RelayCase::CancelDuringReconnect, 74),
+    for case in [
+        RelayCase::ResponseLostAfterAdmission,
+        RelayCase::CancelBeforeGrant,
+        RelayCase::CancelWhileReplyIsLost,
+        RelayCase::CancelDuringReconnect,
     ] {
-        let first = exercise_relay(case, seed);
-        let replay = exercise_relay(case, seed);
-        assert_eq!(
-            first, replay,
-            "relay case {case:?} seed {seed} did not replay"
-        );
+        let scenario = Scenario {
+            name: case.name(),
+            fault_plan: case.plan(),
+            seeds: case.seeds(),
+        };
+        scenario.check(fault_config, |run| exercise_relay(case, run));
     }
 }
 
@@ -411,12 +434,47 @@ impl RestartMilestone {
             Self::RuntimeAdmittedWithDelayedReply => "receiver restart with delayed relay response",
         }
     }
+
+    fn plan(self) -> &'static str {
+        match self {
+            Self::BodyReceived => {
+                "drop the receiver's replies once it takes an Arrow relay body, crash and restart \
+                 the receiver with a new process epoch, then send fresh work"
+            }
+            Self::RuntimeAdmitted => {
+                "drop the receiver's replies once it admits an Arrow relay, crash and restart the \
+                 receiver with a new process epoch, then send fresh work"
+            }
+            Self::RuntimeAdmittedWithDelayedReply => {
+                "hold the receiver's replies once it admits an Arrow relay, crash the receiver, \
+                 release the held reply, restart it with a new process epoch, then send fresh work"
+            }
+        }
+    }
+
+    /// The committed regression seeds.
+    fn seeds(self) -> &'static [u64] {
+        match self {
+            Self::BodyReceived => &[81],
+            Self::RuntimeAdmitted => &[83],
+            // Seed 1036 found that a simulated crash tears a host's tasks down in an order set by
+            // every Tokio task the process created before, so its two runs diverged until each
+            // attempt ran in a fresh process.
+            Self::RuntimeAdmittedWithDelayedReply => &[85, 1036],
+        }
+    }
+}
+
+fn restart_config(seed: u64) -> SimulationConfig {
+    let mut scenario_config = config(seed);
+    scenario_config.bounds.simulated_duration = Duration::from_secs(90);
+    scenario_config
 }
 
 fn restarted_receiver_fences_unresolved_relay(
-    seed: u64,
     milestone: RestartMilestone,
-) -> Vec<TraceEvent> {
+    run: ScenarioRun,
+) -> Result<(), SimulationError> {
     const FIRST: RelayDelivery = RelayDelivery {
         channel_incarnation: [81; 16],
         sequence: 0,
@@ -436,18 +494,15 @@ fn restarted_receiver_fences_unresolved_relay(
     let epochs = StdArc::new(parking_lot::Mutex::new(Vec::<CoordinationIdentity>::new()));
     let incarnations = StdArc::new(AtomicUsize::new(0));
     let crash_phase = StdArc::new(AtomicU8::new(0));
-    let trace = SemanticTrace::default();
-    let server_trace = trace.clone();
-    let client_trace = trace.clone();
+    let seed = run.seed();
+    let server_trace = run.trace();
+    let client_trace = run.trace();
     let server_epochs = epochs.clone();
     let client_epochs = epochs.clone();
     let server_incarnations = incarnations.clone();
     let server_crash_phase = crash_phase.clone();
     let control_crash_phase = crash_phase.clone();
-    let mut scenario_config = config(seed);
-    scenario_config.bounds.simulated_duration = Duration::from_secs(90);
-    let result = scenario_config.run_with_control(
-        milestone.name(),
+    let result = run.simulate_with_control(
         move |simulation| {
             let server_finished = finished_tx.clone();
             simulation.host("server", move || {
@@ -708,27 +763,29 @@ fn restarted_receiver_fences_unresolved_relay(
             }
         },
     );
-    assert!(
-        result.is_ok(),
-        "milestone {milestone:?} seed {seed}: {result:?}\n{}",
-        trace.render()
+    result?;
+    assert_eq!(
+        crash_phase.load(Ordering::SeqCst),
+        2,
+        "the receiver crashed and restarted exactly once"
     );
-    assert_eq!(crash_phase.load(Ordering::SeqCst), 2);
-    trace.events()
+    Ok(())
 }
 
 #[test]
 fn relay_restart_fences_unresolved_delivery_and_accepts_fresh_work() {
-    for (milestone, seed) in [
-        (RestartMilestone::BodyReceived, 81),
-        (RestartMilestone::RuntimeAdmitted, 83),
-        (RestartMilestone::RuntimeAdmittedWithDelayedReply, 85),
+    for milestone in [
+        RestartMilestone::BodyReceived,
+        RestartMilestone::RuntimeAdmitted,
+        RestartMilestone::RuntimeAdmittedWithDelayedReply,
     ] {
-        let first = restarted_receiver_fences_unresolved_relay(seed, milestone);
-        let replay = restarted_receiver_fences_unresolved_relay(seed, milestone);
-        assert_eq!(
-            first, replay,
-            "receiver restart at {milestone:?} did not replay deterministically"
-        );
+        let scenario = Scenario {
+            name: milestone.name(),
+            fault_plan: milestone.plan(),
+            seeds: milestone.seeds(),
+        };
+        scenario.check(restart_config, |run| {
+            restarted_receiver_fences_unresolved_relay(milestone, run)
+        });
     }
 }
