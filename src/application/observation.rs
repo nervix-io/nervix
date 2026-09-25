@@ -35,9 +35,9 @@ use nervix_models::{
     DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainName, DomainStatus, FieldName, InspectionFormat, LookupName,
-    LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ResourceId,
-    ScheduledNode, SchemaName, ShowRelayMaterializedState, UniquelyKindedModel,
-    WasmStateInspection,
+    LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName,
+    ResourceEntryContent, ResourceId, ResourceManifestEntry, ScheduledNode, SchemaName,
+    ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tokio::time::Duration;
@@ -68,10 +68,7 @@ use super::{
     },
 };
 use crate::{
-    registry::RegistryError,
-    resource::{ResourceEntryContent, ResourceManifestEntry},
-    runtime::IngestorDescribe as RuntimeIngestorDescribe,
-    runtime_schema,
+    registry::RegistryError, runtime::IngestorDescribe as RuntimeIngestorDescribe, runtime_schema,
 };
 
 const REMOTE_DESCRIBE_RELAY_TIMEOUT: Duration = Duration::from_secs(1);

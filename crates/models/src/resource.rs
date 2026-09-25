@@ -123,6 +123,36 @@ pub struct ResourceVersion {
     pub created_by_node: ClusterNodeName,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceManifestEntry {
+    pub path: String,
+    pub content: ResourceEntryContent,
+}
+
+/// What one manifest entry names inside a version.
+///
+/// A directory has no bytes of its own, so it carries neither a size nor a checksum. A file
+/// carries both, and they always describe the same bytes because they are written together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResourceEntryContent {
+    Directory,
+    File { size: u64, checksum: String },
+}
+
+impl ResourceEntryContent {
+    /// The bytes this entry contributes to its version's total. A directory contributes none.
+    pub fn size(&self) -> u64 {
+        match self {
+            Self::Directory => 0,
+            Self::File { size, .. } => *size,
+        }
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::File { .. })
+    }
+}
+
 /// The full scope in which an administrative upload identity is unique.
 #[derive(
     Debug,
