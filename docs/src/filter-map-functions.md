@@ -129,6 +129,9 @@ evaluates, so `AND`, `OR`, `coalesce`, and the other operators never skip an ope
 [conditional expression](#conditional-expressions) evaluates an operand for some messages and not
 others.
 
+[VM Functions](vm-functions.md) describes the implementation behind this model: how an expression
+is compiled and executed over a batch, and which kernels each function family uses.
+
 ## Function Properties
 
 Every builtin follows these rules unless its own description says otherwise:
@@ -1959,8 +1962,16 @@ workloads below, shape what an expression costs:
 - Per-message cost falls steeply up to about a thousand messages per batch and then flattens.
   Batches above 1,024 messages execute on the blocking worker pool, whose hand-off costs more than
   a small batch does to execute.
-- An expression costs what its functions do for the messages that evaluate them. A conditional arm
-  runs only for the messages that select it, so its cost follows the share of messages it selects.
+- An expression costs what its functions do for the messages that evaluate them. Inside a
+  conditional arm, some operations run only for the messages that select the arm, so their cost
+  follows the share of messages it selects:
+  - operations that can fail for a message and cost more than the batch's narrowing does, such as
+    pattern matching, text parsing, calendar arithmetic, and transcendental functions
+  - UDFs
+  - JSON extraction
+
+  Every other operation runs over the whole batch, and the arm keeps only its own messages'
+  results.
 
 The table shows the median time to execute a complete compiled program over one batch, measured
 with the VM function workloads on one 32-thread x86-64 development machine in September 2026, with

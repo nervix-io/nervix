@@ -53,21 +53,14 @@ become unbranched. Relays and branch-preserving processors use that exact named 
 entries remain scoped to one concrete branch; batches for those branches share the declared
 relay's owner buffer.
 
-Structured Model expressions are compiled into typed VM programs before local graph instantiation.
-The leader validates them eagerly so invalid scopes, construction, types, nullability, sensitivity,
-or branch relationships fail at command time. Runtime nodes execute validated plans and never
-reparse stored NSPL.
-
-## Working-Message Execution
-
-Transforming construction is compiled as one ordered columnar program. The runtime projects the
-input batch into the route program, reuses input columns for inherited or still-current values,
-and constructs new columns only for rewritten or newly initialized output fields. Repeated `SET`
-targets replace the current output column in written order. Finalization validates required and
-optional output columns before route filtering.
-
-This is the implementation of the Manual's [working-message model](working-message.md), not a
-second field-resolution contract. The Manual owns the normative scopes and edge cases.
+Structured Model expressions are compiled into typed VM programs. The leader validates them when a
+statement is applied, so invalid scopes, construction, types, nullability, sensitivity, or branch
+relationships fail at command time. Runtime nodes never reparse stored NSPL. A program executes
+over the Arrow batch its runtime node projects for it, reusing input columns for inherited or
+still-current values and constructing new columns only for rewritten or newly initialized output
+fields. [VM Functions](./vm-functions.md) defines the compilation pipeline, columnar execution,
+row and batch errors, kernels, every function family, and branch-local window aggregates, and
+[Expression Functions](./filter-map-functions.md) owns the public function contracts.
 
 ## ACK Composition
 
@@ -82,26 +75,9 @@ already successful non-idempotent sink can receive a duplicate after a sibling p
 [ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery) for the
 sink consequences and mitigations.
 
-The current VM surface covers:
-
-- arithmetic operators: `+`, `-`, `*`, `/`, `%`
-- comparisons and boolean operators: `=`, `!=`, `>`, `<`, `>=`, `<=`, `AND`, `OR`, `NOT`
-- explicit casts and tolerant conversions
-- typed extraction from JSON text with `JSON_VALUE`, `TRY_JSON_VALUE`, and `JSON_EXISTS`, which
-  parse each document of a column once for every extraction a route makes from it
-- built-ins: `lower`, `upper`, `trim`, `length`, `coalesce`, `is_null`, `nullif`, `abs`, `contains`, `starts_with`, `ends_with`
-
-These expressions can be nested, and builtin calls can be chained.
-
-The VM now executes over the full Nervix internal schema type set:
-
-- `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
-- `F32`, `F64`
-- `BOOL`, `STRING`, `BYTES`, `DATETIME`
-
-`DATETIME` is stored internally as an Arrow `Timestamp(Nanosecond, "+00:00")`. RFC3339 remains a wire-level string representation rather than an internal schema type.
-`BYTES` is stored as an Arrow `Binary` column. Its values may be empty or contain any octets; they
-are never interpreted as UTF-8 without an explicit conversion function.
+Every internal schema type has one Arrow representation, which relays, processors, and the VM share;
+[Typed Batches And Registers](./vm-functions.md#typed-batches-and-registers) lists them. The
+[Expression Functions](./filter-map-functions.md) reference lists every operator and function.
 
 Examples of replicated runtime state:
 

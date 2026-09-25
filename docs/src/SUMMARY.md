@@ -64,6 +64,7 @@
   - [Resource Versions And Bindings](./resource-versions.md)
   - [Data Plane](./data-plane.md)
   - [Data-Plane Concurrency](./data-plane-concurrency.md)
+  - [VM Functions](./vm-functions.md)
   - [Relay](./relay.md)
   - [WASM State And Recovery](./wasm-state.md)
   - [Shutdown And Recovery](./shutdown.md)

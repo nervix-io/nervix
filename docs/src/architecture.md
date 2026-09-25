@@ -57,6 +57,15 @@ boundary, its source and sink families, delivery and commit points, special inte
 failure semantics. The [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals define the
 public NSPL forms.
 
+Every expression follows the same one-way conversion. Parsing produces expression Models, the
+expression VM lowers each Model once into a program and compiles it against exact types and
+sensitivity, and the data plane executes the compiled program over Arrow batches with a caller-supplied
+domain timestamp. Registry validation uses the same compiler when a statement is applied. The
+[VM Functions](./vm-functions.md) chapter defines that pipeline, columnar execution and its
+selected-row conditionals, row and batch errors, kernel and SIMD choices, every function family,
+branch-local window aggregates and sketches, and how to add a function. [Expression
+Functions](./filter-map-functions.md) owns the public function contracts.
+
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and
 fenced authority for a paced `START`. Each data-plane execution binds a capability for the exact
