@@ -266,7 +266,9 @@ use branch_buffering::{
     RuntimeFlushPolicy, RuntimeInputCollectPolicy, RuntimeInputCollector, RuntimeWake,
     wait_for_branch_buffer_deadlines,
 };
-use branch_instance_registry::BranchInstanceRegistry;
+use branch_instance_registry::{
+    BranchInstanceRegistry, BranchInstanceSnapshotEntry, GetOrCreateBranchInstance,
+};
 use branch_key::branch_key_display;
 use branch_lru_state::{
     BranchLruSnapshotError, decode_branch_lru_snapshot, encode_branch_lru_snapshot,

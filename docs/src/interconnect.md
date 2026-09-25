@@ -625,6 +625,9 @@ current one.
 The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
 activate after a later one is committed.
+Window state also binds to its current window model. A model replacement with unchanged schemas
+therefore addresses a different checkpoint and cannot install rows accumulated under the preceding
+window definition.
 
 The same rule fences a coordinated reset. Once its `Publishing` schedule is committed, every
 runtime-state request for the replaced WASM generation is stale even while the new initial
@@ -656,6 +659,19 @@ its replicas as soon as the branch appears. A replica that receives a checkpoint
 replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
 refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
 owner has evicted.
+The owner publishes an empty final window checkpoint when it evicts a concrete window branch. A
+replica that installs that revision replaces the evicted branch's rows and sketch panes with the
+empty state. The branch lifecycle checkpoint records an incarnation for each concrete branch;
+restoring a window checkpoint with a different incarnation starts an empty window. Reusing a branch
+key after eviction therefore cannot attach a prior lifetime's retained rows, even when the earlier
+checkpoint remains on a replica.
+Window checkpoints carry a sealed container with separate bounded Arrow sections for retained
+input and aggregate arguments, plus bounded typed sections for delayed histogram removals. Its
+revision, row count, and branch incarnation are checked across the sections before restoration;
+the ownership handoff and replica installation fences still govern whether the checkpoint can be
+installed. A section that exceeds its bulk limit or disagrees with the container fails to open.
+Sealing also refuses a container that cannot fit the available bulk memory reservation, instead
+of waiting for a reservation larger than that budget.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution

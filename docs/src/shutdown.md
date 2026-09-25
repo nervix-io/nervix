@@ -239,6 +239,12 @@ state but emits only windows that have met their declared `WIDTH`. A partially f
 emitted early by a shutdown, so its rows do not reach the sink; the window's input was already
 acknowledged when it was admitted, so nothing redelivers them either.
 
+An ownership handoff publishes the remaining window for the destination to restore. Evicting a
+concrete branch has a different endpoint: it drops the branch's retained rows and aggregate state
+before the final checkpoint, so a later branch with the same key begins with an empty window.
+The lifecycle checkpoint carries each branch incarnation; window restore accepts retained state
+only from that same incarnation.
+
 Draining ends with a confirmation pass. After a flush generation observes nothing outstanding, one
 more generation must also observe nothing, so work that an upstream node publishes after a
 downstream node finished its own flush is not left behind. A domain is quiescent only when that
@@ -598,9 +604,12 @@ depend on no schema: they are keyed by their entity alone and survive a restart 
 changed while the node was down. Every other checkpoint, including deduplicator, window, and
 materialized relay state, branch lifecycle records, and WASM guest state, is keyed by the
 fingerprint of the schemas its entity lays records out by, and WASM guest state also by its
-generation. A checkpoint written under a replaced fingerprint is never restored as the new layout,
-served, replicated, handed over, or selected by a forced recovery, and applying the committed
-schedule of a running domain removes it. Until the node has applied a schedule that names an entity,
+generation. Window state additionally includes the current window model in its identity, so a
+replacement that changes `WIDTH`, `STEP`, or aggregate expressions begins with an empty window even
+when its schemas are unchanged. A checkpoint written under a replaced fingerprint is never restored
+as the new layout, served, replicated, handed over, or selected by a forced recovery. Applying the
+committed schedule of a running domain removes it. Until the node has applied a schedule that names
+an entity,
 it has no fingerprint for that entity's schema-bound state and does not place that state at all.
 
 ### Interrupted Snapshot Installation

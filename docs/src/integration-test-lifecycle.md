@@ -487,6 +487,8 @@ longest of five minutes, the node's configured shutdown timeout, and its configu
 the application drain when graceful drain is enabled plus the runtime's branch stop timeout for the
 configured domain drain. A scenario that configures a longer product deadline raises the watchdog
 with it, so the harness never cuts a product deadline short.
+Node-specific stop steps resolve a saved scenario placeholder before selecting the node, including
+the graceful stop used to exercise ownership handoff during drain.
 
 A stop that ends cleanly is followed by a check that the node released its node and consensus
 database locks. The step fails when the node's task panicked, when the watchdog passed and the task

@@ -134,7 +134,8 @@ impl BranchInstanceTemplate {
             processor: processor.clone(),
         };
         let mut branch = self
-            .instantiate(runtime, domain, key.clone())
+            .instantiate(runtime, domain, key.clone(), 1)
+            .await
             .change_context_lazy(fresh)?
             .into_inner();
         branch.refresh_domain_routing().change_context_lazy(fresh)?;

@@ -1,4 +1,155 @@
 Feature: Window processor runtime behavior
+  Scenario: Graceful owner drain retains incomplete branch windows without emitting them early
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And graceful shutdown drain is enabled
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA window_input (tenant STRING, value I64);
+      CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
+      CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
+      CREATE CODEC window_codec FROM WIRE JSON SCHEMA window_wire TO SCHEMA window_input;
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 2 EVICT LRU;
+      CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_tenant;
+      CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_tenant;
+      CREATE VHOST edge window-drain-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR window_ingestor
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
+        TO window_inputs INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR moving_window FROM window_inputs
+        WIDTH 3 MESSAGES STEP 3 MESSAGES BRANCHED BY by_tenant
+        TO window_outputs
+          SET tenant = FIRST(input.tenant),
+              first_value = FIRST(input.value),
+              samples = COUNT(input.value)
+          ON MESSAGE ERROR LOG;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "window_processor" "moving_window" is saved as placeholder "window_owner"
+    And the first replica for scheduled "window_processor" "moving_window" in the last cluster status is saved as placeholder "window_destination"
+    When these NSPL commands are executed on node "{{window_destination}}"
+      """
+      CREATE SUBSCRIPTION window_subscription TO window_outputs;
+      """
+    When http payload is posted to node "node-1" with host "window-drain-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","value":10}
+      """
+    And http payload is posted to node "node-1" with host "window-drain-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":100}
+      """
+    When node "{{window_owner}}" is gracefully stopped
+    Then node "{{window_destination}}" eventually observes a stable leader
+    And within "60s" node "{{window_destination}}" eventually reports scheduled "window_processor" "moving_window" owner equals placeholder "window_destination"
+    Then the relay subscription does not receive a payload within "500ms"
+    When http payload is posted to node "{{window_destination}}" with host "window-drain-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","value":20}
+      """
+    And http payload is posted to node "{{window_destination}}" with host "window-drain-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":200}
+      """
+    And http payload is posted to node "{{window_destination}}" with host "window-drain-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","value":30}
+      """
+    And http payload is posted to node "{{window_destination}}" with host "window-drain-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":300}
+      """
+    Then within "60s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "first_value":10 | "samples":3
+      key={"tenant":"beta"} | "first_value":100 | "samples":3
+      """
+
+  Scenario: Relocating a window owner preserves incomplete branch-local exact aggregates
+    Given runtime replication is configured with replica count 1 and snapshot interval "100ms"
+    And the production sticky scheduler is configured
+    And a 3 node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA window_input (tenant STRING, value I64);
+      CREATE SCHEMA window_output (tenant STRING, first_value I64, samples I64);
+      CREATE WIRE JSON SCHEMA window_wire MODE STRICT (tenant string, value integer);
+      CREATE CODEC window_codec FROM WIRE JSON SCHEMA window_wire TO SCHEMA window_input;
+      CREATE SCHEMA tenant_key (tenant STRING);
+      CREATE BRANCH by_tenant SCHEMA tenant_key TTL 5m MAX INSTANCES 2 EVICT LRU;
+      CREATE RELAY window_inputs SCHEMA window_input BRANCHED BY by_tenant;
+      CREATE RELAY window_outputs SCHEMA window_output BRANCHED BY by_tenant;
+      CREATE VHOST edge window-move-{{test_id}}.example.com;
+      CREATE ENDPOINT ingress ON edge PATH '/events' TYPE HTTP;
+      CREATE INGESTOR window_ingestor
+        FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING window_codec
+        TO window_inputs INHERIT ALL BRANCHED BY by_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE WINDOW PROCESSOR moving_window FROM window_inputs
+        WIDTH 3 MESSAGES STEP 3 MESSAGES BRANCHED BY by_tenant
+        TO window_outputs
+          SET tenant = FIRST(input.tenant),
+              first_value = FIRST(input.value),
+              samples = COUNT(input.value)
+          ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION window_subscription TO window_outputs;
+      START;
+      SHOW CLUSTER STATUS;
+      """
+    Then the last cluster status owner for scheduled "window_processor" "moving_window" is saved as placeholder "window_owner"
+    And the first replica for scheduled "window_processor" "moving_window" in the last cluster status is saved as placeholder "window_destination"
+    When http payload is posted to node "node-1" with host "window-move-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","value":10}
+      """
+    And http payload is posted to node "node-1" with host "window-move-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":100}
+      """
+    When these NSPL commands are executed on the active session
+      """
+      RELOCATE WINDOW PROCESSOR moving_window ONTO NODE {{window_destination}} IGNORE PREFERENCES;
+      """
+    Then within "60s" node "{{window_destination}}" eventually reports scheduled "window_processor" "moving_window" owner equals placeholder "window_destination"
+    When http payload is posted to node "node-1" with host "window-move-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","value":20}
+      """
+    And http payload is posted to node "node-1" with host "window-move-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":200}
+      """
+    And http payload is posted to node "node-1" with host "window-move-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"acme","value":30}
+      """
+    And http payload is posted to node "node-1" with host "window-move-{{test_id}}.example.com" path "/events"
+      """
+      {"tenant":"beta","value":300}
+      """
+    Then within "60s" the relay subscription receives payloads containing all fragments
+      """
+      key={"tenant":"acme"} | "first_value":10 | "samples":3
+      key={"tenant":"beta"} | "first_value":100 | "samples":3
+      """
+
   Scenario Outline: Tumbling message windows emit non-overlapping aggregates per branch
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started
