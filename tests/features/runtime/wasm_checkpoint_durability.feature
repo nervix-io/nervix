@@ -206,6 +206,7 @@ Feature: WASM guest-state checkpoint durability
       key={"tenant":"beta"} | "tenant":"beta" | "value":12
       """
 
+  @exclusive
   Scenario: Guest state acknowledged through a replica survives the loss of its owner
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
