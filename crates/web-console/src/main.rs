@@ -7108,6 +7108,157 @@ mod tests {
     }
 
     #[test]
+    fn subscription_replies_follow_the_request_that_opened_and_closed_the_tab() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            signals.active_subscription_tab.set(None);
+            let mut requests = SessionRequests::new();
+            let stream = test_stream();
+            let domain = DomainName::parse("tenant").assured("the test domain is valid");
+            let start = requests.issue(ConsoleRequest::SubscriptionStart {
+                tab_id: 1,
+                request: SubscribeRequest {
+                    domain: domain.clone(),
+                    statement: "SUBSCRIBE live TO orders;".to_string(),
+                    subscription_type: SubscriptionType::Row,
+                },
+            });
+            let opened = SubscribeOutcome {
+                disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+                    subscription: stream.subscription.clone(),
+                    domain,
+                    relay: nervix_models::RelayName::parse("orders")
+                        .assured("the test relay is valid"),
+                    subscription_type: SubscriptionType::Row,
+                    schema: stream.schema,
+                })),
+                message: String::new(),
+                diagnostics: Vec::new(),
+            };
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: start,
+                    body: ReplyBody::Subscribe(opened),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(signals.active_subscription_tab.get_untracked(), Some(1));
+
+            let stop_request = signals
+                .begin_subscription_close(1)
+                .assured("the acknowledged tab has a stream to close");
+            let stop = requests.issue(ConsoleRequest::SubscriptionStop {
+                tab_id: 1,
+                request: stop_request,
+            });
+            let deleted = UnsubscribeOutcome {
+                disposition: UnsubscribeDisposition::Deleted(stream.subscription),
+                message: String::new(),
+                diagnostics: Vec::new(),
+            };
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: stop,
+                    body: ReplyBody::Unsubscribe(deleted),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+        });
+    }
+
+    #[test]
+    fn a_late_open_reply_cannot_replace_an_already_open_stream() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
+            let mut requests = SessionRequests::new();
+            let late = SubscriptionHandle {
+                name: stream.subscription.name.clone(),
+                generation: NonZeroU64::new(2).assured("two is nonzero"),
+            };
+            apply_subscribe_outcome(
+                signals,
+                &mut requests,
+                1,
+                "SUBSCRIBE live TO orders;",
+                SubscribeOutcome {
+                    disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+                        subscription: late.clone(),
+                        domain: DomainName::parse("tenant").assured("the test domain is valid"),
+                        relay: nervix_models::RelayName::parse("orders")
+                            .assured("the test relay is valid"),
+                        subscription_type: SubscriptionType::Row,
+                        schema: stream.schema,
+                    })),
+                    message: String::new(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(tabs[0].streams(&stream.subscription));
+                assert!(!tabs[0].streams(&late));
+            });
+            assert!(requests.release_held().is_empty());
+        });
+    }
+
+    #[test]
+    fn rejected_subscribe_reply_removes_a_new_tab_but_keeps_a_desired_restore() {
+        for restoring in [false, true] {
+            Owner::new().with(|| {
+                let state = if restoring {
+                    SubscriptionTabState::Restoring
+                } else {
+                    SubscriptionTabState::Pending
+                };
+                let signals = subscription_signals(state);
+                let mut requests = SessionRequests::new();
+                let issued = requests.issue(ConsoleRequest::SubscriptionStart {
+                    tab_id: 1,
+                    request: SubscribeRequest {
+                        domain: DomainName::parse("tenant").assured("the test domain is valid"),
+                        statement: "SUBSCRIBE live TO orders;".to_string(),
+                        subscription_type: SubscriptionType::Row,
+                    },
+                });
+                let step = apply_reply(
+                    signals,
+                    &mut requests,
+                    AnsweredRequest {
+                        request: issued,
+                        body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                            rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                            field: None,
+                            message: "subscription rejected".to_string(),
+                        }),
+                    },
+                );
+                assert!(matches!(step, SessionStep::Continue));
+                if restoring {
+                    signals.subscription_tabs.with_untracked(|tabs| {
+                        assert!(matches!(&tabs[0].state, SubscriptionTabState::Interrupted));
+                        assert!(
+                            tabs[0].lines.clone().into_lines()[0]
+                                .line
+                                .text
+                                .contains("subscription rejected")
+                        );
+                    });
+                } else {
+                    assert!(signals.subscription_tabs.get_untracked().is_empty());
+                    assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+                }
+            });
+        }
+    }
+
+    #[test]
     fn terminal_history_bounds_records_and_keeps_render_keys_stable() {
         let mut history = TermLineHistory::default();
         for index in 0..300 {
