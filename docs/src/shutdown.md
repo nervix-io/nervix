@@ -521,10 +521,12 @@ handles. Terminal teardown does not finish until both database locks have been r
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.
 
-The interconnect rejects new admission, cancels pool and operation waiters, and begins a graceful
-HTTP/2 shutdown, giving active transport work up to ten seconds before closing the remaining
-connections and handlers. A forced ending skips this entirely, so peers observe the connections
-ending exactly as they do when a process crashes.
+The interconnect rejects new admission, cancels pool and operation waiters, and retires the pool
+connections the node opened, giving their leased streams up to ten seconds before closing whatever
+remains. Connections that peers opened to the node close at once, together with the handlers still
+serving their streams, so a peer's request the node has not answered fails instead of completing.
+A forced ending skips this entirely, so peers observe the connections ending exactly as they do
+when a process crashes.
 
 ### Consensus Work At The Ending Boundary
 

@@ -196,6 +196,14 @@ test-turmoil:
     cargo test --package nervix-interconnect --features turmoil --lib -- wire::simulation_checks authentication::simulation_tests --test-threads=1
     cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
 
+# Run the interconnect's Turmoil simulation scenarios. Extra arguments filter or configure the test
+# binary, so one scenario can be replayed without the execution and library checks.
+test-turmoil-simulation *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1 {{ args }}
+
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
     cargo test --package nervix-vm --lib -- {{ args }}
