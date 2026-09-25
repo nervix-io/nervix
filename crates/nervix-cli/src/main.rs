@@ -25,7 +25,6 @@ use byte_unit::{Byte, UnitType};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use error_stack::Report as StackReport;
-use meticulous::ResultExt as _;
 use nervix_client_core::{
     AutocompleteSuggestion, Client, ClientError as CoreClientError, CommandDisposition,
     CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic, DomainName,
@@ -437,18 +436,14 @@ async fn run_json_inspection_mode(
             message: outcome.message,
         }));
     }
-    let Some(inspection) = outcome.inspection else {
+    if outcome.inspection.is_none() {
         let message = "the inspection response contained no typed report";
         print_json_inspection_error("REPORT_MISSING", message);
         return Err(StackReport::new(ClientError::InspectionFailed {
             message: message.to_string(),
         }));
-    };
-    let json = serde_json::to_string(&inspection).assured(
-        "an inspection has only strings, numbers, sequences and tagged enums, all of which have a \
-         JSON representation",
-    );
-    println!("{json}");
+    }
+    println!("{}", outcome.message);
     Ok(())
 }
 
@@ -1146,7 +1141,7 @@ fn diagnostic_range(source: &str, span: Option<SourceSpan>) -> Option<Range<usiz
 
 #[cfg(test)]
 mod tests {
-    use meticulous::OptionExt as _;
+    use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
 
