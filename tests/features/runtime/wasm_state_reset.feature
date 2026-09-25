@@ -20,7 +20,17 @@ Feature: Coordinated WASM processor state reset
       """
       RESET WASM PROCESSOR counting_guest STATE IN DOMAIN {{domain}} FOR BRANCH VALUES { tenant = 'alpha' };
       """
-    And http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
+    Then within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset: READY, branch, generation 2
+      state reset reason: TRANSACTION
+      state reset readiness: READY
+      """
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      stage=REPLICA_CONFIRMED required_replicas=<replica_count> confirmed_replicas=<replica_count>
+      """
+    When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":2}
       """
@@ -310,6 +320,29 @@ Feature: Coordinated WASM processor state reset
       """
       WASM_STATE_RESET
       """
+    When client "owner" executes these NSPL commands
+      """
+      DESCRIBE WASM PROCESSOR counting_guest;
+      """
+    Then the last client outcome reports WASM reset phase "READY" at generation 2
+    And the last command output does not contain
+      """
+      {"tenant":"alpha"}
+      """
+    When client "owner" executes these NSPL commands
+      """
+      DESCRIBE WASM PROCESSOR counting_guest FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /resource_version = 1
+      /reset_readiness = "Ready"
+      /reset/reset/reason = "Transaction"
+      """
+    And the last command output does not contain
+      """
+      {"tenant":"alpha"}
+      """
     When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """
       {"tenant":"alpha","sequence":2}
@@ -354,6 +387,12 @@ Feature: Coordinated WASM processor state reset
       """
     And the cluster is restarted
     Then node "node-1" eventually observes a stable leader
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset: READY, branch, generation 2
+      state reset reason: OPERATOR
+      state reset readiness: READY
+      """
     When these NSPL commands are executed on the leader node
       """
       CREATE SUBSCRIPTION counted_events_subscription TO counted_events;
@@ -694,6 +733,14 @@ Feature: Coordinated WASM processor state reset
       """
       reset was committed but its new lifetime is not usable
       """
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset: PUBLISHING, branch, generation 2
+      """
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset readiness: RESETTING
+      """
     When WASM processor "counting_guest" state reset for branch with a different request fails
       """
       {"tenant":"alpha"}
@@ -711,6 +758,14 @@ Feature: Coordinated WASM processor state reset
     Then the last command error contains
       """
       reset was committed but its new lifetime is not usable
+      """
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset: PUBLISHING, branch, generation 2
+      """
+    And within "10s" DESCRIBE WASM PROCESSOR "counting_guest" on the leader node contains
+      """
+      state reset readiness: AWAITING_USABLE_EXECUTION
       """
     When http payload is posted to host "wasm-reset-{{test_id}}.example.com" path "/events"
       """

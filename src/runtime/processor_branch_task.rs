@@ -445,12 +445,14 @@ pub(super) async fn run_processor_node_runtime(
                     );
                     let request = preparation.request.clone();
                     let scope = preparation.scope;
+                    let reason = preparation.reason;
                     let result = reset_context
                         .prepare(&mut instances, preparation, &mut prepared_reset)
                         .await;
                     if result.is_ok() {
-                        reset_fence =
-                            Some(nervix_models::WasmStateReset::publishing(request, scope));
+                        reset_fence = Some(nervix_models::WasmStateReset::publishing(
+                            request, scope, reason,
+                        ));
                     }
                     response
                         .send(result)
@@ -679,6 +681,7 @@ impl ProcessorWasmStateResetContext<'_> {
             scope,
             branch_key,
             published,
+            reason: _,
         } = preparation;
         let processor = ModelName::from(&template.source);
         if let Some(current) = prepared.as_mut() {
@@ -824,6 +827,7 @@ impl ProcessorWasmStateResetContext<'_> {
                     scope: *reset.scope(),
                     branch_key: None,
                     published: true,
+                    reason: reset.reason(),
                 },
                 prepared,
             )
@@ -1823,12 +1827,14 @@ mod tests {
         let mut ready = nervix_models::WasmStateReset::publishing(
             request.clone(),
             WasmStateResetScope::Unbranched,
+            nervix_models::WasmStateResetReason::Operator,
         );
         ready.mark_ready();
 
         let mut fence = Some(nervix_models::WasmStateReset::publishing(
             other.clone(),
             WasmStateResetScope::Unbranched,
+            nervix_models::WasmStateResetReason::Operator,
         ));
         let mut prepared = None;
         let error =
@@ -1842,6 +1848,7 @@ mod tests {
         fence = Some(nervix_models::WasmStateReset::publishing(
             request.clone(),
             WasmStateResetScope::Unbranched,
+            nervix_models::WasmStateResetReason::Operator,
         ));
         prepared = Some(PreparedWasmStateReset {
             request: other,

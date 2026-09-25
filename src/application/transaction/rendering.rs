@@ -12,9 +12,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ActualExecutionStepImpact, ConcreteBranchCoverage, ExecutionStepImpactReport,
     ExecutionStepOutcome, ImpactAttribution, ImpactDiagnostic, ImpactEffects, ImpactNodeCoverage,
-    ImpactTopology, NodeRef, OperationImpactReason, OperationImpactReport, PauseRequirement,
-    QuiescenceOutcome, TransactionInspection, TransactionLifecycle, TransactionOperation,
-    TransactionOperationRange, TransactionReportFormat,
+    ImpactTopology, InspectionFormat, NodeRef, OperationImpactReason, OperationImpactReport,
+    PauseRequirement, QuiescenceOutcome, TransactionInspection, TransactionLifecycle,
+    TransactionOperation, TransactionOperationRange,
 };
 
 /// Whether an operation's own contribution is rendered beside its identity and reasons.
@@ -38,10 +38,10 @@ impl<'a> InspectionRendering<'a> {
         Self { inspection }
     }
 
-    pub(super) fn render(&self, format: TransactionReportFormat) -> String {
+    pub(super) fn render(&self, format: InspectionFormat) -> String {
         match format {
-            TransactionReportFormat::Text => self.text(),
-            TransactionReportFormat::Json => self.json(),
+            InspectionFormat::Text => self.text(),
+            InspectionFormat::Json => self.json(),
         }
     }
 
