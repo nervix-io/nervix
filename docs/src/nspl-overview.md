@@ -472,7 +472,8 @@ of NSPL.
 
 Supported expression surface:
 
-- literals: `i64`, `f64`, `bool`, `string`
+- [literals](filter-map-functions.md#literals): `I64` integers, `F64` floats, `BOOL`, and
+  `STRING`
 - identifiers: field references from the current row
 - arithmetic: `+`, `-`, `*`, `/`, `%`
 - comparisons: `=`, `!=`, `>`, `<`, `>=`, `<=`
@@ -480,11 +481,11 @@ Supported expression surface:
   `IS NOT DISTINCT FROM`
 - [membership and ranges](filter-map-functions.md#membership-and-ranges): `value [NOT] IN
   (constant, ...)` and `value [NOT] BETWEEN low AND high`
-- boolean logic: `AND`, `OR`, `NOT`
+- [boolean logic](filter-map-functions.md#logical-operators): `AND`, `OR`, `NOT`
 - [conditionals](filter-map-functions.md#conditional-expressions): `IF condition THEN value ELSE value END`, searched
   `CASE WHEN condition THEN value ... [ELSE value] END`, and simple
   `CASE operand WHEN match THEN value ... [ELSE value] END`
-- parentheses for nesting and precedence control
+- parentheses for nesting and [precedence](filter-map-functions.md#operator-precedence) control
 - [explicit conversions](filter-map-functions.md#conversions) only: `expr AS TYPE`, which fails a
   message whose value does not convert, and `TRY_CAST(expr AS TYPE)`, which yields a typed null
   for it instead
@@ -493,31 +494,20 @@ Supported expression surface:
   as `TYPE`, `TRY_JSON_VALUE(doc, '$.path' AS TYPE)`, which yields a typed null for it instead, and
   `JSON_EXISTS(doc, '$.path')`; `TYPE` may be a scalar, `VEC<...>`, or `ARRAY<..., n>` type
 
-Conditional result arms must have one exact type. Searched `CASE` conditions and the `IF` condition
-must be `BOOL`; simple `CASE` match values must have the operand's exact type. Arms are tested in
-written order and the first match wins. A null condition or null simple-`CASE` comparison does not
-match. Omitting `ELSE` produces a typed null, so the destination must be optional. `IF` always
-requires `ELSE`.
+[Expression Functions](filter-map-functions.md) owns the semantics of every form above, including
+conditional typing, the [reserved words](filter-map-functions.md#reserved-words), and the rules for
+where each function may run.
 
-The [Conditional Expressions](filter-map-functions.md#conditional-expressions) reference owns the
-reserved-word rule for conditional keywords.
-
-Supported filter-map types match the full Nervix internal schema type set:
+Expression types match the full Nervix internal schema type set:
 
 - integers: `U8`, `I8`, `U16`, `I16`, `U32`, `I32`, `U64`, `I64`
 - floating point: `F32`, `F64`
-- other scalars: `BOOL`, `STRING`, `DATETIME`
+- other scalars: `BOOL`, `STRING`, `BYTES`, `DATETIME`
+- lists: `ARRAY<...>` and `VEC<...>`
 
-The parser accepts both long and short cast spellings where relevant, for example:
-
-- `AS UINT8` or `AS U8`
-- `AS INT32` or `AS I32`
-- `AS FLOAT32` or `AS F32`
-- `AS STRING`
-- `AS BOOL`
-- `AS DATETIME`
-
-`TRY_CAST(expr AS TYPE)` accepts the same spellings.
+`AS` and `TRY_CAST(expr AS TYPE)` convert between scalar types and accept long and short spellings,
+such as `AS UINT8` or `AS U8`; see [Conversions](filter-map-functions.md#conversions) for every
+spelling and the values each conversion rejects.
 
 Supported built-ins include string, null-handling, numeric, regex, and contextual functions such as:
 
@@ -533,7 +523,7 @@ Supported built-ins include string, null-handling, numeric, regex, and contextua
   `url_query_value`, `url_query_values`, `url_decode`, `is_url`
 - contextual functions: `now`, `uuid_v4`, `uuid_v7`
 
-See [Filter-Map Functions](filter-map-functions.md) for the full current function list, signatures, and aliases.
+See [Expression Functions](filter-map-functions.md) for the full current function list, signatures, and aliases.
 
 User-defined calls always use `udf::<name>(...)`. The explicit namespace means adding a builtin can
 never shadow a UDF or change existing user code. See

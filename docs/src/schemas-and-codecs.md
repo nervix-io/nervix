@@ -20,7 +20,7 @@ CREATE IF NOT EXISTS SCHEMA notification (
 Schemas must declare at least one field.
 
 Field names used in expressions are subject to the
-[conditional reserved-word rule](filter-map-functions.md#conditional-expressions).
+[reserved-word rule](filter-map-functions.md#reserved-words).
 
 These types are the values Nervix stores in runtime records and uses for subscription matching and processor logic. `BYTES` may be a deduplication or reordering key, ordered lexicographically by octet, but branch key schemas cannot contain `BYTES`, including nested `ARRAY` or `VEC` elements.
 

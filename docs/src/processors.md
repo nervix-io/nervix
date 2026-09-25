@@ -303,112 +303,45 @@ CREATE WINDOW PROCESSOR latency_windows
         count_plus_one = COUNT(input.latency) + 1,
         minimum = MIN(input.latency),
         maximum = MAX(input.latency),
-        tenant = branch.tenant
+        tenant = FIRST(input.tenant)
     WHERE output.count > 0
     ON MESSAGE ERROR LOG;
 ```
 
-Aggregate calls may participate in larger scalar expressions and may combine with constants,
-initialized `output`, `branch`, and declared `relay_state` values. Route `WHERE` cannot read live
-input rows. Windows use `WIDTH` and `STEP`, never `FLUSH`.
+Aggregate calls may participate in larger scalar expressions and combine with constants. Route
+`WHERE` reads the finalized output and cannot read live input rows. Windows use `WIDTH` and `STEP`,
+never `FLUSH`. [Window Aggregates](filter-map-functions.md#window-aggregates) owns every aggregate's
+types, null handling, numerical behavior, errors, and sensitivity, and
+[Approximate Sketches](filter-map-functions.md#approximate-sketches) owns the accuracy, memory, and
+expiry of the sketch aggregates.
 
 `MAX STATE SIZE <bytes>` caps the live state of each concrete branch. It charges retained Arrow
 input and argument allocations, row handles, branch keys, and the reserved capacity of every
-sketch in every active pane. A row that would exceed the cap is rejected through the route's
-message-error policy before it changes the window. Sketches require this clause, duration `WIDTH`
-and `STEP`, and a bounded `MAX INSTANCES ... EVICT LRU` branch when branched. Thus the configured
-worst-case live sketch state across branches is bounded by `MAX STATE SIZE * MAX INSTANCES`;
-unbranched windows have one state. A sketch's pane size is the greatest common divisor of its
-width and step, aligned to the Unix epoch. Each pane includes its starting timestamp and excludes
-the next pane's starting timestamp. Stepping removes records strictly before the step cutoff;
-records exactly at that cutoff remain. Panes are merged only from rows still in the active
-window and are rebuilt after stepping. Published branch snapshots share the retained Arrow input
-and argument columns, seal them in bounded sections, and rebuild the same sketches from those
-columns when ownership moves or a node recovers. Histogram delayed removals travel in bounded
-typed sections beside the columns.
+sketch in every active pane. A row that would exceed the cap, or a row whose aggregate arguments
+fail, is refused before it changes the window: the refusal is logged and the row is not
+acknowledged. Sketches require this clause, duration `WIDTH` and `STEP`, and a bounded
+`MAX INSTANCES ... EVICT LRU` branch when branched. Thus the configured worst-case live sketch state
+across branches is bounded by `MAX STATE SIZE * MAX INSTANCES`; unbranched windows have one state.
+A sketch's pane size is the greatest common divisor of its width and step, aligned to the Unix
+epoch. Each pane includes its starting timestamp and excludes the next pane's starting timestamp.
+Stepping removes records strictly before the step cutoff; records exactly at that cutoff remain.
+Panes are merged only from rows still in the active window and are rebuilt after stepping.
+Published branch snapshots share the retained Arrow input and argument columns, seal them in bounded
+sections, and rebuild the same sketches from those columns when ownership moves or a node recovers.
+Histogram delayed removals travel in bounded typed sections beside the columns.
 
-In a window route, `COUNT`, `SUM`, `FIRST`, and `LAST` always name window aggregates. The
-[array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same names
-apply to one `ARRAY` or `VEC` value everywhere else.
+In a window route, `COUNT`, `SUM`, `FIRST`, `LAST`, `MIN`, and `MAX` always name window aggregates.
+The [array and vector functions](filter-map-functions.md#array-and-vector-functions) with the same
+names apply to one `ARRAY` or `VEC` value everywhere else.
 
 ### Window aggregate functions
 
-Every aggregate reads per-row arguments from the rows the window retains when it emits. Aggregate
-names are case-insensitive, and argument and result types are exact and checked when the processor
-is applied.
-
-| Function | Arguments | Returns | Typed null when |
-| --- | --- | --- | --- |
-| `COUNT(value)` | any | `I64` | never; counts every retained row |
-| `COUNT_IF(condition)` | `BOOL` | `I64` | never; counts rows whose condition is true |
-| `BOOL_AND(condition)` | `BOOL` | `BOOL` | no row has a condition |
-| `BOOL_OR(condition)` | `BOOL` | `BOOL` | no row has a condition |
-| `SUM(value)` | numeric | the argument's type | no row has a value |
-| `AVG(value)` | numeric | `F64` | no row has a value |
-| `MIN(value)`, `MAX(value)` | numeric, `BOOL`, `STRING`, or `DATETIME` | the argument's type | no row has a value |
-| `FIRST(value)`, `LAST(value)` | any | the argument's type | no row has a value |
-| `ARG_MIN(value, key)`, `ARG_MAX(value, key)` | any value; a numeric, `BOOL`, `STRING`, or `DATETIME` key | the value's type | no row has both a value and a key |
-| `VAR_POP(value)`, `STDDEV_POP(value)` | numeric | `F64` | no row has a value |
-| `VAR_SAMP(value)`, `STDDEV_SAMP(value)` | numeric | `F64` | fewer than two rows have a value |
-| `COVAR_POP(first, second)` | numeric, numeric | `F64` | no row has both values |
-| `COVAR_SAMP(first, second)` | numeric, numeric | `F64` | fewer than two rows have both values |
-| `CORR(first, second)` | numeric, numeric | `F64` | fewer than two rows have both values, or either variable is constant across them |
-| `PERCENTILE_LINEAR_HISTOGRAM(value, percentile, buckets, min, max, delay)` | numeric value, then constants | `F64` | the histogram counts no value |
-| `APPROX_COUNT_DISTINCT(value, precision)` | numeric, `BOOL`, `STRING`, or `DATETIME`; constant precision 4–16 | `I64` | never; zero when no row contributes |
-| `APPROX_QUANTILE(value, percentile, capacity)` | numeric; constant percentile 0–100 and capacity 32–4096 | `F64` | no row has a value |
-| `APPROX_TOP_K(value, k, capacity)` | numeric, `BOOL`, `STRING`, or `DATETIME`; constants `1 <= k <= capacity <= 4096` | `VEC<value type>` | never; empty when no row contributes |
-
-The sketches ignore nulls and refuse non-finite floating-point values as per-message errors.
-Distinct uses HyperLogLog registers with a stable type-tagged BLAKE3 key; its approximate relative
-standard error is about `1.04 / sqrt(2^precision)`. Quantile uses a bounded t-digest with at most
-`capacity` centroids, with smaller centroids near the tails. It returns an interpolated value at
-the requested percentile; t-digest has no distribution-independent worst-case rank bound, so
-accuracy depends on the distribution and capacity. Top-k uses Misra-Gries frequency candidates
-with at most `capacity` keys and returns up to `k` values ordered by estimated frequency, then by
-stable key bytes to break ties. Its counts are internal;
-values near the frequency cutoff may differ from an exact top-k. Any value occurring more than
-`N / (capacity + 1)` times in the active window remains a candidate. Each pane's sketch is mergeable;
-expired rows never contribute to later results. The sketches are deterministic for the same
-ordered inputs, pane layout, and configuration.
-
-**Nulls.** A row contributes to an aggregate only when every argument that aggregate reads is
-present, so a null argument contributes nothing. `COUNT` is the exception: it counts every retained
-row whatever its argument holds, so `SUM(input.amount) / COUNT(input.amount)` is not the mean of an
-optional field; use `AVG`. A window emits only while it retains at least one row, so an aggregate
-whose arguments are all required always has a value, except the sample statistics and `CORR`,
-which can be undefined in any window. Assign an aggregate that can be null to an `OPTIONAL` field or
-give it a value with `COALESCE`; assigning it to a required field is rejected when the processor is
-applied.
-
-**Order and ties.** `MIN`, `MAX`, `ARG_MIN`, and `ARG_MAX` return the earliest admitted row among
-rows with equal keys. `FIRST` and `LAST` order rows by their ingestion low watermark, then by
-admission. `BOOL` orders `false` before `true`, `STRING` orders by bytes, and floating-point keys
-order NaN above every other value and treat both zeros as equal.
-
-**Population and sample.** `VAR_POP`, `STDDEV_POP`, and `COVAR_POP` divide by the number of
-contributing rows `n`; `VAR_SAMP`, `STDDEV_SAMP`, and `COVAR_SAMP` divide by `n - 1`. Standard
-deviations are the square roots of the matching variances. `CORR` is the Pearson correlation, kept
-within `[-1, 1]`.
-
-**Numerical behavior.** `COUNT`, `COUNT_IF`, `BOOL_AND`, `BOOL_OR`, and `SUM` over integers are
-exact, and an integer `SUM` that does not fit its argument's type is an error when the window
-emits. `SUM` over floating-point values carries the rounding error of every addition beside the
-running total. `AVG`, the variances, standard deviations, covariances, and `CORR` convert each
-argument to the nearest `F64` and keep centered moments, so a variance is never the difference of
-two large sums of squares. Stepping a window never subtracts a floating-point value from a
-statistic: the statistic of the rows that remain is rebuilt from the rows themselves, so a value
-that left the window, however large, leaves no rounding behind. A NaN or infinite floating-point
-argument to `SUM`, `AVG`, a variance, standard deviation, covariance, `CORR`, or
-`PERCENTILE_LINEAR_HISTOGRAM` is a per-message error for its row, which the window does not admit;
-a statistic or floating-point sum that overflows `F64` is an error when the window emits. An error
-at emission fails the acknowledgements of every retained row and clears the window.
-
-Aggregates that can be answered from one structure over the same arguments share it: `AVG`, the
-variances, and the standard deviations of one argument share a `moments` structure; the covariances
-and `CORR` of one argument pair share `co_moments`; `COUNT_IF`, `BOOL_AND`, and `BOOL_OR` share a
-`truth_counter`; `ARG_MIN` and `ARG_MAX` share `arg_extremes`; `MIN` and `MAX` share `extremes`;
-`FIRST` and `LAST` share a `sequence`. `DESCRIBE WINDOW PROCESSOR` lists every structure with the
-functions it serves and the arguments it reads.
+The aggregates a window route can compute are `COUNT`, `COUNT_IF`, `BOOL_AND`, `BOOL_OR`, `SUM`,
+`AVG`, `MIN`, `MAX`, `FIRST`, `LAST`, `ARG_MIN`, `ARG_MAX`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`,
+`STDDEV_SAMP`, `COVAR_POP`, `COVAR_SAMP`, `CORR`, `PERCENTILE_LINEAR_HISTOGRAM`,
+`APPROX_COUNT_DISTINCT`, `APPROX_QUANTILE`, and `APPROX_TOP_K`. See
+[Window Aggregates](filter-map-functions.md#window-aggregates) for each one's arguments, result, and
+behavior. `DESCRIBE WINDOW PROCESSOR` lists the shared structures that answer them.
 
 A duration width begins at the first retained record's low watermark and becomes due when an input
 watermark or the bound domain clock reaches that logical target. A paced `TIME RATE` therefore

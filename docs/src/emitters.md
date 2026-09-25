@@ -448,7 +448,7 @@ Emitter expressions use the same typed surface as other runtime nodes:
   and `JSON_EXISTS(doc, '$.path')`
 - built-ins: string, null-handling, numeric, regex, and contextual functions such as `lower`, `coalesce`, `abs`, `regexp_substr`, `now`, and `uuid_v4`
 
-See [Filter-Map Functions](filter-map-functions.md) for the full function reference.
+See [Expression Functions](filter-map-functions.md) for the full function reference.
 
 That expression surface applies to the full Nervix internal schema type set:
 
