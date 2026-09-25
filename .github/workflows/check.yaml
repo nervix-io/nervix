@@ -569,3 +569,100 @@ jobs:
           name: shuttle-failures
           path: target/shuttle-failures
           if-no-files-found: ignore
+
+  # Turmoil's seeded network simulations of the interconnect: every scenario over its committed
+  # regression seeds, then a fresh-process replay of an injected failure. A job of its own beside
+  # the default suite and the Shuttle checks, because its build enables the `turmoil` feature and
+  # `tokio_unstable` and so shares no compilation with either, and because a failed scenario's
+  # record is this job's artifact.
+  turmoil:
+    name: turmoil
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # The emergency guard around the build, the tests and the upload. The tests end themselves
+    # first: every run has its own real-time bound, and `just test-turmoil` gives all of them
+    # together an 8-minute budget, which ends a wedged run with status 124 and leaves the record
+    # upload its time.
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      NO_COLOR: "1"
+      CARGO_TERM_COLOR: never
+      RUST_LOG_STYLE: never
+    steps:
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.98
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just,toml-cli,wild-linker
+
+      - name: Install Latest LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 23
+
+      # The same toolchain and flags the other jobs build with, so the dependencies this build
+      # shares with them compile identically.
+      - name: Configure cargo
+        run: |
+          tee <<EOF > ~/.cargo/config.toml
+          [target.x86_64-unknown-linux-gnu]
+          ar = "llvm-ar-23"
+          linker = "clang-23"
+          rustflags = ["-Clink-arg=--ld-path=wild"]
+          EOF
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Configure kache daemon remote
+        env:
+          KACHE_S3_BUCKET: ${{ vars.KACHE_S3_BUCKET }}
+          KACHE_S3_REGION: ${{ vars.KACHE_S3_REGION }}
+          KACHE_S3_ACCESS_KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          KACHE_S3_SECRET_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          config="${RUNNER_TEMP}/kache-${GITHUB_JOB}.toml"
+          bash scripts/configure_kache_remote.sh "${config}"
+          echo "KACHE_CONFIG=${config}" >> "${GITHUB_ENV}"
+
+      - name: Setup kache
+        uses: kunobi-ninja/kache-action@v1
+        with:
+          version: ${{ env.KACHE_VERSION }}
+          github-cache: "false"
+          manifest-key: ${{ github.job }}-${{ runner.os }}-${{ runner.arch }}
+          pr-comment: "false"
+          s3-bucket: ${{ vars.KACHE_S3_BUCKET }}
+          s3-region: ${{ vars.KACHE_S3_REGION }}
+          s3-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          s3-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Turmoil simulations
+        run: just test-turmoil
+
+      - name: Turmoil failure replay
+        run: just test-turmoil-replay-check
+
+      - name: Kache stats
+        continue-on-error: true
+        if: always()
+        run: kache stats
+
+      # A failed scenario is reproducible only from its record: the seed and every other input,
+      # the build it ran on, and its semantic trace up to the failure. This job is the only
+      # witness of them.
+      - name: Upload Turmoil failure records
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turmoil-failures
+          path: target/turmoil-failures
+          if-no-files-found: ignore

@@ -15,11 +15,16 @@ can distinguish those outcomes.
 ## Simulation Boundary
 
 The interconnect and its execution dependency have an optional Turmoil test mode. It is separate
-from the Shuttle scheduler mode; selecting both is an invalid build configuration. The normal
-runtime dependency graph contains neither simulation scheduler. The synchronous Turmoil runner is
-a test harness outside product ownership, with a fixed seed, UTC epoch, network topology, simulated
-duration, step limit, and real wall-clock escape bound. It supervises host tasks so their failures
-fail the scenario.
+from the Shuttle scheduler mode; selecting both is an invalid build configuration that fails to
+compile with a diagnostic naming both modes. The normal runtime dependency graph contains neither
+simulation scheduler. The synchronous Turmoil runner is a test harness outside product ownership.
+Every run is built from one configuration: a seed, a UTC epoch, an IPv4 or IPv6 topology, the link
+parameters (message latency range, loss and repair rates, and TCP buffer capacity), a simulated
+duration, a step limit, and a real wall-clock bound. The runner refuses to start unless the test
+build sets `tokio_unstable`, because without it Tokio's scheduling would not follow the seed and a
+panicking task on a simulated host would not fail the run. How the runner supervises a run, and how
+a failed run is recorded and replayed, is described in
+[Supervision, Failure Records, And Replay](#supervision-failure-records-and-replay).
 
 The runner exercises the interconnect's actual bounded rkyv encode and decode path through
 `nervix-execution`. In this build mode, admitted CPU jobs run as Tokio tasks on the simulated
@@ -81,9 +86,11 @@ Production uses the operating system's secure random source; a simulated host is
 source per host, so one scenario, seed and configuration allocates the same identities in every
 process. Randomness inside TLS stays real. Replay is compared by a semantic trace: each event
 records its simulated time, host, and the identity, admission decision or outcome it describes,
-and excludes key material, certificate bytes and ciphertext, which differ between runs without
-changing any decision. The suite runs one scenario in two fresh processes and requires identical
-traces; any causally relevant difference is a defect.
+and excludes key material, certificate bytes, ciphertext and payload values, which either differ
+between runs without changing any decision or do not belong in a failure record. Every scenario
+seed runs twice, each time in a fresh process, and must record identical traces, and the
+certificate-clock checks also run one scenario in two fresh processes; any causally relevant
+difference is a defect.
 
 The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes
 effects, the walk runs in the key's semantic order instead of map order: retiring removed or
@@ -92,8 +99,12 @@ slots after a credential replacement, and sending relay progress reports. Walks 
 take a maximum, or remove entries independently of one another keep map order, because it cannot
 change their result. Residual sources outside the simulated contract are Rustls and AWS-LC
 randomness, which changes cipher bytes but no decision; Tokio's per-runtime scheduling seed, which
-Turmoil derives from the simulation seed only when the build sets `tokio_unstable`, as the test
-recipe does.
+Turmoil derives from the simulation seed only when the build sets `tokio_unstable`, as the runner
+requires; and Tokio's task numbers, which are counted across the whole process. A runtime tears its
+tasks down in an order derived from those numbers, so when a simulated host crashes, the order in
+which its connections close depends on every task the process created before. Each scenario
+attempt and each replay therefore runs in a fresh process, where that count starts from the same
+state.
 
 Production builds use Tokio's operating-system TCP and DNS APIs. The Turmoil build uses only
 simulated TCP and DNS for the interconnect, so transport fault scenarios cannot escape to the host
@@ -103,6 +114,94 @@ transport clock is physical infrastructure time only; it neither defines domain 
 connector arrivals. A simulated host crash tears down its runtime and is not evidence of
 power-loss or SIGKILL durability. A simulation result does not establish kernel retransmission
 behavior or full-node recovery.
+
+### Supervision, Failure Records, And Replay
+
+The runner supervises every way a run can end.
+
+| Ending | How the run fails |
+| --- | --- |
+| A host or client returns an error | With that error |
+| A panic on the scheduler thread | With the first panic's message and source location. This covers a panic in a task on a simulated host, which shuts that host's runtime down, and a panic Tokio catches while it drops a task, which would otherwise only be printed |
+| The simulated duration or the step limit runs out | With the bound and the simulated time reached |
+| The real-time bound expires | With the phase the scheduler was in, the steps it completed, and the simulated time they reached, which locates a step that blocked the scheduler thread |
+| Cleanup panics after the run completed | As a cleanup failure, even though every step succeeded |
+
+The real-time deadline is fixed before the scheduler thread starts and is measured outside it, so it
+expires even when a host blocks that thread and simulated time cannot advance; the blocked thread is
+then abandoned, and ends with the process that runs the attempt. When the steps complete, the
+simulation and every host runtime are dropped in a cleanup phase of their own, inside the same
+deadline. A cleanup failure that follows a failed run is written to standard error beside the run's
+own failure.
+
+Each interconnect scenario has a name, a written fault plan, and a small set of committed regression
+seeds. An ordinary run executes every committed seed twice, each time in a fresh process of the test
+binary, and requires the same outcome and the same trace from both. The attempt's process reports
+what it observed back to the test that started it. A process that ends without reporting, because it
+aborted or because it outlived its run's real-time bound by 30 seconds and was killed, fails the
+seed with its exit and the last 40 lines of its output. The runner's own checks, and the
+library-level clock and codec checks, use fixed seeds and are rerun by name.
+
+A scenario that fails, panics around its simulation, or diverges between its two runs leaves a JSON
+failure record under `target/turmoil-failures`, one file for each test, case and seed. The test then
+fails with a summary of the trace and the command that replays the record.
+
+| Record field | Contents |
+| --- | --- |
+| `scenario` | The Cargo package, test target and libtest name that select the test, the case within it, and its fault plan |
+| `build` | The checked-out commit and whether tracked files were modified, the SHA-256 of `Cargo.lock`, `rustc -vV`, and whether `tokio_unstable` and debug assertions were compiled in |
+| `inputs` | The seed, epoch, topology, link parameters, simulated and real-time bounds, and any injected failure |
+| `run` | Whether the first or the repeat run of the determinism check failed |
+| `outcome` | Running, failed, panicked, diverged, or unreported, with the error, the panic, the first differing event of each run, or the process's ending and output |
+| `events` | The semantic trace, as far as the run got |
+
+A record holds identities, inputs, outcomes and semantic events only. It never holds certificates,
+key material, ciphertext or payload values, and the fixtures' payload assertions do not print the
+values they compare. The record is written before each seed starts, marked running, and removed when
+the seed passes, so a test process ended from outside, such as by the suite's real-time budget,
+still leaves the inputs of the run it was in.
+
+`just test-turmoil-replay <record>` replays a record in a fresh process, the same starting state
+every attempt had. It selects the recorded package, test target and test, and the recorded case
+within that test, and runs it once with exactly the recorded inputs, whatever the scenario's current
+seeds and bounds are. It reports each difference between the recorded build and its own, since a
+different source, lockfile or toolchain can legitimately change a run, and then compares its outcome
+and trace with the record: the failure reproduced, the replay failed differently, or it passed. A
+replay that fails exits with a failure status. One that passes prints that the recorded failure did
+not reproduce, which is how a fix is confirmed.
+
+The replay path is checked itself. `NERVIX_TURMOIL_INJECT_FAILURE`, set to a simulated time such as
+`5s`, adds a harness host that fails at that time. The injection is one of the run's recorded
+inputs, so a replay injects it again. A regression test injects a failure into a scenario in a fresh
+process, requires exactly one record, replays that record in a second fresh process, and requires
+the recorded outcome and trace. `just test-turmoil-replay-check` does the same through the
+documented replay command. Two further scenarios, one whose trace names the process that ran it and
+one whose check after the simulation fails, are started in fresh processes by a regression test that
+requires a diverged and a panicked record. The suite contains no failing test: the injection exists
+only in the environment of those processes, and the two failing scenarios are ignored unless a test
+starts them.
+
+`just test-turmoil-sweep <first> <count>` runs every scenario over a range of seeds in place of its
+committed seeds, each seed twice and with the same failure records. Its default, sixty-four seeds
+from 1000, ran for 8 minutes 11 seconds after the build on a 32-thread development workstation, one
+attempt at a time; the recipe's default real-time budget of 25 minutes leaves three times that, and
+the recipe ends with status `124` when the budget expires. A seed that exposes a defect joins its
+scenario's committed seeds with the fix, so the regression set grows only by seeds that found
+something. The first was seed 1036 of the receiver restart with a delayed relay response: its two
+runs diverged while they shared one process, which exposed the task-numbering dependence described
+above.
+
+In CI the Turmoil suite is a job of its own, beside the default suite and the Shuttle checks. Its
+build enables the `turmoil` feature and `tokio_unstable`, so it shares no compilation with them. The
+job runs `just test-turmoil`, which gives the tests an 8-minute real-time budget after the build and
+ends with status `124` when the budget expires, and then `just test-turmoil-replay-check`. When a
+step fails, it uploads `target/turmoil-failures` as the `turmoil-failures` artifact. The job's
+30-minute limit is the emergency guard outside the budget, following the convention of the
+[Integration Test Lifecycle](./integration-test-lifecycle.md#the-suite-watchdog). No build combines
+the two scheduler modes: the workspace-wide all-features builds exclude every package that offers
+them, and validation checks that the production dependency graph, with or without default features,
+contains no Turmoil package, and that selecting both modes in either package fails with its
+diagnostic.
 
 ## Listener And Peer Topology
 
