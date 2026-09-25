@@ -1967,6 +1967,11 @@ button {
   box-shadow: 0 0 16px rgba(6, 182, 212, 0.85);
 }
 
+.live-dot.paused {
+  background: var(--text-d);
+  box-shadow: none;
+}
+
 .subscribe-block {
   display: grid;
   gap: 8px;

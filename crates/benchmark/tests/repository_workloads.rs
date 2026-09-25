@@ -115,6 +115,29 @@ fn kafka_dedup_window_renders_a_stateful_graph_and_a_matching_competitor() {
         2 * LANES.arch_into()
     );
 
+    let sketch_settings = RunSettings::resolve(
+        benchmark.definition(),
+        &[
+            "sketch_enabled=true".to_owned(),
+            "sketch_precision=10".to_owned(),
+        ],
+        Some(1),
+    )
+    .assured("the optional sketch uses a declared boolean and bounded precision");
+    let sketch_graph = benchmark
+        .render_implementation_with_parameters("nervix", inputs, &sketch_settings.parameters)
+        .assured("the sketch-enabled window graph renders");
+    assert_eq!(
+        sketch_graph
+            .matches("distinct_estimate = APPROX_COUNT_DISTINCT(input.key, 10)")
+            .count(),
+        LANES.arch_into()
+    );
+    assert_eq!(
+        statements_starting_with(&sketch_graph, "CREATE WINDOW PROCESSOR"),
+        LANES.arch_into()
+    );
+
     let vector = benchmark
         .render_implementation_with_parameters("vector", inputs, &settings.parameters)
         .expect("Vector implementation should render");
@@ -193,4 +216,21 @@ fn hot_path_workloads_render_the_publisher_matrix_and_remote_placement() {
     );
     assert_eq!(statements_starting_with(&placement, "RELOCATE RELAY"), 1);
     assert_eq!(statements_starting_with(&placement, "RELOCATE EMITTER"), 1);
+
+    let processor = load("hot-path-processor");
+    let expression = "CASE WHEN contains_any(input.value, vec(input.value)) THEN \
+                      upper(input.value) ELSE input.value END";
+    let settings = RunSettings::resolve(
+        processor.definition(),
+        &[format!("transform_expression={expression}")],
+        Some(1),
+    )
+    .assured("the processor declares a STRING expression parameter");
+    let graph = processor
+        .render_implementation_with_parameters("nervix", inputs, &settings.parameters)
+        .assured("the configured processor expression renders");
+    assert_eq!(
+        graph.matches(&format!("SET value = {expression}")).count(),
+        LANES.arch_into()
+    );
 }

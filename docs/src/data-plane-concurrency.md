@@ -286,6 +286,12 @@ These sites are accepted for the contract and bound named above. A lock that mer
 state convenient, protects immutable configuration, or repeats registry discovery on every batch
 does not belong in this category.
 
+The simulated relay fault checks drive the production receipt, admission, and cancellation APIs
+through authenticated connections. They synchronize on the received Arrow batch and verify the
+same attempt cannot be admitted twice after a lost reply. Cancellation before grant and while
+receipt or reconnection is unresolved must win the attempt's existing admission fence before the
+runtime can admit it. A cancellation after admission returns the admitted outcome.
+
 Relay fan-out itself uses one bounded queue per consumer. Publishers share no fan-out lock;
 capacity and receiver counts are atomic, and a publisher registers for notification only when a
 consumer queue is full. Removing one consumer does not stop the others, and changing capacity does
