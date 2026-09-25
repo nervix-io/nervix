@@ -5,6 +5,7 @@ This section explains how Nervix is built and how it behaves internally.
 Use it for:
 
 - control-plane and data-plane structure
+- [connector crate ownership, the shared source and sink contract, and host execution](./connector-contract.md)
 - domain-clock mapping, authority, lifecycle, progress, and execution-time semantics
 - cluster interconnect security, traffic isolation, and delivery semantics
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)

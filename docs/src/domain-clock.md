@@ -326,6 +326,10 @@ misses multiple occurrences, the cadence returns the newest due instant once and
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.
 
+[Connector Crates And The Connector Contract](./connector-contract.md#source-boundary) defines
+the paced source's host and connector responsibilities; this chapter owns the cadence's time
+mapping and missed-occurrence behavior.
+
 The architecture keeps four time classes distinct:
 
 | Time class | Internal use |

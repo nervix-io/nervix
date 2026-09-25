@@ -49,88 +49,13 @@ The runtime then instantiates that schedule:
 - junctions, deduplicators, and reingestors transform or route records between relays
 - emitters encode records and publish them externally
 
-Ingestors and emitters that reach an external system are connectors. The values that cross between
-a connector and the runtime hosting it are defined once, in the connector contract: a client's
-resolved configuration and the resource mounts it reads files from, the TLS, HTTP client, and
-service-URL settings built from that configuration, physical deadlines and the actual-UTC read a
-source stamps arrival with, and the transport headers and typed metadata a source message carries.
-The runtime resolves resource mounts and projects metadata into its own columns; the contract
-carries only the results.
-
-On the sink side, the contract separates codec records from mapped Arrow rows. A record sink
-receives one batch of encoded keys, payloads, headers, host positions, and, where the emitter
-declares one, the ordering group the runtime evaluated for each record; a row sink receives a
-mapped Arrow batch, its target columns, selected rows, and host-derived chunk ranges. Both return
-per-record delivery or structured-rejection outcomes and at most one infrastructure failure. The
-runtime retains batching, retry cadence, acknowledgement keepalive, stop deadlines, and fault
-injection. Connectors reach transient status, events, staging storage, and general-error handling
-only through an opaque host handle, so neither runtime types nor ACK maps cross the boundary.
-Every record sink implements this contract in its own crate under `crates/connectors`: Kafka,
-Pulsar, RabbitMQ, NATS, MQTT, Redis, ZeroMQ, Syslog, SQS, and Sentry. Each crate owns its driver
-and the raw client configuration that driver reads, neither of which belongs to the server runtime.
-The server's production manifest names the connector crates and contract, while each driver
-dependency belongs to its connector crate. The server test harness may depend on those drivers
-separately to provision and inspect external systems.
-
-The source side has the same shape. A broker source implements the source contract in the crate
-its sink already occupies: Kafka, Pulsar, RabbitMQ, NATS, MQTT, Redis Pub/Sub, ZeroMQ, and SQS,
-beside the syslog listener and the WebSocket client source. A connector owns its transport: how it
-opens, subscribes, reads the next batch, suspends and resumes, and what acknowledging or rejecting
-a position means for its broker, together with its own header semantics. The runtime owns one
-instance loop for every broker source: it parses the declared delivery mode into the acknowledgement
-policy, opens each instance, decodes and dispatches what the connector reads, waits on the
-acknowledgement roots it attached, acknowledges or rejects positions through the connector, and
-paces retries, quiesce, readiness, and transient status. The HTTP and Prometheus sources are paced
-instead: the runtime polls them on the domain cadence their `EVERY` declares.
-
-The endpoint source is the one source that stays in the server. It has no driver, because the
-node's own HTTP and HTTPS listener feeds it, but it implements the same source contract as a
-request-scoped source: starting it binds the endpoint's routes to the runtime's request intake, and
-closing it unbinds them. The runtime keeps request admission, the endpoint buffer, and rejection
-with a `Retry-After` delay on the request path, where each request is admitted and dispatched as
-its own ingest group; the endpoint's source loop only replays what the endpoint buffer retained once
-a quiesce releases it.
-
-Every ingestor starts on one path, whatever its source. The runtime compiles the ingestor's filter
-and output routes and resolves its codec; the composition root, the one place in the server that
-maps a source plan to the connector running it, resolves the client configuration and opens the
-connector's instances; and only then does the runtime register the ingestor and start each
-instance under the loop of its source family. An ingestor whose source cannot start therefore
-leaves nothing running. Which quiesce modes a source honors, whether its messages carry readable
-headers, and what acknowledgement its delivery mode declares all come from the source vocabulary;
-no connector and no runtime table redeclares them.
-
-A row sink writes values rather than encoded payloads, so the runtime evaluates its `VALUES`
-mapping itself. The mapping compiles once when the emitter starts and runs once per batch,
-producing one Arrow column per target column together with the rows that still have to be written;
-a row whose expression failed is rejected with its structured message error and never reaches the
-sink. Sensitivity is unchanged by that projection: a mapped value still requires explicit leakage to
-leave the domain. Each row sink then encodes from those columns at its own boundary — OTLP protobuf
-for OpenTelemetry in `crates/connectors/otel`, `JSONEachRow` lines for ClickHouse in
-`crates/connectors/clickhouse`, bound parameters for Postgres and MySQL in
-`crates/connectors/postgres` and `crates/connectors/mysql`, BSON documents for MongoDB in
-`crates/connectors/mongodb`, and Arrow IPC staging files that one catalog commit turns into Parquet
-data files for Iceberg in `crates/connectors/iceberg`. No mapped row is ever materialized as a
-scalar between the two.
-
-A sink that stages what it accepts declares that it retains acknowledgements, and the runtime then
-hands it the acknowledgements of every row a write carries instead of resolving them as the write
-returns. The sink reports the domain or physical deadline by which its staged work must be
-published, and the runtime folds that deadline into the emitter's wake, asks for the commit once it
-is reached, forces it for a drain, and retries a failed commit on the emitter's declared backoff
-while keeping the retained acknowledgements alive. The sink's commit resolves those
-acknowledgements and reports what it published, so nothing counts as sent before it is.
-
-The pooled sinks keep the same split. A crate owns its driver's pool and the connection it hands
-out, and the runtime owns the lease on the node's one instance of a named client, the wait a graph
-node reports while it holds no connection, and the bounds the client declared.
-
-The runtime names every sink crate in one place, its composition root. Each variant of an
-emitter's sink plan maps to that crate's constructor, and the connector it opens is paired with the
-input the runtime prepares for its contract: the emitter's codec for a record sink, the compiled
-`VALUES` projection for a row sink. The emitter task holds that pairing as one boxed connector, so
-its batching, retry, commit, and drain are written once for every sink, and no connector is ever
-called once per row.
+Ingestors and emitters meet external systems through connector crates. The server composes a
+validated typed plan with an integration-specific source or sink, and its data-plane host owns
+intake, routing, buffering, acknowledgements, and lifecycle. The
+[Connector Crates And The Connector Contract](./connector-contract.md) chapter defines that
+boundary, its source and sink families, delivery and commit points, special integrations, and
+failure semantics. The [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals define the
+public NSPL forms.
 
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and

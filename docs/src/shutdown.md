@@ -435,6 +435,10 @@ admitted work completes in place`.
 
 ## Connector Contracts
 
+[Connector Crates And The Connector Contract](./connector-contract.md) defines normal source and
+sink ownership and completion points. This section describes what a node's drain can complete
+before its shared stop deadline.
+
 Shutdown does not change any connector's delivery contract. It changes only whether a connector
 reaches its completion point before the process ends.
 

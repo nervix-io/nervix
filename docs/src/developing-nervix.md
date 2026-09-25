@@ -168,34 +168,17 @@ Start Nervix with `--otel-enabled` and keep the default OTLP endpoint when `just
 
 ## Connector Crates
 
-Every external integration is its own crate, and every one of them implements a contract that no
-integration owns:
+[Connector Crates And The Connector Contract](./connector-contract.md) is the architecture
+reference for ownership, source and sink lifecycle, and the cross-layer checklist for adding an
+integration. The notes here identify the repository locations and validation commands.
 
-- `crates/connector` is the connector contract, `nervix-connector`: the source and sink traits, the
-  opaque host handles through which a connector reaches the runtime, and the values that cross
-  between them, such as resolved client configuration, TLS material, and ingest headers.
-- `crates/connectors/<name>` holds one integration, `nervix-connector-<name>`, with its driver, its
-  reading of its client configuration, its header semantics, and its per-record outcomes. It names
-  the contract and the vocabulary, never the server.
-- The server is the composition root and the only crate that names every connector. On the source
-  side, `src/runtime/ingestors` starts every ingestor on one path and holds the one mapping from a
-  source plan to the connector that runs it, with the host loops each source family runs under.
-
-Keep driver dependencies in their connector crates. The server's production dependencies contain
-the connector contract and integration crates; test-harness driver dependencies belong in its
-`[dev-dependencies]` when scenarios use them to provision or inspect external systems.
-
-The endpoint source is the exception to one crate per integration: it lives in the server, in
-`src/runtime/ingestors/endpoint.rs`, because it has no driver of its own. The node's HTTP and
-HTTPS listener feeds it, and the source only binds an endpoint's routes to the runtime's request
-intake while its ingestor runs. It still implements the same source contract as every other
-source, so the runtime starts and stops it exactly as it does the others.
-
-A new integration therefore adds a crate under `crates/connectors`, implements the source or sink
-contract there, and gains a plan variant in the server together with the one composition that maps
-it to the crate. A capability the registry validates, such as the quiesce modes a source honors or
-whether it reads headers, is declared in the vocabulary, since the registry cannot name a connector
-crate.
+The shared contract is in `crates/connector`, and each external integration is in
+`crates/connectors/<name>`. The server's `src/runtime/ingestors` and emitter modules compose the
+typed plans with those crates. Keep driver dependencies in their integration crates; the server
+test harness may name a driver in `[dev-dependencies]` to provision or inspect an external system.
+The node's own endpoint source lives in `src/runtime/ingestors/endpoint.rs` because it has no
+external driver. Follow the architecture chapter's [integration checklist](./connector-contract.md#adding-an-integration)
+when extending this layout.
 
 ## Validation And Tests
 

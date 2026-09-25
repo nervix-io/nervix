@@ -2,6 +2,10 @@
 
 The data plane is the runtime execution engine.
 
+[Connector Crates And The Connector Contract](./connector-contract.md) defines how the host
+admits external source messages and publishes through external sinks, including their ACK and
+commit boundaries. This chapter follows the Arrow batches those boundaries hand to the graph.
+
 It is responsible for:
 
 - receiving records from ingestors
@@ -51,7 +55,7 @@ relay's owner buffer.
 
 Structured Model expressions are compiled into typed VM programs before local graph instantiation.
 The leader validates them eagerly so invalid scopes, construction, types, nullability, sensitivity,
-or branch relationships fail at command time. Runtime nodes consume Models directly and never
+or branch relationships fail at command time. Runtime nodes execute validated plans and never
 reparse stored NSPL.
 
 ## Working-Message Execution
