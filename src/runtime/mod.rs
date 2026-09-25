@@ -160,12 +160,12 @@ use crate::{
         AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
     },
     runtime_schema::{
-        CodecError, CompiledCodec, CompiledSchema, ProtobufDescriptorPool,
-        RuntimeProjectionComponent, RuntimeRecordBatch, RuntimeRecordBatchBuilder,
-        RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError, RuntimeSchemaOperation,
-        RuntimeValue, RuntimeValueColumn, RuntimeValueLocation, RuntimeVmOperation,
-        compile_codec_with_protobuf, compile_schema, decode_with_codec, parse_as_type_from_arrow,
-        runtime_value_from_arrow_array,
+        CodecError, CompiledCodec, CompiledSchema, ProtobufCodecDescriptors,
+        ProtobufDescriptorPool, RuntimeProjectionComponent, RuntimeRecordBatch,
+        RuntimeRecordBatchBuilder, RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError,
+        RuntimeSchemaOperation, RuntimeValue, RuntimeValueColumn, RuntimeValueLocation,
+        RuntimeVmOperation, compile_codec_with_protobuf, compile_schema, decode_with_codec,
+        parse_as_type_from_arrow, runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
 };

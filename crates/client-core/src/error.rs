@@ -88,6 +88,10 @@ pub enum ClientError {
     BuildAuthenticationMetadata(#[source] InvalidMetadataValue),
     #[error("session exchange closed")]
     SessionClosed,
+    #[error("a subscription operation task stopped before completing")]
+    SubscriptionTask(#[source] tokio::task::JoinError),
+    #[error("subscription operation failed")]
+    SubscriptionOperation(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("session exchange failed: {0}")]
     Transport(#[source] Box<tonic::Status>),
     #[error("the {request} request exceeded its deadline")]

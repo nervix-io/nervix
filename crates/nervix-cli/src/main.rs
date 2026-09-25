@@ -309,7 +309,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
             .await
             .map_err(|err| StackReport::new(ClientError::from(err)))?;
-    let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(128);
     spawn_event_collectors(client.clone(), event_sender);
     if let Some(command) = args.command {
         execute_and_print(&client, command).await?;
@@ -929,7 +929,7 @@ fn human_bytes(bytes: u64) -> String {
     format!("{adjusted:.1}")
 }
 
-fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::UnboundedSender<String>) {
+fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::Sender<String>) {
     let subscription_client = client.clone();
     let subscription_sender = sender.clone();
     tokio::spawn(async move {
@@ -938,6 +938,7 @@ fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::UnboundedSe
             for line in format_subscription_event(&event) {
                 subscription_sender
                     .send(line)
+                    .await
                     .means_shutdown("terminal event printer");
             }
         }
@@ -948,6 +949,7 @@ fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::UnboundedSe
             tokio::task::consume_budget().await;
             sender
                 .send(format_server_event(&event))
+                .await
                 .means_shutdown("terminal event printer");
         }
     });
@@ -987,7 +989,7 @@ fn spawn_event_loggers(client: Client, output: EventOutput) {
     });
 }
 
-fn drain_event_queue(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>) {
+fn drain_event_queue(receiver: &mut tokio::sync::mpsc::Receiver<String>) {
     while let Ok(line) = receiver.try_recv() {
         println!("{line}");
     }
@@ -1025,6 +1027,14 @@ fn format_subscription_event(event: &SubscriptionEvent) -> Vec<String> {
         SubscriptionEvent::Ended(ended) => vec![format!(
             "[events] subscription [{subscription}] notice: the subscription ended: {}",
             ended.message
+        )],
+        SubscriptionEvent::Interrupted(_) => vec![format!(
+            "[events] subscription [{subscription}] notice: delivery was interrupted; rows may be \
+             missing before restoration"
+        )],
+        SubscriptionEvent::ConsumerOverflow(_) => vec![format!(
+            "[events] subscription [{subscription}] notice: the client event buffer filled; \
+             delivery ended with a gap"
         )],
     }
 }

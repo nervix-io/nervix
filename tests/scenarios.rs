@@ -8,6 +8,7 @@ use std::{
     fmt,
     fs::{OpenOptions, create_dir_all},
     io::Write,
+    net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
@@ -35,7 +36,10 @@ use cucumber::{
     given, then, when,
     writer::{self, Stats as _},
 };
-use futures_util::{TryStreamExt, future::try_join_all};
+use futures_util::{
+    TryStreamExt,
+    future::{join_all, try_join_all},
+};
 use iceberg::{
     Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent,
     arrow::arrow_schema_to_schema_auto_assign_ids,
@@ -96,11 +100,16 @@ use crate::common::{
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
         WebsocketExchangeAction, client_connect_options, client_domain,
     },
+    cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
         MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+    },
+    http_receiver::{
+        ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET, ReceiverFault,
+        ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
@@ -318,6 +327,8 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The HTTP receivers a scenario started, by the name its steps give them.
+    http_receivers: BTreeMap<String, HttpReceiver>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
@@ -408,6 +419,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("http_receivers", &self.http_receivers)
             .field(
                 "silent_interconnect_peer_count",
                 &self.silent_interconnect_peers.len(),
@@ -837,6 +849,250 @@ async fn given_http_mock_server_is_running(world: &mut ScenarioWorld) {
         .await
         .expect("HTTP mock server test container should start");
     refresh_dependency_configuration(world);
+}
+
+/// How long a step waits for an HTTP receiver to observe what a node sends it. Generous, because a
+/// wait for something to happen ends as soon as it does.
+const HTTP_RECEIVER_WAIT: Duration = Duration::from_secs(60);
+
+async fn start_http_receiver(
+    world: &mut ScenarioWorld,
+    name: String,
+    transport: ReceiverTransport,
+) {
+    initialize_scenario_identity(world);
+    let name = expand_placeholders(world, &name);
+    assert!(
+        !world.http_receivers.contains_key(&name),
+        "HTTP receiver '{name}' is already running"
+    );
+    let port = draw_scenario_port(world, "HTTP receiver");
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let receiver = match HttpReceiver::start(address, transport).await {
+        Ok(receiver) => receiver,
+        Err(error) => panic!("HTTP receiver '{name}' failed to start: {error:?}"),
+    };
+    world
+        .placeholders
+        .insert(format!("http_receiver.{name}"), receiver.origin());
+    world.placeholders.insert(
+        format!("http_receiver_port.{name}"),
+        receiver.port().to_string(),
+    );
+    world.http_receivers.insert(name, receiver);
+}
+
+fn http_receiver<'world>(world: &'world ScenarioWorld, name: &str) -> &'world HttpReceiver {
+    let name = expand_placeholders(world, name);
+    match world.http_receivers.get(&name) {
+        Some(receiver) => receiver,
+        None => panic!("HTTP receiver '{name}' is not running"),
+    }
+}
+
+fn certificate_hosts(world: &ScenarioWorld, hosts: &str) -> Vec<String> {
+    let hosts = expand_placeholders(world, hosts)
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        !hosts.is_empty(),
+        "an HTTPS receiver needs at least one certificate host"
+    );
+    hosts
+}
+
+#[given(expr = "HTTP receiver {string} is running")]
+async fn given_http_receiver_is_running(world: &mut ScenarioWorld, name: String) {
+    start_http_receiver(world, name, ReceiverTransport::Plain).await;
+}
+
+#[given(expr = "HTTPS receiver {string} is running with a certificate for {string}")]
+async fn given_https_receiver_is_running(world: &mut ScenarioWorld, name: String, hosts: String) {
+    let options = ReceiverTlsOptions {
+        certificate_hosts: certificate_hosts(world, &hosts),
+        client_certificate: ClientCertificatePolicy::NotRequested,
+    };
+    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+}
+
+#[given(
+    expr = "HTTPS receiver {string} is running with a certificate for {string} and requires a \
+            client certificate"
+)]
+async fn given_https_receiver_requiring_client_certificates_is_running(
+    world: &mut ScenarioWorld,
+    name: String,
+    hosts: String,
+) {
+    let options = ReceiverTlsOptions {
+        certificate_hosts: certificate_hosts(world, &hosts),
+        client_certificate: ClientCertificatePolicy::Required,
+    };
+    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+}
+
+/// Places the receiver's CA certificate and the client identity it issued where the node can mount
+/// them as a resource directory: `ca.pem`, `client.pem`, and `client-key.pem`.
+#[given(
+    expr = "node {string} has the TLS files of HTTP receiver {string} in resource directory \
+            {string}"
+)]
+async fn given_node_has_http_receiver_tls_files(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    name: String,
+    placeholder: String,
+) {
+    let files = match http_receiver(world, &name).tls_files() {
+        Some(files) => files.to_path_buf(),
+        None => panic!("HTTP receiver '{name}' does not serve TLS"),
+    };
+    let base_dir = world
+        .cluster()
+        .node_base_dir(&node_id)
+        .expect("node base dir should exist");
+    let resource_dir = base_dir.join("fixtures").join(&placeholder);
+    if resource_dir.exists() {
+        std::fs::remove_dir_all(&resource_dir).expect("old fixture directory should be removed");
+    }
+    std::fs::create_dir_all(&resource_dir).expect("fixture directory should be created");
+    for file in HttpReceiver::tls_file_names() {
+        std::fs::copy(files.join(file), resource_dir.join(file)).unwrap_or_else(|error| {
+            panic!("failed to copy HTTP receiver TLS file '{file}': {error}")
+        });
+    }
+    world
+        .placeholders
+        .insert(placeholder, resource_dir.display().to_string());
+}
+
+/// Each line is one response, taken by the next request in order. The forms are those
+/// `ReceiverResponse` parses: `respond <status>` with `;`-separated clauses, `lose response`,
+/// `hold response`, and `raw <bytes>`.
+#[given(expr = "HTTP receiver {string} answers with")]
+async fn given_http_receiver_answers_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let script = expand_placeholders(world, docstring(step));
+    let mut responses = Vec::new();
+    for line in script
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        match line.parse::<ReceiverResponse>() {
+            Ok(response) => responses.push(response),
+            Err(error) => panic!("invalid HTTP receiver script line: {error}"),
+        }
+    }
+    http_receiver(world, &name).script(responses);
+}
+
+#[given(expr = "HTTP receiver {string} answers unscripted requests with {string}")]
+async fn given_http_receiver_answers_unscripted_requests_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    response: String,
+) {
+    let response = match expand_placeholders(world, &response).parse::<ReceiverResponse>() {
+        Ok(response) => response,
+        Err(error) => panic!("invalid HTTP receiver response: {error}"),
+    };
+    http_receiver(world, &name).answer_unscripted_requests_with(response);
+}
+
+#[then(expr = "HTTP receiver {string} eventually receives at least {int} request(s)")]
+async fn then_http_receiver_eventually_receives_requests(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let receiver = http_receiver(world, &name);
+    if let Err(error) = receiver
+        .wait_for_requests(expected, HTTP_RECEIVER_WAIT)
+        .await
+    {
+        panic!("HTTP receiver '{name}': {error}");
+    }
+}
+
+/// Compares one captured request, counted from 1, with the docstring: `<METHOD> <target>`, then
+/// the headers the request must carry with exactly these values, then an empty line, then the
+/// exact body. Header names compare without case; headers the docstring does not name are not
+/// checked. A docstring without a body requires a request with zero content bytes.
+#[then(expr = "HTTP receiver {string} request {int} is")]
+async fn then_http_receiver_request_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    #[step] step: &Step,
+) {
+    // Cucumber keeps the newlines that open and close a docstring; neither is part of a request.
+    let expected = expand_placeholders(world, docstring(step))
+        .trim_matches('\n')
+        .to_string();
+    let receiver = http_receiver(world, &name);
+    let captured = receiver.captured();
+    let Some(index) = position.checked_sub(1) else {
+        panic!("HTTP receiver requests are counted from 1");
+    };
+    let Some(request) = captured.get(index) else {
+        panic!(
+            "HTTP receiver '{name}' captured {} request(s), not request {position}",
+            captured.len()
+        );
+    };
+    // Without an empty line the docstring names no body, which is a request with zero content
+    // bytes.
+    let (head, body) = match expected.split_once("\n\n") {
+        Some((head, body)) => (head, body),
+        None => (expected.as_str(), ""),
+    };
+    let mut head_lines = head.lines();
+    let request_line = head_lines.next().unwrap_or_default();
+    assert_eq!(
+        request_line,
+        format!("{} {}", request.method, request.target),
+        "HTTP receiver '{name}' request {position} has another request line:\n{request}"
+    );
+    for header in head_lines {
+        let Some((header_name, value)) = header.split_once(':') else {
+            panic!("expected header line '{header}' has no ':'");
+        };
+        let values = request.header_values(header_name.trim());
+        assert_eq!(
+            values,
+            vec![value.trim().as_bytes()],
+            "HTTP receiver '{name}' request {position} does not carry exactly one '{}' header \
+             with the expected value:\n{request}",
+            header_name.trim()
+        );
+    }
+    assert_eq!(
+        request.body,
+        body.as_bytes(),
+        "HTTP receiver '{name}' request {position} has another body:\n{request}"
+    );
+}
+
+#[then(expr = "HTTP receiver {string} eventually records a failed TLS handshake")]
+async fn then_http_receiver_records_failed_tls_handshake(world: &mut ScenarioWorld, name: String) {
+    let receiver = http_receiver(world, &name);
+    let waited = receiver
+        .wait_for_fault(
+            "failed TLS handshake",
+            ReceiverFault::is_tls_handshake,
+            HTTP_RECEIVER_WAIT,
+        )
+        .await;
+    if let Err(error) = waited {
+        panic!("HTTP receiver '{name}': {error}");
+    }
 }
 
 #[given(expr = "clock source recorder {string} is reset")]
@@ -9292,20 +9548,34 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_a_follower_
     }
 }
 
-async fn connect_named_client_to_node(world: &mut ScenarioWorld, name: String, node_id: String) {
+async fn connect_named_client_to_node(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+    seed_nodes: Vec<String>,
+) {
     let name = expand_placeholders(world, &name);
     let node_id = expand_placeholders(world, &node_id);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node_id)
         .expect("failed to resolve client node gRPC URI");
-    let client = Client::connect_with_options(
-        &grpc_uri,
-        client_domain(&world.domain),
-        client_connect_options(&grpc_uri).expect("failed to build client tls options"),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("failed to connect client '{name}' to '{node_id}': {error}"));
+    let mut options =
+        client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    for seed_node in seed_nodes {
+        let seed_uri = world
+            .cluster()
+            .grpc_uri(&seed_node)
+            .expect("failed to resolve seed node gRPC URI");
+        options
+            .seed_servers
+            .push(url::Url::parse(&seed_uri).expect("cluster gRPC seed URIs are valid URLs"));
+    }
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to connect client '{name}' to '{node_id}': {error}")
+        });
     assert!(
         world
             .transaction_clients
@@ -9321,13 +9591,23 @@ async fn given_named_client_is_connected_to_node(
     name: String,
     node_id: String,
 ) {
-    connect_named_client_to_node(world, name, node_id).await;
+    connect_named_client_to_node(world, name, node_id, Vec::new()).await;
+}
+
+#[given(expr = "client {string} is connected to node {string} with cluster seeds")]
+async fn given_named_client_is_connected_with_cluster_seeds(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+) {
+    let seeds = world.cluster().node_ids();
+    connect_named_client_to_node(world, name, node_id, seeds).await;
 }
 
 #[given(expr = "client {string} is connected to the leader node")]
 async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, name: String) {
     let leader = current_leader_node(world).await;
-    connect_named_client_to_node(world, name, leader).await;
+    connect_named_client_to_node(world, name, leader, Vec::new()).await;
 }
 
 #[given(
@@ -11273,6 +11553,38 @@ async fn then_last_command_output_contains(world: &mut ScenarioWorld, #[step] st
         "expected command output fragment {} in output, got: {output}",
         expected.trim()
     );
+}
+
+/// Runs `SHOW CREATE EMITTER` for every emitter the table names and requires its rendering to
+/// contain the clause beside it. The first row names the columns.
+#[then("SHOW CREATE EMITTER on the leader node renders these clauses")]
+async fn then_show_create_emitter_renders_these_clauses(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let table = step
+        .table
+        .as_ref()
+        .expect("the step lists each emitter with the clause it must render");
+    let leader = current_leader_node(world).await;
+    for row in table.rows.iter().skip(1) {
+        let [emitter, clause] = row.as_slice() else {
+            panic!("each row names an emitter and one clause, got {row:?}");
+        };
+        let output = world
+            .cluster()
+            .run_command(
+                &leader,
+                &world.domain,
+                &format!("SHOW CREATE EMITTER {emitter};"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("SHOW CREATE EMITTER {emitter} failed: {error}"));
+        assert!(
+            output.contains(clause.as_str()),
+            "expected SHOW CREATE EMITTER {emitter} to contain {clause:?}, got: {output}"
+        );
+    }
 }
 
 #[then("the last command output is saved as the relocation plan")]
@@ -17523,6 +17835,117 @@ async fn then_named_client_receives_subscription_payload(
     world.last_subscription_payload = Some(payload);
 }
 
+#[when(
+    expr = "within {string} client {string} receives a subscription payload from repeated http \
+            posts to node {string} with host {string} path {string}"
+)]
+async fn when_named_client_receives_from_repeated_http_posts(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the scenario delivery deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' did not receive a row from repeated posts within {duration:?}"
+        );
+        world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await
+            .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(Duration::from_secs(1));
+        match tokio::time::timeout(wait, client.next_subscription()).await {
+            Ok(Ok(nervix_client_core::SubscriptionEvent::Rows(rows))) => {
+                let lines = rows.display_lines().unwrap_or_else(|error| {
+                    panic!("client '{client_name}' rows do not render: {error}")
+                });
+                if let Some(line) = lines.into_iter().next() {
+                    world.last_subscription_payload = Some(line);
+                    return;
+                }
+            }
+            Ok(Ok(_)) | Err(_) => {}
+            Ok(Err(error)) => panic!("client '{client_name}' subscription stream closed: {error}"),
+        }
+    }
+}
+
+#[then(expr = "within {string} client {string} observes subscription {string} interrupted")]
+async fn then_named_client_observes_subscription_interrupted(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the interruption deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let event = tokio::time::timeout(duration, client.next_subscription())
+        .await
+        .unwrap_or_else(|_| panic!("client '{client_name}' did not report an interruption"))
+        .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+    let nervix_client_core::SubscriptionEvent::Interrupted(interrupted) = event else {
+        panic!("client '{client_name}' did not report an interruption: {event:?}");
+    };
+    assert_eq!(interrupted.subscription.name.as_str(), subscription_name);
+}
+
+#[then(expr = "client {string} subscription {string} is active")]
+async fn then_named_client_subscription_is_active(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let lifecycle = client.subscription_lifecycle(&name);
+        if let Some(nervix_client_core::SubscriptionLifecycle::Active(_)) = lifecycle {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' subscription '{subscription_name}' did not become active: \
+             {lifecycle:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "node {string} eventually accepts websocket traffic for host {string} path {string}")]
 async fn then_node_eventually_accepts_websocket_traffic(
     world: &mut ScenarioWorld,
@@ -21154,6 +21577,31 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::future::pending::<SuiteOutcome>().await
 }
 
+/// Stops every HTTP receiver the scenario started, together under one budget, and records how
+/// each stop went. A receiver's port goes back with the scenario's other fixture ports at the end
+/// of cleanup.
+async fn stop_http_receivers(world: &mut ScenarioWorld) {
+    let receivers = std::mem::take(&mut world.http_receivers);
+    let stops = join_all(receivers.into_iter().map(|(name, receiver)| async move {
+        let stop = receiver.stop().await;
+        (name, stop)
+    }))
+    .await;
+    for (name, stop) in stops {
+        append_cucumber_log_line(&format!("HTTP receiver cleanup: {name}: {stop}"));
+        if stop.was_forced() {
+            append_cucumber_log_line(&format!(
+                "scenario cleanup forced: HTTP receiver {name}: {stop}"
+            ));
+        }
+    }
+}
+
+const _: () = assert!(
+    RECEIVER_STOP_BUDGET.as_nanos() < CLUSTER_TEARDOWN_BUDGET.as_nanos(),
+    "stopping the HTTP receivers must cost less than stopping the cluster"
+);
+
 /// Everything a scenario run may be configured with beyond cucumber's own options.
 #[derive(Clone, Copy, Debug, clap::Args)]
 struct ScenarioRunArgs {
@@ -21168,7 +21616,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
-            "(not @client_wire_expected_failure) and (not @client_wire_baseline)"
+            "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
+             @http_emitter_expected_failure)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
@@ -21314,6 +21763,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.server_process = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
+                stop_http_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
                 world.active_session_node = None;

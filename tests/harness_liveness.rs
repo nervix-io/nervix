@@ -3,15 +3,18 @@
 //! Outside the layer order: a harness test crate.
 //!
 //! - **Owns.** Registration of the focused node-liveness, node-startup, phase-deadline,
-//!   status-request, port-pool, cluster-teardown, scenario-phase and suite-watchdog regressions
-//!   with Rust's test runner, and the stand-in nodes those regressions talk to.
+//!   status-request, port-pool, cluster-teardown, scenario-phase, suite-watchdog and HTTP-receiver
+//!   regressions with Rust's test runner, and the stand-in nodes and clients those regressions talk
+//!   to.
 //! - **Depends on.** The node-liveness, node-startup, phase-deadline, status-request, port-pool,
-//!   cluster-teardown, scenario-phase and suite-watchdog harness modules, and the client wire
-//!   session protocol the stand-in nodes answer status requests with.
+//!   cluster-teardown, scenario-phase, suite-watchdog and HTTP-receiver harness modules, and the
+//!   client wire session protocol the stand-in nodes answer status requests with.
 //! - **Must not know.** Scenario state or production node lifecycle policy.
 
 #[path = "common/cluster_teardown.rs"]
 mod cluster_teardown;
+#[path = "common/http_receiver.rs"]
+mod http_receiver;
 #[path = "common/node_liveness.rs"]
 mod node_liveness;
 #[path = "common/node_startup.rs"]
@@ -2722,5 +2725,413 @@ mod tests {
             failed.to_string().contains("redis container did not stop"),
             "{failed}"
         );
+    }
+}
+
+mod http_receiver_tests {
+    use std::{
+        net::{Ipv4Addr, SocketAddr},
+        time::{Duration, Instant},
+    };
+
+    use meticulous::{OptionExt as _, ResultExt as _};
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpStream,
+    };
+
+    use crate::http_receiver::{
+        ClientCertificatePolicy, HttpReceiver, RECEIVER_CONNECTION_STOP_BUDGET, ReceiverFault,
+        ReceiverResponse, ReceiverScriptError, ReceiverTlsOptions, ReceiverTransport,
+    };
+
+    /// How long a regression waits for something the receiver does promptly on an idle machine.
+    const WITHIN: Duration = Duration::from_secs(10);
+
+    fn loopback() -> SocketAddr {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+    }
+
+    fn script(lines: &str) -> Vec<ReceiverResponse> {
+        lines
+            .lines()
+            .map(|line| {
+                line.parse()
+                    .assured("every regression script line is valid")
+            })
+            .collect()
+    }
+
+    async fn start(transport: ReceiverTransport) -> HttpReceiver {
+        HttpReceiver::start(loopback(), transport)
+            .await
+            .assured("a loopback receiver binds an ephemeral port")
+    }
+
+    /// Writes `request` on a fresh connection and reads until the receiver closes it.
+    async fn exchange(receiver: &HttpReceiver, request: &[u8]) -> Vec<u8> {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, receiver.port()))
+            .await
+            .assured("the receiver is listening");
+        stream
+            .write_all(request)
+            .await
+            .assured("the receiver reads what a client writes");
+        let mut response = Vec::new();
+        tokio::time::timeout(WITHIN, stream.read_to_end(&mut response))
+            .await
+            .assured("the receiver closes a connection its script ends")
+            .assured("reading from a loopback connection succeeds");
+        response
+    }
+
+    #[tokio::test]
+    async fn the_receiver_captures_requests_and_answers_its_script_in_order() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script(
+            "respond 503; header Retry-After: 1\nrespond 202; body accepted",
+        ));
+        let client = reqwest::Client::new();
+
+        let first = client
+            .patch(format!("{}/v1/events/42?notify=true", receiver.origin()))
+            .header("X-Tenant", "north")
+            .header("Idempotency-Key", "42")
+            .body(r#"{"event_id":"42","payload":"p"}"#)
+            .send()
+            .await
+            .assured("the receiver answers a scripted request");
+        assert_eq!(first.status(), 503);
+        assert_eq!(first.headers()["retry-after"], "1");
+        let second = client
+            .delete(format!("{}/v1/events/7", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers a scripted request");
+        assert_eq!(second.status(), 202);
+        assert_eq!(
+            second.text().await.assured("the scripted body is complete"),
+            "accepted"
+        );
+        let unscripted = client
+            .get(format!("{}/after", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers an unscripted request");
+        assert_eq!(unscripted.status(), 200);
+        receiver.answer_unscripted_requests_with(
+            "respond 404"
+                .parse()
+                .assured("the standing response is valid"),
+        );
+        let standing = client
+            .get(format!("{}/missing", receiver.origin()))
+            .send()
+            .await
+            .assured("the receiver answers with its replaced standing response");
+        assert_eq!(standing.status(), 404);
+
+        let captured = receiver
+            .wait_for_requests(4, WITHIN)
+            .await
+            .assured("every request above was answered, so it was captured first");
+        assert_eq!(captured.len(), 4);
+        assert_eq!(captured[0].method, "PATCH");
+        assert_eq!(captured[0].target, "/v1/events/42?notify=true");
+        assert_eq!(
+            captured[0].header_values("x-tenant"),
+            vec![b"north".as_slice()]
+        );
+        assert_eq!(
+            captured[0].header_values("IDEMPOTENCY-KEY"),
+            vec![b"42".as_slice()]
+        );
+        assert_eq!(captured[0].body, br#"{"event_id":"42","payload":"p"}"#);
+        assert_eq!(captured[1].method, "DELETE");
+        assert!(captured[1].body.is_empty());
+        assert_eq!(captured[3].target, "/missing");
+
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+        assert_eq!(stop.captured, 4, "{stop}");
+    }
+
+    #[tokio::test]
+    async fn a_lost_response_is_captured_and_the_connection_closes_without_an_answer() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script("lose response"));
+
+        let response = exchange(
+            &receiver,
+            b"POST /applied HTTP/1.1\r\nHost: receiver\r\nContent-Length: 7\r\n\r\napplied",
+        )
+        .await;
+
+        assert!(response.is_empty(), "a lost response writes nothing");
+        let captured = receiver.captured();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].body, b"applied");
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[tokio::test]
+    async fn chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script(
+            "respond 200; interim 103; header Link: </a>\nraw HTTP/1.1 200 OK\\r\\nbroken \
+             header\\r\\n\\r\\n",
+        ));
+
+        let interim = exchange(
+            &receiver,
+            b"POST /chunked HTTP/1.1\r\nHost: receiver\r\nConnection: close\r\n\
+              Transfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n",
+        )
+        .await;
+        let raw = exchange(&receiver, b"GET /raw HTTP/1.1\r\nHost: receiver\r\n\r\n").await;
+
+        let interim = String::from_utf8(interim).assured("the scripted response is ASCII");
+        let (interim_head, final_response) = interim
+            .split_once("\r\n\r\n")
+            .assured("the interim response ends with an empty line");
+        assert!(interim_head.starts_with("HTTP/1.1 103 "), "{interim}");
+        assert!(
+            final_response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "{interim}"
+        );
+        assert!(final_response.contains("Link: </a>\r\n"), "{interim}");
+        assert_eq!(raw, b"HTTP/1.1 200 OK\r\nbroken header\r\n\r\n");
+        let captured = receiver.captured();
+        assert_eq!(captured[0].body, b"Wikipedia");
+        assert_eq!(captured[1].target, "/raw");
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[tokio::test]
+    async fn held_responses_and_stalled_bodies_end_within_the_stop_budget() {
+        let receiver = start(ReceiverTransport::Plain).await;
+        receiver.script(script(
+            "hold response\nrespond 200; body partial; stall body",
+        ));
+        let held_port = receiver.port();
+        let held = tokio::spawn(async move {
+            let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, held_port))
+                .await
+                .assured("the receiver is listening");
+            stream
+                .write_all(b"GET /held HTTP/1.1\r\nHost: receiver\r\n\r\n")
+                .await
+                .assured("the receiver reads what a client writes");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .await
+                .assured("a held connection ends cleanly when the receiver stops");
+            response
+        });
+        receiver
+            .wait_for_requests(1, WITHIN)
+            .await
+            .assured("the held request is captured before it is held");
+
+        let stalled = reqwest::Client::new()
+            .get(format!("{}/stalled", receiver.origin()))
+            .send()
+            .await
+            .assured("complete headers arrive although the body stalls");
+        assert_eq!(stalled.status(), 200);
+        let body = tokio::spawn(stalled.bytes());
+
+        let started = Instant::now();
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+        assert!(
+            started.elapsed() < RECEIVER_CONNECTION_STOP_BUDGET,
+            "held connections observe the stop: {stop}"
+        );
+        let held = tokio::time::timeout(WITHIN, held)
+            .await
+            .assured("the held client sees the connection close")
+            .assured("the held client does not panic");
+        assert!(held.is_empty(), "a held response writes nothing");
+        let body = tokio::time::timeout(WITHIN, body)
+            .await
+            .assured("the stalled body ends when the receiver stops")
+            .assured("the stalled body reader does not panic");
+        assert!(body.is_err(), "a stalled body never completes");
+    }
+
+    #[tokio::test]
+    async fn requests_beyond_the_receiver_bounds_are_faults_not_captures() {
+        let receiver = start(ReceiverTransport::Plain).await;
+
+        exchange(
+            &receiver,
+            b"POST / HTTP/1.1\r\nHost: receiver\r\nContent-Length: 999999999999\r\n\r\n",
+        )
+        .await;
+        receiver
+            .wait_for_fault(
+                "oversized body",
+                |fault| matches!(fault, ReceiverFault::RequestBodyTooLarge { .. }),
+                WITHIN,
+            )
+            .await
+            .assured("the declared body exceeds the receiver's limit");
+        exchange(&receiver, b"NOT A REQUEST\r\n\r\n").await;
+        receiver
+            .wait_for_fault(
+                "malformed request",
+                |fault| matches!(fault, ReceiverFault::MalformedRequest { .. }),
+                WITHIN,
+            )
+            .await
+            .assured("the request line has no HTTP version");
+
+        assert!(receiver.captured().is_empty());
+        let missing = receiver
+            .wait_for_fault(
+                "TLS handshake failure",
+                ReceiverFault::is_tls_handshake,
+                Duration::ZERO,
+            )
+            .await
+            .expect_err("a plain receiver never records a TLS handshake");
+        assert!(
+            missing.to_string().contains("TLS handshake failure"),
+            "{missing}"
+        );
+        let stop = receiver.stop().await;
+        assert!(!stop.was_forced(), "{stop}");
+        assert_eq!(stop.faults, 2, "{stop}");
+    }
+
+    #[tokio::test]
+    async fn a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others() {
+        let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
+            certificate_hosts: vec!["127.0.0.1".to_string()],
+            client_certificate: ClientCertificatePolicy::Required,
+        }))
+        .await;
+        let files = receiver
+            .tls_files()
+            .assured("a TLS receiver writes its client files");
+        let [ca, certificate, key] = HttpReceiver::tls_file_names()
+            .map(|name| std::fs::read(files.join(name)).assured("the receiver wrote its files"));
+        let ca = reqwest::Certificate::from_pem(&ca).assured("the receiver's CA is valid PEM");
+        let identity = reqwest::Identity::from_pem(&[certificate, key].concat())
+            .assured("the receiver's client identity is valid PEM");
+
+        let trusted = reqwest::Client::builder()
+            .add_root_certificate(ca.clone())
+            .identity(identity)
+            .build()
+            .assured("the client configuration is valid")
+            .get(format!("{}/mutual", receiver.origin()))
+            .send()
+            .await
+            .assured("a client with the issued certificate completes the handshake");
+        assert_eq!(trusted.status(), 200);
+        let anonymous = reqwest::Client::builder()
+            .add_root_certificate(ca)
+            .build()
+            .assured("the client configuration is valid")
+            .get(format!("{}/anonymous", receiver.origin()))
+            .send()
+            .await;
+        assert!(
+            anonymous.is_err(),
+            "a client without a certificate is refused"
+        );
+        receiver
+            .wait_for_fault(
+                "TLS handshake failure",
+                ReceiverFault::is_tls_handshake,
+                WITHIN,
+            )
+            .await
+            .assured("the refused client fails its handshake");
+
+        assert_eq!(receiver.captured().len(), 1);
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[tokio::test]
+    async fn a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks() {
+        let receiver = start(ReceiverTransport::Tls(ReceiverTlsOptions {
+            certificate_hosts: vec!["localhost".to_string()],
+            client_certificate: ClientCertificatePolicy::NotRequested,
+        }))
+        .await;
+        let files = receiver
+            .tls_files()
+            .assured("a TLS receiver writes its client files");
+        let ca = std::fs::read(files.join(HttpReceiver::tls_file_names()[0]))
+            .assured("the receiver wrote its CA certificate");
+        let client = reqwest::Client::builder()
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(&ca).assured("the receiver's CA is valid PEM"),
+            )
+            .build()
+            .assured("the client configuration is valid");
+
+        let by_name = client
+            .get(format!("https://localhost:{}/named", receiver.port()))
+            .send()
+            .await
+            .assured("the certificate names localhost");
+        assert_eq!(by_name.status(), 200);
+        let by_address = client
+            .get(format!("{}/address", receiver.origin()))
+            .send()
+            .await;
+        assert!(
+            by_address.is_err(),
+            "the certificate does not name 127.0.0.1"
+        );
+        receiver
+            .wait_for_fault(
+                "TLS handshake failure",
+                ReceiverFault::is_tls_handshake,
+                WITHIN,
+            )
+            .await
+            .assured("the client abandons the handshake on the hostname mismatch");
+
+        assert_eq!(receiver.captured().len(), 1);
+        assert!(!receiver.stop().await.was_forced());
+    }
+
+    #[test]
+    fn every_documented_script_form_parses_and_unknown_forms_are_refused() {
+        for line in [
+            "respond 200",
+            "respond 204; header X-A: b; body text; interim 100; after 250ms; extra headers 129",
+            "respond 200; stall body",
+            "lose response",
+            "hold response",
+            "raw HTTP/1.1 999 Odd\\r\\n\\r\\n",
+        ] {
+            assert!(line.parse::<ReceiverResponse>().is_ok(), "{line}");
+        }
+        let refused = [
+            ("answer 200", "UnknownForm"),
+            ("respond 20", "Status"),
+            ("respond 099", "Status"),
+            ("respond 200; header nocolon", "Header"),
+            ("respond 200; after soon", "Duration"),
+            ("respond 200; extra headers many", "Count"),
+            ("respond 200; teapot", "UnknownClause"),
+            ("raw trailing\\", "Escape"),
+        ];
+        for (line, variant) in refused {
+            let error: ReceiverScriptError = line
+                .parse::<ReceiverResponse>()
+                .expect_err("the line is not a response");
+            assert!(
+                format!("{error:?}").starts_with(variant),
+                "{line}: {error:?}"
+            );
+        }
     }
 }

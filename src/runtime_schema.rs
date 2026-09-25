@@ -56,7 +56,7 @@ use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
 use prost::Message as ProstMessage;
 use prost_reflect::{
-    DescriptorPool, DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage,
+    DescriptorPool, DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage, Kind,
     MessageDescriptor, SerializeOptions as ProtobufSerializeOptions,
 };
 use serde::{
@@ -131,6 +131,7 @@ struct CompiledJaqNativeCodec {
 struct CompiledJaqTransformations {
     on_ingestion: Option<Arc<CompiledJaqProgram>>,
     on_emitting: Option<Arc<CompiledJaqProgram>>,
+    on_emitting_batch: Option<Arc<CompiledJaqProgram>>,
 }
 
 impl CompiledJaqTransformations {
@@ -153,6 +154,7 @@ impl CompiledJaqTransformations {
         Ok(Self {
             on_ingestion: compile(transformations.on_ingestion.as_deref())?,
             on_emitting: compile(transformations.on_emitting.as_deref())?,
+            on_emitting_batch: compile(transformations.on_emitting_batch.as_deref())?,
         })
     }
 }
@@ -160,7 +162,35 @@ impl CompiledJaqTransformations {
 #[derive(Debug, Clone)]
 struct CompiledProtobufCodec {
     message: MessageDescriptor,
+    batch_message: Option<MessageDescriptor>,
     transformations: CompiledJaqTransformations,
+}
+
+impl CompiledProtobufCodec {
+    /// True when `batch_message` declares exactly one field, `repeated <message>`, which is the
+    /// shape a batch is published in without a batch transformation.
+    fn repeats_members(&self, batch_message: &MessageDescriptor) -> bool {
+        let mut fields = batch_message.fields();
+        let Some(field) = fields.next() else {
+            return false;
+        };
+        if fields.next().is_some() || !field.is_list() {
+            return false;
+        }
+        let Kind::Message(member) = field.kind() else {
+            return false;
+        };
+        member.full_name() == self.message.full_name()
+    }
+}
+
+/// The descriptors a protobuf codec is compiled against, resolved from the resource version it
+/// pins: the message one record encodes to, and the message a batch is published as when the
+/// codec names one.
+#[derive(Debug, Clone)]
+pub struct ProtobufCodecDescriptors {
+    pub message: MessageDescriptor,
+    pub batch_message: Option<MessageDescriptor>,
 }
 
 /// A protobuf descriptor pool compiled from a resource version.
@@ -366,6 +396,19 @@ pub enum CodecError {
     ExpectedObject { codec: String },
     #[error("codec '{codec}' has invalid jaq transformation: {reason}")]
     InvalidJaqTransformation { codec: String, reason: String },
+    #[error(
+        "protobuf codec '{codec}' declares no BATCH MESSAGE, which a batching emitter publishes in"
+    )]
+    ProtobufBatchMessageUndeclared { codec: String },
+    #[error(
+        "protobuf codec '{codec}' declares no ON EMITTING BATCH transformation, so its BATCH \
+         MESSAGE '{batch_message}' must declare exactly one field, repeated {message}"
+    )]
+    ProtobufBatchMessageShape {
+        codec: String,
+        batch_message: String,
+        message: String,
+    },
     #[error("codec '{codec}' jaq transformation failed: {reason}")]
     JaqTransform { codec: String, reason: String },
     #[error("codec '{codec}' ON INGESTION program evaluation failed")]
@@ -674,6 +717,32 @@ impl CompiledCodec {
             | CompiledWireSchema::Avro(_)
             | CompiledWireSchema::Syslog => false,
         }
+    }
+
+    /// Checks that this codec has a container a batching emitter can publish one batch in.
+    ///
+    /// Every format but protobuf derives its container, or has a batch transformation build one.
+    /// A protobuf batch is an instance of the codec's `BATCH MESSAGE`, which either a batch
+    /// transformation builds or whose single repeated field holds the members.
+    pub(crate) fn check_batch_container(&self) -> error_stack::Result<(), CodecError> {
+        let CompiledWireSchema::Protobuf(protobuf) = &self.wire_schema else {
+            return Ok(());
+        };
+        let Some(batch_message) = &protobuf.batch_message else {
+            return Err(Report::new(CodecError::ProtobufBatchMessageUndeclared {
+                codec: self.name.as_str().to_string(),
+            }));
+        };
+        if protobuf.transformations.on_emitting_batch.is_some()
+            || protobuf.repeats_members(batch_message)
+        {
+            return Ok(());
+        }
+        Err(Report::new(CodecError::ProtobufBatchMessageShape {
+            codec: self.name.as_str().to_string(),
+            batch_message: batch_message.full_name().to_string(),
+            message: protobuf.message.full_name().to_string(),
+        }))
     }
 
     pub(crate) fn requires_blocking_encode(&self) -> bool {
@@ -2454,7 +2523,7 @@ pub fn compile_codec_with_protobuf(
     codec: &CreateCodec,
     schema: Arc<CompiledSchema>,
     wire_format: ResolvedCodecWireFormat<'_>,
-    protobuf_descriptor: Option<MessageDescriptor>,
+    protobuf_descriptors: Option<ProtobufCodecDescriptors>,
 ) -> Result<Arc<CompiledCodec>, CodecError> {
     let wire_schema = match wire_format {
         ResolvedCodecWireFormat::Json(schema_def) => {
@@ -2512,12 +2581,13 @@ pub fn compile_codec_with_protobuf(
                     reason: "protobuf codec must declare a JAQ transformation".to_string(),
                 });
             }
-            let message = protobuf_descriptor.ok_or_else(|| CodecError::InvalidCodec {
+            let descriptors = protobuf_descriptors.ok_or_else(|| CodecError::InvalidCodec {
                 codec: codec.name.as_str().to_string(),
                 reason: "protobuf codec is missing compiled descriptor".to_string(),
             })?;
             CompiledWireSchema::Protobuf(CompiledProtobufCodec {
-                message,
+                message: descriptors.message,
+                batch_message: descriptors.batch_message,
                 transformations: CompiledJaqTransformations::compile(
                     codec,
                     &config.transformations,
@@ -4925,6 +4995,7 @@ mod tests {
                 transformations: CodecJaqTransformations {
                     on_ingestion: on_ingestion.map(str::to_string),
                     on_emitting: on_emitting.map(str::to_string),
+                    on_emitting_batch: None,
                 },
             },
             schema: named(schema),
@@ -5015,9 +5086,11 @@ mod tests {
                     value: "notification.proto".to_string(),
                 }],
                 message: "nervix.test.Notification".to_string(),
+                batch_message: None,
                 transformations: CodecJaqTransformations {
                     on_ingestion: on_ingestion.map(str::to_string),
                     on_emitting: on_emitting.map(str::to_string),
+                    on_emitting_batch: None,
                 },
             }),
             schema: named("protobuf_notification"),
@@ -6991,7 +7064,10 @@ mod tests {
             &codec,
             compiled_schema,
             self_describing(&codec.wire_format),
-            Some(protobuf_descriptor()),
+            Some(ProtobufCodecDescriptors {
+                message: protobuf_descriptor(),
+                batch_message: None,
+            }),
         )
         .expect("codec should compile");
         assert!(compiled_codec.requires_blocking_decode());
@@ -7028,7 +7104,10 @@ mod tests {
             &codec,
             compiled_schema,
             self_describing(&codec.wire_format),
-            Some(protobuf_descriptor()),
+            Some(ProtobufCodecDescriptors {
+                message: protobuf_descriptor(),
+                batch_message: None,
+            }),
         )
         .expect("codec should compile");
         let payload = [
@@ -7059,7 +7138,10 @@ mod tests {
             &codec,
             compiled_schema,
             self_describing(&codec.wire_format),
-            Some(protobuf_descriptor()),
+            Some(ProtobufCodecDescriptors {
+                message: protobuf_descriptor(),
+                batch_message: None,
+            }),
         )
         .expect("codec should compile");
         assert!(!compiled_codec.requires_blocking_decode());
@@ -7084,6 +7166,140 @@ mod tests {
                 0x08, 42, 0x12, 4, b'a', b'c', b'm', b'e', 0x1a, 5, b'h', b'e', b'l', b'l', b'o',
             ]
         );
+    }
+
+    fn protobuf_batch_descriptors(batch_message: Option<&str>) -> ProtobufCodecDescriptors {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let proto_path = dir.path().join("notification.proto");
+        std::fs::write(
+            &proto_path,
+            r#"
+                syntax = "proto3";
+                package nervix.test;
+
+                message Notification {
+                  uint32 user_id = 1;
+                  string tenant = 2;
+                  string payload = 3;
+                }
+
+                message NotificationBatch {
+                  repeated Notification notifications = 1;
+                }
+
+                message NotificationEnvelope {
+                  uint32 count = 1;
+                  repeated Notification notifications = 2;
+                }
+
+                message Tenants {
+                  repeated string tenants = 1;
+                }
+            "#,
+        )
+        .expect("proto file should be written");
+        let file_descriptor_set =
+            protox::compile([proto_path], [dir.path()]).expect("proto should compile");
+        let pool = ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
+            .expect("descriptor pool should be built");
+        ProtobufCodecDescriptors {
+            message: pool
+                .message("nervix.test.Notification")
+                .expect("the member message is declared"),
+            batch_message: batch_message
+                .map(|name| pool.message(name).expect("the batch message is declared")),
+        }
+    }
+
+    #[test]
+    fn protobuf_batch_container_needs_a_repeated_member_field_or_a_batch_transformation() {
+        let compile = |batch_message: Option<&str>, on_emitting_batch: Option<&str>| {
+            let mut codec = protobuf_codec("protobuf_batch", None, Some("."));
+            if let CodecWireFormat::Protobuf(config) = &mut codec.wire_format {
+                config.batch_message = batch_message.map(str::to_string);
+                config.transformations.on_emitting_batch = on_emitting_batch.map(str::to_string);
+            }
+            compile_codec_with_protobuf(
+                &codec,
+                Arc::new(compile_schema(&protobuf_schema())),
+                self_describing(&codec.wire_format),
+                Some(protobuf_batch_descriptors(batch_message)),
+            )
+            .expect("codec should compile")
+        };
+
+        compile(Some("nervix.test.NotificationBatch"), None)
+            .check_batch_container()
+            .expect("a single repeated member field holds the batch");
+        compile(
+            Some("nervix.test.NotificationEnvelope"),
+            Some("{count: length, notifications: .}"),
+        )
+        .check_batch_container()
+        .expect("a batch transformation builds any batch message");
+        let undeclared = compile(None, None)
+            .check_batch_container()
+            .expect_err("a protobuf codec without BATCH MESSAGE has no batch container");
+        assert!(matches!(
+            undeclared.current_context(),
+            CodecError::ProtobufBatchMessageUndeclared { codec } if codec == "protobuf_batch"
+        ));
+        for batch_message in ["nervix.test.NotificationEnvelope", "nervix.test.Tenants"] {
+            let error = compile(Some(batch_message), None)
+                .check_batch_container()
+                .expect_err("the batch message does not hold the members alone");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    CodecError::ProtobufBatchMessageShape { batch_message: declared, message, .. }
+                        if declared == batch_message && message == "nervix.test.Notification"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_protobuf_codecs_derive_their_batch_container() {
+        let codec = jaq_native_codec(
+            "json_batch",
+            CodecJaqFormat::Json,
+            "notification",
+            None,
+            Some("."),
+        );
+        let compiled = compile_codec(
+            &codec,
+            Arc::new(compile_schema(&schema())),
+            self_describing(&codec.wire_format),
+        )
+        .expect("codec should compile");
+
+        compiled
+            .check_batch_container()
+            .expect("a JSON codec writes its batch as an array");
+    }
+
+    #[test]
+    fn jaq_native_codec_rejects_invalid_emitting_batch_jaq_program() {
+        let mut codec = jaq_native_codec(
+            "json_with_bad_batch_jaq",
+            CodecJaqFormat::Json,
+            "notification",
+            None,
+            Some("."),
+        );
+        if let CodecWireFormat::JaqNative {
+            transformations, ..
+        } = &mut codec.wire_format
+        {
+            transformations.on_emitting_batch = Some(". | ".to_string());
+        }
+        let wire_format = self_describing(&codec.wire_format);
+        let err = compile_codec(&codec, Arc::new(compile_schema(&schema())), wire_format)
+            .expect_err("invalid jaq must fail");
+
+        assert!(matches!(err, CodecError::InvalidJaqTransformation { .. }));
     }
 
     #[test]

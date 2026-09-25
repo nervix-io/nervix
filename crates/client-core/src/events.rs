@@ -17,6 +17,8 @@ use nervix_client_wire::{
 use nervix_models::{RelayName, SubscriptionDeliveryBehavior};
 use triomphe::Arc;
 
+use crate::subscriptions::SubscriptionInterruption;
+
 /// One event of a subscription the client holds.
 #[derive(Debug, Clone)]
 pub enum SubscriptionEvent {
@@ -27,6 +29,11 @@ pub enum SubscriptionEvent {
     RowsSkipped(SubscriptionRowsSkipped),
     /// The server closed the subscription. No further rows follow for its generation.
     Ended(SubscriptionEnded),
+    /// The exchange ended, leaving a gap before any restoration on a new session.
+    Interrupted(SubscriptionInterruption),
+    /// The client could not retain more events for this subscription. Its delivery on this
+    /// exchange has ended, while unrelated subscriptions continue.
+    ConsumerOverflow(SubscriptionHandle),
 }
 
 impl SubscriptionEvent {
@@ -37,13 +44,19 @@ impl SubscriptionEvent {
             Self::DeliveryLost(lost) => &lost.subscription,
             Self::RowsSkipped(skipped) => &skipped.subscription,
             Self::Ended(ended) => &ended.subscription,
+            Self::Interrupted(interrupted) => &interrupted.subscription,
+            Self::ConsumerOverflow(handle) => handle,
         }
     }
 
     pub(crate) fn queued_bytes(&self) -> usize {
         let dynamic_bytes = match self {
             Self::Rows(rows) => rows.rows.frame().len(),
-            Self::DeliveryLost(_) | Self::RowsSkipped(_) | Self::Ended(_) => 0,
+            Self::DeliveryLost(_)
+            | Self::RowsSkipped(_)
+            | Self::Ended(_)
+            | Self::Interrupted(_)
+            | Self::ConsumerOverflow(_) => 0,
         };
         dynamic_bytes
             .checked_add(std::mem::size_of::<Self>())

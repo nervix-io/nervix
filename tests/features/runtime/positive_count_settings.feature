@@ -70,7 +70,7 @@ Feature: Positive count settings
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 
-  Scenario: Database emitter WITH MAX BATCH must be a positive count
+  Scenario: Emitter BATCH MAX MESSAGES must be a positive count
     When these NSPL commands are executed
       """
       CREATE SCHEMA notification ( tenant STRING );
@@ -79,13 +79,13 @@ Feature: Positive count settings
         'addr' = 'postgresql://nervix:nervix@127.0.0.1:5432/nervix?sslmode=disable'
       };
       """
-    And these NSPL commands fail with "max batch size must be greater than zero"
+    And these NSPL commands fail with "BATCH MAX MESSAGES must be between 1 and 65536, found 0"
       """
       CREATE EMITTER postgres_out FROM notifications
         TO POSTGRES postgres_main INSERT TO TABLE notifications
         VALUES { "tenant" = input.tenant }
-        WITH MAX BATCH 0
         MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        BATCH MAX MESSAGES 0 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
 

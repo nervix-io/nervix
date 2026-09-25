@@ -386,8 +386,8 @@ evaluates it until domain time reaches the epoch. It never encodes another insta
 
 ## String Functions
 
-String functions count and select characters, meaning Unicode scalar values, rather than bytes.
-Positions count from 1.
+String functions count and select characters, meaning Unicode scalar values, rather than bytes or
+grapheme clusters. A combining mark counts as a separate character. Positions count from 1.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
@@ -400,6 +400,7 @@ Positions count from 1.
 | `length(text)` | `I64` | Character count |
 | `char_length(text)` | `I64` | Same as `length` |
 | `bit_length(text)` | `I64` | Eight times the UTF-8 byte length |
+| `octet_length(text)` | `I64` | UTF-8 byte length, read from the Arrow string offsets |
 | `ascii(text)` | `I64` | Unicode code point of the first character, or `0` for an empty string |
 | `initcap(text)` | `STRING` | Uppercases the first character of each run of letters and digits and lowercases the rest |
 | `left(text, count)` | `STRING` | The first `count` characters. A negative `count` removes that many characters from the end |
@@ -409,12 +410,16 @@ Positions count from 1.
 | `substring(text, start)` | `STRING` | Alias for `substr` |
 | `substring(text, start, length)` | `STRING` | Alias for `substr` |
 | `concat(a, b, ...)` | `STRING` | Joins the arguments in order. A null argument contributes nothing, so the result is never null. All arguments must be `STRING` |
+| `concat_ws(separator, a, b, ...)` | `STRING` | Joins non-null string arguments with `separator`; a null separator makes the result null |
 | `repeat(text, count)` | `STRING` | The text repeated `count` times, or an empty string when `count` is at most `0` |
 | `replace(text, from, to)` | `STRING` | Replaces every occurrence of `from`, matched as plain text |
 | `reverse(text)` | `STRING` | Reverses the characters |
 | `lpad(text, length, fill)` | `STRING` | Pads on the left with repetitions of `fill` to `length` characters |
 | `rpad(text, length, fill)` | `STRING` | Pads on the right with repetitions of `fill` to `length` characters |
 | `split_part(text, delimiter, index)` | `STRING` | The part at position `index` |
+| `split(text, delimiter)` | `VEC<STRING>` | All parts in order, including empty parts at the ends or between adjacent delimiters |
+| `join(parts, separator)` | `STRING` | Joins an `ARRAY<STRING>` or `VEC<STRING>`; null elements contribute nothing |
+| `normalize_nfc(text)` | `STRING` | Unicode canonical composition (NFC); does not change case or apply compatibility folding |
 | `strpos(text, needle)` | `I64` | Position of the first occurrence of `needle`, or `0` when it does not occur |
 | `translate(text, from_chars, to_chars)` | `STRING` | Replaces each character found in `from_chars` with the character at the same position in `to_chars`, and removes a character that has no counterpart |
 | `to_hex(value)` | `STRING` | Lowercase hexadecimal digits without a prefix. Integral input only; a negative value is written as its two's complement at the input's width |
@@ -436,6 +441,14 @@ empty string when `length` is at most `0`, and return shorter text unchanged whe
 
 `split_part` returns an empty string when `index` is at most `0` or past the last part. With an
 empty `delimiter`, the whole text is part `1`.
+
+`split` uses the same empty-delimiter rule: it returns one part containing the whole text. An
+empty input also produces one empty part. `join` on an empty list produces an empty string;
+`concat_ws` with no non-null values after the separator does the same. These functions preserve
+the written order. `split` permits at most 65,536 parts in one result, and reports an `overflow`
+message error when that limit or the Arrow list/string offset limit is exceeded. `concat_ws`,
+`join`, and `normalize_nfc` report `overflow` when their result cannot fit in the output
+`STRING` column. Their temporary output is built once per batch.
 
 `repeat`, `lpad`, and `rpad` compute the length of a result before they build it. The values one
 call produces for a batch share one `STRING` column, which holds at most 2,147,483,647 bytes of
@@ -645,13 +658,27 @@ SET scheme = url_scheme(input.referrer),
 
 ## String Predicates
 
-Matching is exact and case-sensitive.
+Plain substring matching is exact and case-sensitive.
 
 | Function | Returns | Notes |
 | --- | --- | --- |
 | `contains(text, needle)` | `BOOL` | True when `needle` occurs in `text` |
 | `starts_with(text, prefix)` | `BOOL` | True when `text` begins with `prefix` |
 | `ends_with(text, suffix)` | `BOOL` | True when `text` ends with `suffix` |
+| `contains_any(text, patterns)` | `BOOL` | True when any non-null string in an `ARRAY<STRING>` or `VEC<STRING>` occurs in `text`; an empty set is false and an empty pattern matches every non-null text |
+| `like(text, pattern)` | `BOOL` | SQL LIKE: `%` matches zero or more Unicode characters and `_` matches one; a backslash quotes a following wildcard or backslash |
+| `ilike(text, pattern)` | `BOOL` | The same wildcard rules with Unicode loose case-insensitive matching |
+
+`like` and `ilike` match the entire text. A trailing backslash is a literal backslash.
+`ilike` follows Arrow's Unicode loose matching: it ignores case without expanding characters,
+so `ß` does not equal `SS`. For full Unicode case mapping, apply `lower` or `upper` explicitly;
+neither matching function normalizes text. Each LIKE pattern is limited to 4 KiB of UTF-8 text;
+an oversized pattern reports an `invalid_argument` error only on the message that evaluates it.
+`contains_any` uses exact case-sensitive text,
+including combining marks. A literal `ARRAY` or `VEC` set is compiled once with the program;
+dynamic sets are compiled by distinct set within each batch. A set has at most 128 non-null
+patterns and 64 KiB of combined pattern text; exceeding either limit reports an
+`invalid_argument` message error. The per-batch cache retains at most 64 distinct sets.
 
 ## Regular Expressions
 
@@ -672,6 +699,11 @@ other invalid pattern.
 | `regexp_like(text, pattern)` | `BOOL` | True when the pattern matches anywhere in the text |
 | `regexp_replace(text, pattern, replacement)` | `STRING` | Replaces every match. `$1` and `${name}` in `replacement` insert a capture group, and `$$` inserts `$` |
 | `regexp_substr(text, pattern)` | `STRING` | The first match, or null when the pattern does not match |
+| `regexp_extract(text, pattern, group)` | `STRING` | Numbered capture from the first leftmost match; group `0` is the complete match, and an absent group or match produces null |
+
+`regexp_extract` accepts any integral group index. A negative index produces null. Regex syntax
+uses Unicode classes by default and supports no backreferences or look-around; the engine keeps
+linear-time search guarantees rather than enabling backtracking features.
 
 ## Numeric Functions
 

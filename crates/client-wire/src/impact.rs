@@ -111,6 +111,7 @@ wire_enum!(ALL_MODEL_CHANGE_ASPECTS: ModelChangeAspect => wire::ModelChangeAspec
     EmitterMode,
     EmitterPublishingMode,
     EmitterFlushPolicy,
+    EmitterBatchPolicy,
     EmitterConstruction,
     EmitterErrorPolicies,
     EmitterMaterializedState,
