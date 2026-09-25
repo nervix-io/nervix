@@ -58,6 +58,7 @@ mod shuttle_test;
 #[cfg(all(test, feature = "turmoil"))]
 #[path = "../tests/simulation/runner.rs"]
 mod simulation_runner;
+mod socket;
 mod wasm_state;
 mod wire;
 
