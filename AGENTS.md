@@ -95,6 +95,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   in-memory hot-path state and are never persisted.
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
   schema, branch, error, or sensitivity rules.
+- [Connector Crates And The Connector Contract](docs/src/connector-contract.md) is the authoritative
+  architecture reference for external integrations and the contract between connector crates and
+  their host. Any change to a connector crate, the shared connector contract, connector planning or
+  composition, or host source and sink execution must keep that chapter current in the same change.
+  Its scope includes layer and dependency ownership, source and sink plans and lifecycle, metadata
+  and header semantics, ACK and commit boundaries, host loops and cadence, special integrations,
+  failures, guarantees, limits, and observability.
 - [Cluster Interconnect](docs/src/interconnect.md) is the authoritative architecture reference for
   node-to-node communication. Any change to interconnect code or to a node-to-node operation must
   keep that chapter current in the same change. Its scope includes authentication and identity,

@@ -773,13 +773,13 @@ test-docs:
 
 # Screenshots are recaptured from the current console and the nervix-cli reference chapter is
 # rendered from the current binary, so a published book can never describe an older build.
-book version="": test-docs docs-screenshots
+book version="0.1.0-dev": test-docs docs-screenshots
     python scripts/build_book.py --version {{ version }}
 
 validate-skill:
     env GH_PROMPT_DISABLED=1 gh skill publish .agents/skills --dry-run
 
-book-pdf version="" output="":
+book-pdf version="0.1.0-dev" output="":
     #!/usr/bin/env bash
     set -euo pipefail
     just book "{{ version }}"
