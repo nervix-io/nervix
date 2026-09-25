@@ -196,6 +196,14 @@ test-turmoil:
     cargo test --package nervix-interconnect --features turmoil --lib -- wire::simulation_checks authentication::simulation_tests --test-threads=1
     cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
 
+# Run the interconnect's Turmoil simulation scenarios. Extra arguments filter or configure the test
+# binary, so one scenario can be replayed without the execution and library checks.
+test-turmoil-simulation *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1 {{ args }}
+
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
     cargo test --package nervix-vm --lib -- {{ args }}
@@ -675,9 +683,9 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
 
 # Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
 # graphs use the real synchronization crates directly and contain no Shuttle package.
@@ -722,6 +730,11 @@ validate-simulation-feature-conflict:
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py
+
+# Reject `Result<_, String>` in product code. A typed error is a rule, not a count, so there is no
+# baseline to raise: any occurrence fails and names the rule.
+validate-typed-errors:
+    python3 -m scripts.check_typed_errors
 
 # Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.

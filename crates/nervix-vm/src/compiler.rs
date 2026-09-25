@@ -2560,6 +2560,15 @@ impl Compiler {
                     span: arg.span,
                 });
             }
+            if self.expr_is_sensitive(arg)? {
+                return Err(CompileError {
+                    code: "sensitive_leak",
+                    message: format!(
+                        "write_header {label} requires leak_sensitive(...) for sensitive data"
+                    ),
+                    span: arg.span,
+                });
+            }
             let compiled = self.compile_expr(arg)?;
             let input = self.alloc_condition(RegisterType::Utf8);
             self.emit_move(input, compiled, arg.span);
@@ -4734,6 +4743,55 @@ mod tests {
         )
         .expect_err("INVOKE must be rejected outside an emitter context");
         assert_eq!(error.code, "unsupported_invoke_context");
+    }
+
+    #[test]
+    fn write_header_requires_explicit_leakage_for_sensitive_arguments() {
+        let input_schema = schema(vec![Field::new("secret", DataType::Utf8, false)]);
+        let output_schema = schema(Vec::<Field>::new());
+        for source in [
+            "INVOKE write_header(input.secret, 'value')",
+            "INVOKE write_header('Authorization', input.secret)",
+        ] {
+            let program = parse_program(source)
+                .assured("each test invocation has two valid string expressions");
+            let error = compile_program_with_options_for_bindings_with_sensitivity(
+                &program,
+                output_schema.clone(),
+                SchemaSensitivity::default(),
+                [
+                    CompileBinding::readonly("input", input_schema.clone())
+                        .with_sensitivity(sensitivity(&["secret"])),
+                    CompileBinding::writable("output", output_schema.clone()),
+                ],
+                CompileOptions {
+                    allow_header_writes: true,
+                    ..CompileOptions::default()
+                },
+            )
+            .expect_err("an implicit sensitive header leak must fail");
+            assert_eq!(error.code, "sensitive_leak");
+        }
+
+        let program = parse_program(
+            "INVOKE write_header(leak_sensitive(input.secret), leak_sensitive(input.secret))",
+        )
+        .assured("the explicit leak test has two valid string expressions");
+        compile_program_with_options_for_bindings_with_sensitivity(
+            &program,
+            output_schema,
+            SchemaSensitivity::default(),
+            [
+                CompileBinding::readonly("input", input_schema)
+                    .with_sensitivity(sensitivity(&["secret"])),
+                CompileBinding::writable("output", schema(Vec::<Field>::new())),
+            ],
+            CompileOptions {
+                allow_header_writes: true,
+                ..CompileOptions::default()
+            },
+        )
+        .assured("leak_sensitive explicitly permits sensitive header arguments");
     }
 
     #[test]

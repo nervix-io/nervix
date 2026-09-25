@@ -1204,10 +1204,10 @@ pub(super) async fn evaluate_output_branch_program(
             })?;
             fields.push((name, value));
         }
-        outcomes[input_row] = BranchKey::from_fields(fields).map(Some).map_err(|reason| {
+        outcomes[input_row] = BranchKey::from_fields(fields).map(Some).map_err(|error| {
             Report::new(PlannedGeneralError {
                 acks: Vec::new(),
-                reason,
+                reason: format!("{error:#}"),
             })
         });
     }

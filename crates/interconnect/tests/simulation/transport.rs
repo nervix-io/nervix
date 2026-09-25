@@ -38,6 +38,7 @@ use super::runner::{
     SimulationConfig, Topology, TraceEvent,
 };
 
+mod isolation;
 mod relay;
 
 const CLUSTER: &str = "simulated";

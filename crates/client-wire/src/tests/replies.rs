@@ -11,7 +11,8 @@ use nervix_models::{
 
 use super::{
     fixtures::{
-        decode_error, finish_raw, limits, name, operation, raw_server, request, round_trip_reply,
+        decode_error, finish_raw, finish_reply, limits, name, operation, raw_server, request,
+        round_trip_reply,
     },
     samples::{
         command_dispositions, command_outcome, diagnostics, impact_report, leader, row_schema,
@@ -237,29 +238,6 @@ fn status_frame(accepted: u64, applied: u64, failing_operation: Option<u64>) -> 
         wire::ReplyBody::AttachOutcome,
         outcome.as_union_value(),
     )
-}
-
-fn finish_reply(
-    mut builder: FlatBufferBuilder<'_>,
-    body_type: wire::ReplyBody,
-    body: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>,
-) -> bytes::Bytes {
-    let reply = wire::Reply::create(
-        &mut builder,
-        &wire::ReplyArgs {
-            request_id: 5,
-            body_type,
-            body: Some(body),
-        },
-    );
-    let root = wire::ServerMessage::create(
-        &mut builder,
-        &wire::ServerMessageArgs {
-            body_type: wire::ServerBody::Reply,
-            body: Some(reply.as_union_value()),
-        },
-    );
-    finish_raw(builder, root, "NXSM")
 }
 
 #[test]
@@ -672,6 +650,37 @@ fn diagnostic_reply(span: Option<wire::SourceSpan>, grpc_uri: &str) -> bytes::By
         wire::ReplyBody::AttachOutcome,
         outcome.as_union_value(),
     )
+}
+
+#[test]
+fn a_span_starting_at_zero_is_a_location_distinct_from_no_span() {
+    let at_start = SourceSpan::new(0, 0).assured("an empty span at the start is ordered");
+    let first_word = SourceSpan::new(0, 6).assured("a span from the start is ordered");
+    let mut outcome = command_outcome(crate::CommandDisposition::Failed);
+    outcome.diagnostics = vec![
+        crate::Diagnostic {
+            message: "expected a statement".to_string(),
+            span: Some(at_start),
+        },
+        crate::Diagnostic {
+            message: "unknown keyword".to_string(),
+            span: Some(first_word),
+        },
+        crate::Diagnostic {
+            message: "the domain does not exist".to_string(),
+            span: None,
+        },
+    ];
+    let original = reply(ReplyBody::Command(Box::new(outcome)));
+    let ReplyBody::Command(decoded) = round_trip_reply(&original).body else {
+        panic!("a command reply decodes as a command outcome");
+    };
+    let spans = decoded
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.span)
+        .collect::<Vec<_>>();
+    assert_eq!(spans, vec![Some(at_start), Some(first_word), None]);
 }
 
 #[test]

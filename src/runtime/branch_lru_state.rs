@@ -6,7 +6,7 @@
 //! - **Depends on.** Typed branch identities, timestamps, and the state codec.
 //! - **Must not know.** NSPL parsing, graph scheduling, connector protocols, or record payloads.
 
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use nervix_models::{RemoteRuntimeField, Timestamp};
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use thiserror::Error;
@@ -37,6 +37,12 @@ pub(super) enum BranchLruSnapshotError {
     Incarnation { entry: usize },
     #[error("the branch lifecycle has no placement under the committed schedule")]
     Unplaced,
+    #[error("failed to read the restorable branch-LRU snapshot")]
+    Read,
+    #[error("failed to restore the branch of branch-LRU entry {entry}")]
+    Restore { entry: usize },
+    #[error("failed to persist the branch-LRU snapshot at lsm {lsm}")]
+    Persist { lsm: u64 },
 }
 
 pub(super) fn encode_branch_lru_snapshot(
@@ -78,10 +84,8 @@ pub(super) fn decode_branch_lru_snapshot(
                     entry: entry_index,
                 }));
             }
-            let key = BranchKey::from_remote_key(entry.key).map_err(|reason| {
-                Report::new(BranchLruSnapshotError::BranchKey { entry: entry_index })
-                    .attach_printable(reason)
-            })?;
+            let key = BranchKey::from_remote_key(entry.key)
+                .change_context(BranchLruSnapshotError::BranchKey { entry: entry_index })?;
             Ok(BranchInstanceSnapshotEntry {
                 key,
                 last_ingestion: Timestamp::from_unix_nanos(entry.last_ingestion_unix_nanos),

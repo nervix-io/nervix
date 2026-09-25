@@ -4608,6 +4608,73 @@ async fn when_wasm_checkpoints_reach_stable_storage_again(world: &mut ScenarioWo
     world.fault_injection.restore_wasm_checkpoint_storage();
 }
 
+/// The checkpoint window of one WASM processor in the scenario's domain that a pause selects.
+struct WasmCheckpointPauseTarget {
+    domain: nervix_models::DomainName,
+    processor: nervix_models::ModelName,
+    window: nervix_server::WasmCheckpointWindow,
+}
+
+impl WasmCheckpointPauseTarget {
+    fn of(world: &ScenarioWorld, processor: &str, window: &str) -> Self {
+        let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+            .expect("the scenario domain must be valid");
+        let processor = nervix_models::ModelName::try_from(processor)
+            .expect("the scenario WASM processor name must be valid");
+        let window = window
+            .parse::<nervix_server::WasmCheckpointWindow>()
+            .unwrap_or_else(|_| panic!("unknown WASM checkpoint window '{window}'"));
+        Self {
+            domain,
+            processor,
+            window,
+        }
+    }
+}
+
+#[given(expr = "the next guest-state checkpoint of WASM processor {string} pauses {word}")]
+#[when(expr = "the next guest-state checkpoint of WASM processor {string} pauses {word}")]
+async fn when_next_wasm_checkpoint_pauses(
+    world: &mut ScenarioWorld,
+    processor: String,
+    window: String,
+) {
+    let target = WasmCheckpointPauseTarget::of(world, &processor, &window);
+    world
+        .fault_injection
+        .pause_wasm_checkpoint(target.domain, target.processor, target.window);
+}
+
+#[then(expr = "a guest-state checkpoint of WASM processor {string} is held {word}")]
+async fn then_wasm_checkpoint_is_held(
+    world: &mut ScenarioWorld,
+    processor: String,
+    window: String,
+) {
+    let target = WasmCheckpointPauseTarget::of(world, &processor, &window);
+    let reached = tokio::time::timeout(
+        Duration::from_secs(30),
+        world.fault_injection.wait_for_wasm_checkpoint_pause(
+            target.domain,
+            target.processor.clone(),
+            target.window,
+        ),
+    )
+    .await;
+    assert!(
+        reached.is_ok(),
+        "no guest-state checkpoint of WASM processor '{}' reached the armed {} window within \
+         thirty seconds",
+        target.processor.as_str(),
+        target.window.as_ref()
+    );
+}
+
+#[when("every held WASM guest-state checkpoint is released")]
+async fn when_every_held_wasm_checkpoint_is_released(world: &mut ScenarioWorld) {
+    world.fault_injection.release_all_wasm_checkpoint_pauses();
+}
+
 #[when("fresh WASM reset guest initialization fails on every node")]
 async fn when_fresh_wasm_reset_guest_initialization_fails(world: &mut ScenarioWorld) {
     world
@@ -22315,6 +22382,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
+                world.fault_injection.release_all_wasm_checkpoint_pauses();
 
                 world.enter_phase(ScenarioPhase::Diagnostics, "");
                 // Scenarios run many at a time, so a status line says which scenario left it.

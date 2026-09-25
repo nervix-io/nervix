@@ -274,6 +274,14 @@ checkpoint as it waits for any other outstanding acknowledgement. The checkpoint
 deadline bounds that wait: a checkpoint that cannot complete fails and negatively acknowledges what
 it held.
 
+Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
+branch tasks one of its own. A processor task still stopping its branches when its grace ends is
+ended together with every branch task it holds. A branch still waiting for its checkpoint therefore
+never outlives its node: it cannot keep the node's runtime database open past terminal teardown,
+continue a checkpoint, or settle acknowledgements after the node stopped. Its unreleased
+acknowledgements are negatively acknowledged, and a restart finds whatever that checkpoint had
+already written to the node's storage, exactly as after a forced ending.
+
 A coordinated WASM state reset is serialized with domain lifecycle, placement, ownership movement,
 resource rebinding, and model mutation by the domain alteration lease and its entity gate. If node
 shutdown interrupts a preparation before reset publication, the old generation remains
@@ -513,10 +521,12 @@ handles. Terminal teardown does not finish until both database locks have been r
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.
 
-The interconnect rejects new admission, cancels pool and operation waiters, and begins a graceful
-HTTP/2 shutdown, giving active transport work up to ten seconds before closing the remaining
-connections and handlers. A forced ending skips this entirely, so peers observe the connections
-ending exactly as they do when a process crashes.
+The interconnect rejects new admission, cancels pool and operation waiters, and retires the pool
+connections the node opened, giving their leased streams up to ten seconds before closing whatever
+remains. Connections that peers opened to the node close at once, together with the handlers still
+serving their streams, so a peer's request the node has not answered fails instead of completing.
+A forced ending skips this entirely, so peers observe the connections ending exactly as they do
+when a process crashes.
 
 ### Consensus Work At The Ending Boundary
 
@@ -595,6 +605,15 @@ owns the work.
 
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
+
+### Whole-Cluster Restart Keeps Ownership
+
+When every node restarts, the first node to lead can form a quorum while the others are still
+starting and gossip has not heard from them yet. Its automatic scheduling therefore waits, for the
+first ten seconds of its reconciliation, while any voter is neither reported live nor declared dead.
+Each owner that returns in that time keeps its work and restores it from its own storage and
+replicas, instead of having it failed over without its state. See
+[Planned Ownership Handoffs And Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
 
 ### Checkpoint Identity
 

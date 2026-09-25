@@ -573,8 +573,11 @@ impl RestoredMaterializedSnapshot {
                 }));
             }
             for (row, identity) in identities.identities.into_iter().enumerate() {
-                let branch = BranchKey::from_remote_key(identity.branch)
-                    .map_err(MaterializedSnapshotError::decoding)?;
+                let branch = BranchKey::from_remote_key(identity.branch).change_context(
+                    MaterializedSnapshotError::Decode {
+                        reason: "a record identity carries an invalid branch key".to_string(),
+                    },
+                )?;
                 let metadata = RuntimeRecordMetadata::from_remote(identity.watermarks);
                 let row = RuntimeRow::new(batch.clone(), row, metadata)
                     .map_err(MaterializedSnapshotError::decoding)?;

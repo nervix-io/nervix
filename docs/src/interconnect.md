@@ -50,7 +50,9 @@ bound open connections, pending requests, reconnect failures, and simulated sock
 disruption. Transport connection counts are checked after shutdown. Turmoil's socket count can
 retain failed connect attempts after a partition, so it is not a session-cleanup measure.
 Transport readiness and authenticated application liveness are checked before disruption and
-after recovery.
+after recovery. The three-host isolation fixture, which stalls one peer while another keeps
+exchanging every traffic class, is described with the capacity it checks in
+[Traffic And Resource Isolation](#traffic-and-resource-isolation).
 
 Turmoil's `hold` queues simulated messages and `release` delivers them; a request whose deadline
 expires while messages are held stays expired when they are released. `partition` drops simulated
@@ -383,6 +385,43 @@ follower whose receive window is full can still produce the answer that releases
 validates the relationships among operation limits and these budgets, including the paired work
 that must fit for independent operations to keep making progress.
 
+Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
+and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
+peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared
+management streams of a connection, a further shared operation to that peer waits for a slot
+until its own deadline, while liveness, cancellation, and discovery still use the reserved streams
+of the same connection. Every connection to another peer keeps all of its slots. A stream whose
+reader stops reading holds one HTTP/2 stream window of response bytes: flow control stops the
+producer once that window is spent, and five seconds without progress resets the stream and returns
+its admission and memory. A relay batch the receiving application holds without admitting keeps
+the reservation of its exact body, the largest decoded batch, and decode scratch. Another channel
+still receives grants and admission beside it, and cancelling the held batch returns the whole
+reservation once the application drops the batch.
+
+A CPU class admits each job separately: one of its workers runs, a bounded number wait, and the
+next job is refused at once instead of joining an unbounded queue. A typed request runs several
+jobs of its class in turn, encoding its payload and envelope and later decoding the response.
+While a burst keeps the queue full, a request that was admitted for one job can therefore be
+refused at its next one. Every refused job holds no memory charge, and every other class keeps
+admitting independently.
+
+The Turmoil isolation fixture runs a hub and two peers in separate simulated hosts. The stalled
+peer accepts shared management operations and never answers them, leaves resource streams unread,
+and sends a relay batch the hub holds without admitting. The healthy peer keeps exchanging shared
+management work, liveness, typed Arrow commands, whole resource streams, and admitted relay
+batches with the hub throughout. Every observation of a host checks its pool connections per peer,
+leased streams per connection, admissions per direction and subquota, worker queues, and memory
+budgets against their configured bounds. Key transitions assert exact counts and reservations: the
+32 leased management streams, the bulk worker's full queue and refused burst, the unread streams
+stopped at one window each and released at the progress deadline, and the held relay reservation.
+The fixture then holds the stalled link with Turmoil's `hold`. The hub's own liveness deadline
+ends its probe while the healthy peer keeps exchanging every traffic class. Removing the stalled
+peer from membership ends the hub's operations to it and closes the hub's pools to it at once,
+without that peer's cooperation. Tearing the stalled host down while the link is still held closes
+the connections the hub opened to it at once, together with the handlers still waiting to answer.
+Releasing the link closes the hub's inbound connections from the torn-down peer. The same seed runs twice and must
+record the same semantic trace.
+
 ## Exchange Forms
 
 The interconnect provides five exchange forms. Each keeps transport mechanics separate from the
@@ -560,9 +599,12 @@ keeps a previous branch lifetime from being confused with the new runtime instan
 
 Cluster membership gossip uses management discovery capacity. It discovers topology and
 incarnations but does not replace application health checks. Gossip payloads remain below the
-management-event bound, so discovery cannot allocate an arbitrary wire message. A node that is
-shutting down closes its gossip transport before it stops gossip, so an exchange still waiting on a
-peer that stopped first ends at once instead of holding shutdown until its one-second deadline.
+management-event bound, so discovery cannot allocate an arbitrary wire message. A node that cannot
+take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
+bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
+shut down. A node that is shutting down closes its gossip transport before it stops gossip, so an
+exchange still waiting on a peer that stopped first ends at once instead of holding shutdown until
+its one-second deadline.
 
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
@@ -870,9 +912,11 @@ still running.
 
 Only after drain support completes or reports abandonment does terminal teardown call transport
 shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation
-waiters, and starts graceful HTTP/2 shutdown. Active transport work receives up to ten seconds to
-drain; remaining connections and handlers are then closed. Connection setup and incomplete TLS
-handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM`, or the shutdown deadline
+waiters, and retires every pool connection the node opened: each stops leasing and closes once its
+leased streams return. Connections that peers opened to the node close at once, together with the
+handlers still serving their streams, so a peer's request the node has not answered fails instead
+of completing. Whatever remains after ten seconds is then closed. Connection setup and incomplete
+TLS handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM`, or the shutdown deadline
 passing, ends the process without running the rest of its shutdown, so its peers observe its
 connections ending exactly as they do when the process crashes.
 

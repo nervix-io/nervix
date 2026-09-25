@@ -16,7 +16,7 @@ use nervix_client_wire::{
     UnsubscribeOutcome, UploadDisposition, UploadFailure, UploadReply,
 };
 use nervix_models::{
-    CommandExecutionReference, ResourceUploadIdentity, TransactionInspection,
+    CommandExecutionReference, ResourceDescription, ResourceUploadIdentity, TransactionInspection,
     TransactionOperationAdmission, TransactionPreviewIdentity, TransactionStatus,
 };
 use url::Url;
@@ -46,6 +46,9 @@ pub struct CommandOutcome {
     pub inspection: Option<Box<TransactionInspection>>,
     /// State facts returned by `DESCRIBE WASM PROCESSOR`.
     pub wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
+    /// The versions, entries and bindings `DESCRIBE RESOURCE <name>` read, whichever text its
+    /// message renders them as.
+    pub resource: Option<Box<ResourceDescription>>,
     /// Present when the statement opened a subscription.
     pub subscription: Option<Box<SubscriptionOpened>>,
     pub resource_upload: Option<ResourceUploadOutcome>,
@@ -93,6 +96,7 @@ impl CommandOutcome {
             transaction_admission: None,
             inspection: None,
             wasm_state: None,
+            resource: None,
             subscription: None,
             resource_upload: None,
         }
@@ -207,6 +211,7 @@ impl From<wire::CommandOutcome> for CommandOutcome {
             transaction_admission: outcome.transaction_admission,
             inspection: outcome.inspection,
             wasm_state: outcome.wasm_state,
+            resource: outcome.resource,
             subscription: None,
             resource_upload: None,
         }

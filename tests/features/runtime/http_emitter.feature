@@ -101,6 +101,216 @@ Feature: HTTP emitter
       | 1            |
       | 3            |
 
+  @http_emitter_configuration @http_emitter_timeout
+  Scenario Outline: HTTP emitter requires an explicit usable client timeout before activation
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (id STRING);
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE CLIENT api TYPE HTTP CONFIG {'endpoint' = 'https://api.example.com'};
+      """
+    When these NSPL commands fail with "timeout_ms"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  @http_emitter_configuration @http_emitter_validation
+  Scenario Outline: HTTP emitter rejects unsafe literal request fields and implicit header leakage
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event (
+        id STRING, secret STRING SENSITIVE, optional_path STRING OPTIONAL, attempts I64
+      );
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE SCHEMA body (id STRING);
+      CREATE WIRE JSON SCHEMA body_wire MODE STRICT (id string);
+      CREATE CODEC body_codec FROM WIRE JSON SCHEMA body_wire TO SCHEMA body;
+      CREATE SCHEMA sensitive_body (id STRING, secret STRING SENSITIVE);
+      CREATE WIRE JSON SCHEMA sensitive_body_wire MODE STRICT (id string, secret string);
+      CREATE CODEC sensitive_body_codec
+        FROM WIRE JSON SCHEMA sensitive_body_wire TO SCHEMA sensitive_body;
+      CREATE SCHEMA state_snapshot (path STRING);
+      CREATE RELAY latest_path SCHEMA state_snapshot UNBRANCHED
+        WITH MATERIALIZED STATE LAST BY TIMESTAMP;
+      CREATE CLIENT api TYPE HTTP CONFIG {
+        'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000
+      };
+      CREATE CLIENT other TYPE SENTRY CONFIG {
+        'dsn' = 'http://public@127.0.0.1:8000/1'
+      };
+      """
+    When these NSPL commands fail with "requires a HTTP client"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP other
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "no matching USING MATERIALIZED STATE declaration"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH relay_state.latest_path.path
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "header"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        INVOKE write_header('Authorization', input.secret)
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "sensitive"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING sensitive_body_codec
+        INHERIT id, secret
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "publish method"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'TRACE' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "publish path"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '//other.example/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "header name"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        INVOKE write_header('Host', 'other.example')
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "header value"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        INVOKE write_header('X-Reason', ' bad')
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "STRING"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD input.attempts PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "null"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH input.optional_path
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "output"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'POST' PATH output.id
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "WITHOUT BODY"
+      """
+      CREATE EMITTER invalid FROM outgoing TO HTTP api
+        METHOD 'GET' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
+        INHERIT id
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE EMITTER allowed FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        INVOKE write_header('Authorization', leak_sensitive(input.secret))
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE CLIENT unsafe_endpoint TYPE HTTP CONFIG {
+        'endpoint' = 'https://key@api.example.com', 'timeout_ms' = 5000
+      };
+      CREATE CLIENT zero_timeout TYPE HTTP CONFIG {
+        'endpoint' = 'https://api.example.com', 'timeout_ms' = 0
+      };
+      CREATE CLIENT text_timeout TYPE HTTP CONFIG {
+        'endpoint' = 'https://api.example.com', 'timeout_ms' = 'invalid'
+      };
+      CREATE CLIENT overflow_timeout TYPE HTTP CONFIG {
+        'endpoint' = 'https://api.example.com',
+        'timeout_ms' = '18446744073709551616'
+      };
+      CREATE CLIENT incomplete_tls TYPE HTTP CONFIG {
+        'endpoint' = 'https://api.example.com', 'timeout_ms' = 5000,
+        'tls_cert_file' = '/tmp/client.pem'
+      };
+      CREATE EMITTER encoded FROM outgoing TO HTTP api
+        METHOD 'POST' PATH output.id
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING body_codec
+        INHERIT id
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE EMITTER leaked_body FROM outgoing TO HTTP api
+        METHOD 'POST' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING sensitive_body_codec
+        INHERIT id SET secret = leak_sensitive(input.secret)
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE EMITTER with_state FROM outgoing
+        USING MATERIALIZED STATE latest_path REQUIRED SKIP
+        TO HTTP api METHOD 'POST' PATH relay_state.latest_path.path
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands fail with "origin"
+      """
+      ALTER EMITTER allowed SET CLIENT unsafe_endpoint;
+      """
+    When these NSPL commands fail with "timeout_ms"
+      """
+      ALTER EMITTER allowed SET CLIENT zero_timeout;
+      """
+    When these NSPL commands fail with "timeout_ms"
+      """
+      ALTER EMITTER allowed SET CLIENT text_timeout;
+      """
+    When these NSPL commands fail with "timeout_ms"
+      """
+      ALTER EMITTER allowed SET CLIENT overflow_timeout;
+      """
+    When these NSPL commands fail with "tls_key_file"
+      """
+      ALTER EMITTER allowed SET CLIENT incomplete_tls;
+      """
+    Then SHOW CREATE EMITTER on the leader node renders these clauses
+      | emitter | clause      |
+      | allowed | TO HTTP api |
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   # The scenarios tagged @http_emitter_expected_failure are the initial public cases of the HTTP
   # emitter epic. They fail until the delivery task the ledger names lands the capability, are
   # excluded from the ordinary suite, and run only by explicit tag selection.

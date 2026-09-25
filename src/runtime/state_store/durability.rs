@@ -101,6 +101,60 @@ impl Drop for DurabilitySynchronization<'_> {
     }
 }
 
+impl DurabilityBarrier {
+    /// Return once every write the caller applied before the call is covered by a synchronization
+    /// that succeeded.
+    ///
+    /// `round` runs one synchronization of the storage and returns the last ticket it covers. The
+    /// barrier runs at most one round at a time and lets every caller waiting meanwhile share the
+    /// next one. A round that fails with [`RuntimePersistenceError::Synchronize`] refuses this and
+    /// every later durability promise.
+    async fn synchronize<Round, Synchronized>(
+        &self,
+        round: Round,
+    ) -> error_stack::Result<(), RuntimePersistenceError>
+    where
+        Round: Fn() -> Synchronized,
+        Synchronized: Future<Output = error_stack::Result<u64, RuntimePersistenceError>>,
+    {
+        let ticket = self.issue();
+        loop {
+            tokio::task::consume_budget().await;
+            let finished = self.finished.notified();
+            tokio::pin!(finished);
+            finished.as_mut().enable();
+            if self.synchronized.load(Ordering::SeqCst) >= ticket {
+                return Ok(());
+            }
+            if self.failed.load(Ordering::SeqCst) {
+                return Err(Report::new(RuntimePersistenceError::Synchronize));
+            }
+            let Some(synchronization) = self.claim() else {
+                finished.await;
+                continue;
+            };
+            match round().await {
+                Ok(covered) => {
+                    self.synchronized.fetch_max(covered, Ordering::SeqCst);
+                }
+                Err(error) => {
+                    if let RuntimePersistenceError::Synchronize = error.current_context() {
+                        self.failed.store(true, Ordering::SeqCst);
+                    }
+                    return Err(error);
+                }
+            }
+            drop(synchronization);
+        }
+    }
+
+    /// The last ticket issued. A synchronization reads it just before it starts, which is what
+    /// lets it cover every write whose ticket was issued by then.
+    fn covered_by_a_round_starting_now(&self) -> u64 {
+        self.issued.load(Ordering::SeqCst)
+    }
+}
+
 impl RuntimeStateStore {
     /// Return once every write this store applied before the call is on stable storage.
     ///
@@ -109,37 +163,9 @@ impl RuntimeStateStore {
     pub(in crate::runtime) async fn synchronize(
         &self,
     ) -> error_stack::Result<(), RuntimePersistenceError> {
-        let barrier = &self.durability;
-        let ticket = barrier.issue();
-        loop {
-            tokio::task::consume_budget().await;
-            let finished = barrier.finished.notified();
-            tokio::pin!(finished);
-            finished.as_mut().enable();
-            if barrier.synchronized.load(Ordering::SeqCst) >= ticket {
-                return Ok(());
-            }
-            if barrier.failed.load(Ordering::SeqCst) {
-                return Err(Report::new(RuntimePersistenceError::Synchronize));
-            }
-            let Some(synchronization) = barrier.claim() else {
-                finished.await;
-                continue;
-            };
-            let round = self.synchronize_storage().await;
-            match round {
-                Ok(covered) => {
-                    barrier.synchronized.fetch_max(covered, Ordering::SeqCst);
-                }
-                Err(error) => {
-                    if let RuntimePersistenceError::Synchronize = error.current_context() {
-                        barrier.failed.store(true, Ordering::SeqCst);
-                    }
-                    return Err(error);
-                }
-            }
-            drop(synchronization);
-        }
+        self.durability
+            .synchronize(|| self.synchronize_storage())
+            .await
     }
 
     /// Synchronize the database on a storage worker, and return the last ticket that
@@ -160,7 +186,7 @@ impl RuntimeStateStore {
                     // Every ticket issued so far belongs to a write that was applied before it was
                     // issued, so reading the last one just before the synchronization starts is
                     // what lets the synchronization cover it.
-                    let covered = barrier.issued.load(Ordering::SeqCst);
+                    let covered = barrier.covered_by_a_round_starting_now();
                     barrier.rounds.fetch_add(1, Ordering::SeqCst);
                     db.persist(PersistMode::SyncAll).map_err(|error| {
                         Report::new(RuntimePersistenceError::Synchronize)
@@ -173,6 +199,10 @@ impl RuntimeStateStore {
             .change_context(RuntimePersistenceError::StorageExecution)?
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "durability_shuttle_tests.rs"]
+mod shuttle_tests;
 
 #[cfg(test)]
 mod tests {
