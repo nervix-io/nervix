@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use nervix_models::{DomainName, FieldName, ModelName, RelayName};
+use nervix_models::{BranchSelection, DomainName, FieldName, ModelKind, ModelName, RelayName};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -266,6 +266,30 @@ pub(crate) enum RegistryError {
         domain: String,
         identifier: String,
         reason: String,
+    },
+    #[error(
+        "{} '{node}' route '{route}' ON MESSAGE ERROR relay '{error_relay}' uses branch \
+         {actual_branch}, expected {expected_branch} in domain '{domain}'",
+        .node_kind.as_str()
+    )]
+    MessageErrorBranchMismatch {
+        domain: DomainName,
+        node_kind: ModelKind,
+        node: ModelName,
+        route: RelayName,
+        error_relay: RelayName,
+        actual_branch: BranchSelection,
+        expected_branch: BranchSelection,
+    },
+    #[error(
+        "emitter '{emitter}' in domain '{domain}' VALUES target '{target}' for {sink} would emit \
+         sensitive data; use leak_sensitive(...) explicitly"
+    )]
+    SensitiveEmitterValue {
+        domain: DomainName,
+        emitter: ModelName,
+        sink: &'static str,
+        target: String,
     },
     #[error(
         "model '{identifier}' in domain '{domain}' is invalid: LOOKUP_HASH_MAP argument \

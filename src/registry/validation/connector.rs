@@ -26,7 +26,8 @@ use nervix_models::{
 use nervix_vm::{
     CompileBinding, CompileOptions, CompiledProgram, OutputMode, SchemaSensitivity,
     SemanticScopePolicy, compile_program_with_options_for_bindings_with_sensitivity,
-    lower_route_construction, lower_transforming_route, program::FunctionName,
+    infer_set_expr_types_for_bindings_with_udfs, lower_route_construction,
+    lower_transforming_route, program::FunctionName,
 };
 
 use crate::registry::{
@@ -261,6 +262,77 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         | EmitSink::MongoDb { .. } => {}
     }
 
+    Ok(())
+}
+
+pub(in crate::registry) fn validate_direct_values_sensitivity(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    emitter: &CreateEmitter,
+    input_schema: &CreateSchema,
+) -> Result<(), Report<RegistryError>> {
+    let mappings = emitter.sink.direct_value_mappings().collect::<Vec<_>>();
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let assignments = mappings
+        .iter()
+        .enumerate()
+        .map(|(index, mapping)| {
+            let field = FieldName::parse(&format!("c{index}"))
+                .assured("c followed by decimal digits is a valid generated field name");
+            Assignment {
+                target: AssignmentTarget::bare(field),
+                value: mapping.expression.clone(),
+            }
+        })
+        .collect();
+    let program = lower_route_construction(
+        &RouteConstruction {
+            assignments,
+            ..RouteConstruction::default()
+        },
+        SemanticScopePolicy::read_write("input", "emitted"),
+    )
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("emitter VALUES is invalid: {reason}"),
+        })
+    })?;
+    let empty_output =
+        std::sync::Arc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
+    let bindings = [
+        CompileBinding::writeonly("emitted", empty_output),
+        readonly_binding_for_internal_schema("input", input_schema),
+        readonly_binding_for_internal_schema("message", input_schema),
+    ];
+    let udf_signatures = udf_compile_options(models, CompileOptions::default()).udf_signatures;
+    let inferred = infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures)
+        .map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("emitter VALUES type inference failed: {}", error.message),
+            })
+        })?;
+    for (index, field) in inferred.iter().enumerate() {
+        if !field.sensitive {
+            continue;
+        }
+        let mapping = mappings
+            .get(index)
+            .assured("one unique generated field is inferred for each VALUES mapping");
+        return Err(Report::new(RegistryError::SensitiveEmitterValue {
+            domain: domain.clone(),
+            emitter: identifier.clone(),
+            sink: emitter.sink.transport_label(),
+            target: mapping.column.clone(),
+        }));
+    }
     Ok(())
 }
 
@@ -1724,6 +1796,64 @@ mod tests {
             column: key.to_string(),
             expression: Expression::Literal(nervix_models::Literal::String("value".to_string())),
         }
+    }
+
+    #[test]
+    fn direct_values_sensitivity_reports_the_typed_external_target() {
+        let domain = DomainName::parse("default").assured("default is a valid domain name");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            panic!("the emitter fixture constructs an emitter model");
+        };
+        let identifier = ModelName::from(&emitter.name);
+        let input_schema = CreateSchema {
+            name: named("event"),
+            fields: vec![SchemaField {
+                name: named("secret"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: true,
+            }],
+        };
+        let mapping = nervix_models::ClickHouseValueMapping {
+            column: "external_secret".to_string(),
+            expression: nervix_nspl::parse_expression("input.secret")
+                .assured("input.secret is a valid expression"),
+        };
+        *emitter.sink = EmitSink::Postgres {
+            client: named("database"),
+            table: named("events"),
+            values: vec![mapping],
+            conflict_action: nervix_models::PostgresConflictAction::None,
+        };
+        let models = ModelIndex::new();
+        let error = validate_direct_values_sensitivity(
+            &domain,
+            &identifier,
+            &models,
+            &emitter,
+            &input_schema,
+        )
+        .expect_err("a sensitive VALUES expression must be rejected");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::SensitiveEmitterValue {
+                domain: error_domain,
+                emitter: error_emitter,
+                sink: "POSTGRES",
+                target,
+            } if error_domain == &domain
+                && error_emitter == &identifier
+                && target == "external_secret"
+        ));
+
+        let EmitSink::Postgres { values, .. } = emitter.sink.as_mut() else {
+            panic!("the test emitter uses Postgres VALUES");
+        };
+        values[0].expression = nervix_nspl::parse_expression("leak_sensitive(input.secret)")
+            .assured("leak_sensitive(input.secret) is a valid expression");
+        validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
+            .assured("explicit leakage permits the direct VALUES mapping");
     }
 
     #[test]

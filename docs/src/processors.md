@@ -675,3 +675,7 @@ never construct a new key. Error-route assignments run through the same typed ex
 ordinary `SET`, so deterministic scalar functions, casts, unary expressions, binary expressions,
 and ordered reads of earlier error-record assignments are supported. Window aggregates and
 side-effect functions are not available in error construction.
+
+The error relay must declare the same exact named branch as the source route, or be unbranched
+when the source is unbranched. A rejected binding identifies the node, source route, error relay,
+and both branch declarations.

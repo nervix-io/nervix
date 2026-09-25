@@ -434,6 +434,8 @@ activation; a newly effective hard colocation requirement can relocate runtime n
 - On a flush-based route, treat `ON MESSAGE ERROR SEND TO` as a separately buffered error output
   governed by that route's same interval and maximum batch-size boundaries. General/global errors
   are node-wide and do not inherit route-local `FLUSH`.
+- Declare the error relay with the source route's exact named branch, or unbranched for an
+  unbranched source. See `Runtime Nodes` for the branch and error-record contract.
 - Require explicit sensitive-value leakage for external emission. Never place real credentials in
   an example unless the user explicitly supplied and requested them; prefer obvious placeholders.
 - Preserve connector configuration as the documented string key/value surface. Do not translate
