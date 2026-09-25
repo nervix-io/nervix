@@ -389,10 +389,10 @@ build and the existing tests, and nothing in it changes behavior.
   route-local, the operation, and the relevant fields. They never carry sensitive payload values.
 - Hot-path errors do not allocate a formatted message per row or per batch when the variant already
   names the failure. Formatting belongs at the reporting boundary.
-- `just ratchet` enforces the conversion as two coordinated counts: each conversion lowers
-  `result_string_errors`, while `bare_error_signatures` rejects replacing it with an unreported
-  Nervix error. A conversion must leave every count at or below its baseline; when the string-error
-  count falls, run `just ratchet --update` and commit `debt-baseline.json` in the same change.
+- `Result<_, String>` is rejected outright in product code. `just validate-typed-errors`, part of
+  `just validate`, fails on any occurrence and names the rule; there is no baseline to raise. The
+  `bare_error_signatures` count in `just ratchet` rejects replacing a `String` error with an
+  unreported Nervix error.
 
 ### Panics and recovery
 
@@ -664,10 +664,10 @@ build and the existing tests, and nothing in it changes behavior.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with
   `let _ =` instead of stating their class, `saturating_*` and `wrapping_*` calls outside the time
-  API, control flow written as `Option` and `Result` combinator chains, `Result<_, String>`,
-  signatures returning a Nervix error without `Report`, node identities carried as `String`, struct
-  fields gated on `cfg(feature = "testing")`, parser references outside the language edges, and
-  `Model` references in the data plane. It also records `data_plane_lock_acquisitions` for lock and
+  API, control flow written as `Option` and `Result` combinator chains, signatures returning a
+  Nervix error without `Report`, node identities carried as `String`, struct fields gated on
+  `cfg(feature = "testing")`, parser references outside the language edges, and `Model` references
+  in the data plane. It also records `data_plane_lock_acquisitions` for lock and
   `DashMap::entry` acquisitions in data-plane files, and `write_once_rwlock_fields` for names and
   shared references held as `RwLock<Option<...>>` fields. CI fails when a count is above
   `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run

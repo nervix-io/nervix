@@ -267,6 +267,15 @@ pub(crate) enum RegistryError {
         identifier: String,
         reason: String,
     },
+    #[error(
+        "model '{identifier}' in domain '{domain}' is invalid: LOOKUP_HASH_MAP argument \
+         {argument} must be a string literal"
+    )]
+    LookupHashMapLiteralArgument {
+        domain: DomainName,
+        identifier: ModelName,
+        argument: usize,
+    },
     #[error("model '{identifier}' in domain '{domain}' is invalid: {issue}")]
     InvalidOtelMapping {
         domain: DomainName,

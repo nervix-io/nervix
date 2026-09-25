@@ -599,9 +599,12 @@ keeps a previous branch lifetime from being confused with the new runtime instan
 
 Cluster membership gossip uses management discovery capacity. It discovers topology and
 incarnations but does not replace application health checks. Gossip payloads remain below the
-management-event bound, so discovery cannot allocate an arbitrary wire message. A node that is
-shutting down closes its gossip transport before it stops gossip, so an exchange still waiting on a
-peer that stopped first ends at once instead of holding shutdown until its one-second deadline.
+management-event bound, so discovery cannot allocate an arbitrary wire message. A node that cannot
+take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
+bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
+shut down. A node that is shutting down closes its gossip transport before it stops gossip, so an
+exchange still waiting on a peer that stopped first ends at once instead of holding shutdown until
+its one-second deadline.
 
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to

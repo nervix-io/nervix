@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use error_stack::{Report, ResultExt as _};
 use nervix_approx_into::CheckedApproxInto as _;
 use thiserror::Error;
 
@@ -29,8 +30,30 @@ pub enum SettingsError {
         reason: String,
     },
 
+    #[error("parameter '{name}' has invalid value '{value}': {error:#}")]
+    InvalidByteSize {
+        name: String,
+        value: String,
+        error: Report<ByteSizeError>,
+    },
+
     #[error("duration override must be positive")]
     InvalidDuration,
+}
+
+/// Why a parameter value is not a binary byte size such as `8MiB`.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ByteSizeError {
+    #[error("expected a positive binary byte size such as 8MiB")]
+    MissingAmount,
+    #[error("the byte amount does not fit in 64 bits")]
+    AmountRange,
+    #[error("byte size must be positive")]
+    Zero,
+    #[error("expected a B, KiB, MiB, or GiB suffix")]
+    Suffix,
+    #[error("byte size overflowed")]
+    Overflow,
 }
 
 impl RunSettings {
@@ -135,12 +158,11 @@ fn add_derived_parameters(parameters: &mut toml::Table) -> Result<(), SettingsEr
         );
     }
     if let Some(value) = string_parameter(parameters, "emitter_max_batch_size")? {
-        let bytes =
-            parse_binary_bytes(value).map_err(|reason| SettingsError::InvalidParameter {
-                name: "emitter_max_batch_size".to_string(),
-                value: value.to_string(),
-                reason,
-            })?;
+        let bytes = parse_binary_bytes(value).map_err(|error| SettingsError::InvalidByteSize {
+            name: "emitter_max_batch_size".to_string(),
+            value: value.to_string(),
+            error,
+        })?;
         let bytes = i64::try_from(bytes).map_err(|_| SettingsError::InvalidParameter {
             name: "emitter_max_batch_size".to_string(),
             value: value.to_string(),
@@ -210,27 +232,27 @@ fn string_parameter<'a>(
     }
 }
 
-fn parse_binary_bytes(value: &str) -> Result<u64, String> {
+fn parse_binary_bytes(value: &str) -> error_stack::Result<u64, ByteSizeError> {
     let digit_count = value.bytes().take_while(u8::is_ascii_digit).count();
     if digit_count == 0 {
-        return Err("expected a positive binary byte size such as 8MiB".to_string());
+        return Err(Report::new(ByteSizeError::MissingAmount));
     }
     let amount = value[..digit_count]
         .parse::<u64>()
-        .map_err(|error| error.to_string())?;
+        .change_context(ByteSizeError::AmountRange)?;
     if amount == 0 {
-        return Err("byte size must be positive".to_string());
+        return Err(Report::new(ByteSizeError::Zero));
     }
     let multiplier = match &value[digit_count..] {
         "B" => 1_u64,
         "KiB" => 1_u64 << 10,
         "MiB" => 1_u64 << 20,
         "GiB" => 1_u64 << 30,
-        _ => return Err("expected a B, KiB, MiB, or GiB suffix".to_string()),
+        _ => return Err(Report::new(ByteSizeError::Suffix)),
     };
     amount
         .checked_mul(multiplier)
-        .ok_or_else(|| "byte size overflowed".to_string())
+        .ok_or_else(|| Report::new(ByteSizeError::Overflow))
 }
 
 #[cfg(test)]
@@ -328,6 +350,39 @@ mod tests {
         assert_eq!(
             settings.parameters["window_max_delay_ms"].as_integer(),
             Some(250)
+        );
+    }
+
+    #[test]
+    fn binary_byte_sizes_name_the_part_they_break() {
+        let cases = [
+            ("MiB", ByteSizeError::MissingAmount),
+            ("99999999999999999999B", ByteSizeError::AmountRange),
+            ("0MiB", ByteSizeError::Zero),
+            ("8MB", ByteSizeError::Suffix),
+            ("17179869184GiB", ByteSizeError::Overflow),
+        ];
+        for (value, expected) in cases {
+            let error = parse_binary_bytes(value).expect_err("the byte size is invalid");
+            assert_eq!(error.current_context(), &expected, "value {value}");
+        }
+        assert_eq!(parse_binary_bytes("8KiB").ok(), Some(8_192));
+    }
+
+    #[test]
+    fn an_invalid_byte_size_override_names_the_parameter_and_the_reason() {
+        let error = RunSettings::resolve(
+            &definition(LoadDuration::Auto),
+            &["emitter_max_batch_size=8MB".to_string()],
+            None,
+        )
+        .expect_err("the byte size suffix is invalid");
+
+        assert!(matches!(error, SettingsError::InvalidByteSize { .. }));
+        assert_eq!(
+            error.to_string(),
+            "parameter 'emitter_max_batch_size' has invalid value '8MB': expected a B, KiB, MiB, \
+             or GiB suffix"
         );
     }
 }

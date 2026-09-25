@@ -784,9 +784,9 @@ pub(in crate::application) fn branch_key_from_filter(
         };
         fields.push((field.clone(), binding.expected.clone()));
     }
-    crate::runtime::BranchKey::from_fields(fields)
-        .map(Some)
-        .map_err(|_| Report::new(SubscriptionError::InvalidBranchKey))
+    let key = crate::runtime::BranchKey::from_fields(fields)
+        .change_context(SubscriptionError::InvalidBranchKey)?;
+    Ok(Some(key))
 }
 
 pub(in crate::application) fn render_subscription_literal(literal: &SubscriptionLiteral) -> String {
