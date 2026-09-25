@@ -283,6 +283,8 @@ All nodes in a running cluster use one current wire contract. A fixed fingerprin
 supported operations and their encoded shapes. A fingerprint mismatch rejects connection setup;
 there is no version negotiation or alternate decoding path. A wire-contract change therefore
 requires a coordinated cluster stop and start with all nodes on the same version.
+The subscription-interest visibility request includes the advertisement version, and its current
+wire fingerprint fences that request shape during connection setup.
 
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
@@ -506,6 +508,15 @@ recorded or consulted by a grant, status, or cancellation request, so ordinary r
 reconcile. A consultation reads the watermark through a shared lookup and refreshes its retention
 with one atomic maximum, so checking a delivery against its channel takes no exclusive lock on the
 watermark.
+
+The Turmoil relay fixture exercises this boundary through the production authenticated connection:
+it drops the receiver-to-sender body reply after an Arrow batch enters the receiver queue, then
+reconnects to the same receiver process and retries the same delivery identity. The retained
+attempt returns its admitted outcome and semantic ACK without a second application enqueue. The
+fixture also checks cancellation before grant, while the body reply is unavailable, and during
+reconnection. Its bounded seeded trace records delivery identities and protocol outcomes without
+payload values. These checks apply within the retention contract above; they do not extend the
+guarantee across a receiver process restart.
 
 Each attempt carries the channel and admission identities it was granted under. Once the receiver
 has delivered an attempt's terminal outcome, it retires that same attempt: it advances the channel
@@ -809,6 +820,10 @@ Interconnect certificate, key, and CA files are watched as one credential bundle
 be complete, valid, and identical in two consecutive reads before it replaces the active bundle, so
 a multi-file update cannot install a mixed generation. An invalid or partially written candidate
 leaves the current credentials active while the watcher continues trying.
+
+TLS loading identifies the CA certificate, node certificate, or node private key by kind and keeps
+PEM parsing failures as typed categories. Error reports and watcher logs omit credential file paths
+and malformed PEM input bytes.
 
 After a valid replacement, new outbound pools use the new credentials and existing inbound HTTP/2
 connections begin graceful shutdown. Certificate expiration is also mapped to a process-monotonic

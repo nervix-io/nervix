@@ -1257,7 +1257,7 @@ Feature: Coordinated WASM processor state reset
       """
       UPLOAD RESOURCE wasm_reset_guest VERSION '{{wasm_unusable}}';
       """
-    And these NSPL commands fail with "invalid WASM PROCESSOR 'counting_guest':"
+    And these NSPL commands fail with "invalid WASM PROCESSOR 'counting_guest' in domain '{{domain}}'"
       """
       REBIND RESOURCE wasm_reset_guest TO VERSION 2;
       """

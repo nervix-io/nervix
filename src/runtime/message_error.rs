@@ -1107,8 +1107,8 @@ impl Runtime {
                 schemas.input = Some(relay_schema(&input)?);
                 current_branch_relay = Some(input);
                 schemas.partial_output = model
-                    .encode_using_codec
-                    .as_ref()
+                    .body
+                    .codec()
                     .map(|codec| match execution.codecs.get(codec) {
                         Some(compiled) => Ok(compiled.schema()),
                         None => Err(error_stack::Report::new(

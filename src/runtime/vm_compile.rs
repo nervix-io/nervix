@@ -1340,7 +1340,7 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     if emitter.construction.is_empty() {
         return Ok(None);
     }
-    let codec_route = emitter.encode_using_codec.is_some();
+    let codec_route = emitter.body.codec().is_some();
     if !codec_route
         && (emitter.construction.inherit.is_some()
             || !emitter.construction.assignments.is_empty()

@@ -43,6 +43,7 @@ use std::{
 
 use ahash::{HashMap, HashMapExt};
 use blake3::Hasher;
+use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
@@ -54,7 +55,7 @@ use nervix_consensus::{
 use nervix_interconnect::SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest;
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeName, CommandExecutionReference, CreateRelay, CreateSchema,
-    DomainName, FieldName, ParseAsType, RelayName, ScheduledModel, SubscriptionBinding,
+    DomainName, FieldName, ParseAsType, RelayName, ScheduledModel, SchemaName, SubscriptionBinding,
     SubscriptionLiteral, SubscriptionName, TransactionPreviewIdentity, UserName,
 };
 use nervix_nspl::client_statement::{ClientStatement, ParsedClientStatement};
@@ -90,6 +91,105 @@ use crate::{
 };
 
 static SESSION_SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, thiserror::Error)]
+pub(in crate::application) enum SessionCommandPlanError {
+    #[error("transaction is already active")]
+    TransactionAlreadyActive,
+    #[error("COMMIT requires an active transaction")]
+    CommitWithoutTransaction,
+    #[error("REVERT requires an active transaction")]
+    RevertWithoutTransaction,
+    #[error(
+        "DESCRIBE TRANSACTION must be executed separately; it reads a transaction and never joins \
+         a multi-statement request"
+    )]
+    MixedTransactionInspection,
+    #[error("transaction command is missing its expected queue position")]
+    MissingQueuePosition,
+    #[error("transaction queue position overflowed")]
+    QueuePositionOverflow,
+    #[error("multiple commands require BEGIN")]
+    MultipleCommandsWithoutTransaction,
+}
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+#[strum(serialize_all = "lowercase")]
+pub(in crate::application) enum ExpectedSubscriptionLiteral {
+    String,
+    Boolean,
+    Numeric,
+    Array,
+    #[strum(serialize = "RFC3339 datetime string")]
+    Datetime,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(in crate::application) enum SubscriptionError {
+    #[error("stream '{relay}' is not branched and does not accept WHERE bindings")]
+    UnbranchedBindings { relay: RelayName },
+    #[error("stream '{relay}' requires WHERE bindings for {fields:?}")]
+    MissingBindings {
+        relay: RelayName,
+        fields: Vec<FieldName>,
+    },
+    #[error("subscription binding '{field}' is specified more than once")]
+    DuplicateBinding { field: FieldName },
+    #[error("subscription bindings for relay '{relay}' must exactly match {fields:?}")]
+    BindingFieldsMismatch {
+        relay: RelayName,
+        fields: Vec<FieldName>,
+    },
+    #[error("branch field '{field}' is missing from schema '{schema}'")]
+    MissingSchemaField {
+        field: FieldName,
+        schema: SchemaName,
+    },
+    #[error("missing binding for branch field '{field}'")]
+    MissingBranchField { field: FieldName },
+    #[error("failed to construct subscription branch key")]
+    InvalidBranchKey,
+    #[error("invalid batch sample rate")]
+    InvalidSampleRate,
+    #[error("batch sample rate must be between 0.0 and 1.0")]
+    SampleRateOutOfRange,
+    #[error("subscription binding '{field}' expects {expected} literal for type {ty:?}")]
+    InvalidLiteral {
+        field: FieldName,
+        ty: ParseAsType,
+        expected: ExpectedSubscriptionLiteral,
+    },
+    #[error(
+        "subscription interest in relay '{relay}' in domain '{domain}' did not become visible on \
+         every live node: {nodes:?}"
+    )]
+    InterestNotVisible {
+        domain: DomainName,
+        relay: RelayName,
+        nodes: BTreeSet<ClusterNodeName>,
+    },
+    #[error(
+        "failed to check subscription interest in relay '{relay}' in domain '{domain}' on node \
+         '{node}'"
+    )]
+    InterestRequest {
+        domain: DomainName,
+        relay: RelayName,
+        node: ClusterNodeName,
+    },
+    #[error("subscription interest visibility failed on node '{node}': {failure}")]
+    InterestRemoteFailure {
+        node: ClusterNodeName,
+        failure: nervix_interconnect::RemoteOperationFailure,
+    },
+    #[error("stream '{relay}' references missing scheduled schema '{schema}'")]
+    MissingScheduledSchema {
+        relay: RelayName,
+        schema: SchemaName,
+    },
+    #[error("stream '{relay}' has no resolved branch declaration in the schedule")]
+    MissingScheduledBranch { relay: RelayName },
+}
 
 /// The most rows one frame of a subscription carries. A frame also stops at the session's frame
 /// limit, so this bounds the rows a client decodes per frame rather than the frame's size.
@@ -317,7 +417,7 @@ impl SessionSubscriptions {
         execution_reference: &CommandExecutionReference,
         expected_transaction_position: Option<usize>,
         expected_preview: Option<TransactionPreviewIdentity>,
-    ) -> Result<Vec<SessionCommandOperation>, String> {
+    ) -> error_stack::Result<Vec<SessionCommandOperation>, SessionCommandPlanError> {
         let mut transaction_active = self.transaction_active();
         let mut transaction_position = expected_transaction_position;
         let multi_statement = statements.len() > 1;
@@ -332,7 +432,9 @@ impl SessionSubscriptions {
             match parsed.statement {
                 ClientStatement::BeginTransaction => {
                     if transaction_active {
-                        return Err("transaction is already active".to_string());
+                        return Err(Report::new(
+                            SessionCommandPlanError::TransactionAlreadyActive,
+                        ));
                     }
                     transaction_active = true;
                     transaction_position = Some(0);
@@ -343,7 +445,9 @@ impl SessionSubscriptions {
                 }
                 ClientStatement::CommitTransaction => {
                     if !transaction_active {
-                        return Err("COMMIT requires an active transaction".to_string());
+                        return Err(Report::new(
+                            SessionCommandPlanError::CommitWithoutTransaction,
+                        ));
                     }
                     transaction_active = false;
                     let fenced_preview = if preview_describes_transaction {
@@ -358,7 +462,9 @@ impl SessionSubscriptions {
                 }
                 ClientStatement::RevertTransaction => {
                     if !transaction_active {
-                        return Err("REVERT requires an active transaction".to_string());
+                        return Err(Report::new(
+                            SessionCommandPlanError::RevertWithoutTransaction,
+                        ));
                     }
                     transaction_active = false;
                     operations.push(SessionCommandOperation::Revert);
@@ -380,26 +486,27 @@ impl SessionSubscriptions {
                         // request with other statements would make it part of their durable
                         // admission and replay, so it is always sent on its own.
                         if multi_statement {
-                            return Err("DESCRIBE TRANSACTION must be executed separately; it \
-                                        reads a transaction and never joins a multi-statement \
-                                        request"
-                                .to_string());
+                            return Err(Report::new(
+                                SessionCommandPlanError::MixedTransactionInspection,
+                            ));
                         }
                         operations.push(SessionCommandOperation::Execute(command));
                     } else if transaction_active {
                         let Some(current_position) = transaction_position else {
-                            return Err("transaction command is missing its expected queue \
-                                        position"
-                                .to_string());
+                            return Err(Report::new(SessionCommandPlanError::MissingQueuePosition));
                         };
                         transaction_position = current_position.checked_add(1);
                         if transaction_position.is_none() {
-                            return Err("transaction queue position overflowed".to_string());
+                            return Err(Report::new(
+                                SessionCommandPlanError::QueuePositionOverflow,
+                            ));
                         }
                         preview_describes_transaction = false;
                         operations.push(SessionCommandOperation::Queue(command));
                     } else if multi_statement {
-                        return Err("multiple commands require BEGIN".to_string());
+                        return Err(Report::new(
+                            SessionCommandPlanError::MultipleCommandsWithoutTransaction,
+                        ));
                     } else {
                         operations.push(SessionCommandOperation::Execute(command));
                     }
@@ -585,17 +692,16 @@ pub(in crate::application) fn validate_subscription_bindings(
     relay: &RelayName,
     branching: &nervix_models::ResolvedBranching,
     bindings: &[SubscriptionBinding],
-) -> Result<SubscriptionFilter, String> {
+) -> error_stack::Result<SubscriptionFilter, SubscriptionError> {
     if branching.is_unbranched() {
         if bindings.is_empty() {
             return Ok(SubscriptionFilter {
                 bindings: Vec::new(),
             });
         }
-        return Err(format!(
-            "stream '{}' is not branched and does not accept WHERE bindings",
-            relay.as_str()
-        ));
+        return Err(Report::new(SubscriptionError::UnbranchedBindings {
+            relay: relay.clone(),
+        }));
     }
 
     let schema = branching
@@ -604,15 +710,10 @@ pub(in crate::application) fn validate_subscription_bindings(
     let branch_fields = branching.field_names().cloned().collect::<Vec<_>>();
 
     if bindings.is_empty() {
-        return Err(format!(
-            "stream '{}' requires WHERE bindings for ({})",
-            relay.as_str(),
-            branch_fields
-                .iter()
-                .map(|name| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        return Err(Report::new(SubscriptionError::MissingBindings {
+            relay: relay.clone(),
+            fields: branch_fields,
+        }));
     }
 
     let mut fields = HashMap::new();
@@ -626,35 +727,28 @@ pub(in crate::application) fn validate_subscription_bindings(
             .insert(binding.field.clone(), binding.value.clone())
             .is_some()
         {
-            return Err(format!(
-                "subscription binding '{}' is specified more than once",
-                binding.field.as_str()
-            ));
+            return Err(Report::new(SubscriptionError::DuplicateBinding {
+                field: binding.field.clone(),
+            }));
         }
     }
 
     let expected = SortedSet::from_unsorted(branch_fields.clone()).into_vec();
     let actual = SortedSet::from_unsorted(bound.keys().cloned().collect::<Vec<_>>()).into_vec();
     if expected != actual {
-        return Err(format!(
-            "subscription bindings for relay '{}' must exactly match ({})",
-            relay.as_str(),
-            branch_fields
-                .iter()
-                .map(|name| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        return Err(Report::new(SubscriptionError::BindingFieldsMismatch {
+            relay: relay.clone(),
+            fields: branch_fields,
+        }));
     }
 
     let mut matchers = Vec::new();
     for field in &branch_fields {
         let ty = fields.get(field).ok_or_else(|| {
-            format!(
-                "branch field '{}' is missing from schema '{}'",
-                field.as_str(),
-                schema.name.as_str()
-            )
+            Report::new(SubscriptionError::MissingSchemaField {
+                field: field.clone(),
+                schema: schema.name.clone(),
+            })
         })?;
         let literal = bound
             .get(field)
@@ -672,7 +766,7 @@ pub(in crate::application) fn validate_subscription_bindings(
 pub(in crate::application) fn branch_key_from_filter(
     branching: &nervix_models::ResolvedBranching,
     filter: &SubscriptionFilter,
-) -> Result<Option<crate::runtime::BranchKey>, String> {
+) -> error_stack::Result<Option<crate::runtime::BranchKey>, SubscriptionError> {
     if branching.is_unbranched() {
         return Ok(None);
     }
@@ -684,14 +778,15 @@ pub(in crate::application) fn branch_key_from_filter(
             .iter()
             .find(|binding| binding.field == *field)
         else {
-            return Err(format!(
-                "missing binding for branch field '{}'",
-                field.as_str()
-            ));
+            return Err(Report::new(SubscriptionError::MissingBranchField {
+                field: (*field).clone(),
+            }));
         };
         fields.push((field.clone(), binding.expected.clone()));
     }
-    crate::runtime::BranchKey::from_fields(fields).map(Some)
+    crate::runtime::BranchKey::from_fields(fields)
+        .map(Some)
+        .map_err(|_| Report::new(SubscriptionError::InvalidBranchKey))
 }
 
 pub(in crate::application) fn render_subscription_literal(literal: &SubscriptionLiteral) -> String {
@@ -702,19 +797,19 @@ pub(in crate::application) fn render_subscription_literal(literal: &Subscription
     }
 }
 
-fn parse_subscription_batch_sample_rate(rate: Option<&str>) -> Result<Option<f64>, String> {
+fn parse_subscription_batch_sample_rate(
+    rate: Option<&str>,
+) -> error_stack::Result<Option<f64>, SubscriptionError> {
     let Some(rate) = rate else {
         return Ok(None);
     };
     let parsed = rate
         .parse::<f64>()
-        .map_err(|error| format!("invalid batch sample rate '{rate}': {error}"))?;
+        .map_err(|_| Report::new(SubscriptionError::InvalidSampleRate))?;
     if (0.0..=1.0).contains(&parsed) {
         Ok(Some(parsed))
     } else {
-        Err(format!(
-            "invalid batch sample rate '{rate}': must be between 0.0 and 1.0"
-        ))
+        Err(Report::new(SubscriptionError::SampleRateOutOfRange))
     }
 }
 
@@ -746,16 +841,15 @@ pub(in crate::application) fn parse_subscription_literal(
     field: &FieldName,
     ty: &ParseAsType,
     literal: &SubscriptionLiteral,
-) -> Result<runtime_schema::RuntimeValue, String> {
+) -> error_stack::Result<runtime_schema::RuntimeValue, SubscriptionError> {
     use runtime_schema::RuntimeValue;
 
-    let bad = |expected: &str| {
-        format!(
-            "subscription binding '{}' expects {} literal for type {:?}",
-            field.as_str(),
+    let bad = |expected| {
+        Report::new(SubscriptionError::InvalidLiteral {
+            field: field.clone(),
+            ty: ty.clone(),
             expected,
-            ty
-        )
+        })
     };
 
     match (ty, literal) {
@@ -765,44 +859,56 @@ pub(in crate::application) fn parse_subscription_literal(
         (ParseAsType::Datetime, SubscriptionLiteral::String(v)) => {
             chrono::DateTime::parse_from_rfc3339(v)
                 .map(RuntimeValue::Datetime)
-                .map_err(|_| bad("RFC3339 datetime string"))
+                .map_err(|_| bad(ExpectedSubscriptionLiteral::Datetime))
         }
         (ParseAsType::Bool, SubscriptionLiteral::Bool(v)) => Ok(RuntimeValue::Bool(*v)),
-        (ParseAsType::U8, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::U8).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::I8, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::I8).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::U16, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::U16).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::I16, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::I16).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::U32, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::U32).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::I32, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::I32).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::U64, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::U64).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::I64, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::I64).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::F32, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::F32).map_err(|_| bad("numeric"))
-        }
-        (ParseAsType::F64, SubscriptionLiteral::Number(v)) => {
-            v.parse().map(RuntimeValue::F64).map_err(|_| bad("numeric"))
-        }
+        (ParseAsType::U8, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::U8)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::I8, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::I8)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::U16, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::U16)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::I16, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::I16)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::U32, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::U32)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::I32, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::I32)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::U64, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::U64)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::I64, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::I64)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::F32, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::F32)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
+        (ParseAsType::F64, SubscriptionLiteral::Number(v)) => v
+            .parse()
+            .map(RuntimeValue::F64)
+            .map_err(|_| bad(ExpectedSubscriptionLiteral::Numeric)),
         _ => Err(bad(match ty {
-            ParseAsType::String | ParseAsType::Datetime => "string",
-            ParseAsType::Bool => "boolean",
-            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => "array",
-            _ => "numeric",
+            ParseAsType::String | ParseAsType::Datetime => ExpectedSubscriptionLiteral::String,
+            ParseAsType::Bool => ExpectedSubscriptionLiteral::Boolean,
+            ParseAsType::Array { .. } | ParseAsType::Vec { .. } => {
+                ExpectedSubscriptionLiteral::Array
+            }
+            _ => ExpectedSubscriptionLiteral::Numeric,
         })),
     }
 }
@@ -821,7 +927,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
         minimum_version: u64,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), SubscriptionError> {
         let subscriber = self.inner.cluster.local_node_identity().await;
         // Subscription delivery may begin as soon as a prepared schedule activates. A member can
         // be application-unavailable while it finishes that activation, then immediately own this
@@ -861,17 +967,17 @@ impl SessionServiceImpl {
                 errors.insert(node_id.clone(), error);
             }
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(format!(
-                "subscription interest in relay '{}' in domain '{}' did not become visible on \
-                 every live node: {:?}",
-                relay.as_str(),
-                domain.as_str(),
-                errors,
-            ))
-        }
+        let nodes = errors.keys().cloned().collect();
+        let Some((_, first_error)) = errors.into_iter().next() else {
+            return Ok(());
+        };
+        Err(
+            first_error.change_context(SubscriptionError::InterestNotVisible {
+                domain: domain.clone(),
+                relay: relay.clone(),
+                nodes,
+            }),
+        )
     }
 
     async fn wait_for_subscription_interest_visibility_on_node(
@@ -881,7 +987,7 @@ impl SessionServiceImpl {
         domain: &DomainName,
         relay: &RelayName,
         minimum_version: u64,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), SubscriptionError> {
         let response = self
             .inner
             .interconnect
@@ -895,20 +1001,29 @@ impl SessionServiceImpl {
                 },
             )
             .await
-            .map_err(|error| error.to_string())?;
-        response.result.map_err(|failure| failure.to_string())
+            .change_context(SubscriptionError::InterestRequest {
+                domain: domain.clone(),
+                relay: relay.clone(),
+                node: target_node_id.clone(),
+            })?;
+        response.result.map_err(|failure| {
+            Report::new(SubscriptionError::InterestRemoteFailure {
+                node: target_node_id.clone(),
+                failure,
+            })
+        })
     }
 
     pub(in crate::application) async fn scheduled_stream_owner_nodes(
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<Vec<ClusterNodeName>, String> {
+    ) -> Vec<ClusterNodeName> {
         let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
-        Ok(scheduled_relay_owner_nodes(domain_schedule, relay))
+        scheduled_relay_owner_nodes(domain_schedule, relay)
     }
 
     async fn process_pending_session_commands(
@@ -995,7 +1110,7 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         relay: &RelayName,
-    ) -> Result<Option<SubscriptionTarget>, String> {
+    ) -> error_stack::Result<Option<SubscriptionTarget>, SubscriptionError> {
         let schedule = self.inner.consensus.current_schedule().await;
         let Some(domain_schedule) = schedule.domain(domain) else {
             return Ok(None);
@@ -1008,21 +1123,20 @@ impl SessionServiceImpl {
             return Ok(None);
         };
         let Some(schema) = domain_schedule.configured::<CreateSchema>(&ack_model.schema) else {
-            return Err(format!(
-                "stream '{}' references missing scheduled schema '{}'",
-                relay.as_str(),
-                ack_model.schema.as_str()
-            ));
+            return Err(Report::new(SubscriptionError::MissingScheduledSchema {
+                relay: relay.clone(),
+                schema: ack_model.schema.clone(),
+            }));
         };
+        let branching = relay_node.resolved_branching.clone().ok_or_else(|| {
+            Report::new(SubscriptionError::MissingScheduledBranch {
+                relay: relay.clone(),
+            })
+        })?;
         Ok(Some(SubscriptionTarget {
             relay: ack_model.clone(),
             schema: schema.clone(),
-            branching: relay_node.resolved_branching.clone().ok_or_else(|| {
-                format!(
-                    "stream '{}' has no resolved branch declaration in the schedule",
-                    relay.as_str()
-                )
-            })?,
+            branching,
         }))
     }
 
@@ -1047,7 +1161,7 @@ impl SessionServiceImpl {
             match parse_subscription_batch_sample_rate(subscription.batch_sample_rate.as_deref()) {
                 Ok(rate) => rate,
                 Err(err) => {
-                    let diagnostic = CommandDiagnostic::unlocated(err.clone());
+                    let diagnostic = CommandDiagnostic::unlocated(err.to_string());
                     return Err(Box::new(CommandResult {
                         diagnostics: vec![diagnostic],
                         ..CommandResult::new(
@@ -1396,7 +1510,7 @@ impl SessionServiceImpl {
             let result = match operation {
                 SessionCommandOperation::Begin { domain } => {
                     match self.resolve_transaction_domain(domain.as_ref()).await {
-                        Err(message) => command_error(message),
+                        Err(error) => command_error(error.to_string()),
                         Ok(domain) => {
                             let id = uuid::Uuid::now_v7().to_string();
                             let transaction = ReplicatedTransaction::open(
@@ -1641,16 +1755,181 @@ mod tests {
             &SubscriptionLiteral::String("42".to_string()),
         )
         .expect_err("string should not satisfy numeric field");
-        assert!(err.contains("expects numeric literal"));
+        assert!(err.to_string().contains("expects numeric literal"));
+    }
+
+    #[test]
+    fn numeric_binding_failures_keep_the_field_and_type_without_the_value() {
+        use runtime_schema::RuntimeValue;
+
+        let field: FieldName = named("account");
+        let cases = [
+            (ParseAsType::U8, RuntimeValue::U8(1)),
+            (ParseAsType::I8, RuntimeValue::I8(1)),
+            (ParseAsType::U16, RuntimeValue::U16(1)),
+            (ParseAsType::I16, RuntimeValue::I16(1)),
+            (ParseAsType::U32, RuntimeValue::U32(1)),
+            (ParseAsType::I32, RuntimeValue::I32(1)),
+            (ParseAsType::U64, RuntimeValue::U64(1)),
+            (ParseAsType::I64, RuntimeValue::I64(1)),
+            (ParseAsType::F32, RuntimeValue::F32(1.0_f32.into())),
+            (ParseAsType::F64, RuntimeValue::F64(1.0_f64.into())),
+        ];
+        for (ty, expected) in cases {
+            let value = parse_subscription_literal(
+                &field,
+                &ty,
+                &SubscriptionLiteral::Number("1".to_string()),
+            )
+            .expect("one fits every numeric scalar type");
+            assert_eq!(value, expected);
+            let error = parse_subscription_literal(
+                &field,
+                &ty,
+                &SubscriptionLiteral::Number("sensitive-invalid-number".to_string()),
+            )
+            .expect_err("invalid numeric text must fail");
+            assert!(matches!(
+                error.current_context(),
+                SubscriptionError::InvalidLiteral {
+                    field: actual_field,
+                    ty: actual_type,
+                    expected: ExpectedSubscriptionLiteral::Numeric,
+                } if actual_field == &field && actual_type == &ty
+            ));
+            assert!(!format!("{error:?}").contains("sensitive-invalid-number"));
+        }
+
+        let error = parse_subscription_literal(
+            &field,
+            &ParseAsType::Datetime,
+            &SubscriptionLiteral::String("sensitive-invalid-date".to_string()),
+        )
+        .expect_err("invalid datetime text must fail");
+        assert!(matches!(
+            error.current_context(),
+            SubscriptionError::InvalidLiteral {
+                expected: ExpectedSubscriptionLiteral::Datetime,
+                ..
+            }
+        ));
+        assert!(!format!("{error:?}").contains("sensitive-invalid-date"));
+    }
+
+    #[test]
+    fn branch_binding_failures_identify_the_relay_and_fields() {
+        let relay = named("events");
+        let field: FieldName = named("tenant");
+        let branching = nervix_models::ResolvedBranching::branched(
+            named("by_tenant"),
+            nervix_models::CreateSchema {
+                name: named("tenant_key"),
+                fields: vec![SchemaField {
+                    name: field.clone(),
+                    ty: ParseAsType::U32,
+                    optional: false,
+                    sensitive: false,
+                }],
+            },
+        );
+        let binding = SubscriptionBinding {
+            field: field.clone(),
+            value: SubscriptionLiteral::Number("7".to_string()),
+        };
+        let unbranched = nervix_models::ResolvedBranching::unbranched();
+        let error =
+            validate_subscription_bindings(&relay, &unbranched, std::slice::from_ref(&binding))
+                .err()
+                .expect("an unbranched relay cannot bind a branch field");
+        assert!(
+            matches!(error.current_context(), SubscriptionError::UnbranchedBindings { relay: actual } if actual == &relay)
+        );
+
+        let error = validate_subscription_bindings(&relay, &branching, &[])
+            .err()
+            .expect("the branch field is required");
+        assert!(
+            matches!(error.current_context(), SubscriptionError::MissingBindings { relay: actual, fields } if actual == &relay && fields == std::slice::from_ref(&field))
+        );
+
+        let error =
+            validate_subscription_bindings(&relay, &branching, &[binding.clone(), binding.clone()])
+                .err()
+                .expect("the same field cannot be bound twice");
+        assert!(
+            matches!(error.current_context(), SubscriptionError::DuplicateBinding { field: actual } if actual == &field)
+        );
+
+        let error = validate_subscription_bindings(
+            &relay,
+            &branching,
+            &[SubscriptionBinding {
+                field: named("region"),
+                value: binding.value.clone(),
+            }],
+        )
+        .err()
+        .expect("bindings must name exactly the declared branch fields");
+        assert!(
+            matches!(error.current_context(), SubscriptionError::BindingFieldsMismatch { relay: actual, fields } if actual == &relay && fields == std::slice::from_ref(&field))
+        );
+
+        let empty = validate_subscription_bindings(&relay, &unbranched, &[])
+            .expect("an unbranched subscription needs no bindings");
+        let error = branch_key_from_filter(&branching, &empty)
+            .expect_err("a branch key cannot omit a declared field");
+        assert!(
+            matches!(error.current_context(), SubscriptionError::MissingBranchField { field: actual } if actual == &field)
+        );
+        let filter = validate_subscription_bindings(&relay, &branching, &[binding])
+            .expect("the exact typed binding is valid");
+        assert!(
+            branch_key_from_filter(&branching, &filter)
+                .expect("the validated filter forms a key")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn subscription_interest_request_preserves_the_remote_target() {
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let domain: DomainName = named("accounts");
+        let relay: RelayName = named("events");
+        let subscriber = service.inner.cluster.local_node_identity().await;
+        let peer = named("unavailable_peer");
+        let error = service
+            .wait_for_subscription_interest_visibility_on_node(
+                &peer,
+                &subscriber,
+                &domain,
+                &relay,
+                1,
+            )
+            .await
+            .expect_err("the peer has no transport route");
+        assert!(
+            matches!(error.current_context(), SubscriptionError::InterestRequest { node, .. } if node == &peer)
+        );
+        assert!(error.contains::<nervix_interconnect::RequestError>());
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("the test database is removed");
     }
 
     #[test]
     fn subscription_batch_sample_rate_is_validated() {
-        assert_eq!(parse_subscription_batch_sample_rate(None), Ok(None));
-        assert_eq!(
+        assert!(matches!(
+            parse_subscription_batch_sample_rate(None),
+            Ok(None)
+        ));
+        assert!(matches!(
             parse_subscription_batch_sample_rate(Some("0.25")),
             Ok(Some(0.25))
-        );
+        ));
         assert!(parse_subscription_batch_sample_rate(Some("1.1")).is_err());
         assert!(parse_subscription_batch_sample_rate(Some("bad")).is_err());
     }

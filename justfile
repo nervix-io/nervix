@@ -348,20 +348,16 @@ test-coverage: tests-deps
 
 # Measure changed server lines against its unit tests and selected Cucumber features while iterating.
 # The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.
-test-coverage-feature feature additional_feature="": tests-deps
+test-coverage-feature +features: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    feature={{ quote(feature) }}
-    additional_feature={{ quote(additional_feature) }}
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
-    cargo llvm-cov --no-report --features testing --package nervix-server \
-        --test scenarios -- --input "${feature}" --concurrency 1
-    if [[ -n "${additional_feature}" ]]; then
+    for feature in {{ features }}; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
-            --test scenarios -- --input "${additional_feature}" --concurrency 1
-    fi
+            --test scenarios -- --input "${feature}" --concurrency 1
+    done
     cargo llvm-cov report --lcov --output-path lcov.info
 
 # Write the line coverage of the unit tests of the packages named in `args`, such as

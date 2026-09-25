@@ -38,7 +38,9 @@ pub(crate) use mutation::{PlannedMutations, RegistryMutation};
 pub(crate) use placement::{
     PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
 };
-pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
+pub(crate) use relocation::{
+    RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
+};
 pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;

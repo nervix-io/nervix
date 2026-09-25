@@ -368,7 +368,7 @@ impl EmitterTask {
             materialized_relay_specs: materialized_stream_specs,
             lookups,
         } = deps;
-        let codec = if let Some(codec_name) = &emitter.encode_using_codec {
+        let codec = if let Some(codec_name) = emitter.body.codec() {
             Some(codecs.get(codec_name).cloned().ok_or_else(|| {
                 RuntimeError::BuildDomainExecution {
                     domain: domain.as_str().to_string(),

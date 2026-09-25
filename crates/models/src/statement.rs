@@ -1645,8 +1645,7 @@ pub enum CodecEncoding {
 pub struct CreateEmitter {
     pub name: EmitterName,
     pub from: ProcessorInputs,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encode_using_codec: Option<CodecName>,
+    pub body: EmitterBody,
     pub sink: Box<EmitSink>,
     /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
     /// message. A sink whose [`EmitSink::batch_requirement`] is required never omits it.
@@ -1659,6 +1658,26 @@ pub struct CreateEmitter {
     #[serde(default)]
     pub construction: crate::RouteConstruction,
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
+}
+
+/// The complete payload selection of an emitter. HTTP distinguishes an encoded body from an
+/// explicit absence of content; direct-value sinks construct their own destination values.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum EmitterBody {
+    Codec { codec: CodecName },
+    WithoutBody,
+    Values,
+}
+
+impl EmitterBody {
+    pub fn codec(&self) -> Option<&CodecName> {
+        match self {
+            Self::Codec { codec } => Some(codec),
+            Self::WithoutBody | Self::Values => None,
+        }
+    }
 }
 
 impl CreateEmitter {
@@ -1685,6 +1704,11 @@ impl CreateEmitter {
     /// the sink has no unbounded write, and no larger than a payload the destination can carry.
     pub fn validate_batch(&self) -> error_stack::Result<(), EmitterBatchContractError> {
         let sink = self.sink.transport_label();
+        if let EmitSink::Http { .. } = self.sink.as_ref()
+            && self.batch.is_some()
+        {
+            return Err(Report::new(EmitterBatchContractError::HttpUnsupported));
+        }
         let Some(batch) = &self.batch else {
             return match self.sink.batch_requirement() {
                 crate::EmitterBatchRequirement::Optional => Ok(()),
@@ -1771,6 +1795,7 @@ impl CreateEmitter {
             AlterEmitterOperation::SetSink {
                 sink,
                 publishing_mode,
+                body,
             } => {
                 if !sink.accepts_publishing_mode(publishing_mode) {
                     return Err(AlterEmitterError::PublishingModeUnsupported {
@@ -1780,17 +1805,26 @@ impl CreateEmitter {
                 }
                 self.sink = sink.clone();
                 self.publishing_mode = publishing_mode.clone();
+                if let Some(body) = body {
+                    self.body = body.clone();
+                }
             }
             AlterEmitterOperation::SetClient { client } => {
                 *self.sink.client_mut() = client.clone();
             }
             AlterEmitterOperation::SetEncodeUsing { codec } => {
-                self.encode_using_codec = Some(codec.clone());
+                self.body = EmitterBody::Codec {
+                    codec: codec.clone(),
+                };
             }
             AlterEmitterOperation::DropEncode => {
-                if self.encode_using_codec.take().is_none() {
+                if let EmitSink::Http { .. } = self.sink.as_ref() {
+                    return Err(AlterEmitterError::HttpDropEncode);
+                }
+                if self.body.codec().is_none() {
                     return Err(AlterEmitterError::EncodeNotConfigured);
                 }
+                self.body = EmitterBody::Values;
             }
             AlterEmitterOperation::SetCollect { policy } => {
                 self.from.collect_policy = Some(policy.clone());
@@ -1890,6 +1924,7 @@ pub enum AlterEmitterOperation {
     SetSink {
         sink: Box<EmitSink>,
         publishing_mode: EmitterPublishingMode,
+        body: Option<EmitterBody>,
     },
     SetClient {
         client: ClientName,
@@ -1938,6 +1973,8 @@ pub enum AlterEmitterError {
     CannotDropLastInput,
     #[error("emitter encoding is not configured")]
     EncodeNotConfigured,
+    #[error("HTTP emitters select an absent body with SET TO HTTP ... WITHOUT BODY")]
+    HttpDropEncode,
     #[error("COMMIT policy is only supported by Iceberg emitters")]
     CommitPolicyUnsupported,
     #[error("{sink} emitters do not support publishing mode {mode}")]
@@ -1951,6 +1988,8 @@ pub enum AlterEmitterError {
 /// Why an emitter's batching clause does not fit the sink it publishes to.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum EmitterBatchContractError {
+    #[error("HTTP emitters send one request per record and do not support BATCH")]
+    HttpUnsupported,
     #[error(
         "{sink} emitters require BATCH MAX MESSAGES <n> MAX SIZE <bytes>, because every write \
          carries several rows"
@@ -2168,6 +2207,11 @@ const SQS_MESSAGE_SIZE_MAXIMUM: crate::PayloadSizeLimit =
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmitSink {
+    Http {
+        client: ClientName,
+        method: crate::Expression,
+        path: crate::Expression,
+    },
     Kafka {
         client: ClientName,
         topic: TopicName,
@@ -2257,7 +2301,8 @@ pub enum EmitSink {
 impl EmitSink {
     pub const fn capabilities(&self) -> SinkCapabilities {
         match self {
-            Self::Kafka { .. }
+            Self::Http { .. }
+            | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
             | Self::Nats { .. }
@@ -2282,7 +2327,8 @@ impl EmitSink {
 
     pub fn client(&self) -> &ClientName {
         match self {
-            Self::Kafka { client, .. }
+            Self::Http { client, .. }
+            | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
             | Self::RabbitMq { client, .. }
             | Self::Redis { client, .. }
@@ -2326,7 +2372,8 @@ impl EmitSink {
                 mode,
                 EmitterPublishingMode::SqsSingle { .. } | EmitterPublishingMode::SqsBatch { .. }
             ),
-            Self::Sentry { .. }
+            Self::Http { .. }
+            | Self::Sentry { .. }
             | Self::Otel { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
@@ -2340,7 +2387,8 @@ impl EmitSink {
 
     fn client_mut(&mut self) -> &mut ClientName {
         match self {
-            Self::Kafka { client, .. }
+            Self::Http { client, .. }
+            | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
             | Self::RabbitMq { client, .. }
             | Self::Redis { client, .. }
@@ -2374,6 +2422,7 @@ impl EmitSink {
 
     pub fn expected_client_type(&self) -> &'static str {
         match self {
+            Self::Http { .. } => "HTTP",
             Self::Kafka { .. } => "KAFKA",
             Self::Pulsar { .. } => "PULSAR",
             Self::RabbitMq { .. } => "RABBITMQ",
@@ -2407,7 +2456,8 @@ impl EmitSink {
     pub fn accepts_client(&self, client: &Model) -> bool {
         matches!(
             (self, client),
-            (Self::Kafka { .. }, Model::ClientKafka(_))
+            (Self::Http { .. }, Model::ClientHttp(_))
+                | (Self::Kafka { .. }, Model::ClientKafka(_))
                 | (Self::Pulsar { .. }, Model::ClientPulsar(_))
                 | (Self::RabbitMq { .. }, Model::ClientRabbitMq(_))
                 | (Self::Redis { .. }, Model::ClientRedis(_))
@@ -2458,7 +2508,8 @@ impl EmitSink {
             | Self::Sqs { .. }
             | Self::Sentry { .. } => true,
             Self::Syslog { .. } => true,
-            Self::Otel { .. }
+            Self::Http { .. }
+            | Self::Otel { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
@@ -2474,7 +2525,8 @@ impl EmitSink {
             | Self::Postgres { .. }
             | Self::MySql { .. }
             | Self::MongoDb { .. } => crate::EmitterBatchRequirement::Required,
-            Self::Kafka { .. }
+            Self::Http { .. }
+            | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
             | Self::Redis { .. }
@@ -2496,7 +2548,8 @@ impl EmitSink {
     pub const fn requires_batch_transformation(&self) -> bool {
         match self {
             Self::Sentry { .. } => true,
-            Self::Kafka { .. }
+            Self::Http { .. }
+            | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
             | Self::Redis { .. }
@@ -2518,7 +2571,8 @@ impl EmitSink {
     pub const fn batch_size_maximum(&self) -> Option<crate::PayloadSizeLimit> {
         match self {
             Self::Sqs { .. } => Some(SQS_MESSAGE_SIZE_MAXIMUM),
-            Self::Kafka { .. }
+            Self::Http { .. }
+            | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
             | Self::Redis { .. }
@@ -2543,7 +2597,8 @@ impl EmitSink {
                 max_commit_size,
                 ..
             } => Some((commit_each.as_str(), max_commit_size.as_str())),
-            Self::Kafka { .. }
+            Self::Http { .. }
+            | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
             | Self::Redis { .. }
@@ -5943,7 +5998,7 @@ mod tests {
         CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
         CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement, CreateReingestor,
         CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
-        EmitterBatchContractError, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
+        EmitterBatchContractError, EmitterBody, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
         GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
         InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule,
         MaterializedRelayState, Model, ModelKind, MongoDbConflictAction, MySqlConflictAction,
@@ -6687,7 +6742,9 @@ mod tests {
         let mut emitter = CreateEmitter {
             name: named("event_sink"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("event_codec")),
+            body: EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink_a"),
             }),
@@ -6762,6 +6819,67 @@ mod tests {
         assert_eq!(emitter, before, "failed ALTER must not partially apply");
     }
 
+    #[test]
+    fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
+        let retry_policy = RetryPolicy {
+            backoff: "250ms".to_string(),
+            max_backoff: "30s".to_string(),
+        };
+        let mut emitter = CreateEmitter {
+            name: named("request_sink"),
+            from: ProcessorInputs::single(named("events")),
+            body: EmitterBody::WithoutBody,
+            sink: Box::new(EmitSink::Http {
+                client: named("api"),
+                method: Expression::Literal(Literal::String("DELETE".to_string())),
+                path: Expression::Literal(Literal::String("/events".to_string())),
+            }),
+            batch: None,
+            flush_policy: FlushPolicy::Immediate,
+            error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::RequestAck {
+                retry_policy: retry_policy.clone(),
+            },
+            mode: AckMode::Attached,
+            construction: crate::RouteConstruction::default(),
+            materialized_state: Vec::new(),
+        };
+        let replacement = AlterEmitter {
+            emitter: named("request_sink"),
+            operations: vec![AlterEmitterOperation::SetSink {
+                sink: Box::new(EmitSink::Http {
+                    client: named("other_api"),
+                    method: Expression::Literal(Literal::String("HEAD".to_string())),
+                    path: Expression::Literal(Literal::String("/health".to_string())),
+                }),
+                publishing_mode: EmitterPublishingMode::RequestAck { retry_policy },
+                body: Some(EmitterBody::WithoutBody),
+            }],
+        };
+        emitter
+            .apply_alter(&replacement)
+            .expect("complete HTTP replacement");
+        assert_eq!(emitter.body, EmitterBody::WithoutBody);
+        assert_eq!(emitter.sink.client(), &named("other_api"));
+        let stored = serde_json::to_vec(&emitter).expect("current emitter should serialize");
+        let restored: CreateEmitter =
+            serde_json::from_slice(&stored).expect("current emitter should deserialize");
+        assert_eq!(restored, emitter);
+
+        let before = emitter.clone();
+        let error = emitter.apply_alter(&AlterEmitter {
+            emitter: named("request_sink"),
+            operations: vec![
+                AlterEmitterOperation::SetClient {
+                    client: named("third_api"),
+                },
+                AlterEmitterOperation::DropEncode,
+            ],
+        });
+        assert_eq!(error, Err(AlterEmitterError::HttpDropEncode));
+        assert_eq!(emitter, before);
+    }
+
     fn batch_policy(max_messages: u32, max_size: &str) -> crate::EmitterBatchPolicy {
         crate::EmitterBatchPolicy {
             max_messages: crate::BatchMessageLimit::try_from(max_messages)
@@ -6776,7 +6894,7 @@ mod tests {
         CreateEmitter {
             name: named("event_sink"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: None,
+            body: EmitterBody::Values,
             sink: Box::new(sink),
             batch,
             flush_policy: FlushPolicy::Immediate,
@@ -6865,6 +6983,7 @@ mod tests {
         };
         let sink_change = AlterEmitterOperation::SetSink {
             sink: Box::new(postgres_sink()),
+            body: None,
             publishing_mode: EmitterPublishingMode::RequestAck {
                 retry_policy: RetryPolicy {
                     backoff: "250ms".to_string(),
@@ -7016,7 +7135,9 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("event_sink"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("event_codec")),
+            body: EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),

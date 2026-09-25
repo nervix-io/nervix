@@ -1487,6 +1487,20 @@ pub fn where_only_route_construction<'src>()
     )
 }
 
+/// HTTP requests without a body may filter records and set outgoing headers, but construct no
+/// output fields.
+pub fn bodyless_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        route_construction_clause(
+            Identifier::Where,
+            route_construction_body("where_expression"),
+        ),
+        route_construction_clause(Identifier::Invoke, route_construction_body("invocations")),
+    ))
+    .boxed()
+}
+
 fn set_only_alter_route_construction<'src>()
 -> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
     route_construction_clause(
@@ -1614,6 +1628,10 @@ fn nested_expression_tokens<'src>(
     choice((
         group,
         any()
+            .filter(|token: &Token| matches!(token, Token::Dot))
+            .then(any().filter(|token: &Token| !token.is_group_delimiter()))
+            .map(|(dot, field)| vec![dot, field]),
+        any()
             .filter(move |token: &Token| !boundary(token) && !token.is_group_delimiter())
             .map(|token| vec![token]),
     ))
@@ -1622,6 +1640,19 @@ fn nested_expression_tokens<'src>(
     .collect::<Vec<Vec<Token>>>()
     .map(|runs| runs.into_iter().flatten().collect())
     .boxed()
+}
+
+pub fn expression_before_clause<'src>(
+    boundary: fn(&Token) -> bool,
+) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
+    nested_expression_tokens(boundary)
+        .labelled("string_expression")
+        .try_map(|tokens, span| {
+            let source = render_expression_tokens(&tokens);
+            crate::parse_expression(&source)
+                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+        })
+        .boxed()
 }
 
 fn source_where_clause_with_boundary<'src>(

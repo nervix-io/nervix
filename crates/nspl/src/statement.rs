@@ -984,7 +984,7 @@ mod tests {
                     Model::Emitter(CreateEmitter {
                         name: g.name(),
                         from: ProcessorInputs::single(g.name()),
-                        encode_using_codec: Some(g.name()),
+                        body: nervix_models::EmitterBody::Codec { codec: g.name() },
                         sink: Box::new(sink),
                         publishing_mode,
                         batch: None,
@@ -1049,7 +1049,7 @@ mod tests {
             18 => Model::Emitter(CreateEmitter {
                 name: g.name(),
                 from: ProcessorInputs::single(g.name()),
-                encode_using_codec: Some(g.name()),
+                body: nervix_models::EmitterBody::Codec { codec: g.name() },
                 sink: Box::new(EmitSink::ZeroMq { client: g.name() }),
                 publishing_mode: emitter_publishing_mode(),
                 batch: None,
@@ -1082,7 +1082,7 @@ mod tests {
             20 => Model::Emitter(CreateEmitter {
                 name: g.name(),
                 from: ProcessorInputs::single(g.name()),
-                encode_using_codec: Some(g.name()),
+                body: nervix_models::EmitterBody::Codec { codec: g.name() },
                 sink: Box::new(EmitSink::Nats {
                     client: g.name(),
                     subject: g.name(),

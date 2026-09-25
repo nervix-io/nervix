@@ -31,20 +31,21 @@ use crate::{
     CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeTransaction, DomainPace, DomainStartPoint,
-    EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterPublishingMode, EndpointIngestMode,
-    Expression, FieldName, FieldScope, FlushPolicy, GeneralErrorPolicy, IcebergCatalog,
-    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorMapping, IngestSource,
-    IngestTimestampSource, Inheritance, InputCollectPolicy, InspectionFormat, JsonType,
-    KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState, MaterializedStateDependency,
-    MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy, Model, ModelName,
-    MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession, MySqlConflictAction,
-    NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType, PlacementPolicy,
-    PostgresConflictAction, ProcessorInputWhere, ProcessorInputs, ProcessorOutputs,
-    PulsarIngestMode, QueueName, RabbitMqIngestMode, RangeOperator, RedisPubSubIngestMode,
-    RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField, SignalingProtocolName,
-    SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup, SqsIngestMode, Statement,
-    SubscriptionLiteral, TopicName, TransactionInspectionTarget, UnaryOperator,
-    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField, ZeroMqIngestMode,
+    EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
+    EndpointIngestMode, Expression, FieldName, FieldScope, FlushPolicy, GeneralErrorPolicy,
+    IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
+    InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
+    InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
+    MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
+    Model, ModelName, MongoDbConflictAction, MqttIngestMode, MqttQos, MqttSession,
+    MySqlConflictAction, NatsIngestMode, OtelMetricKind, OtelSignal, OutputBranch, ParseAsType,
+    PlacementPolicy, PostgresConflictAction, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutputs, PulsarIngestMode, QueueName, RabbitMqIngestMode, RangeOperator,
+    RedisPubSubIngestMode, RelayBranching, RelayName, RetryPolicy, RouteConstruction, SchemaField,
+    SignalingProtocolName, SignalingStep, SignalingWaitStep, SignalingWireFormat, SqsFifoGroup,
+    SqsIngestMode, Statement, SubscriptionLiteral, TopicName, TransactionInspectionTarget,
+    UnaryOperator, WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaField,
+    ZeroMqIngestMode,
 };
 
 /// Width of one canonical indentation level.
@@ -2036,8 +2037,12 @@ impl CreateEmitter {
             "MODE {}",
             self.publishing_mode.to_canonical_nspl()
         )));
-        if let Some(codec) = &self.encode_using_codec {
-            sink_clauses.push(Clause::line(format!("ENCODE USING {}", codec.as_str())));
+        match &self.body {
+            EmitterBody::Codec { codec } => {
+                sink_clauses.push(Clause::line(format!("ENCODE USING {}", codec.as_str())));
+            }
+            EmitterBody::WithoutBody => sink_clauses.push(Clause::line("WITHOUT BODY".to_string())),
+            EmitterBody::Values => {}
         }
 
         let mut clauses = vec![Clause::line(format!(
@@ -2547,13 +2552,19 @@ fn alter_emitter_operation_to_nspl(
         AlterEmitterOperation::SetSink {
             sink,
             publishing_mode,
+            body,
         } => {
             let commit_policy = match sink.commit_policy() {
                 Some((policy, max_size)) => format!(" {}", commit_policy_to_nspl(policy, max_size)),
                 None => String::new(),
             };
+            let body_clause = match body {
+                Some(EmitterBody::Codec { codec }) => format!(" ENCODE USING {}", codec.as_str()),
+                Some(EmitterBody::WithoutBody) => " WITHOUT BODY".to_string(),
+                Some(EmitterBody::Values) | None => String::new(),
+            };
             Ok(format!(
-                "SET TO {}{commit_policy} MODE {}",
+                "SET TO {}{commit_policy} MODE {}{body_clause}",
                 emit_sink_to_nspl(sink)?,
                 publishing_mode.to_canonical_nspl()
             ))
@@ -3303,6 +3314,16 @@ fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
 
 fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
     match sink {
+        EmitSink::Http {
+            client,
+            method,
+            path,
+        } => Ok(format!(
+            "HTTP {} METHOD {} PATH {}",
+            client.as_str(),
+            expression_to_nspl(method)?,
+            expression_to_nspl(path)?
+        )),
         EmitSink::Kafka { client, topic } => Ok(format!(
             "KAFKA {} TOPIC {}",
             client.as_str(),
@@ -3721,7 +3742,7 @@ mod tests {
         CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
         CreateDeduplicator, CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction,
         CreatePlacement, CreateReingestor, CreateRelay, CreateSchema, CreateSignalingProtocol,
-        CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink,
+        CreateUdf, CreateVhost, CreateWindowProcessor, CreateWireSchema, EmitSink, EmitterBody,
         EmitterPublishingMode, EndpointIngestMode, EndpointType, ErrorPolicies, Expression,
         FieldScope, FlushPolicy, GeneralErrorPolicy, HttpConfigEntry, IngestSource, JsonType,
         KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, Literal, MessageErrorPolicy, Model,
@@ -4767,7 +4788,9 @@ mod tests {
                 name: named("emit_orders"),
                 from: ProcessorInputs::single(named("orders_stream"))
                     .with_collect_policy("50ms".to_string(), Some("4MiB".to_string())),
-                encode_using_codec: Some(named("orders_codec")),
+                body: EmitterBody::Codec {
+                    codec: named("orders_codec"),
+                },
                 sink: Box::new(sink),
                 batch: None,
                 flush_policy: FlushPolicy::Each {
@@ -4813,7 +4836,7 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
-            encode_using_codec: None,
+            body: EmitterBody::Values,
             sink: Box::new(EmitSink::Postgres {
                 client: named("postgres_main"),
                 table: named("notification_rows"),
@@ -4855,7 +4878,7 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
-            encode_using_codec: None,
+            body: EmitterBody::Values,
             sink: Box::new(EmitSink::MySql {
                 client: named("mysql_main"),
                 table: named("notification_rows"),
@@ -4900,7 +4923,7 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("emit_notifications"),
             from: ProcessorInputs::single(named("notifications")),
-            encode_using_codec: None,
+            body: EmitterBody::Values,
             sink: Box::new(EmitSink::MongoDb {
                 client: named("mongodb_main"),
                 collection: named("notification_rows"),

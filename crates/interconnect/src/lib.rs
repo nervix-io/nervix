@@ -1008,16 +1008,49 @@ pub enum TransportError {
     RelayRejected(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub enum TlsPemFileKind {
+    #[strum(serialize = "cluster CA certificate")]
+    CaCertificate,
+    #[strum(serialize = "node certificate")]
+    NodeCertificate,
+    #[strum(serialize = "node private key")]
+    NodePrivateKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TlsPemFailureKind {
+    #[error("no PEM items found")]
+    NoItemsFound,
+    #[error("missing section end marker")]
+    MissingSectionEnd,
+    #[error("invalid section start")]
+    IllegalSectionStart,
+    #[error("invalid base64")]
+    Base64Decode,
+    #[error("I/O error: {0:?}")]
+    Io(io::ErrorKind),
+    #[error("section exceeds size limit")]
+    SectionTooLarge,
+    #[error("unclassified PEM failure")]
+    Unclassified,
+}
+
 #[derive(Debug, Error)]
 pub enum TlsConfigError {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
     #[error("tls error: {0}")]
     Tls(#[from] rustls::Error),
-    #[error("missing certificate in {0}")]
-    MissingCertificate(String),
-    #[error("missing private key in {0}")]
-    MissingPrivateKey(String),
+    #[error("missing certificate in {file}")]
+    MissingCertificate { file: TlsPemFileKind },
+    #[error("missing private key in {file}")]
+    MissingPrivateKey { file: TlsPemFileKind },
+    #[error("invalid {file} PEM: {kind}")]
+    MalformedPem {
+        file: TlsPemFileKind,
+        kind: TlsPemFailureKind,
+    },
     #[error("certificate is invalid: {0}")]
     InvalidCertificate(String),
     #[error("certificate has no subjectAltName extension")]

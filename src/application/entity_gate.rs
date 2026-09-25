@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use arch_into::ArchInto;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_interconnect::{
     DomainDrainStatusEnvelope, DomainDrainStatusRequest as RemoteDomainDrainStatusRequest,
@@ -32,6 +32,32 @@ use crate::runtime::EntityGateLease;
 
 pub(in crate::application) const ENTITY_GATE_RELEASE_RETRY_INTERVAL: Duration =
     Duration::from_millis(100);
+
+#[derive(Debug, Clone, Copy, strum::Display)]
+pub(in crate::application) enum EntityGateControlOperation {
+    DomainDrainStatus,
+    EntityDrainStatus,
+    Release,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(in crate::application) enum EntityGateControlError {
+    #[error("failed to request {operation} for domain '{domain}' from node '{node}'")]
+    Request {
+        operation: EntityGateControlOperation,
+        domain: DomainName,
+        node: ClusterNodeName,
+    },
+    #[error("{operation} failed: {failure}")]
+    Remote {
+        operation: EntityGateControlOperation,
+        failure: RemoteOperationFailure,
+    },
+    #[error("failed to release local entity gate in domain '{domain}'")]
+    LocalRelease { domain: DomainName },
+    #[error("server stopped while releasing entity gates in domain '{domain}'")]
+    ReleaseInterrupted { domain: DomainName },
+}
 
 #[derive(Debug, Clone)]
 pub(in crate::application) struct DrainOutstanding {
@@ -290,7 +316,7 @@ impl SessionServiceImpl {
         &self,
         node_id: &ClusterNodeName,
         domain: &DomainName,
-    ) -> Result<DomainDrainStatusEnvelope, String> {
+    ) -> error_stack::Result<DomainDrainStatusEnvelope, EntityGateControlError> {
         if node_id == self.inner.consensus.local_node_id() {
             self.inner.runtime.force_flush_domain_if_idle(domain);
             return Ok(self.local_domain_drain_status(domain));
@@ -305,9 +331,18 @@ impl SessionServiceImpl {
                 Duration::from_secs(2),
             )
             .await
-            .map_err(|error| error.to_string())?
+            .change_context(EntityGateControlError::Request {
+                operation: EntityGateControlOperation::DomainDrainStatus,
+                domain: domain.clone(),
+                node: node_id.clone(),
+            })?
             .result
-            .map_err(|failure| failure.to_string())
+            .map_err(|failure| {
+                Report::new(EntityGateControlError::Remote {
+                    operation: EntityGateControlOperation::DomainDrainStatus,
+                    failure,
+                })
+            })
     }
 
     pub(in crate::application) fn local_entity_drain_status(
@@ -424,7 +459,7 @@ impl SessionServiceImpl {
         &self,
         node_id: &ClusterNodeName,
         query: EntityGateStatusQuery<'_>,
-    ) -> Result<EntityDrainStatusEnvelope, String> {
+    ) -> error_stack::Result<EntityDrainStatusEnvelope, EntityGateControlError> {
         let EntityGateStatusQuery {
             coordination,
             domain,
@@ -436,7 +471,12 @@ impl SessionServiceImpl {
         if node_id == self.inner.consensus.local_node_id() {
             let status = self
                 .local_entity_drain_status(coordination, domain, relays, affected_entities, purpose)
-                .map_err(|failure| failure.to_string())?;
+                .map_err(|failure| {
+                    Report::new(EntityGateControlError::Remote {
+                        operation: EntityGateControlOperation::EntityDrainStatus,
+                        failure,
+                    })
+                })?;
             if status.buffered_relay_batches != 0
                 || status.node_work_items != 0
                 || status.outstanding_acks != 0
@@ -460,9 +500,18 @@ impl SessionServiceImpl {
                 remaining.min(Duration::from_secs(2)),
             )
             .await
-            .map_err(|error| error.to_string())?
+            .change_context(EntityGateControlError::Request {
+                operation: EntityGateControlOperation::EntityDrainStatus,
+                domain: domain.clone(),
+                node: node_id.clone(),
+            })?
             .result
-            .map_err(|failure| failure.to_string())
+            .map_err(|failure| {
+                Report::new(EntityGateControlError::Remote {
+                    operation: EntityGateControlOperation::EntityDrainStatus,
+                    failure,
+                })
+            })
     }
 
     async fn release_entity_gate_on_node(
@@ -470,14 +519,16 @@ impl SessionServiceImpl {
         node_id: &ClusterNodeName,
         coordination: &CoordinationIdentity,
         domain: &DomainName,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), EntityGateControlError> {
         if node_id == self.inner.consensus.local_node_id() {
             return self
                 .inner
                 .runtime
                 .release_entity_gate_operation(coordination, domain)
                 .await
-                .map_err(|error| error.to_string());
+                .change_context(EntityGateControlError::LocalRelease {
+                    domain: domain.clone(),
+                });
         }
         self.inner
             .interconnect
@@ -489,9 +540,18 @@ impl SessionServiceImpl {
                 },
             )
             .await
-            .map_err(|error| error.to_string())?
+            .change_context(EntityGateControlError::Request {
+                operation: EntityGateControlOperation::Release,
+                domain: domain.clone(),
+                node: node_id.clone(),
+            })?
             .result
-            .map_err(|failure| failure.to_string())
+            .map_err(|failure| {
+                Report::new(EntityGateControlError::Remote {
+                    operation: EntityGateControlOperation::Release,
+                    failure,
+                })
+            })
     }
 
     fn schedule_cluster_entity_gate_release(&self, release: PendingClusterEntityGateRelease) {
@@ -527,7 +587,7 @@ impl SessionServiceImpl {
                             domain = release.domain.as_str(),
                             coordination = %release.coordination,
                             %node,
-                            error,
+                            error = %error,
                             "entity gate release retry remains pending"
                         );
                     }
@@ -746,7 +806,7 @@ impl SessionServiceImpl {
                         if tokio::time::Instant::now() >= deadline {
                             warn!(
                                 domain = domain.as_str(),
-                                %node, error, "failed to retrieve entity drain status"
+                                %node, error = %error, "failed to retrieve entity drain status"
                             );
                         }
                     }
@@ -801,7 +861,7 @@ impl SessionServiceImpl {
                 Err(error) => {
                     warn!(
                         domain = domain.as_str(),
-                        %node, error, "failed to release entity gates; scheduling retry"
+                        %node, error = %error, "failed to release entity gates; scheduling retry"
                     );
                     self.broadcast_error(format!(
                         "failed to release entity gates on node '{node}' in domain '{}': {error}; \
@@ -838,7 +898,7 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn release_cluster_entity_gates_and_wait(
         &self,
         mut gate: ClusterEntityGate,
-    ) -> Result<bool, String> {
+    ) -> error_stack::Result<bool, EntityGateControlError> {
         let mut every_release_confirmed = true;
         while !gate.nodes.is_empty() {
             tokio::task::consume_budget().await;
@@ -870,10 +930,9 @@ impl SessionServiceImpl {
             }
             tokio::select! {
                 _ = self.inner.drain_support_shutdown.cancelled() => {
-                    return Err(format!(
-                        "server stopped while releasing entity gates in domain '{}'",
-                        gate.domain.as_str()
-                    ));
+                    return Err(Report::new(EntityGateControlError::ReleaseInterrupted {
+                        domain: gate.domain.clone(),
+                    }));
                 }
                 _ = sleep(ENTITY_GATE_RELEASE_RETRY_INTERVAL) => {}
             }
@@ -886,7 +945,7 @@ impl SessionServiceImpl {
         &self,
         gate: ClusterEntityGate,
         impact: Option<&TransactionStepImpactRecorder>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), EntityGateControlError> {
         let attempt = gate.impact_attempt();
         match self.release_cluster_entity_gates_and_wait(gate).await {
             Ok(every_release_confirmed) => {
@@ -909,7 +968,7 @@ impl SessionServiceImpl {
                     impact.fail(
                         attempt,
                         nervix_models::ImpactDiagnosticKind::Recovery,
-                        error.clone(),
+                        format!("{error:#}"),
                     );
                 }
                 Err(error)
@@ -926,6 +985,169 @@ mod tests {
         super::test_fixtures::{TestService, build_test_service},
         *,
     };
+
+    #[tokio::test]
+    async fn unavailable_gate_participants_preserve_request_context() {
+        use super::super::test_fixtures::named;
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let domain: DomainName = named("accounts");
+        let peer: ClusterNodeName = named("unavailable_peer");
+        let coordination = service
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .expect("the test transport has coordination capacity");
+        let error = service
+            .domain_drain_status_on_node(&peer, &domain)
+            .await
+            .expect_err("the participant has no transport route");
+        assert!(
+            matches!(error.current_context(), EntityGateControlError::Request { operation: EntityGateControlOperation::DomainDrainStatus, domain: actual_domain, node } if actual_domain == &domain && node == &peer)
+        );
+        assert!(error.contains::<nervix_interconnect::RequestError>());
+        let error = service
+            .entity_drain_status_on_node(
+                &peer,
+                EntityGateStatusQuery {
+                    coordination: &coordination,
+                    domain: &domain,
+                    relays: &[],
+                    affected_entities: &[],
+                    purpose: EntityGatePurpose::ModelAlteration,
+                    deadline: tokio::time::Instant::now() + Duration::from_secs(2),
+                },
+            )
+            .await
+            .expect_err("the participant cannot answer entity drain status");
+        assert!(matches!(
+            error.current_context(),
+            EntityGateControlError::Request {
+                operation: EntityGateControlOperation::EntityDrainStatus,
+                ..
+            }
+        ));
+        assert!(error.contains::<nervix_interconnect::RequestError>());
+        let error = service
+            .release_entity_gate_on_node(&peer, &coordination, &domain)
+            .await
+            .expect_err("the participant cannot acknowledge the release");
+        assert!(matches!(
+            error.current_context(),
+            EntityGateControlError::Request {
+                operation: EntityGateControlOperation::Release,
+                ..
+            }
+        ));
+        assert!(error.contains::<nervix_interconnect::RequestError>());
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("the test database is removed");
+    }
+
+    #[tokio::test]
+    async fn gate_release_rejects_the_wrong_domain_without_losing_the_runtime_cause() {
+        use super::super::test_fixtures::named;
+
+        fn assert_preserved_context<C: std::error::Error + Send + Sync + 'static>(
+            error: &Report<EntityGateControlError>,
+            _source: &Report<C>,
+        ) {
+            assert!(error.contains::<C>());
+        }
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        let domain: DomainName = named("accounts");
+        let wrong_domain: DomainName = named("payments");
+        let local = service.inner.consensus.local_node_id();
+        let coordination = service
+            .inner
+            .interconnect
+            .next_coordination_identity()
+            .expect("the test transport has coordination capacity");
+        let query = EntityGateStatusQuery {
+            coordination: &coordination,
+            domain: &domain,
+            relays: &[],
+            affected_entities: &[],
+            purpose: EntityGatePurpose::ModelAlteration,
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+        };
+        let error = service
+            .entity_drain_status_on_node(local, query)
+            .await
+            .expect_err("the operation has not engaged a gate");
+        assert!(matches!(
+            error.current_context(),
+            EntityGateControlError::Remote {
+                operation: EntityGateControlOperation::EntityDrainStatus,
+                ..
+            }
+        ));
+        service
+            .inner
+            .runtime
+            .engage_entity_gate_operation(
+                &coordination,
+                &domain,
+                &[],
+                &[],
+                EntityGatePurpose::ModelAlteration,
+                EntityGateLease {
+                    deadline: query.deadline,
+                    reason: "typed gate release test",
+                },
+            )
+            .await
+            .expect("the empty gate scope engages");
+        service
+            .entity_drain_status_on_node(local, query)
+            .await
+            .expect("the engaged scope can be observed");
+        let error = service
+            .release_entity_gate_on_node(local, &coordination, &wrong_domain)
+            .await
+            .expect_err("a release must name the held domain");
+        assert!(
+            matches!(error.current_context(), EntityGateControlError::LocalRelease { domain: actual } if actual == &wrong_domain)
+        );
+        let source = service
+            .inner
+            .runtime
+            .release_entity_gate_operation(&coordination, &wrong_domain)
+            .await
+            .expect_err("the runtime independently rejects the mismatched domain");
+        assert_preserved_context(&error, &source);
+        assert!(
+            service
+                .inner
+                .runtime
+                .entity_gate_operation_is_held(&coordination)
+        );
+        let mut gate = ClusterEntityGate::new(&service, coordination.clone(), &domain);
+        gate.record_attempt(local.clone());
+        service
+            .release_cluster_entity_gates_and_wait_recording(gate, None)
+            .await
+            .expect("the matching domain can release the gate");
+        assert!(
+            !service
+                .inner
+                .runtime
+                .entity_gate_operation_is_held(&coordination)
+        );
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("the test database is removed");
+    }
 
     #[tokio::test]
     async fn dropping_cluster_gate_owner_releases_local_durable_hold() {

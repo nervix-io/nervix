@@ -1321,7 +1321,7 @@ mod tests {
         CreateEmitter {
             name: named("orders_out"),
             from: ProcessorInputs::single(named("orders")),
-            encode_using_codec: None,
+            body: nervix_models::EmitterBody::Values,
             sink: Box::new(sink),
             batch: None,
             flush_policy: FlushPolicy::Immediate,

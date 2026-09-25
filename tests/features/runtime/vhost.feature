@@ -51,9 +51,17 @@ Feature: Vhost persistence
       latest: 1
       versions: 1
       """
-    When these NSPL commands fail with "invalid TLS resource for VHOST 'edge': no certificates found"
+    When these NSPL commands fail with "invalid TLS resource for VHOST 'edge' in domain '{{domain}}'"
       """
       CREATE VHOST edge pinned-{{test_id}}.example.com WITH TLS invalid_tls VERSION 1;
+      """
+    Then the last command error contains
+      """
+      from 'invalid_tls@1'
+      """
+    And the last command error contains
+      """
+      no certificates found in TLS CA certificate
       """
     When these NSPL commands are executed
       """
@@ -245,9 +253,17 @@ Feature: Vhost persistence
       CREATE VHOST edge unusable-{{test_id}}.example.com WITH TLS tls_bundle VERSION 1;
       START;
       """
-    When these NSPL commands fail with "invalid TLS resource for VHOST 'edge': no certificates found"
+    When these NSPL commands fail with "invalid TLS resource for VHOST 'edge' in domain '{{domain}}'"
       """
       REBIND RESOURCE tls_bundle TO VERSION 2;
+      """
+    Then the last command error contains
+      """
+      from 'tls_bundle@2'
+      """
+    And the last command error contains
+      """
+      no certificates found in TLS CA certificate
       """
     When these NSPL commands are executed on the leader node
       """
