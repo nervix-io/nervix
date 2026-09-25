@@ -312,7 +312,7 @@ against runtime schemas:
 
 | Program | Compiled for execution |
 | --- | --- |
-| Routes of junctions, deduplicators, reorderers, inferencers, reingestors, correlators, and WASM processors, and processor `FROM ... WHERE` and `FILTER WHERE` | Lazily, on the first batch of each concrete branch instance, then cached on the route. The cache is cleared when the route's Model or message-error policy changes. |
+| Routes of junctions, deduplicators, reorderers, inferencers, reingestors, correlators, and WASM processors, and processor `FROM ... WHERE` and `FILTER WHERE` | Lazily, on the first batch of each concrete branch instance, then cached on that instance's route. Every branch instance compiles and holds its own copy, prepared artifacts included. The cache is cleared when the route's Model or message-error policy changes. |
 | `DEDUPLICATE ON`, reorderer `BY`, and `CORRELATE WHERE` | On the first batch of each branch instance |
 | Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | When the ingestor starts |
 | Emitter `FROM ... WHERE`, routes, HTTP `METHOD` and `PATH`, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | When the emitter task starts |
@@ -1168,7 +1168,9 @@ The complete user-facing limits are in [Limits](./filter-map-functions.md#limits
 **Current boundaries:**
 
 - The data plane compiles its programs from Models rather than receiving validated plans.
-- Routes compile lazily on each branch instance's first batch.
+- Routes compile lazily on each branch instance's first batch. A branched processor therefore
+  pays compilation, and holds its routes' prepared patterns and sets, once for every concrete
+  branch it runs, where window and inferencer programs are compiled once per processor.
 - An error-record program compiles once per record it builds.
 - The text functions listed under [Allocation And Result Bounds](#allocation-and-result-bounds)
   build their columns without the size check.
