@@ -507,6 +507,15 @@ reconcile. A consultation reads the watermark through a shared lookup and refres
 with one atomic maximum, so checking a delivery against its channel takes no exclusive lock on the
 watermark.
 
+The Turmoil relay fixture exercises this boundary through the production authenticated connection:
+it drops the receiver-to-sender body reply after an Arrow batch enters the receiver queue, then
+reconnects to the same receiver process and retries the same delivery identity. The retained
+attempt returns its admitted outcome and semantic ACK without a second application enqueue. The
+fixture also checks cancellation before grant, while the body reply is unavailable, and during
+reconnection. Its bounded seeded trace records delivery identities and protocol outcomes without
+payload values. These checks apply within the retention contract above; they do not extend the
+guarantee across a receiver process restart.
+
 Each attempt carries the channel and admission identities it was granted under. Once the receiver
 has delivered an attempt's terminal outcome, it retires that same attempt: it advances the channel
 watermark and releases the attempt, its channel occupancy, and its admission without rebuilding

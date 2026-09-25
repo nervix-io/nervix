@@ -38,6 +38,8 @@ use super::runner::{
     SimulationConfig, Topology, TraceEvent,
 };
 
+mod relay;
+
 const CLUSTER: &str = "simulated";
 const PORT: u16 = 7443;
 const HOST_DEADLINE: Duration = Duration::from_secs(20);
