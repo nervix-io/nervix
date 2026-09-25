@@ -176,15 +176,19 @@ impl CommandOutcome {
 
     /// The preview a later COMMIT should fence against, as this outcome reports it.
     ///
-    /// An accepted append makes its own preview current. A refused commit reports the preview
-    /// that now describes the transaction, so the caller can decide again against the transaction
-    /// as it actually is instead of staying fenced against a revision it already knows is gone.
-    pub(crate) fn commit_basis(&self) -> Option<&TransactionPreviewIdentity> {
+    /// An accepted append makes its own preview current. An inspection provides the whole
+    /// transaction's reviewed basis. A stale refusal is deliberately excluded: the caller must
+    /// inspect the changed plan before widening what a later COMMIT may apply.
+    pub(crate) fn commit_basis(&self) -> Option<TransactionPreviewIdentity> {
         if let Some(admission) = &self.transaction_admission {
-            return Some(&admission.preview);
+            return Some(admission.preview.clone());
         }
-        if let CommandDisposition::PreviewStale { current, .. } = &self.disposition {
-            return Some(current);
+        if let Some(inspection) = &self.inspection {
+            return Some(TransactionPreviewIdentity {
+                transaction_id: inspection.transaction.transaction_id().to_string(),
+                position: inspection.report.position(),
+                planning_basis: inspection.report.planning_basis(),
+            });
         }
         None
     }

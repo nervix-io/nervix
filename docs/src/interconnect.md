@@ -39,6 +39,26 @@ hosts. The test harness shares only bounded readiness and completion signals. It
 transport before its host exits, so listener cleanup and rebinding are observable in the same host.
 The two-host exchange transfers an Arrow batch both in a typed request and as a relay payload; a
 three-host scenario resolves and exchanges with two peers and checks certificate-name rejection.
+Fault scenarios partition a link before connection setup, partition one direction before setup,
+hold traffic after an authenticated exchange, and partition an established exchange. The setup
+partitions remain in place for twelve seconds of simulated time so bounded reconnect behavior is
+observable. The established-link faults expire both a one-second liveness probe and a two-second
+typed request. A repaired hold releases queued traffic; a repaired partition that dropped TCP
+segments also closes and rebinds the listener and retires the client pool before reconnecting.
+The same seed and fault plan run twice and compare semantic event times and outcomes. Snapshots
+bound open connections, pending requests, reconnect failures, and simulated sockets during
+disruption. Transport connection counts are checked after shutdown. Turmoil's socket count can
+retain failed connect attempts after a partition, so it is not a session-cleanup measure.
+Transport readiness and authenticated application liveness are checked before disruption and
+after recovery.
+
+Turmoil's `hold` queues simulated messages and `release` delivers them; a request whose deadline
+expires while messages are held stays expired when they are released. `partition` drops simulated
+messages and `repair` restores delivery without replaying dropped messages. One-way partitions are
+used separately from holds because Turmoil does not support combining them. The pinned Turmoil
+version has no separate disconnect control; listener shutdown and rebinding exercise TCP closure
+through the production transport. These tests establish behavior of the simulated TCP link and
+physical transport deadlines. They do not model kernel retransmission timing.
 
 Transport deadlines are Tokio instants, so on a simulated host they follow the simulated clock:
 connection setup, request and progress timeouts, reconnect backoff, relay grant lifetimes, and the
@@ -79,9 +99,8 @@ network within that boundary. External connectors, filesystem and database work,
 consensus randomness, and domain-clock authority are outside this simulation boundary. The
 transport clock is physical infrastructure time only; it neither defines domain time nor stamps
 connector arrivals. A simulated host crash tears down its runtime and is not evidence of
-power-loss or SIGKILL durability. A simulation result therefore makes no claim yet about production
-transport faults or full-node
-recovery.
+power-loss or SIGKILL durability. A simulation result does not establish kernel retransmission
+behavior or full-node recovery.
 
 ## Listener And Peer Topology
 

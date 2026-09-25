@@ -255,7 +255,8 @@ What follows depends on who owns the plan. An ordinary command retains that fail
 starts another attempt, derived from the newer revision, under the same execution reference, so it
 plans again and `LATEST` binds the version that completed. An explicit transaction is frozen from
 `COMMIT` admission onwards: a basis that is already stale at admission leaves the transaction `OPEN`
-with a refreshed identity to commit again, and a conflict found after admission ends the
+with a refreshed identity; the Rust client requires an inspection of the attached transaction
+before retrying against that identity. A conflict found after admission ends the
 transaction instead of replanning it.
 
 Either way, a plan never commits a `LATEST` it resolved against an older catalog.

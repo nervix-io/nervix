@@ -33,9 +33,10 @@ use nervix_client_core::{
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
     TransactionStatus,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
-    parse_client_statements, parse_upload_resource_query, upload_resource_path_fragment,
+    ClientStatement, parse_client_statements, parse_upload_resource_query,
+    upload_resource_path_fragment,
 };
 use nervix_recovery::{Discarded as _, Reported as _};
 use reedline::{
@@ -159,6 +160,8 @@ enum ClientError {
     ReadPassword,
     #[error("invalid subscription WHERE expression: {reason}")]
     InvalidSubscriptionWhere { reason: String },
+    #[error("transaction inspection failed: {message}")]
+    InspectionFailed { message: String },
 }
 
 impl Completer for GrpcCompleter {
@@ -299,6 +302,12 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         None => {}
     }
 
+    if let Some(command) = args.command.as_deref()
+        && is_json_inspection_command(command)
+    {
+        return run_json_inspection_mode(&args, command).await;
+    }
+
     let connect_options = connect_options_from_args(&args)?;
     let client =
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
@@ -307,7 +316,6 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let event_sender = EventLineSender::new(event_sender);
     spawn_event_collectors(client.clone(), event_sender.clone());
-
     if let Some(command) = args.command {
         execute_and_print(&client, command).await?;
         return Ok(());
@@ -382,6 +390,74 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     }
 
     Ok(())
+}
+
+/// A one-shot JSON inspection reserves stdout for exactly one machine-readable document.
+fn is_json_inspection_command(query: &str) -> bool {
+    let Ok(statements) = parse_client_statements(query) else {
+        return false;
+    };
+    let [ClientStatement::Server(Statement::DescribeTransaction(describe))] = statements.as_slice()
+    else {
+        return false;
+    };
+    describe.format == InspectionFormat::Json
+}
+
+async fn run_json_inspection_mode(
+    args: &Args,
+    query: &str,
+) -> Result<(), StackReport<ClientError>> {
+    let options = match connect_options_from_args(args) {
+        Ok(options) => options,
+        Err(error) => {
+            print_json_inspection_error("CLIENT_CONFIGURATION", &error.to_string());
+            return Err(error);
+        }
+    };
+    let client = match Client::connect_with_options(
+        &args.server,
+        Some(args.domain.clone()),
+        options,
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(error) => {
+            print_json_inspection_error("CONNECTION_FAILED", &error.to_string());
+            return Err(StackReport::new(ClientError::from(error)));
+        }
+    };
+    spawn_event_loggers(client.clone(), EventOutput::Stderr);
+    let outcome = match client.execute(query).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            print_json_inspection_error("REQUEST_FAILED", &error.to_string());
+            return Err(StackReport::new(ClientError::from(error)));
+        }
+    };
+    if !outcome.succeeded() {
+        print_json_inspection_error("INSPECTION_REFUSED", &outcome.message);
+        return Err(StackReport::new(ClientError::InspectionFailed {
+            message: outcome.message,
+        }));
+    }
+    if outcome.inspection.is_none() {
+        let message = "the inspection response contained no typed report";
+        print_json_inspection_error("REPORT_MISSING", message);
+        return Err(StackReport::new(ClientError::InspectionFailed {
+            message: message.to_string(),
+        }));
+    }
+    println!("{}", outcome.message);
+    Ok(())
+}
+
+fn print_json_inspection_error(code: &str, message: &str) {
+    println!(
+        "{}",
+        serde_json::json!({ "error": { "code": code, "message": message } })
+    );
 }
 
 fn create_line_editor(completer: GrpcCompleter) -> Result<Reedline, StackReport<ClientError>> {
@@ -540,7 +616,7 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
     )
     .await
     .map_err(|err| StackReport::new(ClientError::from(err)))?;
-    spawn_event_loggers(client.clone());
+    spawn_event_loggers(client.clone(), EventOutput::Stdout);
     let request = subscribe_request(
         &options.name,
         &options.relay,
@@ -898,12 +974,27 @@ impl EventLineSender {
     }
 }
 
-fn print_event_gap(dropped: u64) {
+#[derive(Clone, Copy)]
+enum EventOutput {
+    Stdout,
+    Stderr,
+}
+
+impl EventOutput {
+    fn print(self, line: &str) {
+        match self {
+            Self::Stdout => println!("{line}"),
+            Self::Stderr => eprintln!("{line}"),
+        }
+    }
+}
+
+fn print_event_gap(dropped: u64, output: EventOutput) {
     if dropped > 0 {
-        println!(
+        output.print(&format!(
             "[events] notice: {dropped} event lines were omitted because terminal output could \
              not keep up"
-        );
+        ));
     }
 }
 
@@ -927,17 +1018,17 @@ fn spawn_event_collectors(client: Client, sender: EventLineSender) {
     });
 }
 
-fn spawn_event_loggers(client: Client) {
+fn spawn_event_loggers(client: Client, output: EventOutput) {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let sender = EventLineSender::new(sender);
     let dropped = sender.dropped.clone();
     spawn_event_collectors(client, sender);
     tokio::task::spawn_blocking(move || {
         while let Some(line) = receiver.blocking_recv() {
-            print_event_gap(dropped.swap(0, Ordering::Relaxed));
-            println!("{line}");
+            print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
+            output.print(&line);
         }
-        print_event_gap(dropped.swap(0, Ordering::Relaxed));
+        print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
     });
 }
 
@@ -946,9 +1037,9 @@ fn drain_event_queue(receiver: &mut tokio::sync::mpsc::Receiver<String>, sender:
         let Ok(line) = receiver.try_recv() else {
             break;
         };
-        println!("{line}");
+        EventOutput::Stdout.print(&line);
     }
-    print_event_gap(sender.take_dropped());
+    print_event_gap(sender.take_dropped(), EventOutput::Stdout);
 }
 
 /// The terminal lines of one subscription event: one line per row of a batch, or one notice.
@@ -1157,6 +1248,20 @@ mod tests {
         drop(receiver);
         sink.push("printer stopped".to_string());
         assert_eq!(sink.take_dropped(), 0);
+    }
+
+    #[test]
+    fn one_shot_json_mode_requires_one_complete_inspection_statement() {
+        assert!(is_json_inspection_command(
+            "DESCRIBE TRANSACTION 'tx-1' OPERATION 1 FORMAT JSON;"
+        ));
+        assert!(!is_json_inspection_command("DESCRIBE TRANSACTION;"));
+        assert!(!is_json_inspection_command(
+            "DESCRIBE TRANSACTION FORMAT JSON; SHOW TRANSACTIONS;"
+        ));
+        assert!(!is_json_inspection_command(
+            "DESCRIBE TRANSACTION FORMAT JSON; ???"
+        ));
     }
 
     #[test]

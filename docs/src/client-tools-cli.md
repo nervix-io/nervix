@@ -153,6 +153,14 @@ nervix-cli --domain production --command \
   "DESCRIBE TRANSACTION '01a0ca64-7062-7302-ac1e-43138ccc2067' OPERATION 2 FORMAT JSON;"
 ```
 
+For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exactly one JSON
+document serialized from the typed report, without terminal decoration or unrelated events.
+Failures print one JSON object with `error.code` and `error.message` on stdout and exit nonzero;
+diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses the normal readable
+terminal output. After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
+attached transaction before retrying the commit so the client fences it to the newly reviewed
+planning basis.
+
 `BEGIN` requires an existing active domain and binds the transaction to it; attaching a transaction
 switches the active domain to the transaction's domain. An upload targets the active domain,
 renders live progress, and finishes after every current live node incarnation has verified and
