@@ -1541,7 +1541,7 @@ impl BranchExecutionRuntime {
                     warn!(
                         domain = domain.as_str(),
                         ingestor = ingestor.as_str(),
-                        error = %error,
+                        error = %format_args!("{error:#}"),
                         "failed to restore branch lru snapshot"
                     );
                     0
@@ -1636,7 +1636,7 @@ impl BranchExecutionRuntime {
                         warn!(
                             domain = domain.as_str(),
                             ingestor = ingestor.as_str(),
-                            error = %error,
+                            error = %format_args!("{error:#}"),
                             "failed to persist branch lru snapshot"
                         );
                     }
@@ -1821,7 +1821,7 @@ impl BranchExecutionRuntime {
                 warn!(
                     domain = domain.as_str(),
                     ingestor = ingestor.as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to persist final branch lru snapshot"
                 );
             }
@@ -2009,18 +2009,17 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
     domain: &DomainName,
     template: &BranchInstanceTemplate,
     instances: &mut BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
-) -> Result<u64, String> {
-    let placement =
-        branch_lru_placement(runtime, domain, template).map_err(|error| format!("{error:#}"))?;
+) -> error_stack::Result<u64, BranchLruSnapshotError> {
+    let placement = branch_lru_placement(runtime, domain, template)
+        .change_context(BranchLruSnapshotError::Unplaced)?;
     let snapshot = runtime
         .take_restorable_branch_lru_snapshot(&placement)
-        .map_err(|error| error.to_string())?;
+        .change_context(BranchLruSnapshotError::Read)?;
     let Some(snapshot) = snapshot else {
         return Ok(0);
     };
-    for restored in
-        decode_branch_lru_snapshot(&snapshot.payload).map_err(|error| error.to_string())?
-    {
+    let entries = decode_branch_lru_snapshot(&snapshot.payload)?;
+    for (entry, restored) in entries.into_iter().enumerate() {
         tokio::task::consume_budget().await;
         let key = restored.key;
         let last_ingestion = restored.last_ingestion;
@@ -2028,7 +2027,7 @@ pub(super) async fn restore_branch_instance_lru_snapshot(
         let state = template
             .instantiate(runtime, domain, key.clone(), incarnation)
             .await
-            .map_err(|error| format!("{error:#}"))?;
+            .change_context(BranchLruSnapshotError::Restore { entry })?;
         runtime.observe_branch_instance_created(domain, template.branch.as_ref(), &key);
         instances.insert_restored(key, last_ingestion, incarnation, state);
     }
@@ -2068,21 +2067,20 @@ pub(super) fn persist_branch_instance_lru_snapshot<V>(
     template: &BranchInstanceTemplate,
     instances: &BranchInstanceRegistry<Option<BranchKey>, V>,
     last_persisted_lsm: &mut u64,
-) -> Result<(), String> {
+) -> error_stack::Result<(), BranchLruSnapshotError> {
     let lsm = instances.version();
     if lsm <= *last_persisted_lsm {
         return Ok(());
     }
-    let placement =
-        branch_lru_placement(runtime, domain, template).map_err(|error| format!("{error:#}"))?;
-    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())
-        .map_err(|error| error.to_string())?;
+    let placement = branch_lru_placement(runtime, domain, template)
+        .change_context(BranchLruSnapshotError::Unplaced)?;
+    let payload = encode_branch_lru_snapshot(&instances.snapshot_entries())?;
     runtime
         .persist_branch_lru_snapshot(
             placement.clone(),
             PersistedRuntimeStateEntry { lsm, payload },
         )
-        .map_err(|error| error.to_string())?;
+        .change_context(BranchLruSnapshotError::Persist { lsm })?;
     *last_persisted_lsm = lsm;
     Ok(())
 }

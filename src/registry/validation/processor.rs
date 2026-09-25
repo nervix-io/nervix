@@ -2177,6 +2177,63 @@ mod tests {
     }
 
     #[test]
+    fn apply_batch_rejects_lookup_hash_map_arguments_that_are_not_string_literals() {
+        for (call, argument) in [
+            ("LOOKUP_HASH_MAP(input.source, input.source, \"city\")", 1),
+            ("LOOKUP_HASH_MAP(\"cities\", input.source, input.source)", 3),
+        ] {
+            let (domain, models) = example_graph_models(
+                "lookup hash map argument literals",
+                &format!(
+                    r#"
+                    CREATE SCHEMA metric (
+                      value I64,
+                      source STRING
+                    );
+
+                    CREATE SCHEMA located_metric (
+                      value I64,
+                      source STRING,
+                      city STRING OPTIONAL
+                    );
+
+                    CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+                    CREATE RELAY located_metrics SCHEMA located_metric UNBRANCHED;
+
+                    CREATE DEDUPLICATOR locate_metrics
+                      FROM raw_metrics
+                      DEDUPLICATE ON input.source
+                      MAX TIME 10m
+                      UNBRANCHED
+                      TO located_metrics
+                        INHERIT ALL
+                        SET city = {call}
+                        FLUSH IMMEDIATE
+                        ON MESSAGE ERROR LOG;
+                    "#
+                ),
+            );
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry should open");
+
+            let err = registry
+                .apply_batch(&domain, models)
+                .expect_err("a LOOKUP_HASH_MAP name argument must be a string literal");
+
+            assert_eq!(
+                err.current_context(),
+                &RegistryError::LookupHashMapLiteralArgument {
+                    domain: domain.clone(),
+                    identifier: ModelName::parse("locate_metrics").expect("valid identifier"),
+                    argument,
+                }
+            );
+
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+
+    #[test]
     fn apply_batch_rejects_processor_from_where_unavailable_scope() {
         let (domain, models) = example_graph_models(
             "processor source where other relay",

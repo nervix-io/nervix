@@ -186,22 +186,6 @@ pub(in crate::registry) fn visit_model_expressions(
     }
 }
 
-fn lookup_hash_map_literal_arg(args: &[SpannedExpr], index: usize) -> Result<&str, String> {
-    let Some(arg) = args.get(index) else {
-        return Err(format!(
-            "LOOKUP_HASH_MAP expects 3 arguments, found {}",
-            args.len()
-        ));
-    };
-    match &arg.inner {
-        Expr::Literal(Literal::String(value)) => Ok(value.as_str()),
-        _ => Err(format!(
-            "LOOKUP_HASH_MAP argument {} must be a string literal",
-            index + 1
-        )),
-    }
-}
-
 pub(in crate::registry) fn lookup_hash_map_bindings(
     mut fields: Vec<(String, ArrowDataType)>,
 ) -> Vec<CompileBinding> {
@@ -365,7 +349,7 @@ fn rewrite_lookup_hash_map_expr(
         },
         Expr::Call { function, args } => {
             if let FunctionName::LookupHashMap = function {
-                if args.len() != 3 {
+                let [lookup_arg, key_arg, field_arg] = args.as_slice() else {
                     return Err(Report::new(RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
                         identifier: identifier.as_str().to_string(),
@@ -374,14 +358,14 @@ fn rewrite_lookup_hash_map_expr(
                             args.len()
                         ),
                     }));
-                }
-                let lookup_name = lookup_hash_map_literal_arg(args, 0).map_err(|reason| {
-                    Report::new(RegistryError::InvalidModel {
-                        domain: domain.as_str().to_string(),
-                        identifier: identifier.as_str().to_string(),
-                        reason,
-                    })
-                })?;
+                };
+                let Expr::Literal(Literal::String(lookup_name)) = &lookup_arg.inner else {
+                    return Err(Report::new(RegistryError::LookupHashMapLiteralArgument {
+                        domain: domain.clone(),
+                        identifier: identifier.clone(),
+                        argument: 1,
+                    }));
+                };
                 let lookup = LookupName::parse(lookup_name).map_err(|error| {
                     Report::new(RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
@@ -391,13 +375,13 @@ fn rewrite_lookup_hash_map_expr(
                         ),
                     })
                 })?;
-                let raw_lookup_field = lookup_hash_map_literal_arg(args, 2).map_err(|reason| {
-                    Report::new(RegistryError::InvalidModel {
-                        domain: domain.as_str().to_string(),
-                        identifier: identifier.as_str().to_string(),
-                        reason,
-                    })
-                })?;
+                let Expr::Literal(Literal::String(raw_lookup_field)) = &field_arg.inner else {
+                    return Err(Report::new(RegistryError::LookupHashMapLiteralArgument {
+                        domain: domain.clone(),
+                        identifier: identifier.clone(),
+                        argument: 3,
+                    }));
+                };
                 let lookup_field = FieldName::parse(raw_lookup_field).change_context(
                     RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
@@ -423,7 +407,7 @@ fn rewrite_lookup_hash_map_expr(
                 };
                 // Matches the runtime's identity for the same call: the key expression itself,
                 // compared without its source spans.
-                let key = args[1].inner.clone();
+                let key = key_arg.inner.clone();
                 let data_type = arrow_data_type_for_parse_as(&schema_field.ty);
                 let existing = calls.iter().find(|call| {
                     call.lookup == lookup && call.lookup_field == lookup_field && call.key == key

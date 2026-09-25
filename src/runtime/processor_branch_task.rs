@@ -391,7 +391,7 @@ pub(super) async fn run_processor_node_runtime(
                 warn!(
                     domain = domain.as_str(),
                     processor = processor.as_str(),
-                    error = %error,
+                    error = %format_args!("{error:#}"),
                     "failed to persist processor branch lru snapshot"
                 );
             }
@@ -589,7 +589,7 @@ pub(super) async fn run_processor_node_runtime(
         warn!(
             domain = domain.as_str(),
             processor = processor.as_str(),
-            error = %error,
+            error = %format_args!("{error:#}"),
             "failed to persist final processor branch lru snapshot"
         );
     }
@@ -945,11 +945,8 @@ impl ProcessorWasmStateResetContext<'_> {
             instances,
             last_persisted_lru_lsm,
         )
-        .map_err(|error| {
-            Report::new(WasmStateResetRuntimeError::InitialCheckpoint {
-                processor: processor.clone(),
-            })
-            .attach_printable(error)
+        .change_context_lazy(|| WasmStateResetRuntimeError::InitialCheckpoint {
+            processor: processor.clone(),
         })?;
         let branch_lru =
             branch_lru_placement(runtime, domain, template).change_context_lazy(|| {

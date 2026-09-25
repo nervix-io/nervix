@@ -872,11 +872,11 @@ impl Runtime {
                 ),
             });
         }
-        let branch_key = BranchKey::from_remote_key(remote.key).map_err(|reason| {
+        let branch_key = BranchKey::from_remote_key(remote.key).map_err(|error| {
             RuntimeError::DecodeRemoteRelay {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
-                reason,
+                reason: format!("{error:#}"),
             }
         })?;
         let acks = remote
@@ -1015,11 +1015,11 @@ impl Runtime {
                     .to_string(),
             });
         }
-        let branch_key = BranchKey::from_remote_key(remote.key).map_err(|reason| {
+        let branch_key = BranchKey::from_remote_key(remote.key).map_err(|error| {
             RuntimeError::DecodeRemoteRelay {
                 domain: remote.domain.as_str().to_string(),
                 relay: remote.relay.as_str().to_string(),
-                reason,
+                reason: format!("{error:#}"),
             }
         })?;
         let ack_count = remote.acks.len();
