@@ -1,7 +1,8 @@
 //! Syslog wire decoding and encoding.
 //!
 //! Layer: engines and infrastructure.
-//! - **Owns.** Typed Arrow conversion for RFC 3164 and RFC 5424 syslog messages.
+//! - **Owns.** Typed Arrow conversion for RFC 3164 and RFC 5424 syslog messages, and the RFC 5424
+//!   frame one batch of records is published in.
 //! - **Depends on.** Wire codec models, Arrow builders and UTC for omitted RFC 3164 years.
 //! - **Must not know.** Domains, runtime clocks, schedules or connector lifecycle.
 
@@ -12,7 +13,7 @@ use arrow_array::{
 };
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, Utc};
 use error_stack::Report;
-use meticulous::OptionExt as _;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{CreateCodec, ParseAsType};
 
 use super::{
@@ -114,61 +115,200 @@ pub(super) fn decode(
 pub(super) fn encode_row(
     row: &ArrowCodecRow<'_>,
     output: &mut impl std::io::Write,
-) -> Result<(), CodecError> {
-    let facility = required_u8(row, "facility")?;
-    if facility > 23 {
-        return Err(encode_field_error(
-            row,
-            "facility",
-            "value must be at most 23",
-        ));
+) -> error_stack::Result<(), CodecError> {
+    SyslogMessage::from_row(row)?.write(row, output)
+}
+
+/// The RFC 5424 header fields a batch frame carries once for all of its members: every header
+/// field except `TIMESTAMP`, which each member keeps inside its own message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SyslogFrameHeader {
+    priority: u16,
+    hostname: Option<String>,
+    app_name: Option<String>,
+    proc_id: Option<String>,
+    msg_id: Option<String>,
+    structured_data: Option<String>,
+}
+
+impl SyslogFrameHeader {
+    /// Writes `<PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID STRUCTURED-DATA` with the given
+    /// timestamp, without the space that separates the header from `MSG`.
+    fn write(&self, timestamp: &str, output: &mut impl std::io::Write) -> std::io::Result<()> {
+        write!(
+            output,
+            "<{}>1 {timestamp} {} {} {} {} {}",
+            self.priority,
+            self.hostname.as_deref().unwrap_or("-"),
+            self.app_name.as_deref().unwrap_or("-"),
+            self.proc_id.as_deref().unwrap_or("-"),
+            self.msg_id.as_deref().unwrap_or("-"),
+            self.structured_data.as_deref().unwrap_or("-"),
+        )
     }
-    let severity = required_u8(row, "severity")?;
-    if severity > 7 {
-        return Err(encode_field_error(
-            row,
-            "severity",
-            "value must be at most 7",
-        ));
-    }
-    let message = required_string(row, "message")?;
-    let message = message.strip_prefix('\u{feff}').unwrap_or(message);
-    let hostname = header_value(row, "hostname", 255)?;
-    let app_name = header_value(row, "app_name", 48)?;
-    let proc_id = header_value(row, "proc_id", 128)?;
-    let msg_id = header_value(row, "msg_id", 32)?;
-    let structured_data = optional_string(row, "structured_data")?;
-    if let Some(structured_data) = structured_data {
-        let consumed = structured_data_prefix(structured_data, true)
-            .map_err(|error| encode_field_error(row, "structured_data", error.to_string()))?;
-        if consumed != structured_data.len() {
-            return Err(encode_field_error(
-                row,
-                "structured_data",
-                "text contains trailing content after the SD elements",
-            ));
-        }
+}
+
+/// One record as the RFC 5424 message it encodes to on its own, kept as a batch member.
+#[derive(Debug, Clone)]
+pub(super) struct SyslogBatchMember {
+    header: SyslogFrameHeader,
+    /// The member's own `TIMESTAMP`, or the nil value.
+    timestamp: String,
+    /// The member's complete RFC 5424 message.
+    message: String,
+}
+
+impl SyslogBatchMember {
+    pub(super) fn from_row(row: &ArrowCodecRow<'_>) -> error_stack::Result<Self, CodecError> {
+        let message = SyslogMessage::from_row(row)?;
+        let mut encoded = Vec::new();
+        message.write(row, &mut encoded)?;
+        let encoded = String::from_utf8(encoded)
+            .assured("every part of an RFC 5424 message is written from UTF-8 text");
+        Ok(Self {
+            header: message.header.to_owned_header(),
+            timestamp: message.timestamp,
+            message: encoded,
+        })
     }
 
-    let timestamp = match optional_datetime(row, "timestamp")?.as_ref() {
-        Some(timestamp) => format_rfc5424_timestamp(timestamp),
-        None => "-".to_string(),
-    };
-    let priority = u16::from(facility) * 8 + u16::from(severity);
-    write!(
-        output,
-        "<{priority}>1 {timestamp} {} {} {} {} {} {message}",
-        hostname.unwrap_or("-"),
-        app_name.unwrap_or("-"),
-        proc_id.unwrap_or("-"),
-        msg_id.unwrap_or("-"),
-        structured_data.unwrap_or("-"),
-    )
-    .map_err(|error| CodecError::SyslogEncode {
-        codec: row.codec.name.as_str().to_string(),
-        reason: error.to_string(),
-    })?;
-    Ok(())
+    /// The exact length of the member's own message.
+    pub(super) fn len(&self) -> usize {
+        self.message.len()
+    }
+
+    /// Whether this member and `other` agree on every header field a frame carries once.
+    pub(super) fn shares_frame_with(&self, other: &Self) -> bool {
+        self.header == other.header
+    }
+
+    /// Writes one RFC 5424 message carrying `members`: their common header, the first member's
+    /// timestamp, and a `MSG` that is the JSON array of the members' own messages.
+    ///
+    /// The members must share a frame header, which the packing that chose them guarantees.
+    pub(super) fn write_frame(
+        members: &[&Self],
+        output: &mut impl std::io::Write,
+    ) -> std::io::Result<()> {
+        let Some(first) = members.first() else {
+            return Ok(());
+        };
+        first.header.write(&first.timestamp, output)?;
+        output.write_all(b" ")?;
+        let messages = members
+            .iter()
+            .map(|member| member.message.as_str())
+            .collect::<Vec<_>>();
+        serde_json::to_writer(output, &messages).map_err(std::io::Error::from)
+    }
+}
+
+/// The header fields one record's RFC 5424 message carries, borrowed from its row.
+struct SyslogHeaderFields<'a> {
+    priority: u16,
+    hostname: Option<&'a str>,
+    app_name: Option<&'a str>,
+    proc_id: Option<&'a str>,
+    msg_id: Option<&'a str>,
+    structured_data: Option<&'a str>,
+}
+
+impl SyslogHeaderFields<'_> {
+    fn to_owned_header(&self) -> SyslogFrameHeader {
+        SyslogFrameHeader {
+            priority: self.priority,
+            hostname: self.hostname.map(str::to_string),
+            app_name: self.app_name.map(str::to_string),
+            proc_id: self.proc_id.map(str::to_string),
+            msg_id: self.msg_id.map(str::to_string),
+            structured_data: self.structured_data.map(str::to_string),
+        }
+    }
+}
+
+/// One record's RFC 5424 message, validated and ready to write.
+struct SyslogMessage<'a> {
+    header: SyslogHeaderFields<'a>,
+    timestamp: String,
+    message: &'a str,
+}
+
+impl<'a> SyslogMessage<'a> {
+    fn from_row(row: &'a ArrowCodecRow<'_>) -> error_stack::Result<Self, CodecError> {
+        let facility = required_u8(row, "facility")?;
+        if facility > 23 {
+            return Err(Report::new(encode_field_error(
+                row,
+                "facility",
+                "value must be at most 23",
+            )));
+        }
+        let severity = required_u8(row, "severity")?;
+        if severity > 7 {
+            return Err(Report::new(encode_field_error(
+                row,
+                "severity",
+                "value must be at most 7",
+            )));
+        }
+        let message = required_string(row, "message")?;
+        let message = message.strip_prefix('\u{feff}').unwrap_or(message);
+        let hostname = header_value(row, "hostname", 255)?;
+        let app_name = header_value(row, "app_name", 48)?;
+        let proc_id = header_value(row, "proc_id", 128)?;
+        let msg_id = header_value(row, "msg_id", 32)?;
+        let structured_data = optional_string(row, "structured_data")?;
+        if let Some(structured_data) = structured_data {
+            let consumed = structured_data_prefix(structured_data, true)
+                .map_err(|error| encode_field_error(row, "structured_data", error.to_string()))?;
+            if consumed != structured_data.len() {
+                return Err(Report::new(encode_field_error(
+                    row,
+                    "structured_data",
+                    "text contains trailing content after the SD elements",
+                )));
+            }
+        }
+
+        let timestamp = match optional_datetime(row, "timestamp")?.as_ref() {
+            Some(timestamp) => format_rfc5424_timestamp(timestamp),
+            None => "-".to_string(),
+        };
+        let priority = u16::from(facility) * 8 + u16::from(severity);
+        Ok(Self {
+            header: SyslogHeaderFields {
+                priority,
+                hostname,
+                app_name,
+                proc_id,
+                msg_id,
+                structured_data,
+            },
+            timestamp,
+            message,
+        })
+    }
+
+    fn write(
+        &self,
+        row: &ArrowCodecRow<'_>,
+        output: &mut impl std::io::Write,
+    ) -> error_stack::Result<(), CodecError> {
+        let header = &self.header;
+        write!(
+            output,
+            "<{}>1 {} {} {} {} {} {} {}",
+            header.priority,
+            self.timestamp,
+            header.hostname.unwrap_or("-"),
+            header.app_name.unwrap_or("-"),
+            header.proc_id.unwrap_or("-"),
+            header.msg_id.unwrap_or("-"),
+            header.structured_data.unwrap_or("-"),
+            self.message,
+        )
+        .map_err(|error| Report::new(encode_error(row, error.to_string())))
+    }
 }
 
 fn invalid_codec(codec: &CreateCodec, reason: impl Into<String>) -> CodecError {

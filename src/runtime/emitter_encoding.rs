@@ -1,57 +1,48 @@
 //! Encoding an emitter's rows into the records a record sink publishes.
 //!
 //! Layer: data plane.
-//! - **Owns.** Encoding every row a batch still holds with the emitter's codec, holding each
-//!   encoding to the emitter's `BATCH ... MAX SIZE` when it declares one, pairing each record with
-//!   its key, headers and ordering group, rejecting the rows that cannot be encoded or do not fit,
-//!   and handing the records to the record sink in one write.
-//! - **Depends on.** The emitter's compiled codec, its buffered batches, and the connector
-//!   contract's record sink and record value type.
+//! - **Owns.** Encoding every row a batch still holds with the emitter's codec — one record per row,
+//!   or, when the emitter declares `BATCH`, one record per packed batch payload — pairing each
+//!   record with its key, headers and ordering group, rejecting the rows that cannot be encoded or
+//!   do not fit, handing the records to the record sink in one write, and applying the sink's
+//!   outcome for a batch record to every member it carries.
+//! - **Depends on.** The emitter's compiled codec, its buffered batches, the batch packing, and the
+//!   connector contract's record sink and record value type.
 //! - **Must not know.** Which external system receives the records, or when the emitter publishes
 //!   them.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
-use nervix_connector::{RecordSink, SinkLifecycle, SinkRecord, SinkRecordPosition};
-use nervix_models::PayloadSizeLimit;
+use nervix_connector::{
+    PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkLifecycle, SinkRecord, SinkRecordPosition,
+};
+use nervix_models::EmitterBatchPolicy;
 
-use super::*;
-use crate::runtime_schema::{BoundedRowEncoding, CompiledCodecBatchEncoder, PayloadLimitExceeded};
-
-/// What encoding one pending row produced.
-#[derive(Debug)]
-enum RowPayload {
-    Encoded(Vec<u8>),
-    Failed(Report<CodecError>),
-    /// The row's encoding would have exceeded the emitter's `MAX SIZE`, so it was abandoned.
-    Oversize(PayloadLimitExceeded),
-}
-
-impl RowPayload {
-    /// Encodes `row_index`, held to `limit` when the emitter declares one.
-    fn encode(
-        encoder: &CompiledCodecBatchEncoder<'_>,
-        row_index: usize,
-        limit: Option<PayloadSizeLimit>,
-    ) -> Self {
-        let Some(limit) = limit else {
-            let mut payload = Vec::new();
-            return match encoder.encode_row_into(row_index, &mut payload) {
-                Ok(()) => Self::Encoded(payload),
-                Err(error) => Self::Failed(error),
-            };
-        };
-        match encoder.encode_row_within(row_index, limit) {
-            Ok(BoundedRowEncoding::Encoded(payload)) => Self::Encoded(payload),
-            Ok(BoundedRowEncoding::Oversize(exceeded)) => Self::Oversize(exceeded),
-            Err(error) => Self::Failed(error),
-        }
-    }
-}
+use super::{
+    emitter_batch_packing::{
+        BatchEnvelope, BatchPayload, BufferedBatchPacking, PackedOutcome, PackingRow,
+        pack_buffered_batch,
+    },
+    *,
+};
+use crate::runtime_schema::{BatchContainerError, CompiledCodecBatchEncoder};
 
 #[derive(Debug)]
 struct PendingRowPayload {
     row_index: usize,
-    payload: RowPayload,
+    payload: Result<Vec<u8>, Report<CodecError>>,
+}
+
+impl PendingRowPayload {
+    fn encode(encoder: &CompiledCodecBatchEncoder<'_>, row_index: usize) -> Self {
+        let mut payload = Vec::new();
+        let encoded = encoder.encode_row_into(row_index, &mut payload);
+        Self {
+            row_index,
+            payload: encoded.map(|()| payload),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -78,9 +69,9 @@ impl EncodedBrokerRecord {
 pub(super) struct EncodedRecordSink {
     pub(super) sink: Box<dyn RecordSink>,
     pub(super) codec: Arc<CompiledCodec>,
-    /// The emitter's `BATCH ... MAX SIZE`. Every encoded payload is held to it, so a record whose
-    /// encoding exceeds it never reaches the sink.
-    pub(super) payload_limit: Option<PayloadSizeLimit>,
+    /// The emitter's `BATCH` clause. With it, each record the sink receives is one batch payload
+    /// holding several rows; without it, each record is one row.
+    pub(super) batch: Option<EmitterBatchPolicy>,
 }
 
 #[async_trait]
@@ -99,8 +90,19 @@ impl EmitterSink for EncodedRecordSink {
         context: &EmitterSinkContext,
         batches: &mut [EmitterPublishBatch],
     ) -> EmitterRuntimeResult<()> {
-        let encoded =
-            encode_broker_records(self.codec.clone(), self.payload_limit, context, batches).await?;
+        if let Some(policy) = self.batch {
+            let packed = pack_batch_records(self.codec.clone(), policy, context, batches).await?;
+            let outcome = self.sink.publish(packed.records).await;
+            let outcome = packed.membership.apply_to_members(outcome);
+            return finish_record_sink_publish(
+                context,
+                batches,
+                outcome,
+                DeliveredAcknowledgements::Host,
+            )
+            .await;
+        }
+        let encoded = encode_broker_records(self.codec.clone(), context, batches).await?;
         let records = sink_records(context, batches, encoded).await?;
         let outcome = self.sink.publish(records).await;
         finish_record_sink_publish(context, batches, outcome, DeliveredAcknowledgements::Host).await
@@ -109,7 +111,6 @@ impl EmitterSink for EncodedRecordSink {
 
 async fn encode_pending_broker_payloads(
     codec: Arc<CompiledCodec>,
-    payload_limit: Option<PayloadSizeLimit>,
     context: &EmitterSinkContext,
     batch: &EmitterPublishBatch,
     pending_rows: Vec<usize>,
@@ -122,10 +123,7 @@ async fn encode_pending_broker_payloads(
             Ok::<_, CodecError>(
                 pending_rows
                     .into_iter()
-                    .map(|row_index| PendingRowPayload {
-                        row_index,
-                        payload: RowPayload::encode(&encoder, row_index, payload_limit),
-                    })
+                    .map(|row_index| PendingRowPayload::encode(&encoder, row_index))
                     .collect(),
             )
         })
@@ -153,16 +151,12 @@ async fn encode_pending_broker_payloads(
     })?;
     Ok(pending_rows
         .into_iter()
-        .map(|row_index| PendingRowPayload {
-            row_index,
-            payload: RowPayload::encode(&encoder, row_index, payload_limit),
-        })
+        .map(|row_index| PendingRowPayload::encode(&encoder, row_index))
         .collect())
 }
 
 async fn encode_broker_records(
     codec: Arc<CompiledCodec>,
-    payload_limit: Option<PayloadSizeLimit>,
     context: &EmitterSinkContext,
     batches: &mut [EmitterPublishBatch],
 ) -> EmitterRuntimeResult<Vec<EncodedBrokerRecord>> {
@@ -177,13 +171,7 @@ async fn encode_broker_records(
         let batch_acks = batch.merged_acks();
         let payloads = await_emitter_confirmation(
             &batch_acks,
-            encode_pending_broker_payloads(
-                codec.clone(),
-                payload_limit,
-                context,
-                batch,
-                pending_rows,
-            ),
+            encode_pending_broker_payloads(codec.clone(), context, batch, pending_rows),
         )
         .await?;
 
@@ -218,8 +206,8 @@ async fn encode_broker_records(
                 row_index,
             };
             let payload = match payload {
-                RowPayload::Encoded(payload) => payload,
-                RowPayload::Failed(error) => {
+                Ok(payload) => payload,
+                Err(error) => {
                     rejected.push(RejectedEmitterRecord {
                         position,
                         reason: format!(
@@ -227,22 +215,6 @@ async fn encode_broker_records(
                             context.emitter.as_str()
                         ),
                         structured_error: None,
-                    });
-                    continue;
-                }
-                RowPayload::Oversize(exceeded) => {
-                    let message = format!("emitter '{}' {exceeded}", context.emitter.as_str());
-                    rejected.push(RejectedEmitterRecord {
-                        position,
-                        reason: message.clone(),
-                        structured_error: Some(structured_message_error(
-                            batch.execution_now,
-                            MessageErrorCode::Validation,
-                            message,
-                            MessageErrorOperation::Encode,
-                            None,
-                            std::iter::empty(),
-                        )),
                     });
                     continue;
                 }
@@ -302,4 +274,390 @@ async fn sink_records(
     }
     finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
     Ok(records)
+}
+
+/// The records a batching emitter publishes, one per batch payload, and the rows each carries.
+struct PackedBatchRecords {
+    records: Vec<SinkRecord>,
+    membership: BatchMembership,
+}
+
+/// The rows every batch record carries, keyed by the position the record is published under.
+///
+/// A batch record is published under its first member's position, so a sink that answers for the
+/// record answers for exactly one entry here.
+#[derive(Debug, Default)]
+struct BatchMembership {
+    members: BTreeMap<SinkRecordPosition, Vec<SinkRecordPosition>>,
+}
+
+impl BatchMembership {
+    /// Applies the sink's outcome for each batch record to every member it carries.
+    ///
+    /// One confirmation delivers every member, and one rejection rejects every member with the
+    /// same error, so its reference shows that they failed together.
+    fn apply_to_members(&self, outcome: PerRecordOutcome) -> PerRecordOutcome {
+        let outcome = outcome.into_parts();
+        let mut applied = PerRecordOutcome::with_capacity(outcome.delivered.len());
+        for position in outcome.delivered {
+            for member in self.members_of(position) {
+                applied.deliver(member);
+            }
+        }
+        for rejected in outcome.rejected {
+            for member in self.members_of(rejected.position) {
+                applied.reject(RejectedSinkRecord {
+                    position: member,
+                    error: rejected.error.clone(),
+                });
+            }
+        }
+        if let Some(error) = outcome.infrastructure_error {
+            applied.fail(error);
+        }
+        applied
+    }
+
+    /// The members of the batch record published under `position`. A position the host never
+    /// published a batch under answers for itself, so an outcome is never silently dropped.
+    fn members_of(&self, position: SinkRecordPosition) -> Vec<SinkRecordPosition> {
+        match self.members.get(&position) {
+            Some(members) => members.clone(),
+            None => vec![position],
+        }
+    }
+}
+
+/// Packs the rows every batch still holds into batch payloads and pairs each payload with the key,
+/// headers and ordering group its members share.
+///
+/// Rows whose ordering group could not be evaluated are rejected before packing, as they are when
+/// the emitter publishes one record per row. Rows that cannot be members, rows that alone exceed
+/// `MAX SIZE`, and the rows of a candidate whose container failed are rejected here as well.
+async fn pack_batch_records(
+    codec: Arc<CompiledCodec>,
+    policy: EmitterBatchPolicy,
+    context: &EmitterSinkContext,
+    batches: &mut [EmitterPublishBatch],
+) -> EmitterRuntimeResult<PackedBatchRecords> {
+    let mut records = Vec::new();
+    let mut membership = BatchMembership::default();
+    let mut unpublishable = Vec::new();
+    let mut rejected = Vec::new();
+    for (batch_index, batch) in batches.iter().enumerate() {
+        tokio::task::consume_budget().await;
+        let mut rows = Vec::new();
+        for row_index in batch.pending_record_rows() {
+            let envelope = match batch_envelope(batch, row_index)? {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    unpublishable.push(RejectedEmitterRecord {
+                        position: SinkRecordPosition {
+                            batch_index,
+                            row_index,
+                        },
+                        reason: error.to_string(),
+                        structured_error: None,
+                    });
+                    continue;
+                }
+            };
+            rows.push(PackingRow {
+                row_index,
+                envelope,
+            });
+        }
+        if rows.is_empty() {
+            continue;
+        }
+        let batch_acks = batch.merged_acks();
+        let packing = await_emitter_confirmation(
+            &batch_acks,
+            pack_pending_rows(codec.clone(), policy, context, batch, rows),
+        )
+        .await?;
+        if packing.subdivisions > 0 {
+            tracing::debug!(
+                emitter = %context.emitter,
+                subdivisions = packing.subdivisions,
+                "re-encoded batch candidates that reached MAX SIZE"
+            );
+        }
+        for outcome in packing.outcomes {
+            tokio::task::consume_budget().await;
+            match outcome {
+                PackedOutcome::Payload(BatchPayload {
+                    rows,
+                    envelope,
+                    payload,
+                }) => {
+                    let members = rows
+                        .into_iter()
+                        .map(|row_index| SinkRecordPosition {
+                            batch_index,
+                            row_index,
+                        })
+                        .collect::<Vec<_>>();
+                    let position = *members
+                        .first()
+                        .assured("a packed payload always carries at least one member");
+                    let record = SinkRecord::new(
+                        position,
+                        envelope.key,
+                        payload,
+                        envelope.headers,
+                        batch.execution_now,
+                    );
+                    records.push(match envelope.message_group {
+                        Some(message_group) => record.with_message_group(message_group),
+                        None => record,
+                    });
+                    membership.members.insert(position, members);
+                }
+                PackedOutcome::MemberFailed { row_index, error } => {
+                    rejected.push(RejectedEmitterRecord {
+                        position: SinkRecordPosition {
+                            batch_index,
+                            row_index,
+                        },
+                        reason: format!(
+                            "emitter '{}' failed to encode record: {error}",
+                            context.emitter.as_str()
+                        ),
+                        structured_error: None,
+                    });
+                }
+                PackedOutcome::Oversize {
+                    row_index,
+                    exceeded,
+                } => {
+                    let message = format!("emitter '{}' {exceeded}", context.emitter.as_str());
+                    rejected.push(RejectedEmitterRecord {
+                        position: SinkRecordPosition {
+                            batch_index,
+                            row_index,
+                        },
+                        reason: message.clone(),
+                        structured_error: Some(structured_message_error(
+                            batch.execution_now,
+                            MessageErrorCode::Validation,
+                            message,
+                            MessageErrorOperation::Encode,
+                            None,
+                            std::iter::empty(),
+                        )),
+                    });
+                }
+                PackedOutcome::ContainerFailed { rows, error } => {
+                    let shared = container_failure(context, &codec, batch, rows.len(), error);
+                    for row_index in rows {
+                        rejected.push(RejectedEmitterRecord {
+                            position: SinkRecordPosition {
+                                batch_index,
+                                row_index,
+                            },
+                            reason: shared.message.clone(),
+                            structured_error: Some(shared.clone()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    finish_rejected_records(
+        context,
+        batches,
+        unpublishable,
+        MessageErrorOperation::Publish,
+    )
+    .await?;
+    finish_rejected_records(context, batches, rejected, MessageErrorOperation::Encode).await?;
+    Ok(PackedBatchRecords {
+        records,
+        membership,
+    })
+}
+
+/// The one error every member of a candidate whose container failed is rejected with.
+///
+/// It names the emitter, the codec, the cause and the member count, and never a payload value.
+fn container_failure(
+    context: &EmitterSinkContext,
+    codec: &CompiledCodec,
+    batch: &EmitterPublishBatch,
+    member_count: usize,
+    error: BatchContainerError,
+) -> StructuredMessageError {
+    let code = match error {
+        BatchContainerError::NoOutput
+        | BatchContainerError::MultipleOutputs
+        | BatchContainerError::Evaluation => MessageErrorCode::Evaluation,
+        BatchContainerError::Unwritable { .. } => MessageErrorCode::Validation,
+    };
+    let noun = if member_count == 1 {
+        "message"
+    } else {
+        "messages"
+    };
+    structured_message_error(
+        batch.execution_now,
+        code,
+        format!(
+            "emitter '{}' codec '{}' {error} for a batch of {member_count} {noun}",
+            context.emitter.as_str(),
+            codec.name.as_str(),
+        ),
+        MessageErrorOperation::Encode,
+        None,
+        std::iter::empty(),
+    )
+}
+
+/// The key, headers and ordering group row `row_index` would be published under, or why its
+/// ordering group could not be evaluated.
+fn batch_envelope(
+    batch: &EmitterPublishBatch,
+    row_index: usize,
+) -> EmitterRuntimeResult<Result<BatchEnvelope, SqsMessageGroupError>> {
+    let key = batch
+        .batch
+        .keys
+        .get(row_index)
+        .ok_or_else(|| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "emitter batch row {row_index} has no branch key entry"
+            ))
+        })?
+        .as_ref()
+        .map(|key| key.as_str().to_string());
+    let headers = batch.headers_for_row(row_index).cloned().ok_or_else(|| {
+        Report::new(EmitterRuntimeError::EncodeBatch)
+            .attach_printable(format!("emitter batch row {row_index} has no header entry"))
+    })?;
+    let message_group = batch.sqs_message_groups.get(row_index).ok_or_else(|| {
+        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+            "emitter batch row {row_index} has no SQS FIFO group entry"
+        ))
+    })?;
+    let message_group = match message_group {
+        Ok(message_group) => message_group.clone(),
+        Err(error) => return Ok(Err(error.clone())),
+    };
+    Ok(Ok(BatchEnvelope {
+        key,
+        headers,
+        message_group,
+    }))
+}
+
+/// Packs `rows` of `batch`, off the reactor when the codec's transformations require it.
+async fn pack_pending_rows(
+    codec: Arc<CompiledCodec>,
+    policy: EmitterBatchPolicy,
+    context: &EmitterSinkContext,
+    batch: &EmitterPublishBatch,
+    rows: Vec<PackingRow>,
+) -> EmitterRuntimeResult<BufferedBatchPacking> {
+    let initialization_failed = |error: Report<CodecError>| {
+        error
+            .change_context(EmitterRuntimeError::EncodeBatch)
+            .attach_printable(format!(
+                "emitter '{}' failed to initialize columnar encoding",
+                context.emitter.as_str()
+            ))
+    };
+    if !codec.requires_blocking_encode() {
+        return pack_buffered_batch(&codec, &batch.batch.batch, rows, policy)
+            .map_err(initialization_failed);
+    }
+    let arrow_batch = batch.batch.batch.clone();
+    let codec_name = codec.name.as_str().to_string();
+    tokio::task::spawn_blocking(move || pack_buffered_batch(&codec, &arrow_batch, rows, policy))
+        .await
+        .map_err(|error| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "emitter '{}' blocking codec task for '{}' failed: {error}",
+                context.emitter.as_str(),
+                codec_name
+            ))
+        })?
+        .map_err(initialization_failed)
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_connector::SinkPublishError;
+
+    use super::*;
+
+    fn position(batch_index: usize, row_index: usize) -> SinkRecordPosition {
+        SinkRecordPosition {
+            batch_index,
+            row_index,
+        }
+    }
+
+    fn membership() -> BatchMembership {
+        let mut membership = BatchMembership::default();
+        membership.members.insert(
+            position(0, 0),
+            vec![position(0, 0), position(0, 1), position(0, 3)],
+        );
+        membership
+            .members
+            .insert(position(1, 2), vec![position(1, 2), position(1, 4)]);
+        membership
+    }
+
+    #[test]
+    fn a_confirmed_batch_record_delivers_every_member() {
+        let mut outcome = PerRecordOutcome::with_capacity(1);
+        outcome.deliver(position(1, 2));
+
+        let applied = membership().apply_to_members(outcome).into_parts();
+
+        assert_eq!(applied.delivered, vec![position(1, 2), position(1, 4)]);
+        assert!(applied.rejected.is_empty());
+        assert!(applied.infrastructure_error.is_none());
+    }
+
+    #[test]
+    fn a_rejected_batch_record_rejects_every_member_with_one_reference() {
+        let mut outcome = PerRecordOutcome::with_capacity(0);
+        outcome.reject(RejectedSinkRecord::external(
+            position(0, 0),
+            Timestamp::from_unix_nanos(1),
+            "refused".to_string(),
+        ));
+
+        let applied = membership().apply_to_members(outcome).into_parts();
+
+        let rejected = applied
+            .rejected
+            .iter()
+            .map(|rejected| rejected.position)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rejected,
+            vec![position(0, 0), position(0, 1), position(0, 3)]
+        );
+        let references = applied
+            .rejected
+            .iter()
+            .map(|rejected| rejected.error.reference)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(references.len(), 1);
+    }
+
+    #[test]
+    fn an_infrastructure_failure_and_unknown_positions_pass_through() {
+        let mut outcome = PerRecordOutcome::with_capacity(1);
+        outcome.deliver(position(2, 0));
+        outcome.fail(Report::new(SinkPublishError::Publish { sink: "test" }));
+
+        let applied = membership().apply_to_members(outcome).into_parts();
+
+        assert_eq!(applied.delivered, vec![position(2, 0)]);
+        assert!(applied.infrastructure_error.is_some());
+    }
 }
