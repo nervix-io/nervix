@@ -1,3 +1,4 @@
+pub(crate) mod client_conformance;
 pub(crate) mod client_wire_baseline;
 pub(crate) mod cluster;
 pub(crate) mod cluster_teardown;
