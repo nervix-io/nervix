@@ -657,6 +657,21 @@ checkpoint was confirmed by. What that means differs for guest state, for the so
   produces that output again. Delivery through a WASM processor is at least once; see
   [ACK Semantics And Effective Delivery](emitters.md#ack-semantics-and-effective-delivery).
 
+Where the checkpoint of the last callback had got to when its owner stopped decides which state the
+branch continues from. In every window the callback's output may already have been dispatched, and
+its inputs were not acknowledged, so a source with acknowledgements redelivers them:
+
+| The owner stopped | The branch continues from | A redelivered input |
+| --- | --- | --- |
+| After dispatching output, before the guest saved | The previous checkpoint | Is applied once more to state that never reflected it, and can emit its output again |
+| After the save was captured, before it reached stable storage | The previous checkpoint | Is applied once more to state that never reflected it, and can emit its output again |
+| After it reached the owner's stable storage, before every replica confirmed it | On restart, this checkpoint; after owner loss, whichever of the two checkpoints the promoted replica holds | Is applied again to state that may already reflect it |
+| After every replica confirmed it, before the acknowledgements were released | This checkpoint, on restart and after owner loss | Is applied again to state that already reflects it |
+
+A source that keeps redelivering an input while no owner accepts it can deliver it to the recovered
+branch more than once, so the number of times a redelivered input is applied is not fixed. A source
+without acknowledgements delivers nothing again, and the input is lost in the first two windows.
+
 A branch holds back the acknowledgements of one callback at a time, for no longer than the
 checkpoint deadline. Stopping a node ends a branch still waiting for its checkpoint after the
 branch's stop grace, and whatever it held is negatively acknowledged when the node's drain ends.

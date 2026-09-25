@@ -44,6 +44,16 @@ use super::{
 };
 use crate::{registry::ActiveGraph, runtime::LocalGraphDrainOutcome};
 
+/// How long a leader's automatic scheduling waits, after its reconciliation starts, for gossip to
+/// hear from or give up on every voter before it treats a voter it has not heard from as failed.
+///
+/// After a whole cluster restarts, the first node to lead can reach a quorum before gossip has
+/// heard from the other nodes, which are still starting. Failing their work over then would move it
+/// away from the node that holds its state and start that state afresh. Gossip exchanges state every
+/// half second, so the grace covers many rounds, and a voter that has not appeared by its end is
+/// treated as failed exactly as before.
+pub(in crate::application) const VOTER_OBSERVATION_GRACE: Duration = Duration::from_secs(10);
+
 pub(in crate::application) const LEADER_KAFKA_PARTITION_WATCH_INTERVAL: Duration =
     Duration::from_secs(1);
 
