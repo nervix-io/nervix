@@ -22,9 +22,16 @@ use nervix_vm::{
 use thiserror::Error;
 use triomphe::Arc;
 
+#[path = "vm/workloads.rs"]
+mod workloads;
+
+#[cfg(feature = "benchmark-allocations")]
+#[path = "vm/allocation_probe.rs"]
+mod allocation_probe;
+
 /// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
 /// amortization curve below it and the cost of the blocking hop above it.
-const SWEEP_ROW_COUNTS: [usize; 6] = [64, 256, 1_024, 4_096, 16_384, 65_536];
+const SWEEP_ROW_COUNTS: [usize; 8] = [1, 8, 64, 256, 1_024, 4_096, 16_384, 65_536];
 
 #[derive(Debug, Error)]
 enum BenchmarkProgramError {
@@ -2887,6 +2894,7 @@ criterion_group!(
     membership_kernel_benches,
     network_kernel_benches,
     json_extraction_benches,
-    string_search_benches
+    string_search_benches,
+    workloads::workload_shape_benches
 );
 criterion_main!(benches);

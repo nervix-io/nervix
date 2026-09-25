@@ -1073,11 +1073,11 @@ impl SessionServiceImpl {
             ))
             .await
             {
-                return command_error(error);
+                return command_error(format!("{error:#}"));
             }
             let prepared_udfs = match Box::pin(self.prepare_planned_domain_udfs(&planned)).await {
                 Ok(prepared) => prepared,
-                Err(error) => return command_error(error),
+                Err(error) => return command_error(format!("{error:#}")),
             };
             let base_classified_level = if let DomainStatus::Running = domain_state.status {
                 planned.quiesce().level()
@@ -1144,22 +1144,19 @@ impl SessionServiceImpl {
                     }
                 }
             } else if !is_noop {
-                match Box::pin(self.prepare_domain_schedule(
+                let prepared = Box::pin(self.prepare_domain_schedule(
                     &domain,
                     planned.candidate_graph(),
                     domain_state.config.placement,
                 ))
-                .await
-                {
-                    Ok(prepared) => ScheduleTransition {
-                        expected_schedule: prepared.inputs.schedule().cloned(),
-                        prepared_schedule: prepared.schedule,
-                        planned_relocations: prepared.relocations,
-                        inputs: Some(prepared.inputs),
-                        planning: Some(prepared.planning),
-                        transaction_eligibility: None,
-                    },
-                    Err(error) => return command_error(error),
+                .await;
+                ScheduleTransition {
+                    expected_schedule: prepared.inputs.schedule().cloned(),
+                    prepared_schedule: prepared.schedule,
+                    planned_relocations: prepared.relocations,
+                    inputs: Some(prepared.inputs),
+                    planning: Some(prepared.planning),
+                    transaction_eligibility: None,
                 }
             } else {
                 ScheduleTransition::default()

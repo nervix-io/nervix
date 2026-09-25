@@ -342,6 +342,57 @@ fails the domain build. A batching Sentry emitter requires its codec to declare 
 transformation. `ON EMITTING` keeps its meaning exactly: it runs per record and yields one value per
 record.
 
+The transformation replaces the format's [batch container](#batch-containers), so an array mapping,
+an envelope and a larger value are all ordinary uses:
+
+```nspl,ignore
+ON EMITTING BATCH '.'
+ON EMITTING BATCH 'map({id: .user_id})'
+ON EMITTING BATCH '{count: length, records: .}'
+```
+
+Its output is written by the codec's format writer and measured against the emitter's `MAX SIZE`
+like any container. Whatever it reports as a count, Nervix still counts, acknowledges and limits the
+source records that went in. It sees only the member values, never the source row, materialized
+state or headers, so it cannot reach a sensitive value that construction did not already leak.
+
+### Batch Containers
+
+An emitter that declares a [batching clause](emitters.md#batch-payloads) publishes several records
+as one payload. Each record contributes one member value, exactly the value it would have been
+published as alone: the wire object for `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` codecs, the
+`ON EMITTING` output for JAQ-native and protobuf codecs, and the complete RFC 5424 message for
+`SYSLOG`. Without an `ON EMITTING BATCH` transformation the members are written in the format's own
+container, by the same writer, with the same whitespace and number formatting, that writes one
+record:
+
+| Format | Container | Three members |
+| --- | --- | --- |
+| `WIRE JSON` | Array | `[{"seq":1},{"seq":2},{"seq":3}]` |
+| JAQ-native `JSON` | Array | `[{"seq": 1}, {"seq": 2}, {"seq": 3}]` |
+| `WIRE CBOR`, JAQ-native `CBOR` | Definite-length array | Major type 4 with the member count, then the members |
+| `YAML` | One document holding a sequence | `[{seq: 1}, {seq: 2}, {seq: 3}]` |
+| `WIRE AVRO` | One datum of type `array` whose items are the codec's record schema | One block: the member count, the members, then the terminating zero |
+| `TOML` | One document with a single key, `batch` | `[[batch]]` sections, one per member |
+| `XML` | One root element, `batch`, whose children are the members | `<batch><event seq="1"/><event seq="2"/><event seq="3"/></batch>` |
+| `PROTOBUF` | One instance of the codec's `BATCH MESSAGE` | The members in its single `repeated <MESSAGE>` field |
+| `SYSLOG` | One RFC 5424 message | The members' common header, the first member's timestamp, and a `MSG` that is the JSON array of the members' own messages |
+
+TOML and XML have no top-level sequence, so their containers use the single key and the single root
+element; an XML member must therefore be an element. A `SYSLOG` frame can say its header once only
+for members that share it, so records whose `PRI`, `HOSTNAME`, `APP-NAME`, `PROCID`, `MSGID` or
+`STRUCTURED-DATA` differ are published in separate frames, while each member keeps its own timestamp
+inside the array:
+
+```text
+<134>1 2026-09-24T10:15:00Z app-01 checkout - - - ["<134>1 2026-09-24T10:15:00Z app-01 checkout - - - order accepted","<134>1 2026-09-24T10:15:01Z app-01 checkout - - - order shipped"]
+```
+
+A consumer reads a container back with the same codec: a JAQ-native codec whose `ON INGESTION`
+unfolds the array, such as `'.[]'`, yields the members as separate messages within the
+[unfolding limit](#unfolding-payloads), and a protobuf codec whose `MESSAGE` is the batch message can
+unfold its repeated field, such as `'.events[]'`.
+
 ### Unfolding Payloads
 
 A JAQ-backed codec decodes a payload as a stream. The payload is parsed into the values its format

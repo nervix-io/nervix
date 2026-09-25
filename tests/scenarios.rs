@@ -13,7 +13,7 @@ use std::{
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
     sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -90,6 +90,7 @@ use sqlx::{
     },
 };
 use tempfile::TempDir;
+use tokio::io::AsyncBufReadExt as _;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
@@ -260,6 +261,10 @@ struct ScenarioWorld {
     last_publish_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    last_cli_output: Option<Output>,
+    cli_subscription_process: Option<tokio::process::Child>,
+    cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
+    cli_subscription_reader: Option<AbortOnDropHandle<()>>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
@@ -2444,6 +2449,177 @@ fn nspl_format_binary() -> PathBuf {
         "nervix-nspl-format must be built beside nervix-server; run `just test-scenarios`"
     );
     candidate
+}
+
+/// Resolves the public CLI built by `tests-deps` beside the server binary.
+fn scenario_cli_binary() -> PathBuf {
+    let candidate = Path::new(env!("CARGO_BIN_EXE_nervix-server"))
+        .parent()
+        .assured("the server binary has a parent directory")
+        .join("nervix-cli");
+    assert!(candidate.exists(), "tests-deps must build nervix-cli");
+    candidate
+}
+
+impl ScenarioWorld {
+    async fn execute_cli(&mut self, command: String, node: String, password: &str) {
+        let command = expand_placeholders(self, &command);
+        let node = expand_placeholders(self, &node);
+        let grpc_uri = self
+            .cluster()
+            .grpc_uri(&node)
+            .assured("the scenario names a cluster node");
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::process::Command::new(scenario_cli_binary())
+                .args([
+                    "--server",
+                    &grpc_uri,
+                    "--domain",
+                    &self.domain,
+                    "--username",
+                    TEST_AUTH_USERNAME,
+                    "--password",
+                    password,
+                    "--command",
+                    &command,
+                ])
+                .output(),
+        )
+        .await;
+        let output = match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => panic!("the scenario CLI process failed to start: {error}"),
+            Err(_) => panic!("the CLI command did not complete within 60 seconds"),
+        };
+        self.last_cli_output = Some(output);
+    }
+}
+
+#[when(expr = "the CLI executes {string} on node {string}")]
+async fn when_cli_executes_on_node(world: &mut ScenarioWorld, command: String, node: String) {
+    world.execute_cli(command, node, TEST_AUTH_PASSWORD).await;
+}
+
+#[when(expr = "the CLI executes {string} on node {string} with password {string}")]
+async fn when_cli_executes_with_password(
+    world: &mut ScenarioWorld,
+    command: String,
+    node: String,
+    password: String,
+) {
+    world.execute_cli(command, node, &password).await;
+}
+
+#[then(expr = "the CLI output contains {string}")]
+fn then_cli_output_contains(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(&expected),
+        "CLI status: {}; stdout: {stdout}; stderr: {stderr}",
+        output.status
+    );
+}
+
+#[then(expr = "the CLI fails with {string}")]
+fn then_cli_fails_with(world: &mut ScenarioWorld, expected: String) {
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains(&expected),
+        "CLI status: {}; stderr: {stderr}",
+        output.status
+    );
+}
+
+#[when(expr = "the CLI subscribes to relay {string} on node {string}")]
+async fn when_cli_subscribes_to_relay(world: &mut ScenarioWorld, relay: String, node: String) {
+    let relay = expand_placeholders(world, &relay);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let mut process = tokio::process::Command::new(scenario_cli_binary())
+        .args([
+            "--server",
+            &grpc_uri,
+            "--domain",
+            &world.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+            "subscribe",
+            "watch",
+            &relay,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|error| panic!("the scenario CLI process failed to start: {error}"));
+    let stdout = process
+        .stdout
+        .take()
+        .verified("the CLI process was started with piped stdout");
+    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let reader_lines = lines.clone();
+    let task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            tokio::task::consume_budget().await;
+            let mut retained = reader_lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if retained.len() == 256 {
+                retained.pop_front();
+            }
+            retained.push_back(line);
+        }
+    });
+    world.cli_subscription_reader = Some(AbortOnDropHandle::new(task));
+    world.cli_subscription_lines = Some(lines);
+    world.cli_subscription_process = Some(process);
+}
+
+#[then(expr = "the CLI subscription output eventually contains {string}")]
+async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let lines = world
+        .cli_subscription_lines
+        .as_ref()
+        .verified("the preceding step started the CLI subscription");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let found = {
+            let retained = lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retained.iter().any(|line| line.contains(&expected))
+        };
+        if found {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let retained = lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("CLI subscription output did not contain {expected:?}: {retained:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// The directory holding the NSPL files a formatter scenario writes.
@@ -11158,6 +11334,31 @@ async fn when_selector_is_pressed_with(world: &mut ScenarioWorld, selector: Stri
         .expect("selector must accept key press");
 }
 
+#[when(expr = "the web console submits {string} {int} times")]
+async fn when_web_console_submits_repeatedly(
+    world: &mut ScenarioWorld,
+    command: String,
+    count: usize,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .assured("the scenario opened the console before submitting commands");
+    let command = expand_placeholders(world, &command);
+    let input = page.locator(".prompt-row input");
+    for _ in 0..count {
+        tokio::task::consume_budget().await;
+        input
+            .fill(&command, None)
+            .await
+            .unwrap_or_else(|error| panic!("console input could not be filled: {error}"));
+        input
+            .press("Enter", None)
+            .await
+            .unwrap_or_else(|error| panic!("console input could not be submitted: {error}"));
+    }
+}
+
 #[when(expr = "selector {string} is typed with {string}")]
 async fn when_selector_is_typed_with(world: &mut ScenarioWorld, selector: String, value: String) {
     let page = world
@@ -11745,7 +11946,7 @@ async fn then_selector_contains_text_exactly_times(
     let page = world
         .browser_page
         .as_ref()
-        .expect("a browser page must be opened before selector assertions");
+        .assured("the scenario opened the console before asserting its elements");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
@@ -11768,6 +11969,29 @@ async fn then_selector_contains_text_exactly_times(
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[then(expr = "selector {string} has at most {int} elements")]
+async fn then_selector_has_at_most_elements(
+    world: &mut ScenarioWorld,
+    selector: String,
+    limit: usize,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .assured("the scenario opened the console before asserting its elements");
+    let selector = expand_placeholders(world, &selector);
+    let count = page
+        .locator(&selector)
+        .all_inner_texts()
+        .await
+        .unwrap_or_else(|error| panic!("selector text could not be read: {error}"))
+        .len();
+    assert!(
+        count <= limit,
+        "expected at most {limit} elements for '{selector}', got {count}"
+    );
 }
 
 #[then(expr = "selector {string} contains {string}")]
@@ -11922,6 +12146,33 @@ async fn then_selector_does_not_exist(world: &mut ScenarioWorld, selector: Strin
         if Instant::now() >= deadline {
             return;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "selector {string} eventually disappears")]
+async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let locator = page.locator(&selector);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let texts = locator
+            .all_inner_texts()
+            .await
+            .expect("selector text must be readable");
+        if texts.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected selector '{selector}' to disappear after its server acknowledgement, still \
+             showing {texts:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -19146,8 +19397,53 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     duration: String,
     #[step] step: &Step,
 ) {
+    receive_subscription_fragment_sets(world, &duration, step).await;
+}
+
+/// Like the step above, and every payload matching a fragment set carries the same value in the
+/// named JSON field, such as the one error reference the members of a failed batch share.
+#[then(
+    expr = "within {string} the relay subscription receives payloads containing all fragments \
+            that share one {string}"
+)]
+async fn then_within_duration_the_stream_subscription_receives_fragments_sharing_one_field(
+    world: &mut ScenarioWorld,
+    duration: String,
+    field: String,
+    #[step] step: &Step,
+) {
+    let matched = receive_subscription_fragment_sets(world, &duration, step).await;
+    let values = matched
+        .iter()
+        .map(|payload| {
+            let payload: serde_json::Value =
+                serde_json::from_str(payload).unwrap_or_else(|error| {
+                    panic!("subscription payload {payload:?} is not JSON: {error}")
+                });
+            payload
+                .get(&field)
+                .cloned()
+                .unwrap_or_else(|| panic!("subscription payload {payload} has no field {field:?}"))
+        })
+        .collect::<Vec<_>>();
+    let Some(first) = values.first() else {
+        panic!("no subscription payload matched the expected fragment sets");
+    };
+    assert!(
+        values.iter().all(|value| value == first),
+        "payloads matching the fragment sets carry different {field:?} values: {values:?}"
+    );
+}
+
+/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
+/// payload, and returns the payloads that matched, in the order they arrived.
+async fn receive_subscription_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    step: &Step,
+) -> Vec<String> {
     let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        humantime::parse_duration(duration).expect("step duration must be a valid duration");
     let expected_fragment_sets = docstring(step)
         .lines()
         .map(str::trim)
@@ -19173,6 +19469,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     let deadline = Instant::now() + duration;
     let mut remaining = expected_fragment_sets;
     let mut observed = Vec::new();
+    let mut matched = Vec::new();
 
     while !remaining.is_empty() {
         let now = Instant::now();
@@ -19204,8 +19501,10 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
             .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)))
         {
             remaining.remove(index);
+            matched.push(payload);
         }
     }
+    matched
 }
 
 #[then("the relay subscription does not receive a payload")]
@@ -21379,21 +21678,92 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_payload
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
-    let mut remaining = BTreeMap::<String, usize>::new();
+    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
     for line in docstring(step).lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let payload = expand_placeholders(world, line);
-        *remaining.entry(payload).or_insert(0) += 1;
+        *expected.entry(payload.into_bytes()).or_insert(0) += 1;
     }
+    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+}
+
+/// Like the step above, for payloads that are not all text. Each docstring line is `text:`
+/// followed by the exact payload text, or `hex:` followed by the exact payload bytes in hex.
+#[then(expr = "within {string} the observed broker receives exactly these encoded payloads")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded_payloads(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let payload = if let Some(text) = line.strip_prefix("text:") {
+            expand_placeholders(world, text).into_bytes()
+        } else if let Some(hex) = line.strip_prefix("hex:") {
+            decode_hex_payload(hex)
+        } else {
+            panic!("encoded payload line must start with 'text:' or 'hex:', found {line:?}");
+        };
+        *expected.entry(payload).or_insert(0) += 1;
+    }
+    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+}
+
+fn decode_hex_payload(hex: &str) -> Vec<u8> {
+    let digits = hex
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<Vec<_>>();
+    assert!(
+        digits.len() % 2 == 0,
+        "hex payload must hold an even number of digits: {hex:?}"
+    );
+    digits
+        .chunks(2)
+        .map(|pair| {
+            let pair = pair.iter().collect::<String>();
+            u8::from_str_radix(&pair, 16)
+                .unwrap_or_else(|error| panic!("invalid hex byte {pair:?} in {hex:?}: {error}"))
+        })
+        .collect()
+}
+
+fn describe_broker_payload(payload: &[u8]) -> String {
+    let hex = payload
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "{:?} (hex {hex}, {} bytes)",
+        String::from_utf8_lossy(payload),
+        payload.len()
+    )
+}
+
+async fn receive_exactly_these_broker_payloads(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    mut remaining: BTreeMap<Vec<u8>, usize>,
+) {
+    let duration =
+        humantime::parse_duration(duration).expect("step duration must be a valid duration");
     assert!(
         !remaining.is_empty(),
         "step docstring must contain at least one expected payload"
     );
+    let describe_remaining = |remaining: &BTreeMap<Vec<u8>, usize>| {
+        remaining
+            .iter()
+            .map(|(payload, count)| format!("{count} x {}", describe_broker_payload(payload)))
+            .collect::<Vec<_>>()
+    };
 
     let deadline = Instant::now() + duration;
     let mut observed = Vec::new();
@@ -21402,47 +21772,50 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_payload
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out waiting for broker payloads; expected remaining {remaining:?}, observed \
-             {observed:?}"
+            "timed out waiting for broker payloads; expected remaining {:?}, observed {observed:?}",
+            describe_remaining(&remaining)
         );
-        let payload = world
+        let message = world
             .broker_observer
             .as_mut()
             .expect("a broker observer must exist before assertion")
-            .try_next_payload(deadline.saturating_duration_since(now))
+            .try_next_message(deadline.saturating_duration_since(now))
             .await
             .expect("failed while waiting for exact broker payloads");
-        let Some(payload) = payload else {
+        let Some(message) = message else {
             panic!(
-                "timed out waiting for broker payloads; expected remaining {remaining:?}, \
-                 observed {observed:?}"
+                "timed out waiting for broker payloads; expected remaining {:?}, observed \
+                 {observed:?}",
+                describe_remaining(&remaining)
             );
         };
-        let Some(count) = remaining.get_mut(&payload) else {
+        let Some(count) = remaining.get_mut(&message.bytes) else {
             panic!(
-                "observed an unexpected broker payload {payload:?} ({} bytes); expected remaining \
-                 {remaining:?}, observed before it {observed:?}",
-                payload.len()
+                "observed an unexpected broker payload {}; expected remaining {:?}, observed \
+                 before it {observed:?}",
+                describe_broker_payload(&message.bytes),
+                describe_remaining(&remaining)
             );
         };
         *count -= 1;
         if *count == 0 {
-            remaining.remove(&payload);
+            remaining.remove(&message.bytes);
         }
-        world.last_broker_payload = Some(payload.clone());
-        observed.push(payload);
+        world.last_broker_payload = Some(message.payload.clone());
+        observed.push(describe_broker_payload(&message.bytes));
     }
 
     let extra = world
         .broker_observer
         .as_mut()
         .expect("a broker observer must exist before assertion")
-        .try_next_payload(Duration::from_secs(2))
+        .try_next_message(Duration::from_secs(2))
         .await
         .expect("failed while checking for an unexpected broker payload");
     assert!(
         extra.is_none(),
-        "observed a broker payload beyond the expected ones: {extra:?}; observed {observed:?}"
+        "observed a broker payload beyond the expected ones: {:?}; observed {observed:?}",
+        extra.map(|message| describe_broker_payload(&message.bytes))
     );
 }
 
@@ -21964,6 +22337,9 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 ));
 
                 world.enter_phase(ScenarioPhase::Stopping, "");
+                world.cli_subscription_reader = None;
+                world.cli_subscription_process = None;
+                world.cli_subscription_lines = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;

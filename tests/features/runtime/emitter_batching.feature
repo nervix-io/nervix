@@ -543,23 +543,23 @@ Feature: Emitter batching configuration
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
       """
-      {"seq":1,"note":"exactly-fit13"}
+      {"seq":1,"note":"exactly-fit"}
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
       """
-      {"seq":2,"note":"one-byte-over!"}
+      {"seq":2,"note":"one-byte-ovr"}
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
       """
-      {"seq":3,"note":"quote\"escaped"}
+      {"seq":3,"note":"quote\"escap"}
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
       """
-      {"seq":4,"note":"ééééééx"}
+      {"seq":4,"note":"éééééx"}
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
       """
-      {"seq":5,"note":"éééééééx"}
+      {"seq":5,"note":"éééééé"}
       """
     And http payload is posted to host "http-{{test_id}}.example.com" path "/events"
       """
@@ -567,9 +567,9 @@ Feature: Emitter batching configuration
       """
     Then within "30s" the observed broker receives exactly these payloads
       """
-      {"seq":1,"note":"exactly-fit13"}
-      {"seq":4,"note":"ééééééx"}
-      {"seq":6,"note":"ok"}
+      [{"seq":1,"note":"exactly-fit"}]
+      [{"seq":4,"note":"éééééx"}]
+      [{"seq":6,"note":"ok"}]
       """
     And within "30s" the relay subscription receives payloads containing all fragments
       """

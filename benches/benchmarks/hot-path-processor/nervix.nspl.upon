@@ -41,7 +41,7 @@ CREATE JUNCTION benchmark_transform_{{ lane }}
   FROM benchmark_ingested_{{ lane }}
   UNBRANCHED
   TO benchmark_records
-    SET value = upper(input.value)
+    SET value = {{ parameters.transform_expression }}
     FLUSH IMMEDIATE
     ON MESSAGE ERROR LOG;
 {% endfor %}

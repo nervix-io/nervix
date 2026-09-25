@@ -1,6 +1,6 @@
 {
   "as_casts": 3,
-  "bare_error_signatures": 779,
+  "bare_error_signatures": 778,
   "bare_unwrap_and_expect": 0,
   "clamped_arithmetic": 10,
   "combinator_control_flow": 0,
@@ -10,7 +10,7 @@
   "files_over_3000_lines": 10,
   "model_matches_in_data_plane": 79,
   "parser_imports_outside_edges": 0,
-  "result_string_errors": 57,
+  "result_string_errors": 13,
   "string_node_ids": 0,
   "testing_feature_struct_fields": 0,
   "write_once_rwlock_fields": 0

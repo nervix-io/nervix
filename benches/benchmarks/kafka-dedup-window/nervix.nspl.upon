@@ -4,14 +4,16 @@ CREATE SCHEMA benchmark_record (
   value STRING
 );
 CREATE SCHEMA benchmark_summary (
-  record_count I64
+  record_count I64{% if parameters.sketch_enabled %},
+  distinct_estimate I64{% endif %}
 );
 CREATE WIRE JSON SCHEMA benchmark_record_wire MODE STRICT (
   key string,
   value string
 );
 CREATE WIRE JSON SCHEMA benchmark_summary_wire MODE STRICT (
-  record_count integer
+  record_count integer{% if parameters.sketch_enabled %},
+  distinct_estimate integer{% endif %}
 );
 CREATE CODEC benchmark_record_codec
   FROM WIRE JSON SCHEMA benchmark_record_wire
@@ -63,9 +65,12 @@ CREATE WINDOW PROCESSOR benchmark_window_{{ lane }}
   FROM benchmark_unique_{{ lane }}
   WIDTH {{ parameters.window_messages }} MESSAGES {{ parameters.window_max_delay }} DURATION
   STEP {{ parameters.window_messages }} MESSAGES {{ parameters.window_max_delay }} DURATION
+  {% if parameters.sketch_enabled %}MAX STATE SIZE {{ parameters.sketch_state_size }}
+  {% endif %}
   UNBRANCHED
   TO benchmark_summaries_{{ lane }}
-    SET record_count = COUNT(input.key)
+    SET record_count = COUNT(input.key){% if parameters.sketch_enabled %},
+        distinct_estimate = APPROX_COUNT_DISTINCT(input.key, {{ parameters.sketch_precision }}){% endif %}
     ON MESSAGE ERROR LOG;
 CREATE EMITTER kafka_out_{{ lane }}
   FROM benchmark_summaries_{{ lane }}

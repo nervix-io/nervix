@@ -338,6 +338,8 @@ struct SummaryObservation {
     partition: i32,
     offset: i64,
     record_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    distinct_estimate: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -467,6 +469,9 @@ impl DrainState {
                 partition: message.partition(),
                 offset: message.offset(),
                 record_count,
+                distinct_estimate: output
+                    .get("distinct_estimate")
+                    .and_then(serde_json::Value::as_u64),
             });
         }
     }
@@ -1453,6 +1458,7 @@ mod tests {
                 offset,
                 record_count: u64::try_from(offset + 1)
                     .assured("the test iterates positive offsets below forty"),
+                distinct_estimate: Some(37),
             });
         }
 
@@ -1476,5 +1482,12 @@ mod tests {
         assert_eq!(observations.recent.len(), RECENT_SUMMARY_LIMIT);
         assert_eq!(observations.recent.front().map(|item| item.offset), Some(8));
         assert_eq!(observations.recent.back().map(|item| item.offset), Some(39));
+        assert_eq!(
+            observations
+                .recent
+                .back()
+                .and_then(|item| item.distinct_estimate),
+            Some(37)
+        );
     }
 }

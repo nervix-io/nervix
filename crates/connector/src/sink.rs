@@ -39,7 +39,9 @@ pub enum BrokerPublishingMode {
 }
 
 /// Where one record sits in a sink write: its source batch and row within that batch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Positions order by batch and then by row, which is the order the host hands records over in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SinkRecordPosition {
     pub batch_index: usize,
     pub row_index: usize,

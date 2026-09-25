@@ -941,7 +941,10 @@ impl SessionServiceImpl {
             Ok(operations) => operations,
             Err(error) => {
                 let result = self
-                    .command_with_transaction_status(command_error(error), subscriptions)
+                    .command_with_transaction_status(
+                        command_error(error.to_string()),
+                        subscriptions,
+                    )
                     .await;
                 return Ok(CommandResponse::executed(result));
             }
@@ -950,7 +953,9 @@ impl SessionServiceImpl {
         let persistent_request = if is_transaction_request {
             let domain = match self.resolve_transaction_domain(req.domain.as_ref()).await {
                 Ok(domain) => domain,
-                Err(error) => return Ok(CommandResponse::executed(command_error(error))),
+                Err(error) => {
+                    return Ok(CommandResponse::executed(command_error(error.to_string())));
+                }
             };
             let target = if matches!(
                 operations.first(),

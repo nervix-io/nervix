@@ -55,11 +55,12 @@ Build configuration in dependency order:
    already bind the resource. The target and all replacements validate together; `LATEST` is
    provisional at queue admission and resolved again at `COMMIT`. Rotating a VHOST certificate
    this way is dynamic: every node's HTTPS listener presents the new bundle and ingestion does not
-   pause. Changing VHOST hostnames, adding or removing `WITH TLS`, or binding another TLS resource
-   pauses the domain. Moving a WASM processor usage also discards the saved guest state of every one
-   of its branches, because a new module cannot restore what the module it replaces wrote; an
-   uncompilable candidate module rejects the whole rebinding with every binding and its saved state
-   still in place.
+   pause. A TLS binding error identifies the failing file kind without exposing its path or
+   certificate material. Changing VHOST hostnames, adding or removing `WITH TLS`, or binding
+   another TLS resource pauses the domain. Moving a WASM processor usage also discards the saved
+   guest state of each branch, because a new module cannot restore what the module it replaces
+   wrote; an uncompilable candidate module rejects the whole rebinding with every binding and its
+   saved state still in place.
 3. Define internal schemas, branch-key schemas, branches, wire schemas, and codecs.
 4. Define clients, signaling protocols, virtual hosts/endpoints, lookup models, and trusted Roto
    UDFs as needed.

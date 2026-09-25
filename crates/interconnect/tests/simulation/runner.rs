@@ -98,6 +98,20 @@ impl SimulationConfig {
     where
         F: for<'a> FnOnce(&mut turmoil::Sim<'a>) + Send + 'static,
     {
+        self.run_with_control(scenario, setup, |_| {})
+    }
+
+    /// Observe each completed scheduler step to inject host lifecycle events at a fixture milestone.
+    pub fn run_with_control<F, C>(
+        self,
+        scenario: &'static str,
+        setup: F,
+        control: C,
+    ) -> Result<(), SimulationError>
+    where
+        F: for<'a> FnOnce(&mut turmoil::Sim<'a>) + Send + 'static,
+        C: for<'a> FnMut(&mut turmoil::Sim<'a>) + Send + 'static,
+    {
         for (field, duration) in [
             ("simulated_duration", self.bounds.simulated_duration),
             ("tick", self.bounds.tick),
@@ -120,7 +134,7 @@ impl SimulationConfig {
 
         let (sender, receiver) = mpsc::sync_channel(1);
         let scheduler = std::thread::spawn(move || {
-            let result = self.run_on_scheduler(scenario, setup);
+            let result = self.run_on_scheduler(scenario, setup, control);
             sender
                 .send(result)
                 .discarded("the wall-time escape already returned to the test caller");
@@ -155,9 +169,15 @@ impl SimulationConfig {
         }
     }
 
-    fn run_on_scheduler<F>(self, scenario: &'static str, setup: F) -> Result<(), SimulationError>
+    fn run_on_scheduler<F, C>(
+        self,
+        scenario: &'static str,
+        setup: F,
+        mut control: C,
+    ) -> Result<(), SimulationError>
     where
         F: for<'a> FnOnce(&mut turmoil::Sim<'a>),
+        C: for<'a> FnMut(&mut turmoil::Sim<'a>),
     {
         let mut builder = turmoil::Builder::new();
         builder
@@ -173,7 +193,7 @@ impl SimulationConfig {
         for _ in 0..self.bounds.max_steps.get() {
             match simulation.step() {
                 Ok(true) => return Ok(()),
-                Ok(false) => {}
+                Ok(false) => control(&mut simulation),
                 Err(error) => {
                     return Err(SimulationError::Failed {
                         scenario,
