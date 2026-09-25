@@ -2,12 +2,14 @@
 //!
 //! Layer: test harness outside the product layer order.
 //!
-//! - **Owns.** Same-process relay retry, cancellation, and Arrow delivery assertions.
+//! - **Owns.** Relay retry, cancellation, restart fencing, and Arrow delivery assertions.
 //! - **Depends on.** The transport fixture, production relay APIs, and Turmoil network faults.
 //! - **Must not know.** Runtime graphs, persistent ACK stores, or connector behavior.
 
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+
 use nervix_interconnect::{RelayAdmissionDecision, RelayAdmissionStatus};
-use nervix_models::{RemoteAckOutcome, RemoteAckResolution};
+use nervix_models::{CoordinationIdentity, RemoteAckOutcome, RemoteAckResolution};
 
 use super::*;
 
@@ -53,11 +55,15 @@ impl RelayCase {
 }
 
 fn payload(case: RelayCase, sender: &Transport) -> RelayPayload {
+    relay_payload(case.delivery(), case.ack_id(), sender)
+}
+
+fn relay_payload(delivery: RelayDelivery, ack_id: u64, sender: &Transport) -> RelayPayload {
     let batch_ipc = Executor::default()
         .try_charge_owned(MemoryClass::Relay, arrow_batch())
         .assured("the Arrow fixture fits the relay memory budget");
     RelayPayload {
-        delivery: case.delivery(),
+        delivery,
         kind: RelayPayloadKind::Routed,
         domain: DomainName::parse("simulated").assured("fixture domain is valid"),
         relay: RelayName::parse("records").assured("fixture relay is valid"),
@@ -66,7 +72,7 @@ fn payload(case: RelayCase, sender: &Transport) -> RelayPayload {
         metadata: Vec::new(),
         acks: Vec::new(),
         admission: Some(RemoteAckRegistration {
-            ack_id: case.ack_id(),
+            ack_id,
             reply_node_id: sender.node_id().clone(),
         }),
     }
@@ -386,6 +392,307 @@ fn relay_reconciliation_and_cancellation_survive_lost_replies() {
         assert_eq!(
             first, replay,
             "relay case {case:?} seed {seed} did not replay"
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RestartMilestone {
+    BodyReceived,
+    RuntimeAdmitted,
+}
+
+impl RestartMilestone {
+    fn name(self) -> &'static str {
+        match self {
+            Self::BodyReceived => "receiver restart after relay body receipt",
+            Self::RuntimeAdmitted => "receiver restart after runtime admission",
+        }
+    }
+}
+
+fn restarted_receiver_fences_unresolved_relay(
+    seed: u64,
+    milestone: RestartMilestone,
+) -> Vec<TraceEvent> {
+    const FIRST: RelayDelivery = RelayDelivery {
+        channel_incarnation: [81; 16],
+        sequence: 0,
+    };
+    const FRESH: RelayDelivery = RelayDelivery {
+        channel_incarnation: [82; 16],
+        sequence: 0,
+    };
+
+    let authority = Authority::new();
+    let server_credentials = authority.issue("server");
+    let client_credentials = authority.issue("client");
+    let (ready_tx, ready_rx) = watch::channel(0_usize);
+    let (fresh_tx, fresh_rx) = watch::channel(false);
+    let (done_tx, done_rx) = watch::channel(false);
+    let (finished_tx, finished_rx) = watch::channel(0_usize);
+    let epochs = StdArc::new(parking_lot::Mutex::new(Vec::<CoordinationIdentity>::new()));
+    let incarnations = StdArc::new(AtomicUsize::new(0));
+    let crash_phase = StdArc::new(AtomicU8::new(0));
+    let trace = SemanticTrace::default();
+    let server_trace = trace.clone();
+    let client_trace = trace.clone();
+    let server_epochs = epochs.clone();
+    let client_epochs = epochs.clone();
+    let server_incarnations = incarnations.clone();
+    let server_crash_phase = crash_phase.clone();
+    let control_crash_phase = crash_phase.clone();
+    let mut scenario_config = config(seed);
+    scenario_config.bounds.simulated_duration = Duration::from_secs(90);
+    let result = scenario_config.run_with_control(
+        milestone.name(),
+        move |simulation| {
+            let server_finished = finished_tx.clone();
+            simulation.host("server", move || {
+                let incarnation = server_incarnations.fetch_add(1, Ordering::SeqCst);
+                let credentials = server_credentials.clone();
+                let ready = ready_tx.clone();
+                let mut fresh = fresh_rx.clone();
+                let mut done = done_rx.clone();
+                let finished = server_finished.clone();
+                let epochs = server_epochs.clone();
+                let crash_phase = server_crash_phase.clone();
+                let trace = server_trace.clone();
+                async move {
+                    let result = HostSupervisor::run(async move {
+                        let process_seed = seed
+                            .checked_add(
+                                u64::try_from(incarnation).assured("two incarnations fit in u64"),
+                            )
+                            .assured("fixture seed fits");
+                        let (server, mut incoming) =
+                            bind_with_incoming("server", credentials, process_seed).await;
+                        let identity = server
+                            .next_coordination_identity()
+                            .assured("fixture process can allocate its identity");
+                        epochs.lock().push(identity);
+                        let live = ["client", "server"]
+                            .into_iter()
+                            .map(|name| {
+                                ClusterNodeName::parse(name).assured("fixture node name is valid")
+                            })
+                            .collect::<BTreeSet<_>>();
+                        server.replace_live_nodes(&live);
+                        ready.send_modify(|count| {
+                            *count = count.checked_add(1).assured("two incarnations start")
+                        });
+                        if incarnation == 0 {
+                            let envelope = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
+                                .await
+                                .assured("the first relay reaches the receiver")
+                                .assured("the first receiver queue remains open");
+                            let Envelope::RelayPayload(ref body) = envelope.envelope else {
+                                panic!("the first receiver gets a relay body");
+                            };
+                            assert_eq!(body.delivery, FIRST);
+                            assert_eq!(decode_arrow(&body.batch_ipc), 3);
+                            turmoil::partition_oneway("server", "client");
+                            if let RestartMilestone::RuntimeAdmitted = milestone {
+                                assert_eq!(
+                                    envelope
+                                        .relay_admission
+                                        .assured("first relay has admission token")
+                                        .admit(),
+                                    RelayAdmissionDecision::Admitted
+                                );
+                                trace.record(
+                                    "server",
+                                    "first Arrow relay admitted; response hidden",
+                                );
+                            } else {
+                                trace.record(
+                                    "server",
+                                    "first Arrow body received; admission pending",
+                                );
+                            }
+                            crash_phase.store(1, Ordering::SeqCst);
+                            std::future::pending::<()>().await;
+                        }
+                        assert_eq!(incarnation, 1, "only one receiver restart is scheduled");
+                        wait_for(&mut fresh).await;
+                        let envelope = tokio::time::timeout(HOST_DEADLINE, incoming.recv())
+                            .await
+                            .assured("fresh relay reaches the restarted receiver")
+                            .assured("restarted receiver queue remains open");
+                        let Envelope::RelayPayload(ref body) = envelope.envelope else {
+                            panic!("restarted receiver gets a relay body");
+                        };
+                        assert_eq!(body.delivery, FRESH, "stale relay was not replayed");
+                        assert_eq!(decode_arrow(&body.batch_ipc), 3);
+                        assert_eq!(
+                            envelope
+                                .relay_admission
+                                .assured("fresh relay has admission token")
+                                .admit(),
+                            RelayAdmissionDecision::Admitted
+                        );
+                        trace.record("server", "fresh Arrow relay admitted after restart");
+                        wait_for(&mut done).await;
+                        assert!(
+                            incoming.try_recv().is_err(),
+                            "only the fresh relay was admitted"
+                        );
+                        server.shutdown().await;
+                        Ok::<(), io::Error>(())
+                    })
+                    .await;
+                    if incarnation == 1 {
+                        finished.send_modify(|count| {
+                            *count = count.checked_add(1).assured("two hosts finish")
+                        });
+                    }
+                    result
+                }
+            });
+            let client_finished = finished_tx.clone();
+            simulation.host("client", move || {
+                let credentials = client_credentials.clone();
+                let mut ready = ready_rx.clone();
+                let fresh = fresh_tx.clone();
+                let done = done_tx.clone();
+                let finished = client_finished.clone();
+                let epochs = client_epochs.clone();
+                let trace = client_trace.clone();
+                async move {
+                    let result = HostSupervisor::run(async move {
+                        let (client, _incoming) = bind_with_incoming(
+                            "client",
+                            credentials,
+                            seed.checked_add(2).assured("fixture seed fits"),
+                        )
+                        .await;
+                        let peer =
+                            ClusterNodeName::parse("server").assured("fixture node name is valid");
+                        client.replace_live_nodes(&BTreeSet::from([
+                            client.node_id().clone(),
+                            peer.clone(),
+                        ]));
+                        wait_for_count(&mut ready, 1).await;
+                        register_peer(&client, "server").await;
+                        let sending = client.clone();
+                        let target = peer.clone();
+                        let first = tokio::spawn(async move {
+                            sending
+                                .send(
+                                    &target,
+                                    Envelope::RelayPayload(relay_payload(FIRST, 81, &sending)),
+                                )
+                                .await
+                        });
+                        wait_for_count(&mut ready, 2).await;
+                        let first_outcome = first.await.assured("first relay task joins");
+                        assert!(first_outcome.is_err(), "crash hides the first response");
+                        {
+                            let identities = epochs.lock();
+                            assert_eq!(identities.len(), 2);
+                            assert_eq!(identities[0].coordinator(), identities[1].coordinator());
+                            assert_ne!(
+                                identities[0].process_epoch(),
+                                identities[1].process_epoch()
+                            );
+                        }
+                        trace.record(
+                            "client",
+                            "same node restarted with a distinct process epoch",
+                        );
+                        client.replace_outbound_targets(&Default::default());
+                        register_peer(&client, "server").await;
+                        wait_for_connection(&client, &peer).await;
+                        let error = match client
+                            .send(
+                                &peer,
+                                Envelope::RelayPayload(relay_payload(FIRST, 81, &client)),
+                            )
+                            .await
+                        {
+                            Ok(()) => panic!("the retained relay cannot cross the receiver epoch"),
+                            Err(error) => error,
+                        };
+                        assert!(
+                            matches!(error, TransportError::RelayIndeterminate),
+                            "{error:?}"
+                        );
+                        trace.record("client", "retained relay returned indeterminate");
+                        fresh.send_replace(true);
+                        client
+                            .send(
+                                &peer,
+                                Envelope::RelayPayload(relay_payload(FRESH, 82, &client)),
+                            )
+                            .await
+                            .assured("fresh relay reaches the restarted listener");
+                        trace.record("client", "fresh relay body response received");
+                        assert_eq!(
+                            client
+                                .relay_admission_status(&peer, FRESH)
+                                .await
+                                .assured("fresh admission status crosses the restarted transport"),
+                            RelayAdmissionStatus::Admitted
+                        );
+                        trace.record("client", "fresh relay and authenticated status succeeded");
+                        done.send_replace(true);
+                        client.shutdown().await;
+                        Ok::<(), io::Error>(())
+                    })
+                    .await;
+                    finished.send_modify(|count| {
+                        *count = count.checked_add(1).assured("two hosts finish")
+                    });
+                    result
+                }
+            });
+            simulation.client("observer", async move {
+                let mut finished = finished_rx;
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while *finished.borrow() < 2 {
+                        tokio::task::consume_budget().await;
+                        finished
+                            .changed()
+                            .await
+                            .assured("fixture hosts remain alive");
+                    }
+                })
+                .await
+                .assured("restart fixture hosts finish within the simulated deadline");
+                Ok(())
+            });
+        },
+        move |simulation| {
+            if control_crash_phase
+                .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                simulation.crash("server");
+                simulation.repair_oneway("server", "client");
+                simulation.bounce("server");
+            }
+        },
+    );
+    assert!(
+        result.is_ok(),
+        "milestone {milestone:?} seed {seed}: {result:?}\n{}",
+        trace.render()
+    );
+    assert_eq!(crash_phase.load(Ordering::SeqCst), 2);
+    trace.events()
+}
+
+#[test]
+fn relay_restart_fences_unresolved_delivery_and_accepts_fresh_work() {
+    for (milestone, seed) in [
+        (RestartMilestone::BodyReceived, 81),
+        (RestartMilestone::RuntimeAdmitted, 83),
+    ] {
+        let first = restarted_receiver_fences_unresolved_relay(seed, milestone);
+        let replay = restarted_receiver_fences_unresolved_relay(seed, milestone);
+        assert_eq!(
+            first, replay,
+            "receiver restart at {milestone:?} did not replay deterministically"
         );
     }
 }
