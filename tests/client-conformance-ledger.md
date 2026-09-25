@@ -70,7 +70,10 @@ expected report:
   values on both sides of the JavaScript safe-integer boundary, an absent and a present-zero optional
   value, multi-byte text with an embedded NUL, bytes that are not UTF-8, empty text and bytes,
   `-0.0`, the smallest subnormal and the largest finite floats by their bits, the extreme DATETIME
-  nanoseconds, and a sensitive field that is always redacted.
+  nanoseconds, and a sensitive field that is always redacted. The ingestor passes integer, text,
+  bytes, datetime, optional and sensitive fields through `coalesce`, `concat`, hex encode/decode,
+  and `nullif` calls before the client reads them, so the report covers function output through
+  the final transport as well as the transport's scalar encoding.
 - A closure: deleting the subscription completes.
 
 Beyond the shared report, each kind of probe checks what only it can reach:

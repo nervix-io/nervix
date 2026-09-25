@@ -77,16 +77,16 @@ Feature: Cross-language client conformance
               i16v = message.i16v,
               u32v = message.u32v,
               i32v = message.i32v,
-              u64v = message.u64v,
-              i64v = message.i64v,
+              u64v = coalesce(message.u64v, 0 AS U64),
+              i64v = coalesce(message.i64v, 0 AS I64),
               f32v = message.f32v,
               f64v = message.f64v,
               flag = message.flag,
-              text = message.text,
-              raw = message.raw,
-              at = message.at,
-              maybe = message.maybe,
-              secret = message.secret
+              text = concat(message.text, ''),
+              raw = hex_decode(hex_encode(message.raw)),
+              at = coalesce(message.at, now()),
+              maybe = nullif(message.maybe, -1),
+              secret = concat(message.secret, '')
           BRANCHED BY by_tenant
           SET tenant = message.tenant
           FLUSH IMMEDIATE
