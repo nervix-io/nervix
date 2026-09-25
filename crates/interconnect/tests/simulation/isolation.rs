@@ -1691,9 +1691,21 @@ where
     }
 }
 
-fn stalled_peer_plan(seed: u64) -> Vec<TraceEvent> {
+fn isolation_config(seed: u64) -> SimulationConfig {
+    let mut configuration = config(seed);
+    configuration.bounds = SimulationBounds {
+        simulated_duration: Duration::from_secs(120),
+        tick: POLL,
+        max_steps: NonZeroUsize::new(120_000).assured("the fixture step limit is nonzero"),
+        wall_duration: Duration::from_secs(120),
+    };
+    configuration
+}
+
+fn stalled_peer_plan(run: ScenarioRun) -> Result<(), SimulationError> {
+    let seed = run.seed();
+    let trace = run.trace();
     let authority = Authority::new();
-    let trace = SemanticTrace::default();
     let (finished_tx, finished_rx) = watch::channel(0_usize);
     let (stalled_commands, stalled_receiver) = mpsc::channel(1);
     let (healthy_commands, healthy_receiver) = mpsc::channel(1);
@@ -1741,14 +1753,7 @@ fn stalled_peer_plan(seed: u64) -> Vec<TraceEvent> {
             trace: trace.clone(),
         },
     ];
-    let mut configuration = config(seed);
-    configuration.bounds = SimulationBounds {
-        simulated_duration: Duration::from_secs(120),
-        tick: POLL,
-        max_steps: NonZeroUsize::new(120_000).assured("the fixture step limit is nonzero"),
-        wall_duration: Duration::from_secs(120),
-    };
-    let result = configuration.run("stalled peer isolation", move |simulation| {
+    run.simulate(move |simulation| {
         for peer in peers {
             let name = peer.name;
             let plan = StdArc::new(Mutex::new(Some(peer)));
@@ -1772,23 +1777,17 @@ fn stalled_peer_plan(seed: u64) -> Vec<TraceEvent> {
             .assured("the stalled-peer plan finishes within its simulated budget");
             Ok(())
         });
-    });
-    assert!(
-        result.is_ok(),
-        "stalled peer isolation seed {seed}: {result:?}\n{}",
-        trace.render()
-    );
-    trace.events()
+    })
 }
 
 #[test]
 fn stalled_peer_cannot_consume_unrelated_capacity_or_leak_reservations() {
-    for seed in [91, 92, 93] {
-        let first = stalled_peer_plan(seed);
-        let replay = stalled_peer_plan(seed);
-        assert_eq!(
-            first, replay,
-            "stalled peer isolation seed {seed} did not replay"
-        );
-    }
+    let scenario = Scenario {
+        name: "stalled peer isolation",
+        fault_plan: "one peer accepts shared management work and never answers while another \
+                     keeps exchanging every traffic class with the hub; the hub then holds the \
+                     stalled link, lets that peer depart and tears it down",
+        seeds: &[91, 92, 93],
+    };
+    scenario.check(isolation_config, stalled_peer_plan);
 }
