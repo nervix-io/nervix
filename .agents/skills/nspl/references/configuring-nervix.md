@@ -169,7 +169,10 @@ relay. Do not use them to scan across branches.
 - ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
   <bytes>` before `FLUSH`; any other emitter may, with `MAX MESSAGES` from 1 to 65,536, a positive
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
-  emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec.
+  emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec. `MAX SIZE` is the
+  exact encoded payload length, including escaping and any `ON EMITTING` expansion; a record-sink
+  emitter routes a record whose payload would exceed it to `ON MESSAGE ERROR` as a `validation`
+  error, so leave headroom for the largest record rather than sizing it to a typical one.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
