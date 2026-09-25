@@ -38,8 +38,9 @@ use crate::registry::{
             effective_emitter_filter_map_schema, effective_ingestor_output_filter_map_schema,
             ensure_ingestor_timestamp_source, ensure_signaling_protocol_is_valid,
             validate_emitter_batch_container, validate_emitter_publishing_contract,
-            validate_endpoint_paths, validate_ingestor_filter_where_for_internal_schemas,
-            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
+            validate_endpoint_paths, validate_http_request_expressions,
+            validate_ingestor_filter_where_for_internal_schemas, validate_ingestor_source,
+            validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -1361,6 +1362,13 @@ impl DomainState {
                         emitter,
                         producer_schema,
                     )?;
+                    validate_http_request_expressions(
+                        domain,
+                        identifier,
+                        models,
+                        emitter,
+                        producer_schema,
+                    )?;
                     validate_from_where_for_internal_schemas(
                         domain,
                         identifier,
@@ -1370,7 +1378,7 @@ impl DomainState {
                         &emitter.from.r#where,
                     )?;
 
-                    if let Some(codec_name) = &emitter.encode_using_codec {
+                    if let Some(codec_name) = emitter.body.codec() {
                         let codec = expect_kind(
                             domain,
                             identifier,
@@ -1463,7 +1471,7 @@ impl DomainState {
                         graph.add_edge(catalog_client, source, EdgeKind::RequiredBy);
                     }
 
-                    let output_schema = if let Some(codec_name) = &emitter.encode_using_codec {
+                    let output_schema = if let Some(codec_name) = emitter.body.codec() {
                         schema_for_codec_model(domain, identifier, models, codec_name)?
                     } else {
                         producer_schema
@@ -1476,7 +1484,7 @@ impl DomainState {
                         producer_schema,
                         output_schema,
                     )?;
-                    if let Some(codec_name) = &emitter.encode_using_codec {
+                    if let Some(codec_name) = emitter.body.codec() {
                         let consumer_schema =
                             schema_for_codec_model(domain, identifier, models, codec_name)?;
                         ensure_internal_schema_compatibility_with_policy(

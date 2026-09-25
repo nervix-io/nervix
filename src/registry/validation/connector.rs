@@ -127,18 +127,35 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         )));
     }
 
-    let requires_codec = emitter.sink.requires_codec();
-    if requires_codec && emitter.encode_using_codec.is_none() {
-        return Err(invalid(format!(
-            "{} emitter requires ENCODE USING",
-            emitter.sink.transport_label()
-        )));
-    }
-    if !requires_codec && emitter.encode_using_codec.is_some() {
-        return Err(invalid(format!(
-            "{} emitter does not support ENCODE USING",
-            emitter.sink.transport_label()
-        )));
+    match (emitter.sink.as_ref(), &emitter.body) {
+        (
+            EmitSink::Http { .. },
+            nervix_models::EmitterBody::Codec { .. } | nervix_models::EmitterBody::WithoutBody,
+        ) => {}
+        (EmitSink::Http { .. }, nervix_models::EmitterBody::Values) => {
+            return Err(invalid(
+                "HTTP emitter requires ENCODE USING or WITHOUT BODY".to_string(),
+            ));
+        }
+        (_, nervix_models::EmitterBody::Codec { .. }) if emitter.sink.requires_codec() => {}
+        (_, nervix_models::EmitterBody::Values) if !emitter.sink.requires_codec() => {}
+        (_, nervix_models::EmitterBody::WithoutBody) => {
+            return Err(invalid(
+                "WITHOUT BODY is only supported by HTTP emitters".to_string(),
+            ));
+        }
+        (_, nervix_models::EmitterBody::Values) => {
+            return Err(invalid(format!(
+                "{} emitter requires ENCODE USING",
+                emitter.sink.transport_label()
+            )));
+        }
+        (_, nervix_models::EmitterBody::Codec { .. }) => {
+            return Err(invalid(format!(
+                "{} emitter does not support ENCODE USING",
+                emitter.sink.transport_label()
+            )));
+        }
     }
 
     emitter
@@ -224,7 +241,8 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
                 domain, identifier, signal, values, attributes, resource,
             )?;
         }
-        EmitSink::Kafka { .. }
+        EmitSink::Http { .. }
+        | EmitSink::Kafka { .. }
         | EmitSink::Pulsar { .. }
         | EmitSink::RabbitMq { .. }
         | EmitSink::Redis { .. }
@@ -513,6 +531,101 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "SQS FIFO GROUP expression requires an exact non-sensitive STRING value: {}",
+                error.message
+            ),
+        })
+    })?;
+
+    Ok(())
+}
+
+pub(in crate::registry) fn validate_http_request_expressions(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    emitter: &CreateEmitter,
+    input_schema: &CreateSchema,
+) -> Result<(), Report<RegistryError>> {
+    let EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
+        return Ok(());
+    };
+
+    let mut fields = Vec::with_capacity(2);
+    let mut assignments = Vec::with_capacity(2);
+    for (name, expression) in [("method", method), ("path", path)] {
+        let target = FieldName::parse(name).assured("HTTP request field names are valid literals");
+        fields.push(SchemaField {
+            name: target.clone(),
+            ty: ParseAsType::String,
+            optional: false,
+            sensitive: false,
+        });
+        assignments.push(Assignment {
+            target: AssignmentTarget::bare(target),
+            value: expression.clone(),
+        });
+    }
+    let output_schema = CreateSchema {
+        name: SchemaName::parse("http_request")
+            .assured("HTTP request schema name is a valid literal"),
+        fields,
+    };
+    let input_arrow_schema = arrow_schema_for_internal_schema(input_schema);
+    let output_arrow_schema = arrow_schema_for_internal_schema(&output_schema);
+    let parsed = lower_transforming_route(
+        &RouteConstruction {
+            assignments,
+            ..RouteConstruction::default()
+        },
+        input_arrow_schema.as_ref(),
+        output_arrow_schema.as_ref(),
+    )
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("HTTP METHOD or PATH expression is invalid: {reason}"),
+        })
+    })?;
+    let original_parsed = parsed.clone();
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let mut bindings = vec![
+        readonly_binding_for_internal_schema("input", input_schema),
+        writable_binding_for_internal_schema("output", &output_schema),
+    ];
+    let local_namespaces = HashSet::from_iter(["input".to_string(), "output".to_string()]);
+    bindings.extend(referenced_materialized_stream_bindings(
+        domain,
+        identifier,
+        models,
+        &original_parsed,
+        &local_namespaces,
+        "HTTP request expression",
+    )?);
+    bindings.extend(lookup_hash_map_bindings(lookup_fields));
+    compile_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        output_arrow_schema,
+        schema_sensitivity_for_internal_schema(&output_schema),
+        bindings,
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                allow_sensitive_output: false,
+                ..CompileOptions::default()
+            },
+        ),
+    )
+    .map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "HTTP METHOD and PATH require exact non-sensitive STRING values: {}",
                 error.message
             ),
         })
@@ -858,16 +971,21 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
 ) -> Result<CreateSchema, Report<RegistryError>> {
-    let codec_route = emitter.encode_using_codec.is_some();
-    if !codec_route
-        && (emitter.construction.inherit.is_some()
-            || !emitter.construction.assignments.is_empty()
-            || !emitter.construction.invocations.is_empty())
-    {
+    let codec_route = emitter.body.codec().is_some();
+    let has_output_construction =
+        emitter.construction.inherit.is_some() || !emitter.construction.assignments.is_empty();
+    let invalid_direct_construction = match emitter.body {
+        nervix_models::EmitterBody::Codec { .. } => false,
+        nervix_models::EmitterBody::WithoutBody => has_output_construction,
+        nervix_models::EmitterBody::Values => {
+            has_output_construction || !emitter.construction.invocations.is_empty()
+        }
+    };
+    if invalid_direct_construction {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "direct emitter routes support VALUES and WHERE only".to_string(),
+            reason: "emitter body selection does not support the retained construction".to_string(),
         }));
     }
     if emitter.construction.is_empty() && !codec_route {
@@ -1284,7 +1402,7 @@ mod tests {
         };
         let identifier = ModelName::from(&emitter.name);
         let models = ModelIndex::new();
-        emitter.encode_using_codec = None;
+        emitter.body = nervix_models::EmitterBody::Values;
         emitter.publishing_mode = EmitterPublishingMode::RequestAck {
             retry_policy: RetryPolicy {
                 backoff: "10ms".to_string(),
@@ -1314,7 +1432,9 @@ mod tests {
             queue: "events".to_string(),
             fifo_group: None,
         };
-        emitter.encode_using_codec = Some(named("event_codec"));
+        emitter.body = nervix_models::EmitterBody::Codec {
+            codec: named("event_codec"),
+        };
         emitter.publishing_mode = EmitterPublishingMode::SqsBatch {
             retry_policy: RetryPolicy {
                 backoff: "10ms".to_string(),
@@ -1400,7 +1520,7 @@ mod tests {
             unreachable!("emitter helper must build an emitter model")
         };
         let identifier = ModelName::from(&emitter.name);
-        emitter.encode_using_codec = None;
+        emitter.body = nervix_models::EmitterBody::Values;
         emitter.publishing_mode = EmitterPublishingMode::RequestAck {
             retry_policy: RetryPolicy {
                 backoff: "10ms".to_string(),
@@ -1606,7 +1726,9 @@ mod tests {
         let mut emitter = CreateEmitter {
             name: named("emit"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("events_codec")),
+            body: nervix_models::EmitterBody::Codec {
+                codec: named("events_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("zeromq_main"),
             }),

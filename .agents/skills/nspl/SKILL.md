@@ -350,7 +350,12 @@ activation; a newly effective hard colocation requirement can relocate runtime n
   ClickHouse, put `timeout_ms` in the referenced client CONFIG when the request needs an explicit
   bound; the emitter's declared retry policy owns pacing after that request fails. OTEL clients
   must also select `grpc` or `http/protobuf` explicitly with the required `protocol` key.
-- Write an emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
+- For an HTTP emitter, write `TO HTTP <client> METHOD <string_expression> PATH
+  <string_expression> MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>` followed by exactly
+  one of `ENCODE USING <codec>` or `WITHOUT BODY`. Do not add an ACK window, `ACK TIMEOUT`,
+  `NO_ACK` or `BATCH`; see [Emitters](../../../docs/src/emitters.md#http-request-configuration)
+  for bodyless construction and ALTER rules.
+- Write a supported emitter's optional `BATCH MAX MESSAGES <1..65536> MAX SIZE <bytes>` after the complete
   sink clause and route construction, before `FLUSH`; it is required for ClickHouse, Postgres,
   MySQL, and MongoDB emitters and limited to `256KiB` for SQS. A batching Sentry emitter needs a
   codec with `ON EMITTING BATCH`, and a batching protobuf codec needs `BATCH MESSAGE`. For

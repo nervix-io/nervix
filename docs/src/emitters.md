@@ -100,7 +100,7 @@ only at the external export boundary.
 
 ## Publishing modes
 
-Every emitter sink requires `MODE <body>` as its final sink subclause, immediately before
+Every emitter sink requires `MODE <body>` before its body selection, immediately before
 `ENCODE USING` when the sink uses a codec. There is no implicit mode, confirmation window, ACK
 timeout, or retry cadence. `SHOW CREATE EMITTER` and `DESCRIBE EMITTER` render the complete mode.
 
@@ -141,6 +141,40 @@ discard a record.
 | OTEL | `ACK` | Successful OTLP Export response; `partial_success` is acknowledged with a warning |
 | ClickHouse, Postgres, MySQL, MongoDB | `ACK` | Successful insert/write result |
 | Iceberg | `ACK` | Successful catalog commit |
+| HTTP | `ACK` | Complete successful response headers |
+
+### HTTP request configuration
+
+An HTTP emitter uses an existing `TYPE HTTP` client and declares the request method, path and body
+selection in this order:
+
+```nspl,ignore
+TO HTTP <client>
+  METHOD <string_expression>
+  PATH <string_expression>
+  MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+  (ENCODE USING <codec> | WITHOUT BODY)
+```
+
+`METHOD` and `PATH` are structured expressions. They may read qualified source fields such as
+`input.method` and `input.path`; parentheses, arrays and string literals keep clause words inside
+the expression. `MODE ACK` has no acknowledgement window or `ACK TIMEOUT`, and `NO_ACK` is not
+available. The ordinary route-local `FLUSH` clause is required.
+
+`ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
+absent request body and permits `WHERE` and `INVOKE` but no `INHERIT`, `SET` or `VALUES`. HTTP
+emitters publish one request per eligible source record, so they do not accept the optional
+`BATCH` clause. `SHOW CREATE EMITTER` preserves both request expressions and the explicit body
+selection.
+
+HTTP emitter configuration can currently be created, altered and inspected. Outbound request
+delivery is not yet available.
+
+`ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
+`SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
+USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `SET TO HTTP ...
+WITHOUT BODY` replacement. The retained construction and error scopes must be valid for the new
+selection.
 
 While confirmations or infrastructure retries are pending, the emitter stops consuming from its
 relays and keeps upstream ACK leases alive. `FLUSH` still controls when and how much work enters a
@@ -180,6 +214,7 @@ CREATE EMITTER kafka_notifications
 | --- | --- |
 | Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry, Syslog, OTEL, Iceberg | Optional |
 | ClickHouse, Postgres, MySQL, MongoDB | Required: a database write always carries several rows |
+| HTTP | Unavailable: each request contains one source record |
 
 A statement is rejected, naming the offending value, when:
 
