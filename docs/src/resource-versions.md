@@ -527,7 +527,7 @@ each kind of ending.
 | `DESCRIBE RESOURCE <name> VERSION <n>` | The version's checksums, file count, size, and entries; one line per node with its topology, replica state, incarnation, checksum, verification time, source node, and error, taken from its live incarnation or, for a node that is not live, from its latest one; and the models pinned to that version, or `none`. |
 | `SHOW CREATE` | The stored number for every binding. A statement written with `LATEST` renders the number it resolved to. |
 | `DESCRIBE HASH MAP` | `resource: <name>@<n>` for the loaded version, together with the path, codec, placement, key field, and entry count. |
-| `DESCRIBE WASM PROCESSOR` | The module's `resource:` and pinned `resource version:`. |
+| `DESCRIBE WASM PROCESSOR` | The module's `resource:` and pinned `resource version:` beside the current guest-state generation and checkpoint status. A completed reset of the previous binding is not presented as a reset of the newly pinned module. |
 | Command results | `uploaded resource version <n>`, every `resolved VERSION LATEST ...` line, and the rebinding summary with one `from`/`to` line per selected usage. |
 | Web console | The highest completed version of each resource in the sidebar and, in the resource dialog, the models bound to each version. See [Web Console](./client-tools-web-console.md#uploading-resources). |
 | Server log | `rebound resource usages` at `info` once the leader has applied a rebinding's step, before the step's outcome is recorded, with the domain, resource, target version, and the counts of selected and changed usages; `installed HTTPS listener TLS configuration` at `info` whenever a node's listener starts presenting a changed set of certificates. |

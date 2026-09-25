@@ -259,6 +259,11 @@ instance and all timeout handles it owned. A fresh initialization may request it
 no deadline armed by the replaced instance can fire in the new state lifetime even though domain
 logical time continued across the reset.
 
+Checkpoint and reset inspection samples existing state without taking a domain execution snapshot
+or advancing the logical frontier. A reported checkpoint revision and reset generation describe
+durability and lifetime identity, not domain time; neither may establish or alter the clock used
+by a later guest callback.
+
 An NSPL reset uses this same clock contract. Repeating its durable command reference resumes the
 same guest-state lifetime replacement without changing the domain clock mapping.
 

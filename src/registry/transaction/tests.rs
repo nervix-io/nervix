@@ -273,7 +273,11 @@ fn reset_planning_rejects_a_second_identity_while_the_first_is_publishing() {
         .scope
         .resolve(branching)
         .assured("the fixture selects the declared branch field");
-    assert!(node.begin_wasm_state_reset(first_request, selected.scope()));
+    assert!(node.begin_wasm_state_reset(
+        first_request,
+        selected.scope(),
+        nervix_models::WasmStateResetReason::Transaction,
+    ));
     captured.operation_references[0] = CommandExecutionReference::parse("reset-filter-again")
         .assured("the second fixed reference satisfies the command identity grammar");
 
