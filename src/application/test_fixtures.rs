@@ -357,7 +357,7 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
         ModelKind::Emitter => Model::Emitter(CreateEmitter {
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
-            encode_using_codec: None,
+            body: nervix_models::EmitterBody::Values,
             sink: Box::new(EmitSink::Syslog {
                 client: named("syslog_forwarder"),
             }),

@@ -5,8 +5,8 @@ use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use meticulous::OptionExt as _;
 use nervix_models::{
     AckMode, AlterEmitter, AlterEmitterOperation, BatchMessageLimit, ClickHouseValueMapping,
-    CodecName, CreateEmitter, CreateStatement, EmitSink, EmitterBatchPolicy, EmitterName,
-    EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    CodecName, CreateEmitter, CreateStatement, EmitSink, EmitterBatchPolicy, EmitterBody,
+    EmitterName, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
     MaterializedStateDependency, MongoDbConflictAction, MySqlConflictAction,
     OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
     PayloadSizeLimit, PostgresConflictAction, ProcessorInputs, SqsFifoGroup,
@@ -16,13 +16,14 @@ use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator,
-        boxed_choice, byte_size_lit, channel_ref, client_ref, codec_ref, collect_for,
-        collection_ref, duration_lit, emitter_ack_window, emitter_name, emitter_ref, flush_each,
-        from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
-        queue_ref, relay_ref, render_expression_tokens, retry_policy, route_construction,
-        string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref, u64_value,
-        where_expression, where_only_route_construction, word_raw,
+        bodyless_route_construction, boxed_choice, byte_size_lit, channel_ref, client_ref,
+        codec_ref, collect_for, collection_ref, duration_lit, emitter_ack_window, emitter_name,
+        emitter_ref, expression_before_clause, flush_each, from_relay_clauses,
+        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
+        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
+        render_expression_tokens, retry_policy, route_construction, string_lit, subject_ref,
+        suggest_from, table_ref, tok, topic_ref, u64_value, where_expression,
+        where_only_route_construction, word_raw,
     },
 };
 
@@ -888,6 +889,83 @@ fn encode_using_clause<'src>()
         .boxed()
 }
 
+fn method_boundary(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Word(Word::KnownWord {
+            iden: Identifier::Path,
+            ..
+        })
+    )
+}
+
+fn path_boundary(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Word(Word::KnownWord {
+            iden: Identifier::Mode,
+            ..
+        })
+    )
+}
+
+fn http_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Http)
+        .ignore_then(client_ref())
+        .then_ignore(kw(Identifier::Method))
+        .then(expression_before_clause(method_boundary))
+        .then_ignore(kw(Identifier::Path))
+        .then(expression_before_clause(path_boundary))
+        .then_ignore(kw(Identifier::Mode))
+        .then(request_ack_publishing_mode())
+        .map(
+            |(((client, method), path), publishing_mode)| SinkWithPublishingMode {
+                sink: EmitSink::Http {
+                    client,
+                    method,
+                    path,
+                },
+                publishing_mode,
+            },
+        )
+        .boxed()
+}
+
+fn http_body_selection<'src>()
+-> impl Parser<'src, &'src [Token], EmitterBody, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        encode_using_clause().map(|codec| EmitterBody::Codec { codec }),
+        kw_phrase2(Identifier::Without, Identifier::Body).to(EmitterBody::WithoutBody),
+    ))
+    .boxed()
+}
+
+fn http_create_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
+    let encoded = http_sink_parser()
+        .then(encode_using_clause())
+        .then(route_construction().or_not())
+        .map(|((head, codec), construction)| ParsedSink {
+            sink: head.sink,
+            publishing_mode: head.publishing_mode,
+            body: EmitterBody::Codec { codec },
+            construction,
+            batch: None,
+        });
+    let bodyless = http_sink_parser()
+        .then_ignore(kw_phrase2(Identifier::Without, Identifier::Body))
+        .then(bodyless_route_construction().or_not())
+        .map(|(head, construction)| ParsedSink {
+            sink: head.sink,
+            publishing_mode: head.publishing_mode,
+            body: EmitterBody::WithoutBody,
+            construction,
+            batch: None,
+        });
+    choice((encoded, bodyless)).boxed()
+}
+
 /// A sink together with the publishing mode written after it, which every sink accepts.
 struct SinkWithPublishingMode {
     sink: EmitSink,
@@ -922,7 +1000,7 @@ fn encoded_sink<'src>(
         .map(|((sink, codec), construction)| ParsedSink {
             sink: sink.sink,
             publishing_mode: sink.publishing_mode,
-            codec: Some(codec),
+            body: EmitterBody::Codec { codec },
             construction,
             batch: None,
         })
@@ -940,7 +1018,7 @@ fn codec_free_sink<'src>(
         .map(|(sink, construction)| ParsedSink {
             sink: sink.sink,
             publishing_mode: sink.publishing_mode,
-            codec: None,
+            body: EmitterBody::Values,
             construction,
             batch: None,
         })
@@ -972,7 +1050,7 @@ fn batch_optional<'src>(
 struct ParsedSink {
     sink: EmitSink,
     publishing_mode: EmitterPublishingMode,
-    codec: Option<CodecName>,
+    body: EmitterBody,
     construction: Option<nervix_models::RouteConstruction>,
     batch: Option<EmitterBatchPolicy>,
 }
@@ -980,6 +1058,7 @@ struct ParsedSink {
 fn emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
+        http_create_sink_parser(),
         batch_optional(codec_free_sink(sink_with_publishing_mode(
             otel_emit_sink_parser(),
             request_ack_publishing_mode(),
@@ -1110,6 +1189,16 @@ pub fn alter_emitter_parser<'src>()
         .map(|sink| AlterEmitterOperation::SetSink {
             sink: Box::new(sink.sink),
             publishing_mode: sink.publishing_mode,
+            body: None,
+        });
+    let set_http_sink = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(http_sink_parser())
+        .then(http_body_selection())
+        .map(|(sink, body)| AlterEmitterOperation::SetSink {
+            sink: Box::new(sink.sink),
+            publishing_mode: sink.publishing_mode,
+            body: Some(body),
         });
     let set_client = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Client))
@@ -1154,6 +1243,7 @@ pub fn alter_emitter_parser<'src>()
         drop_from,
         alter_from,
         set_sink,
+        set_http_sink,
         set_client,
         set_encode,
         drop_encode,
@@ -1195,7 +1285,7 @@ struct EmitterHead {
     materialized_state: Vec<MaterializedStateDependency>,
     sink: EmitSink,
     publishing_mode: EmitterPublishingMode,
-    encode_using_codec: Option<CodecName>,
+    body: EmitterBody,
     construction: Option<nervix_models::RouteConstruction>,
     batch: Option<EmitterBatchPolicy>,
 }
@@ -1224,7 +1314,7 @@ pub fn create_emitter_parser<'src>()
                 materialized_state,
                 sink: parsed_sink.sink,
                 publishing_mode: parsed_sink.publishing_mode,
-                encode_using_codec: parsed_sink.codec,
+                body: parsed_sink.body,
                 construction: parsed_sink.construction,
                 batch: parsed_sink.batch,
             }
@@ -1245,7 +1335,7 @@ pub fn create_emitter_parser<'src>()
                     materialized_state,
                     sink,
                     publishing_mode,
-                    encode_using_codec,
+                    body,
                     construction,
                     batch,
                 } = head;
@@ -1253,7 +1343,7 @@ pub fn create_emitter_parser<'src>()
                     CreateEmitter {
                         name,
                         from,
-                        encode_using_codec,
+                        body,
                         sink: Box::new(sink),
                         batch,
                         flush_policy,
@@ -1333,6 +1423,99 @@ mod tests {
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn http_emitter_body_modes_roundtrip_with_qualified_request_fields() {
+        for body in [
+            "ENCODE USING body_codec INHERIT ALL",
+            "WITHOUT BODY INVOKE write_header('X-Request', input.method)",
+        ] {
+            let source = format!(
+                "CREATE EMITTER send FROM source TO HTTP api METHOD input.method PATH input.path \
+                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s {body} FLUSH IMMEDIATE ON MESSAGE \
+                 ERROR LOG ON GENERAL ERROR LOG;"
+            );
+            let parsed = parse_create_emitter(&source).expect("HTTP emitter should parse");
+            let canonical = parsed
+                .to_canonical_nspl()
+                .expect("HTTP emitter should format");
+            let reparsed = parse_create_emitter(&canonical).expect("canonical HTTP should parse");
+            assert_eq!(parsed, reparsed);
+        }
+    }
+
+    #[test]
+    fn http_emitter_requires_ordered_request_and_body_clauses() {
+        for sink in [
+            "HTTP api PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY",
+            "HTTP api METHOD 'GET' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY",
+            "HTTP api METHOD 'GET' PATH '/' MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s \
+             WITHOUT BODY",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY \
+             BACKOFF 250ms MAX 30s WITHOUT BODY",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
+             BODY INHERIT ALL",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
+             BODY SET id = input.id",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
+             BODY VALUES { 'id' = input.id }",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE \
+             USING body_codec WITHOUT BODY",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
+             BODY BATCH MAX MESSAGES 2 MAX SIZE 1MiB",
+        ] {
+            let source = format!(
+                "CREATE EMITTER send FROM source TO {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                 ON GENERAL ERROR LOG;"
+            );
+            assert!(parse_create_emitter(&source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn http_emitter_completion_follows_clause_order() {
+        let prefix = "CREATE EMITTER send FROM source TO HTTP api ";
+        assert_eq!(suggest_create_emitter(prefix, prefix.len()), vec!["METHOD"]);
+        let mode = format!("{prefix}METHOD 'POST' PATH input.path MODE ");
+        assert_eq!(suggest_create_emitter(&mode, mode.len()), vec!["ACK"]);
+        let body = format!("{mode}ACK RETRY POLICY BACKOFF 250ms MAX 30s ");
+        let suggestions = suggest_create_emitter(&body, body.len());
+        assert!(suggestions.contains(&"ENCODE USING".to_string()));
+        assert!(suggestions.contains(&"WITHOUT BODY".to_string()));
+        assert!(!suggestions.contains(&"BATCH".to_string()));
+    }
+
+    #[test]
+    fn http_alter_sink_roundtrips_both_explicit_body_selections() {
+        for body in ["ENCODE USING body_codec", "WITHOUT BODY"] {
+            let source = format!(
+                "ALTER EMITTER send SET TO HTTP api METHOD input.method PATH input.path MODE ACK \
+                 RETRY POLICY BACKOFF 250ms MAX 30s {body};"
+            );
+            let parsed = parse_alter_emitter(&source).expect("HTTP replacement should parse");
+            let canonical = parsed
+                .to_canonical_nspl()
+                .expect("HTTP replacement should format");
+            let reparsed =
+                parse_alter_emitter(&canonical).expect("canonical replacement should parse");
+            assert_eq!(parsed, reparsed);
+        }
+    }
+
+    #[test]
+    fn http_request_expressions_keep_clause_words_inside_qualified_fields_and_groups() {
+        let source = "CREATE EMITTER send FROM source TO HTTP api METHOD input.path PATH \
+                      coalesce(input.mode, 'MODE ACK') MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+                      30s WITHOUT BODY WHERE input.path = '/ready' INVOKE \
+                      write_header('X-Method', input.method) FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                      ON GENERAL ERROR LOG;";
+        let parsed = parse_create_emitter(source).expect("qualified clause words should parse");
+        let canonical = parsed
+            .to_canonical_nspl()
+            .expect("request expressions should format");
+        assert_eq!(parse_create_emitter(&canonical).expect("roundtrip"), parsed);
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -1930,10 +2113,7 @@ mod tests {
             "p99"
         );
         assert_eq!(
-            parsed
-                .encode_using_codec
-                .as_ref()
-                .map(|codec| codec.as_str()),
+            parsed.body.body.codec().map(|codec| codec.as_str()),
             Some("my_codec")
         );
         assert_eq!(
@@ -2082,7 +2262,7 @@ mod tests {
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::ClickHouse {
@@ -2148,7 +2328,7 @@ mod tests {
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(parsed.mode, AckMode::Detached);
         assert_eq!(
             parsed.sink.as_ref(),
@@ -2500,7 +2680,7 @@ mod tests {
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Postgres {
@@ -2738,7 +2918,7 @@ mod tests {
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::MySql {
@@ -2914,7 +3094,7 @@ mod tests {
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::MongoDb {

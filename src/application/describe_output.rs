@@ -14,10 +14,10 @@ use nervix_interconnect::{
     DataflowNodeStatusEnvelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
 };
 use nervix_models::{
-    BranchSelection, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
-    CreateWindowProcessor, DomainName, EmitSink, IcebergCatalog, IngestSource,
-    IngestTimestampSource, KafkaOffsetMode, Model, ModelName, MongoDbConflictAction,
+    BranchSelection, CanonicalNsplError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
+    CreateReorderer, CreateWindowProcessor, DomainName, EmitSink, EmitterBody, IcebergCatalog,
+    IngestSource, IngestTimestampSource, KafkaOffsetMode, Model, ModelName, MongoDbConflictAction,
     MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
     ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ScheduledNode,
     WasmStateResetScope, expression_to_nspl, ingest_quiesce_to_nspl,
@@ -702,7 +702,7 @@ pub(in crate::application) fn format_emitter_describe_output(
     emitter: &CreateEmitter,
     scheduled_node: Option<&ScheduledNode>,
     status: Option<&DataflowNodeStatusEnvelope>,
-) -> String {
+) -> error_stack::Result<String, CanonicalNsplError> {
     let name = name.into();
     let mut lines = vec![
         format!("emitter: {}", name.as_str()),
@@ -745,12 +745,20 @@ pub(in crate::application) fn format_emitter_describe_output(
         ),
         format!(
             "codec: {}",
-            match emitter.encode_using_codec.as_ref() {
+            match emitter.body.codec() {
                 Some(name) => name.as_str(),
                 None => "none",
             }
         ),
-        format!("sink: {}", format_emit_sink(&emitter.sink)),
+        format!(
+            "body: {}",
+            match &emitter.body {
+                EmitterBody::Codec { .. } => "codec",
+                EmitterBody::WithoutBody => "without body",
+                EmitterBody::Values => "values",
+            }
+        ),
+        format!("sink: {}", format_emit_sink(&emitter.sink)?),
         match &emitter.batch {
             Some(batch) => format!("batch: {batch}"),
             None => "batch: none".to_string(),
@@ -769,11 +777,21 @@ pub(in crate::application) fn format_emitter_describe_output(
             }
         ),
     ]);
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
-fn format_emit_sink(sink: &EmitSink) -> String {
-    match sink {
+fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
+    Ok(match sink {
+        EmitSink::Http {
+            client,
+            method,
+            path,
+        } => format!(
+            "HTTP client={} method={} path={}",
+            client.as_str(),
+            expression_to_nspl(method).map_err(error_stack::Report::new)?,
+            expression_to_nspl(path).map_err(error_stack::Report::new)?
+        ),
         EmitSink::Kafka { client, topic } => {
             format!("KAFKA client={} topic={}", client.as_str(), topic.as_str())
         }
@@ -944,7 +962,7 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 max_commit_size
             )
         }
-    }
+    })
 }
 
 pub(in crate::application) fn format_window_processor_describe_output(

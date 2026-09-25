@@ -1689,7 +1689,9 @@ mod tests {
                     model: nervix_models::Model::Emitter(CreateEmitter {
                         name: named("orders_emitter"),
                         from: ProcessorInputs::single(named("aggregated_orders")),
-                        encode_using_codec: Some(named("orders_codec")),
+                        body: nervix_models::EmitterBody::Codec {
+                            codec: named("orders_codec"),
+                        },
                         sink: Box::new(EmitSink::ZeroMq {
                             client: named("zmq_client"),
                         }),

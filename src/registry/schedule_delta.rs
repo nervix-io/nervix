@@ -612,7 +612,9 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("event_sink"),
             from: nervix_models::ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("event_codec")),
+            body: nervix_models::EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink_a"),
             }),

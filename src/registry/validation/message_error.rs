@@ -224,8 +224,8 @@ pub(in crate::registry) fn validate_model_message_error_policies(
         }
         Model::Emitter(node) => {
             let partial_output = node
-                .encode_using_codec
-                .as_ref()
+                .body
+                .codec()
                 .map(|codec| schema_for_codec_model(domain, identifier, models, codec))
                 .transpose()?;
             for input_relay in node.from.relays() {

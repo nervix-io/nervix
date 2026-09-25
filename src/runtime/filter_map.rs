@@ -2342,7 +2342,9 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("kafka_notifications"),
             from: ProcessorInputs::single(named("notifications")),
-            encode_using_codec: Some(named("notification_codec")),
+            body: nervix_models::EmitterBody::Codec {
+                codec: named("notification_codec"),
+            },
             sink: Box::new(EmitSink::Kafka {
                 client: named("kafka_main"),
                 topic: named("notifications_out"),
@@ -2464,7 +2466,9 @@ mod tests {
         CreateEmitter {
             name: named("sqs_notifications"),
             from: ProcessorInputs::single(named("notifications")),
-            encode_using_codec: Some(named("notification_codec")),
+            body: nervix_models::EmitterBody::Codec {
+                codec: named("notification_codec"),
+            },
             sink: Box::new(EmitSink::Sqs {
                 client: named("sqs_main"),
                 queue: "notifications.fifo".to_string(),

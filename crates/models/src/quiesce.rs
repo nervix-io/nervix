@@ -1281,7 +1281,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     let CreateEmitter {
         name: base_name,
         from: base_from,
-        encode_using_codec: base_codec,
+        body: base_body,
         sink: base_sink,
         batch: base_batch,
         flush_policy: base_flush_policy,
@@ -1294,7 +1294,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     let CreateEmitter {
         name: candidate_name,
         from: candidate_from,
-        encode_using_codec: candidate_codec,
+        body: candidate_body,
         sink: candidate_sink,
         batch: candidate_batch,
         flush_policy: candidate_flush_policy,
@@ -1322,7 +1322,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if !emitter_sink_definition_eq(base_sink, candidate_sink) {
         changes.push(ModelChangeAspect::EmitterSink);
     }
-    if base_codec != candidate_codec {
+    if base_body != candidate_body {
         changes.push(ModelChangeAspect::EmitterCodec);
     }
     if base_from.collect_policy != candidate_from.collect_policy {
@@ -1360,6 +1360,18 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
 
 fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
     match (base, candidate) {
+        (
+            EmitSink::Http {
+                method: base_method,
+                path: base_path,
+                ..
+            },
+            EmitSink::Http {
+                method: candidate_method,
+                path: candidate_path,
+                ..
+            },
+        ) => base_method == candidate_method && base_path == candidate_path,
         (
             EmitSink::Kafka {
                 client: _,
@@ -1556,7 +1568,8 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 && base_max_commit_size == candidate_max_commit_size
         }
         (
-            EmitSink::Kafka { .. }
+            EmitSink::Http { .. }
+            | EmitSink::Kafka { .. }
             | EmitSink::Pulsar { .. }
             | EmitSink::RabbitMq { .. }
             | EmitSink::Redis { .. }
@@ -1599,11 +1612,12 @@ mod tests {
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
-        IngestSource, IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
-        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-        ModelChangeAspect, ModelKind, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
+        EmitterBody, EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy,
+        GeneralErrorPolicy, IngestSource, IngestTimestampSource, InputCollectPolicy, Literal,
+        MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
+        MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, ProcessorInputWhere,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
+        RetryPolicy,
     };
 
     fn named<N>(raw: &str) -> N
@@ -1686,7 +1700,9 @@ mod tests {
         CreateEmitter {
             name: named("emit"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("event_codec")),
+            body: EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
@@ -2089,7 +2105,9 @@ mod tests {
         );
 
         let mut codec = base.clone();
-        codec.encode_using_codec = Some(named("event_codec_v2"));
+        codec.body = EmitterBody::Codec {
+            codec: named("event_codec_v2"),
+        };
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(codec),

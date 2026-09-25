@@ -3,9 +3,107 @@ Feature: HTTP emitter
   endpoint, with an independently configured method, path, headers, and body. See
   docs/specifications/http-emitter.md and tests/http-emitter-acceptance-ledger.md.
 
-  The scenarios tagged @http_emitter_expected_failure are the initial public cases of the HTTP
-  emitter epic. They fail until the delivery task the ledger names lands the capability, are
-  excluded from the ordinary suite, and run only by explicit tag selection.
+  @http_emitter_configuration
+  Scenario Outline: HTTP emitter body selections round-trip through public configuration
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event (event_id STRING, request_method STRING, request_path STRING);
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
+        event_id string, request_method string, request_path string
+      );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      CREATE CLIENT api TYPE HTTP CONFIG {
+        'endpoint' = 'http://127.0.0.1:19080',
+        'timeout_ms' = 5000
+      };
+      CREATE EMITTER encoded FROM outgoing TO HTTP api
+        METHOD input.request_method PATH input.request_path
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        ENCODE USING event_codec INHERIT ALL
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      CREATE EMITTER empty FROM outgoing TO HTTP api
+        METHOD 'DELETE' PATH input.request_path
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        WITHOUT BODY INVOKE write_header('X-Event', input.event_id)
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    Then SHOW CREATE EMITTER on the leader node renders these clauses
+      | emitter | clause                      |
+      | encoded | METHOD input.request_method |
+      | encoded | PATH input.request_path     |
+      | encoded | ENCODE USING event_codec    |
+      | empty   | WITHOUT BODY                |
+    When these NSPL commands fail with "HTTP METHOD and PATH require exact non-sensitive STRING values"
+      """
+      CREATE EMITTER invalid_method FROM outgoing TO HTTP api
+        METHOD 42 PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY
+        FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER EMITTER encoded SET CLIENT api,
+        SET MODE ACK RETRY POLICY BACKOFF 500ms MAX 30s,
+        SET ENCODE USING event_codec;
+      """
+    Then SHOW CREATE EMITTER on the leader node renders these clauses
+      | emitter | clause                             |
+      | encoded | RETRY POLICY BACKOFF 500ms MAX 30s |
+      | encoded | ENCODE USING event_codec           |
+    When these NSPL commands fail with "emitter body selection does not support the retained construction"
+      """
+      ALTER EMITTER encoded SET TO HTTP api
+        METHOD 'DELETE' PATH '/events'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY;
+      """
+    Then SHOW CREATE EMITTER on the leader node renders these clauses
+      | emitter | clause                   |
+      | encoded | ENCODE USING event_codec |
+    When these NSPL commands fail with "HTTP emitters select an absent body"
+      """
+      ALTER EMITTER empty DROP ENCODE;
+      """
+    When these NSPL commands fail with "HTTP emitters send one request per record"
+      """
+      ALTER EMITTER empty SET BATCH MAX MESSAGES 2 MAX SIZE 1MiB;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      ALTER EMITTER empty SET TO HTTP api
+        METHOD 'HEAD' PATH '/health'
+        MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY;
+      """
+    Then SHOW CREATE EMITTER on the leader node renders these clauses
+      | emitter | clause         |
+      | empty   | METHOD 'HEAD'  |
+      | empty   | PATH '/health' |
+      | empty   | WITHOUT BODY   |
+    When these NSPL commands are executed on the leader node
+      """
+      DESCRIBE EMITTER empty;
+      """
+    Then the last command output contains
+      """
+      body: without body
+      sink: HTTP client=api method='HEAD' path='/health'
+      batch: none
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  # The scenarios tagged @http_emitter_expected_failure are the initial public cases of the HTTP
+  # emitter epic. They fail until the delivery task the ledger names lands the capability, are
+  # excluded from the ordinary suite, and run only by explicit tag selection.
 
   @http_emitter_expected_failure
   Scenario Outline: An HTTP emitter sends each record with its own method, path, headers, and codec body

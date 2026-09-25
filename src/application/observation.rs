@@ -1266,15 +1266,16 @@ impl SessionServiceImpl {
             Ok(metrics) => metrics,
             Err(message) => return command_error(message),
         };
-        command_ok(append_metrics_lines(
-            format_emitter_describe_output(
-                &describe.name,
-                &emitter,
-                scheduled_node.as_ref(),
-                Some(&status),
-            ),
-            metrics,
-        ))
+        let description = match format_emitter_describe_output(
+            &describe.name,
+            &emitter,
+            scheduled_node.as_ref(),
+            Some(&status),
+        ) {
+            Ok(description) => description,
+            Err(error) => return command_error(error.to_string()),
+        };
+        command_ok(append_metrics_lines(description, metrics))
     }
 
     pub(in crate::application) async fn describe_window_processor(
