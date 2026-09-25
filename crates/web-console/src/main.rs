@@ -36,8 +36,10 @@ use nervix_dataflow_graph::{
     DataflowStatistics,
 };
 use nervix_models::{
-    ClusterNodeName, CommandExecutionReference, DomainName, DomainPace, DomainStatus, ModelKind,
-    Statement, SubscriptionName, TransactionLifecycle, TransactionStatus,
+    CommandExecutionReference, DomainName, DomainPace, DomainStatus, ModelKind,
+    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
+    ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName,
+    TransactionLifecycle, TransactionStatus,
 };
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
@@ -186,7 +188,8 @@ enum ConsoleRequest {
 enum CommandPurpose {
     /// The REPL prints it.
     Repl,
-    /// The resource dialog reads the versions of `resource` from its `DESCRIBE RESOURCE` text.
+    /// The resource dialog reads the versions of `resource` from its typed `DESCRIBE RESOURCE`
+    /// description.
     ResourceDescription { resource: String },
 }
 
@@ -581,55 +584,14 @@ struct ResourceDetailView {
     status: String,
 }
 
-/// Everything one version row of the resource dialog shows. A keyed list re-renders a row only
-/// when its key changes, so the dialog keys each row by this whole value: a later description
-/// that changes the row, such as the usages a rebinding moved, replaces it.
+/// Everything one version row of the resource dialog shows: the version as the typed description
+/// reports it, and the models bound to it. A keyed list re-renders a row only when its key
+/// changes, so the dialog keys each row by this whole value: a later description that changes the
+/// row, such as the usages a rebinding moved, replaces it.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ResourceVersionView {
-    version: u64,
-    root_checksum: Option<String>,
-    manifest_checksum: Option<String>,
-    file_count: Option<String>,
-    total_bytes: Option<String>,
-    created_by_node: Option<ClusterNodeName>,
-    created_at: Option<String>,
-    files: Vec<ResourceFileView>,
-    usages: Vec<ResourceUsageView>,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct ResourceFileView {
-    path: String,
-    entry_type: String,
-    size: Option<String>,
-    checksum: Option<String>,
-}
-
-/// One model bound to a resource version.
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct ResourceUsageView {
-    /// The model kind as a statement names it, such as `HASH MAP`.
-    kind: String,
-    name: String,
-}
-
-/// One line of the `usages` section of `DESCRIBE RESOURCE`: a bound model and the version it
-/// pins.
-struct ResourceUsageDetail {
-    version: u64,
-    usage: ResourceUsageView,
-}
-
-/// The part of a `DESCRIBE RESOURCE` description a line belongs to. The version and usage lists
-/// share the `- key=value` line shape, so a line is read by the section that holds it.
-#[derive(Clone, Copy)]
-enum ResourceDescribeSection {
-    /// The `resource`, `latest` and `versions` summary lines.
-    Summary,
-    /// `version_details`: one line per version, each followed by its entries.
-    VersionDetails,
-    /// `usages`: one line per model bound to the resource.
-    Usages,
+    version: ResourceVersionDescription,
+    usages: Vec<ResourceUsage>,
 }
 
 impl ConsoleConnectionState {
@@ -863,15 +825,9 @@ fn App() -> impl IntoView {
                 });
             }
         } else {
+            // The server decides which statements need a selected domain, and answers one sent
+            // without it with a failed outcome.
             let request_domain = active_domain.get_untracked();
-            if request_domain.is_none() && !is_domainless_server_command(&command) {
-                terminal_lines.update(|lines| {
-                    lines.push(TermLine::error("no active domain selected"));
-                });
-                suggestions.set(Vec::new());
-                input.set(String::new());
-                return;
-            }
             let transaction = transaction_status.get_untracked();
             let expected_transaction_position = match &transaction {
                 Some(status) if status.lifecycle().is_active() => {
@@ -2529,10 +2485,13 @@ fn domain_list_lines(domains: &[DomainView]) -> Vec<TermLine> {
         .collect()
 }
 
+/// What the resource dialog shows for a completed description that carries no typed description.
+const MISSING_RESOURCE_DESCRIPTION: &str = "the server returned no resource description";
+
 impl ResourceDetailView {
-    /// Reads the dialog's versions from the same `DESCRIBE RESOURCE` description the REPL prints,
-    /// attaching to each version the usages that pin it. A description that did not complete
-    /// shows its message instead.
+    /// Reads the dialog's versions from the typed description `DESCRIBE RESOURCE` returns beside
+    /// the text the REPL prints, attaching to each version the usages that pin it. A description
+    /// that did not complete shows its message instead.
     fn from_description(outcome: CommandOutcome) -> Self {
         let CommandDisposition::Completed { .. } = outcome.disposition else {
             return Self {
@@ -2540,188 +2499,87 @@ impl ResourceDetailView {
                 status: outcome.message,
             };
         };
-        let mut versions = Vec::<ResourceVersionView>::new();
-        let mut usages_by_version = BTreeMap::<u64, Vec<ResourceUsageView>>::new();
-        let mut section = ResourceDescribeSection::Summary;
-        for line in outcome.message.lines() {
-            if line == "version_details:" {
-                section = ResourceDescribeSection::VersionDetails;
-                continue;
-            }
-            if line == "usages:" {
-                section = ResourceDescribeSection::Usages;
-                continue;
-            }
-            match section {
-                ResourceDescribeSection::Summary => {}
-                ResourceDescribeSection::VersionDetails => {
-                    if let Some(version) = parse_resource_version_detail(line) {
-                        versions.push(version);
-                    } else if let Some(file) = parse_resource_file_detail(line)
-                        && let Some(version) = versions.last_mut()
-                    {
-                        version.files.push(file);
-                    }
-                }
-                ResourceDescribeSection::Usages => {
-                    if let Some(detail) = ResourceUsageDetail::parse(line) {
-                        usages_by_version
-                            .entry(detail.version)
-                            .or_default()
-                            .push(detail.usage);
-                    }
-                }
-            }
+        let Some(description) = outcome.resource else {
+            return Self {
+                versions: Vec::new(),
+                status: MISSING_RESOURCE_DESCRIPTION.to_string(),
+            };
+        };
+        let ResourceDescription {
+            versions, usages, ..
+        } = *description;
+        let mut usages_by_version = BTreeMap::<NonZeroU64, Vec<ResourceUsage>>::new();
+        for usage in usages {
+            usages_by_version
+                .entry(usage.version)
+                .or_default()
+                .push(usage);
         }
-        for version in &mut versions {
-            if let Some(usages) = usages_by_version.remove(&version.version) {
-                version.usages = usages;
-            }
+        let mut version_views = Vec::with_capacity(versions.len());
+        for version in versions {
+            let usages = usages_by_version
+                .remove(&version.version)
+                .unwrap_or_default();
+            version_views.push(ResourceVersionView { version, usages });
         }
         Self {
-            versions,
+            versions: version_views,
             status: "ready".to_string(),
         }
     }
 }
 
-impl ResourceUsageDetail {
-    /// Reads `- kind=<kind> name=<name> version=<n>`. The description spells the kind in
-    /// snake_case, such as `hash_map`; the dialog shows it as a statement names it, `HASH MAP`.
-    fn parse(line: &str) -> Option<Self> {
-        let line = line.strip_prefix("- ")?;
-        let mut kind = None;
-        let mut name = None;
-        let mut version = None;
-        for part in line.split_whitespace() {
-            let Some((key, value)) = part.split_once('=') else {
-                continue;
-            };
-            match key {
-                "kind" => kind = Some(value.replace('_', " ").to_ascii_uppercase()),
-                "name" => name = Some(value.to_string()),
-                "version" => version = value.parse::<u64>().ok(),
-                _ => {}
-            }
-        }
-        Some(Self {
-            version: version?,
-            usage: ResourceUsageView {
-                kind: kind?,
-                name: name?,
-            },
-        })
-    }
+fn resource_version_summary(version: &ResourceVersionDescription) -> String {
+    format!(
+        "{} files | {} bytes | from {} | {}",
+        version.file_count, version.total_bytes, version.created_by_node, version.created_at
+    )
 }
 
-fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
-    let line = line.strip_prefix("- ")?;
-    let mut version = None;
-    let mut root_checksum = None;
-    let mut manifest_checksum = None;
-    let mut file_count = None;
-    let mut total_bytes = None;
-    let mut created_by_node = None;
-    let mut created_at = None;
-    for part in line.split_whitespace() {
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        match key {
-            "version" => version = value.parse::<u64>().ok(),
-            "root_checksum" => root_checksum = Some(value.to_string()),
-            "manifest_checksum" => manifest_checksum = Some(value.to_string()),
-            "file_count" => file_count = Some(value.to_string()),
-            "total_bytes" => total_bytes = Some(value.to_string()),
-            "created_by_node" => created_by_node = ClusterNodeName::parse(value).ok(),
-            "created_at" => created_at = Some(value.to_string()),
-            _ => {}
+fn resource_version_checksums(version: &ResourceVersionDescription) -> String {
+    format!(
+        "root {} | manifest {}",
+        version.root_checksum, version.manifest_checksum
+    )
+}
+
+fn resource_entry_summary(entry: &ResourceManifestEntry) -> String {
+    match &entry.content {
+        ResourceEntryContent::Directory => "directory".to_string(),
+        ResourceEntryContent::File { size, checksum } => {
+            format!("file | {size} bytes | checksum {checksum}")
         }
     }
-    version.map(|version| ResourceVersionView {
-        version,
-        root_checksum,
-        manifest_checksum,
-        file_count,
-        total_bytes,
-        created_by_node,
-        created_at,
-        files: Vec::new(),
-        usages: Vec::new(),
-    })
 }
 
-fn parse_resource_file_detail(line: &str) -> Option<ResourceFileView> {
-    let line = line.strip_prefix("  - ")?;
-    if line.starts_with("none") || line.starts_with("unavailable") {
-        return None;
-    }
-    let mut path = None;
-    let mut entry_type = None;
-    let mut size = None;
-    let mut checksum = None;
-    for part in line.split_whitespace() {
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        match key {
-            "type" => entry_type = Some(value.to_string()),
-            "path" => path = Some(value.to_string()),
-            "size" => size = Some(value.to_string()),
-            "checksum" => checksum = Some(value.to_string()),
-            _ => {}
+/// The entries of one version row: each entry by its path, or why the serving node could not
+/// list them.
+fn resource_entries_view(entries: ResourceVersionEntries) -> AnyView {
+    match entries {
+        ResourceVersionEntries::Listed(entries) => view! {
+            <For
+                each=move || entries.clone()
+                key=|entry| entry.clone()
+                children=|entry| {
+                    let summary = resource_entry_summary(&entry);
+                    view! {
+                        <div class="resource-file-row">
+                            <strong>{entry.path}</strong>
+                            <span>{summary}</span>
+                        </div>
+                    }
+                }
+            />
         }
+        .into_any(),
+        ResourceVersionEntries::Unavailable { reason } => view! {
+            <div class="resource-file-row resource-file-unavailable">
+                <strong>"entries unavailable"</strong>
+                <span>{reason}</span>
+            </div>
+        }
+        .into_any(),
     }
-    Some(ResourceFileView {
-        path: path?,
-        entry_type: entry_type.unwrap_or_else(|| "file".to_string()),
-        size,
-        checksum,
-    })
-}
-
-fn resource_version_summary(version: &ResourceVersionView) -> String {
-    let mut parts = Vec::new();
-    if let Some(file_count) = &version.file_count {
-        parts.push(format!("{file_count} files"));
-    }
-    if let Some(total_bytes) = &version.total_bytes {
-        parts.push(format!("{total_bytes} bytes"));
-    }
-    if let Some(created_by_node) = &version.created_by_node {
-        parts.push(format!("from {created_by_node}"));
-    }
-    if let Some(created_at) = &version.created_at {
-        parts.push(created_at.clone());
-    }
-    parts.join(" | ")
-}
-
-fn resource_version_checksums(version: &ResourceVersionView) -> String {
-    let mut parts = Vec::new();
-    if let Some(root_checksum) = &version.root_checksum {
-        parts.push(format!("root {root_checksum}"));
-    }
-    if let Some(manifest_checksum) = &version.manifest_checksum {
-        parts.push(format!("manifest {manifest_checksum}"));
-    }
-    parts.join(" | ")
-}
-
-fn resource_file_summary(file: &ResourceFileView) -> String {
-    let mut parts = Vec::new();
-    parts.push(file.entry_type.clone());
-    if let Some(size) = &file.size
-        && file.entry_type != "directory"
-    {
-        parts.push(format!("{size} bytes"));
-    }
-    if let Some(checksum) = &file.checksum
-        && checksum != "-"
-    {
-        parts.push(format!("checksum {checksum}"));
-    }
-    parts.join(" | ")
 }
 
 /// The domain the first `CREATE DOMAIN` in `query` declares, or `None` when there is none.
@@ -2736,17 +2594,6 @@ fn first_created_domain_from_query(query: &str) -> Option<DomainName> {
         }
     }
     None
-}
-
-fn is_domainless_server_command(command: &str) -> bool {
-    let normalized = command.trim_start().to_ascii_uppercase();
-    normalized.starts_with("COMMIT")
-        || normalized.starts_with("REVERT")
-        || normalized.starts_with("CREATE DOMAIN ")
-        || normalized.starts_with("CREATE UNPACED DOMAIN ")
-        || normalized.starts_with("CREATE PACED DOMAIN ")
-        || normalized.starts_with("CREATE USER ")
-        || normalized.starts_with("CREATE IF NOT EXISTS USER ")
 }
 
 /// One diagnostic as the terminal shows it: the text its span covers in `query` and its message.
@@ -3429,30 +3276,18 @@ fn ResourceDialog(
                             }
                             key=|version| version.clone()
                             children=|version| {
+                                let ResourceVersionView { version, usages } = version;
                                 let summary = resource_version_summary(&version);
                                 let checksums = resource_version_checksums(&version);
-                                let files = version.files.clone();
-                                let usages = version.usages.clone();
-                                let unbound = version.usages.is_empty();
+                                let number = version.version;
+                                let unbound = usages.is_empty();
                                 view! {
-                                    <div class="resource-version-row" data-version=version.version.to_string()>
-                                        <strong>{format!("version {}", version.version)}</strong>
+                                    <div class="resource-version-row" data-version=number.to_string()>
+                                        <strong>{format!("version {number}")}</strong>
                                         <span>{summary.clone()}</span>
                                         <em>{checksums.clone()}</em>
                                         <div class="resource-file-list">
-                                            <For
-                                                each=move || files.clone()
-                                                key=|file| format!("{}:{}", file.entry_type, file.path)
-                                                children=|file| {
-                                                    let file_summary = resource_file_summary(&file);
-                                                    view! {
-                                                        <div class="resource-file-row">
-                                                            <strong>{file.path}</strong>
-                                                            <span>{file_summary}</span>
-                                                        </div>
-                                                    }
-                                                }
-                                            />
+                                            {resource_entries_view(version.entries)}
                                         </div>
                                         <div class="resource-usage-list">
                                             <p>"usages"</p>
@@ -3462,9 +3297,9 @@ fn ResourceDialog(
                                                 children=|usage| {
                                                     view! {
                                                         <div class="resource-usage-row">
-                                                            <em>{usage.kind}</em>
+                                                            <em>{usage.node.kind.keyword_phrase()}</em>
                                                             " "
-                                                            <strong>{usage.name}</strong>
+                                                            <strong>{usage.node.identifier.as_str().to_string()}</strong>
                                                         </div>
                                                     }
                                                 }
@@ -6610,7 +6445,8 @@ mod tests {
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
     };
     use nervix_models::{
-        DomainClockPeriod, DomainClockSkew, ModelName, NodeRef, ResourceName, TransactionPosition,
+        ClusterNodeName, DomainClockPeriod, DomainClockSkew, ModelName, NodeRef, ResourceName,
+        Timestamp, TransactionPosition,
     };
 
     use super::*;
@@ -7337,6 +7173,40 @@ mod tests {
     }
 
     #[test]
+    fn a_redirect_moves_to_the_leaders_console_only_when_the_leader_advertises_one() {
+        let unknown = LeaderRedirect { leader: None };
+        assert_eq!(redirect_console(&unknown), None);
+        assert_eq!(
+            leader_redirect_line(&unknown).text,
+            "topology: not-a-leader"
+        );
+
+        let node = ClusterNodeName::parse("node-2").assured("a literal node name");
+        let unadvertised = LeaderRedirect {
+            leader: Some(nervix_client_wire::LeaderEndpoints {
+                node: node.clone(),
+                grpc_uri: None,
+                web_console_uri: None,
+            }),
+        };
+        assert_eq!(redirect_console(&unadvertised), None);
+        assert_eq!(
+            leader_redirect_line(&unadvertised).text,
+            "topology: not-a-leader, retry on leader 'node-2'"
+        );
+
+        let console = Url::parse("http://node-2:17420/console/").assured("a literal URL");
+        let advertised = LeaderRedirect {
+            leader: Some(nervix_client_wire::LeaderEndpoints {
+                node,
+                grpc_uri: None,
+                web_console_uri: Some(console.clone()),
+            }),
+        };
+        assert_eq!(redirect_console(&advertised), Some(&console));
+    }
+
+    #[test]
     fn ordered_requests_wait_for_the_leader_and_keep_their_order_across_a_reconnect() {
         let mut requests = SessionRequests::new();
         let first = requests.issue(repl_command("CREATE SCHEMA first ( value I64 );"));
@@ -7600,46 +7470,114 @@ mod tests {
             span: None,
         };
         assert_eq!(diagnostic_line(query, unplaced).text, "- bad name");
+        assert_eq!(
+            diagnostic_line(query, diagnostic("unknown statement", 0, 6)).text,
+            "- CREATE at 0..6: unknown statement",
+            "a span starting at zero is a location in the query"
+        );
+    }
+
+    fn described_version(number: u64, path: &str) -> ResourceVersionDescription {
+        ResourceVersionDescription {
+            version: NonZeroU64::new(number).assured("the test version is non-zero"),
+            root_checksum: format!("root-{number}"),
+            manifest_checksum: format!("manifest-{number}"),
+            file_count: 1,
+            total_bytes: 24,
+            created_at: Timestamp::from_unix_nanos(1_789_000_000_000_000_000),
+            created_by_node: ClusterNodeName::parse("node-1").assured("a literal node name"),
+            entries: ResourceVersionEntries::Listed(vec![ResourceManifestEntry {
+                path: path.to_string(),
+                content: ResourceEntryContent::File {
+                    size: 24,
+                    checksum: format!("checksum-{number}"),
+                },
+            }]),
+        }
+    }
+
+    fn usage(kind: ModelKind, name: &str, version: u64) -> ResourceUsage {
+        ResourceUsage {
+            node: NodeRef::new(kind, ModelName::parse(name).assured("a literal model name")),
+            version: NonZeroU64::new(version).assured("the test version is non-zero"),
+        }
     }
 
     #[test]
     fn resource_description_lists_each_usage_under_the_version_it_pins() {
-        let message = [
-            "resource: lookup_bundle",
-            "latest: 2",
-            "versions: 1,2",
-            "version_details:",
-            "- version=1 file_count=1 total_bytes=24",
-            "  entries:",
-            "  - type=file path=lookup.jsonl size=24 checksum=first",
-            "- version=2 file_count=1 total_bytes=24",
-            "  entries:",
-            "  - type=file path=lookup.jsonl size=24 checksum=second",
-            "usages:",
-            "- kind=client name=lookup_store version=2",
-            "- kind=hash_map name=lookup_by_id version=2",
-        ]
-        .join("\n");
+        let mut outcome = completed_outcome("resource: lookup_bundle");
+        outcome.resource = Some(Box::new(ResourceDescription {
+            resource: ResourceName::parse("lookup_bundle").assured("a literal resource name"),
+            latest_version: NonZeroU64::new(2),
+            versions: vec![
+                described_version(1, "lookup table.jsonl"),
+                described_version(2, "lookup table.jsonl"),
+            ],
+            usages: vec![
+                usage(ModelKind::Client, "lookup_store", 2),
+                usage(ModelKind::Lookup, "lookup_by_id", 2),
+            ],
+        }));
 
-        let detail = ResourceDetailView::from_description(completed_outcome(&message));
+        let detail = ResourceDetailView::from_description(outcome);
 
+        assert_eq!(detail.status, "ready");
         let versions = detail
             .versions
             .iter()
-            .map(|version| version.version)
+            .map(|version| version.version.version.get())
             .collect::<Vec<_>>();
         assert_eq!(versions, vec![1, 2]);
         let first = &detail.versions[0];
-        assert_eq!(first.files.len(), 1);
         assert!(first.usages.is_empty());
+        let ResourceVersionEntries::Listed(entries) = &first.version.entries else {
+            panic!("the first version lists its entries");
+        };
+        let summaries = entries
+            .iter()
+            .map(|entry| format!("{} {}", entry.path, resource_entry_summary(entry)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summaries,
+            vec!["lookup table.jsonl file | 24 bytes | checksum checksum-1"]
+        );
         let second = &detail.versions[1];
-        assert_eq!(second.files.len(), 1);
         let usages = second
             .usages
             .iter()
-            .map(|usage| format!("{} {}", usage.kind, usage.name))
+            .map(|usage| {
+                format!(
+                    "{} {}",
+                    usage.node.kind.keyword_phrase(),
+                    usage.node.identifier.as_str()
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(usages, vec!["CLIENT lookup_store", "HASH MAP lookup_by_id"]);
+        assert_eq!(
+            resource_version_summary(&second.version),
+            "1 files | 24 bytes | from node-1 | 2026-09-10 00:26:40 UTC"
+        );
+    }
+
+    #[test]
+    fn a_resource_description_shows_why_it_has_no_versions() {
+        let mut failed = completed_outcome("resource 'lookup_bundle' does not exist");
+        failed.disposition = CommandDisposition::Failed;
+        let detail = ResourceDetailView::from_description(failed);
+        assert!(detail.versions.is_empty());
+        assert_eq!(detail.status, "resource 'lookup_bundle' does not exist");
+
+        let untyped = completed_outcome("resource: lookup_bundle");
+        let detail = ResourceDetailView::from_description(untyped);
+        assert!(detail.versions.is_empty());
+        assert_eq!(detail.status, MISSING_RESOURCE_DESCRIPTION);
+
+        let entry = ResourceManifestEntry {
+            path: "nested dir".to_string(),
+            content: ResourceEntryContent::Directory,
+        };
+        assert_eq!(resource_entry_summary(&entry), "directory");
     }
 
     #[test]
@@ -8451,6 +8389,7 @@ mod tests {
             transaction_admission: None,
             inspection: None,
             wasm_state: None,
+            resource: None,
         }
     }
 

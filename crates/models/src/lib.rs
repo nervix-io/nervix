@@ -114,11 +114,12 @@ pub use reset_wasm_state::{
     ResolvedResetWasmStateScope,
 };
 pub use resource::{
-    RequestedResourceVersion, ResourceEntryContent, ResourceId, ResourceManifestEntry,
-    ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey, ResourceUpload,
-    ResourceUploadIdentity, ResourceUploadIdentityError, ResourceUploadKey, ResourceUploadState,
-    ResourceUploads, ResourceUploadsError, ResourceVersion, ResourceVersionCounter,
-    ResourceVersionKey, ResourceVersionResolutionError, ResourceVersionStatus,
+    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceId,
+    ResourceManifestEntry, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    ResourceUpload, ResourceUploadIdentity, ResourceUploadIdentityError, ResourceUploadKey,
+    ResourceUploadState, ResourceUploads, ResourceUploadsError, ResourceUsage, ResourceVersion,
+    ResourceVersionCounter, ResourceVersionDescription, ResourceVersionEntries, ResourceVersionKey,
+    ResourceVersionResolutionError, ResourceVersionStatus,
 };
 pub use resource_binding::ResourceRebinding;
 pub use schema::{

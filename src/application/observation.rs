@@ -8,7 +8,7 @@
 //!   the interconnect to reach the node that owns each answer.
 //! - **Must not know.** How the reported state came to be.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroU64};
 
 use arch_into::ArchInto;
 use error_stack::{Report, ResultExt as _};
@@ -35,9 +35,10 @@ use nervix_models::{
     DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
     DescribeRelay, DescribeReorderer, DescribeResource, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainName, DomainStatus, FieldName, InspectionFormat, LookupName,
-    LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName,
-    ResourceEntryContent, ResourceId, ResourceManifestEntry, ScheduledNode, SchemaName,
-    ShowRelayMaterializedState, UniquelyKindedModel, WasmStateInspection,
+    LookupQuery, Model, ModelKind, ModelName, NodeRef, ParseAsType, RelayName, ResourceDescription,
+    ResourceId, ResourceName, ResourceUsage, ResourceVersion, ResourceVersionDescription,
+    ResourceVersionEntries, ScheduledNode, SchemaName, ShowRelayMaterializedState,
+    UniquelyKindedModel, WasmStateInspection,
 };
 use nervix_vm::window::{WindowAggregateProgram, lower_window_assignments};
 use tokio::time::Duration;
@@ -54,6 +55,7 @@ use super::{
         format_placement_runtime_node, format_placement_runtime_nodes,
         format_placement_runtime_nodes_in_context, format_reingestor_describe_output,
         format_relay_describe_output, format_reorderer_describe_output,
+        format_resource_description, format_resource_entry_lines, format_resource_usage_lines,
         format_wasm_processor_describe_output, format_window_processor_describe_output,
         ordered_placement_corridor, placement_claim_owner, placement_group_host,
         placement_groups_claimed_by_rule, placement_rule_coverage_status,
@@ -1991,64 +1993,11 @@ impl SessionServiceImpl {
         domain: &DomainName,
         describe: DescribeResource,
     ) -> CommandResult {
-        if describe.version.is_none() {
-            let resources = self.inner.consensus.current_resources().await;
-            if !resources.is_declared(domain, &describe.identifier) {
-                return command_error(format!(
-                    "resource '{}' does not exist",
-                    describe.identifier.as_str()
-                ));
-            }
-            let versions = resources
-                .versions
-                .iter()
-                .filter(|resource| {
-                    resource.id.domain == *domain && resource.id.identifier == describe.identifier
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let version_numbers = if versions.is_empty() {
-                "(none)".to_string()
-            } else {
-                versions
-                    .iter()
-                    .map(|resource| resource.id.version.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            };
-            let latest = match resources.uploads.resolve_completed_version(
-                domain,
-                &describe.identifier,
-                nervix_models::RequestedResourceVersion::Latest,
-            ) {
-                Ok(id) => id.version.to_string(),
-                Err(_) => "(none)".to_string(),
-            };
-            let mut lines = vec![
-                format!("resource: {}", describe.identifier.as_str()),
-                format!("latest: {latest}"),
-                format!("versions: {version_numbers}"),
-            ];
-            lines.push("version_details:".to_string());
-            if versions.is_empty() {
-                lines.push("- none".to_string());
-            } else {
-                for resource in &versions {
-                    tokio::task::consume_budget().await;
-                    lines.push(SessionServiceImpl::format_resource_version_summary(
-                        resource,
-                    ));
-                    lines.push("  entries:".to_string());
-                    lines.extend(self.resource_version_entry_lines(resource).await);
-                }
-            }
-            lines.extend(self.resource_usage_lines(domain, &describe.identifier, None));
-            return command_ok(lines.join("\n"));
-        }
-
-        let version = describe
-            .version
-            .verified("the branch above returned for the absent case");
+        let Some(version) = describe.version else {
+            return self
+                .describe_resource_versions(domain, describe.identifier)
+                .await;
+        };
         let id = ResourceId::new(domain.clone(), describe.identifier.clone(), version);
         let resources = self.inner.consensus.current_resources().await;
         let Some(resource) = resources.version(&id).cloned() else {
@@ -2103,7 +2052,8 @@ impl SessionServiceImpl {
             format!("created_at: {}", resource.created_at),
             "entries:".to_string(),
         ];
-        lines.extend(self.resource_version_entry_lines(&resource).await);
+        let entries = self.resource_version_entries(&resource).await;
+        lines.extend(format_resource_entry_lines(&entries));
         lines.extend([
             format!(
                 "alive_nodes: {}",
@@ -2185,86 +2135,98 @@ impl SessionServiceImpl {
             }
         }
 
-        lines.extend(self.resource_usage_lines(domain, &describe.identifier, Some(version)));
+        let usages = self.resource_usages(domain, &describe.identifier, Some(version));
+        lines.extend(format_resource_usage_lines(&usages));
 
         command_ok(lines.join("\n"))
     }
 
-    fn resource_usage_lines(
+    /// Describes every published version of one resource: typed, and as the text a client prints.
+    async fn describe_resource_versions(
         &self,
         domain: &DomainName,
-        resource: &nervix_models::ResourceName,
-        version: Option<u64>,
-    ) -> Vec<String> {
-        let models = self.inner.registry.transaction_planning_models(domain);
-        let mut usages = models
-            .iter()
-            .filter_map(|(node, model)| {
-                let bound_version = model.resource_version(resource)?;
-                if version.is_some_and(|version| version != bound_version) {
-                    return None;
-                }
-                Some((node.clone(), bound_version))
-            })
-            .collect::<Vec<_>>();
-        usages.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut lines = vec!["usages:".to_string()];
-        if usages.is_empty() {
-            lines.push("- none".to_string());
-            return lines;
+        identifier: ResourceName,
+    ) -> CommandResult {
+        let resources = self.inner.consensus.current_resources().await;
+        if !resources.is_declared(domain, &identifier) {
+            return command_error(format!("resource '{}' does not exist", identifier.as_str()));
         }
-        lines.extend(usages.into_iter().map(|(node, version)| {
-            let kind = match node.kind {
-                ModelKind::Lookup => "hash_map",
-                _ => node.kind.as_str(),
-            };
-            format!(
-                "- kind={kind} name={} version={version}",
-                node.identifier.as_str()
-            )
-        }));
-        lines
-    }
-
-    fn format_resource_version_summary(resource: &nervix_models::ResourceVersion) -> String {
-        format!(
-            "- version={} root_checksum={} manifest_checksum={} file_count={} total_bytes={} \
-             created_by_node={} created_at={}",
-            resource.id.version,
-            resource.root_checksum,
-            resource.manifest_checksum,
-            resource.file_count,
-            resource.total_bytes,
-            resource.created_by_node,
-            resource.created_at
-        )
-    }
-
-    async fn resource_version_entry_lines(
-        &self,
-        resource: &nervix_models::ResourceVersion,
-    ) -> Vec<String> {
-        match self.inner.resource_store.read_manifest(&resource.id).await {
-            Ok(manifest) if manifest.entries.is_empty() => vec!["  - none".to_string()],
-            Ok(manifest) => manifest
-                .entries
-                .iter()
-                .map(SessionServiceImpl::format_resource_manifest_entry)
-                .collect(),
-            Err(error) => vec![format!("  - unavailable error={error}")],
+        let latest = resources
+            .uploads
+            .completed_versions_of(domain, &identifier)
+            .next_back();
+        let latest_version = latest.map(|latest| catalog_version(latest.version));
+        let mut versions = Vec::new();
+        for resource in resources.versions_of(domain, &identifier) {
+            tokio::task::consume_budget().await;
+            let entries = self.resource_version_entries(resource).await;
+            versions.push(ResourceVersionDescription {
+                version: catalog_version(resource.id.version),
+                root_checksum: resource.root_checksum.clone(),
+                manifest_checksum: resource.manifest_checksum.clone(),
+                file_count: resource.file_count,
+                total_bytes: resource.total_bytes,
+                created_at: resource.created_at,
+                created_by_node: resource.created_by_node.clone(),
+                entries,
+            });
         }
-    }
-
-    fn format_resource_manifest_entry(entry: &ResourceManifestEntry) -> String {
-        let (entry_type, size, checksum) = match &entry.content {
-            ResourceEntryContent::File { size, checksum } => ("file", *size, checksum.as_str()),
-            ResourceEntryContent::Directory => ("directory", 0, "-"),
+        let usages = self.resource_usages(domain, &identifier, None);
+        let description = ResourceDescription {
+            resource: identifier,
+            latest_version,
+            versions,
+            usages,
         };
-        format!(
-            "  - type={} path={} size={} checksum={}",
-            entry_type, entry.path, size, checksum
-        )
+        let mut result = command_ok(format_resource_description(&description));
+        result.resource = Some(Box::new(description));
+        result
     }
+
+    /// The models of `domain` bound to `resource`, ordered by model, keeping only those bound to
+    /// `version` when one is given.
+    fn resource_usages(
+        &self,
+        domain: &DomainName,
+        resource: &ResourceName,
+        version: Option<u64>,
+    ) -> Vec<ResourceUsage> {
+        let models = self.inner.registry.transaction_planning_models(domain);
+        let mut usages = Vec::new();
+        for (node, model) in models.iter() {
+            let Some(bound_version) = model.resource_version(resource) else {
+                continue;
+            };
+            if let Some(version) = version
+                && version != bound_version
+            {
+                continue;
+            }
+            usages.push(ResourceUsage {
+                node: node.clone(),
+                version: catalog_version(bound_version),
+            });
+        }
+        usages.sort_by(|left, right| left.node.cmp(&right.node));
+        usages
+    }
+
+    /// The entries of `resource` as this node's store holds them.
+    async fn resource_version_entries(&self, resource: &ResourceVersion) -> ResourceVersionEntries {
+        match self.inner.resource_store.read_manifest(&resource.id).await {
+            Ok(manifest) => ResourceVersionEntries::Listed(manifest.entries),
+            Err(error) => ResourceVersionEntries::Unavailable {
+                reason: error.to_string(),
+            },
+        }
+    }
+}
+
+/// A version the resource catalog assigned or a binding pins, as a description carries it.
+fn catalog_version(version: u64) -> NonZeroU64 {
+    NonZeroU64::new(version).assured(
+        "the resource catalog numbers versions from 1, and a binding pins only a completed version",
+    )
 }
 
 impl SessionServiceImpl {
@@ -2828,6 +2790,26 @@ mod tests {
                 .message
                 .contains("- type=file path=model.onnx size=5 checksum=")
         );
+        let Some(description) = result.resource.as_deref() else {
+            panic!("a description of every version carries the typed description");
+        };
+        assert_eq!(result.message, format_resource_description(description));
+        assert_eq!(description.latest_version, NonZeroU64::new(2));
+        let versions = description
+            .versions
+            .iter()
+            .map(|version| (version.version.get(), version.file_count))
+            .collect::<Vec<_>>();
+        assert_eq!(versions, vec![(1, 2), (2, 1)]);
+        let ResourceVersionEntries::Listed(entries) = &description.versions[0].entries else {
+            panic!("the first version's entries are readable");
+        };
+        let paths = entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["alpha.txt", "nested", "nested/beta.txt"]);
+        assert!(description.usages.is_empty());
 
         subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);

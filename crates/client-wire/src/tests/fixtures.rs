@@ -7,14 +7,14 @@ use std::{
 
 use bytes::Bytes;
 use error_stack::Report;
-use flatbuffers::{FlatBufferBuilder, WIPOffset};
+use flatbuffers::{FlatBufferBuilder, UnionWIPOffset, WIPOffset};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{CommandExecutionReference, NameError, TransactionOperationNumber};
 
 use crate::{
     ClientFrame, ClientMessage, EncodedFrame, FrameError, FrameRoot, Reply, ReplyDelivery,
     RequestId, ServerEvent, ServerFrame, ServerMessage, SessionLimitSettings, SessionLimits,
-    VerifiedFrame, WireDecodeError,
+    VerifiedFrame, WireDecodeError, wire,
 };
 
 pub(crate) fn limits() -> SessionLimits {
@@ -112,6 +112,30 @@ pub(crate) fn finish_raw<T>(
 ) -> Bytes {
     builder.finish(root, Some(identifier));
     Bytes::copy_from_slice(builder.finished_data())
+}
+
+/// Finishes a hand-built reply to request 5 as a server frame.
+pub(crate) fn finish_reply(
+    mut builder: FlatBufferBuilder<'_>,
+    body_type: wire::ReplyBody,
+    body: WIPOffset<UnionWIPOffset>,
+) -> Bytes {
+    let reply = wire::Reply::create(
+        &mut builder,
+        &wire::ReplyArgs {
+            request_id: 5,
+            body_type,
+            body: Some(body),
+        },
+    );
+    let root = wire::ServerMessage::create(
+        &mut builder,
+        &wire::ServerMessageArgs {
+            body_type: wire::ServerBody::Reply,
+            body: Some(reply.as_union_value()),
+        },
+    );
+    finish_raw(builder, root, "NXSM")
 }
 
 pub(crate) fn verify_raw<R: FrameRoot>(bytes: Bytes) -> VerifiedFrame<R> {

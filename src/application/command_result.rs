@@ -3,8 +3,8 @@
 //! Layer: control plane.
 //!
 //! - **Owns.** A command's typed disposition, its message and diagnostics, the outcomes of the
-//!   statements of a multi-statement command, and the transaction binding, admitted operation and
-//!   typed transaction or WASM-state inspection read a command reports.
+//!   statements of a multi-statement command, and the transaction binding, admitted operation,
+//!   typed transaction or WASM-state inspection and typed resource description a command reports.
 //! - **Depends on.** The vocabulary for transaction status, admission, preview identity and
 //!   inspections, cluster node names and service URLs, and consensus for the ways a reused
 //!   execution reference can conflict and for the diagnostics its durable records keep.
@@ -18,8 +18,8 @@ use nervix_consensus::{
     TransactionDiagnostic,
 };
 use nervix_models::{
-    ClusterNodeName, NodeServiceUrl, TransactionInspection, TransactionOperationAdmission,
-    TransactionPreviewIdentity, TransactionStatus,
+    ClusterNodeName, NodeServiceUrl, ResourceDescription, TransactionInspection,
+    TransactionOperationAdmission, TransactionPreviewIdentity, TransactionStatus,
 };
 
 /// What became of a command, or of one statement of a multi-statement command.
@@ -145,6 +145,8 @@ pub(in crate::application) struct CommandResult {
     pub(in crate::application) inspection: Option<Box<TransactionInspection>>,
     /// The read-only state facts returned by a WASM processor description.
     pub(in crate::application) wasm_state: Option<Box<nervix_models::WasmStateInspection>>,
+    /// The versions, entries and bindings a resource description read.
+    pub(in crate::application) resource: Option<Box<ResourceDescription>>,
 }
 
 impl CommandResult {
@@ -159,6 +161,7 @@ impl CommandResult {
             transaction_admission: None,
             inspection: None,
             wasm_state: None,
+            resource: None,
         }
     }
 

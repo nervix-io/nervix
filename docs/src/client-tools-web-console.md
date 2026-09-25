@@ -156,6 +156,10 @@ nervix[quickstart tx]>
 nervix[quickstart committing]>
 ```
 
+The console sends a statement whether or not a domain is selected, and the server decides whether
+it needs one: `SHOW CLUSTER STATUS` or `CREATE DOMAIN` runs with no domain selected, while a
+statement that acts on a domain fails with `no active domain selected`.
+
 `BEGIN` requires a selected domain that already exists and binds the transaction to it. The
 console follows the transaction's domain, so attaching switches the domain selector to it.
 `DESCRIBE TRANSACTION` prints the open transaction's impact report between queued statements, and
@@ -182,9 +186,10 @@ empties the scrollback.
 ![The resource dialog after uploading a version](images/console-resource-dialog.png)
 
 The sidebar shows each resource's highest completed version, such as `v2`, or `catalog` while no
-upload has completed. Selecting a resource opens its version list, read from the same
-`DESCRIBE RESOURCE` description the REPL prints: every version with its files, and under each
-version the models bound to it, listed by kind and name, or `none`.
+upload has completed. Selecting a resource opens its version list, read from the typed description
+that `DESCRIBE RESOURCE` returns beside the text the REPL prints: every version with each file and
+directory under its exact path, and under each version the models bound to it, listed by kind and
+name, or `none`.
 
 Files or a whole directory can be uploaded from the browser as a new version of that resource in
 the selected domain. The successful upload result arrives after every current live node has
