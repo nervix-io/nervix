@@ -229,7 +229,7 @@ impl CompiledCodec {
         &self,
         members: &[&BatchMember],
         limit: PayloadSizeLimit,
-    ) -> Result<BoundedBatchEncoding, BatchContainerError> {
+    ) -> error_stack::Result<BoundedBatchEncoding, BatchContainerError> {
         let written = BoundedWriter::write_with(limit_bytes(limit), |writer| {
             self.write_batch(members, writer)
         })?;
@@ -245,9 +245,9 @@ impl CompiledCodec {
         &self,
         members: &[&BatchMember],
         output: &mut BoundedWriter,
-    ) -> Result<(), BatchContainerError> {
+    ) -> error_stack::Result<(), BatchContainerError> {
         let encoding = self.wire_schema.encoding_name();
-        let unwritable = |_: io::Error| BatchContainerError::Unwritable { encoding };
+        let unwritable = |_: io::Error| Report::new(BatchContainerError::Unwritable { encoding });
         match &self.wire_schema {
             CompiledWireSchema::Json(_) => {
                 output.write_all(b"[").map_err(unwritable)?;
@@ -316,13 +316,13 @@ impl CompiledCodec {
                 native
                     .format
                     .write_value_into(&value, output)
-                    .map_err(|_| BatchContainerError::Unwritable { encoding })
+                    .map_err(|_| Report::new(BatchContainerError::Unwritable { encoding }))
             }
             CompiledWireSchema::Syslog => {
                 let mut syslog_members = Vec::with_capacity(members.len());
                 for member in members.iter().copied() {
                     let MemberValue::Syslog(member) = &member.0 else {
-                        return Err(BatchContainerError::Unwritable { encoding });
+                        return Err(Report::new(BatchContainerError::Unwritable { encoding }));
                     };
                     syslog_members.push(member);
                 }
@@ -362,11 +362,11 @@ fn limit_bytes(limit: PayloadSizeLimit) -> NonZeroUsize {
 fn encoded_members<'a>(
     members: &[&'a BatchMember],
     encoding: &'static str,
-) -> Result<impl Iterator<Item = &'a [u8]>, BatchContainerError> {
+) -> error_stack::Result<impl Iterator<Item = &'a [u8]>, BatchContainerError> {
     let mut encoded = Vec::with_capacity(members.len());
     for member in members.iter().copied() {
         let MemberValue::Encoded(bytes) = &member.0 else {
-            return Err(BatchContainerError::Unwritable { encoding });
+            return Err(Report::new(BatchContainerError::Unwritable { encoding }));
         };
         encoded.push(bytes.as_slice());
     }
@@ -377,11 +377,11 @@ fn encoded_members<'a>(
 fn member_values(
     members: &[&BatchMember],
     encoding: &'static str,
-) -> Result<Vec<JsonValue>, BatchContainerError> {
+) -> error_stack::Result<Vec<JsonValue>, BatchContainerError> {
     let mut values = Vec::with_capacity(members.len());
     for member in members.iter().copied() {
         let MemberValue::Value(value) = &member.0 else {
-            return Err(BatchContainerError::Unwritable { encoding });
+            return Err(Report::new(BatchContainerError::Unwritable { encoding }));
         };
         values.push(value.clone());
     }
@@ -393,17 +393,17 @@ fn member_values(
 fn run_batch_transformation(
     program: &nervix_jaq::CompiledJaqProgram,
     members: &[&BatchMember],
-) -> Result<JsonValue, BatchContainerError> {
+) -> error_stack::Result<JsonValue, BatchContainerError> {
     let mut values = Vec::with_capacity(members.len());
     for member in members.iter().copied() {
         let MemberValue::Value(value) = &member.0 else {
-            return Err(BatchContainerError::Evaluation);
+            return Err(Report::new(BatchContainerError::Evaluation));
         };
         values.push(value.clone());
     }
     program
         .run_single(JsonValue::Array(values))
-        .map_err(|error| BatchContainerError::from(&error))
+        .map_err(|error| Report::new(BatchContainerError::from(&error)))
 }
 
 /// The default container of a jaq-native format: an array for the formats with a top-level
@@ -666,7 +666,10 @@ mod tests {
         let batch = events();
         let members = members_of(codec, &batch, limit(4096));
         let references = members.iter().collect::<Vec<_>>();
-        match codec.encode_batch_within(&references, limit(4096))? {
+        let encoded = codec
+            .encode_batch_within(&references, limit(4096))
+            .map_err(|error| *error.current_context())?;
+        match encoded {
             BoundedBatchEncoding::Encoded(payload) => Ok(payload),
             BoundedBatchEncoding::Oversize(exceeded) => panic!("unexpected {exceeded}"),
         }

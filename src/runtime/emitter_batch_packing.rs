@@ -103,7 +103,7 @@ pub(super) fn pack_buffered_batch(
     batch: &RuntimeRecordBatch,
     rows: Vec<PackingRow>,
     policy: EmitterBatchPolicy,
-) -> Result<BufferedBatchPacking, CodecError> {
+) -> error_stack::Result<BufferedBatchPacking, CodecError> {
     let encoder = codec.batch_encoder(batch)?;
     let mut packing = BufferedBatchPacking::default();
     let mut members = Vec::with_capacity(rows.len());
@@ -143,7 +143,10 @@ pub(super) fn pack_buffered_batch(
                 .iter()
                 .map(|prepared| &prepared.member)
                 .collect::<Vec<_>>();
-            match codec.encode_batch_within(&references, policy.max_size)? {
+            let encoded = codec
+                .encode_batch_within(&references, policy.max_size)
+                .map_err(|error| *error.current_context())?;
+            match encoded {
                 BoundedBatchEncoding::Encoded(payload) => Ok(CandidateEncoding::Fits(payload)),
                 BoundedBatchEncoding::Oversize(exceeded) => {
                     Ok(CandidateEncoding::Oversize(exceeded))

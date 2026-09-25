@@ -558,11 +558,13 @@ async fn pack_pending_rows(
     batch: &EmitterPublishBatch,
     rows: Vec<PackingRow>,
 ) -> EmitterRuntimeResult<BufferedBatchPacking> {
-    let initialization_failed = |error: CodecError| {
-        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-            "emitter '{}' failed to initialize columnar encoding: {error}",
-            context.emitter.as_str()
-        ))
+    let initialization_failed = |error: Report<CodecError>| {
+        error
+            .change_context(EmitterRuntimeError::EncodeBatch)
+            .attach_printable(format!(
+                "emitter '{}' failed to initialize columnar encoding",
+                context.emitter.as_str()
+            ))
     };
     if !codec.requires_blocking_encode() {
         return pack_buffered_batch(&codec, &batch.batch.batch, rows, policy)
