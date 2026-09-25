@@ -29,10 +29,57 @@ use super::{
 };
 use crate::{
     resource::{ResourceStore, StagedResourceArchive},
-    resource_interconnect::{FetchResourceArchive, PublishResourceReplica},
+    resource_interconnect::{
+        FetchResourceArchive, PublishResourceReplica, ResourceInterconnectError,
+    },
 };
 
 const MAX_CONCURRENT_RESOURCE_REPLICATIONS: usize = 4;
+
+#[derive(Debug, Error)]
+enum ResourceFetchError {
+    #[error("resource '{}@{}' archive exceeds the configured limit", .id.identifier, .id.version)]
+    ArchiveQuota { id: ResourceId },
+    #[error("resource '{}@{}' fetch request to node '{node}' failed", .id.identifier, .id.version)]
+    Request {
+        id: ResourceId,
+        node: ClusterNodeIdentity,
+    },
+    #[error("resource archive size mismatch: expected {expected}, source declared {actual}")]
+    SourceSize { expected: u64, actual: u64 },
+    #[error("failed to create temporary resource archive")]
+    Stage,
+    #[error("resource fetch failed")]
+    Read,
+    #[error("resource chunk length is invalid")]
+    ChunkLength,
+    #[error("resource archive offset overflowed")]
+    OffsetOverflow,
+    #[error("resource archive size exceeds published size {published}")]
+    ExceedsPublishedSize { published: u64 },
+    #[error("failed to write temporary resource archive")]
+    Write,
+    #[error("resource archive size mismatch: expected {expected}, received {received}")]
+    Incomplete { expected: u64, received: u64 },
+    #[error("failed to flush temporary resource archive")]
+    Finish,
+    #[error("resource archive staging size mismatch: received {received}, wrote {written}")]
+    StagingSize { received: u64, written: u64 },
+}
+
+#[derive(Debug, Error)]
+enum ResourceReplicaPublishError {
+    #[error("failed to publish resource replica: cluster leader is unknown")]
+    UnknownLeader,
+    #[error("failed to publish resource replica through consensus")]
+    Consensus,
+    #[error("failed to publish resource replica to leader '{leader}'")]
+    Request {
+        leader: nervix_models::ClusterNodeName,
+    },
+    #[error("leader rejected resource replica: {source}")]
+    Remote { source: ResourceInterconnectError },
+}
 
 /// The reason a scenario-armed installation failure records for the version it fails. The failure
 /// happens once the node installed and published the version, before the upload completes.
@@ -114,10 +161,12 @@ async fn fetch_resource_archive(
     resource_store: &ResourceStore,
     source_node: &ClusterNodeIdentity,
     resource: &nervix_models::ResourceVersion,
-) -> Result<StagedResourceArchive, String> {
+) -> error_stack::Result<StagedResourceArchive, ResourceFetchError> {
     resource_store
         .validate_archive_bytes(resource.archive_bytes)
-        .map_err(|error| error.to_string())?;
+        .change_context(ResourceFetchError::ArchiveQuota {
+            id: resource.id.clone(),
+        })?;
     let mut archive = interconnect
         .request_stream(
             source_node.node_id(),
@@ -126,60 +175,63 @@ async fn fetch_resource_archive(
             },
         )
         .await
-        .map_err(|error| format!("resource fetch request failed: {error}"))?;
+        .change_context(ResourceFetchError::Request {
+            id: resource.id.clone(),
+            node: source_node.clone(),
+        })?;
     if archive.content_length() != resource.archive_bytes {
-        return Err(format!(
-            "resource archive size mismatch: expected {}, source declared {}",
-            resource.archive_bytes,
-            archive.content_length()
-        ));
+        return Err(Report::new(ResourceFetchError::SourceSize {
+            expected: resource.archive_bytes,
+            actual: archive.content_length(),
+        }));
     }
     let mut staged = resource_store
         .create_archive_stager()
         .await
-        .map_err(|error| format!("failed to create temporary resource archive: {error}"))?;
+        .change_context(ResourceFetchError::Stage)?;
     let mut received = 0_u64;
     while let Some(chunk) = archive
         .next_chunk()
         .await
-        .map_err(|error| format!("resource fetch failed: {error}"))?
+        .change_context(ResourceFetchError::Read)?
     {
         tokio::task::consume_budget().await;
-        let chunk_bytes = u64::try_from(chunk.len())
-            .map_err(|error| format!("resource chunk length is invalid: {error}"))?;
+        let chunk_bytes =
+            u64::try_from(chunk.len()).map_err(|_| Report::new(ResourceFetchError::ChunkLength))?;
         let next_received = received
             .checked_add(chunk_bytes)
-            .ok_or_else(|| "resource archive offset overflowed".to_string())?;
+            .ok_or_else(|| Report::new(ResourceFetchError::OffsetOverflow))?;
         if next_received > resource.archive_bytes {
-            return Err(format!(
-                "resource archive size exceeds published size {}",
-                resource.archive_bytes
-            ));
+            return Err(Report::new(ResourceFetchError::ExceedsPublishedSize {
+                published: resource.archive_bytes,
+            }));
         }
         resource_store
             .validate_archive_bytes(next_received)
-            .map_err(|error| error.to_string())?;
+            .change_context(ResourceFetchError::ArchiveQuota {
+                id: resource.id.clone(),
+            })?;
         staged
             .write_chunk(chunk)
             .await
-            .map_err(|error| format!("failed to write temporary resource archive: {error}"))?;
+            .change_context(ResourceFetchError::Write)?;
         received = next_received;
     }
     if received != resource.archive_bytes {
-        return Err(format!(
-            "resource archive size mismatch: expected {}, received {received}",
-            resource.archive_bytes
-        ));
+        return Err(Report::new(ResourceFetchError::Incomplete {
+            expected: resource.archive_bytes,
+            received,
+        }));
     }
     let staged = staged
         .finish()
         .await
-        .map_err(|error| format!("failed to flush temporary resource archive: {error}"))?;
+        .change_context(ResourceFetchError::Finish)?;
     if staged.archive_bytes() != received {
-        return Err(format!(
-            "resource archive staging size mismatch: received {received}, wrote {}",
-            staged.archive_bytes()
-        ));
+        return Err(Report::new(ResourceFetchError::StagingSize {
+            received,
+            written: staged.archive_bytes(),
+        }));
     }
     Ok(staged)
 }
@@ -256,11 +308,12 @@ pub(in crate::application) fn resource_named_before_version(
 }
 
 impl SessionServiceImpl {
-    async fn publish_resource_replica(&self, replica: ResourceNodeStatus) -> Result<(), String> {
+    async fn publish_resource_replica(
+        &self,
+        replica: ResourceNodeStatus,
+    ) -> error_stack::Result<(), ResourceReplicaPublishError> {
         let Some(leader_id) = self.inner.consensus.current_leader().await else {
-            return Err(
-                "failed to publish resource replica: cluster leader is unknown".to_string(),
-            );
+            return Err(Report::new(ResourceReplicaPublishError::UnknownLeader));
         };
 
         if leader_id == self.inner.consensus.local_node_id().clone() {
@@ -269,15 +322,15 @@ impl SessionServiceImpl {
                 .consensus
                 .put_resource_replica(replica)
                 .await
-                .map_err(|error| format!("failed to publish resource replica: {error}"));
+                .change_context(ResourceReplicaPublishError::Consensus);
         }
 
         self.inner
             .interconnect
             .request(&leader_id, PublishResourceReplica { replica })
             .await
-            .map_err(|error| format!("failed to publish resource replica: {error}"))?
-            .map_err(|error| format!("failed to publish resource replica: {error}"))
+            .change_context(ResourceReplicaPublishError::Request { leader: leader_id })?
+            .map_err(|source| Report::new(ResourceReplicaPublishError::Remote { source }))
     }
 
     pub(in crate::application) async fn reconcile_resources_once(&self) {
@@ -338,7 +391,7 @@ impl SessionServiceImpl {
                         error: None,
                     };
                     if let Err(error) = self.publish_resource_replica(replica).await {
-                        self.broadcast_error(error);
+                        self.broadcast_error(format!("{error:#}"));
                     }
                     continue;
                 }
@@ -382,7 +435,7 @@ impl SessionServiceImpl {
                 };
                 if !already_reported && let Err(error) = self.publish_resource_replica(failed).await
                 {
-                    self.broadcast_error(error);
+                    self.broadcast_error(format!("{error:#}"));
                 }
                 continue;
             };
@@ -525,7 +578,7 @@ impl SessionServiceImpl {
             })
             .await
         {
-            self.broadcast_error(error);
+            self.broadcast_error(format!("{error:#}"));
             return;
         }
 
@@ -540,10 +593,10 @@ impl SessionServiceImpl {
             Ok(archive) => archive,
             Err(error) => {
                 if let Err(publish_error) = self
-                    .publish_resource_replica(failed_replica(None, error))
+                    .publish_resource_replica(failed_replica(None, format!("{error:#}")))
                     .await
                 {
-                    self.broadcast_error(publish_error);
+                    self.broadcast_error(format!("{publish_error:#}"));
                 }
                 return;
             }
@@ -561,7 +614,7 @@ impl SessionServiceImpl {
                 ))
                 .await
             {
-                self.broadcast_error(error);
+                self.broadcast_error(format!("{error:#}"));
             }
             return;
         }
@@ -584,7 +637,7 @@ impl SessionServiceImpl {
                     .publish_resource_replica(failed_replica(None, error.to_string()))
                     .await
                 {
-                    self.broadcast_error(publish_error);
+                    self.broadcast_error(format!("{publish_error:#}"));
                 }
                 return;
             }
@@ -603,7 +656,7 @@ impl SessionServiceImpl {
                 ))
                 .await
             {
-                self.broadcast_error(publish_error);
+                self.broadcast_error(format!("{publish_error:#}"));
             }
             return;
         }
@@ -619,7 +672,7 @@ impl SessionServiceImpl {
             })
             .await
         {
-            self.broadcast_error(error);
+            self.broadcast_error(format!("{error:#}"));
         }
     }
 

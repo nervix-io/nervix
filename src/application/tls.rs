@@ -182,34 +182,59 @@ const INTERNAL_TLS_KEY_FILE: &str = "node-key.pem";
 /// Why a file a model reads from a resource version cannot be opened.
 #[derive(Debug, Error)]
 pub(in crate::application) enum ResourceFileError {
-    #[error("{label} file '{}' does not exist", path.display())]
+    #[error("{label} file does not exist: {source}")]
     Missing {
         label: &'static str,
-        path: PathBuf,
         source: io::Error,
     },
-    #[error("{label} path '{}' is not a file", path.display())]
-    NotAFile { label: &'static str, path: PathBuf },
+    #[error("{label} path is not a file")]
+    NotAFile { label: &'static str },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
+pub(in crate::application) enum TlsFileKind {
+    #[strum(serialize = "TLS certificate")]
+    Certificate,
+    #[strum(serialize = "TLS private key")]
+    PrivateKey,
+    #[strum(serialize = "TLS CA certificate")]
+    CaCertificate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub(in crate::application) enum TlsPemFailure {
+    #[error("missing section end marker")]
+    MissingSectionEnd,
+    #[error("invalid section start")]
+    IllegalSectionStart,
+    #[error("invalid base64")]
+    Base64Decode,
+    #[error("I/O error: {0:?}")]
+    Io(io::ErrorKind),
+    #[error("section exceeds size limit")]
+    SectionTooLarge,
+    #[error("unclassified PEM failure")]
+    Unclassified,
 }
 
 /// Why TLS material read from disk cannot be presented.
 #[derive(Debug, Error)]
 pub(in crate::application) enum TlsMaterialError {
     #[error("the {file} path cannot be resolved inside the resource")]
-    ResolvePath { file: &'static str },
+    ResolvePath { file: TlsFileKind },
     #[error("a required TLS file is unavailable")]
     Unavailable,
-    #[error("no certificates found in '{}'", path.display())]
-    NoCertificates { path: PathBuf },
-    #[error("no PEM items found in '{}'", path.display())]
-    NoPemItems { path: PathBuf },
-    #[error("failed to read PEM file '{}': {source}", path.display())]
-    Pem { path: PathBuf, source: PemError },
-    #[error("'{}' contains an unusable CA certificate: {source}", path.display())]
-    CaCertificate {
-        path: PathBuf,
-        source: rustls::Error,
+    #[error("no certificates found in {file}")]
+    NoCertificates { file: TlsFileKind },
+    #[error("no PEM items found in {file}")]
+    NoPemItems { file: TlsFileKind },
+    #[error("failed to read {file} PEM file: {kind}")]
+    Pem {
+        file: TlsFileKind,
+        kind: TlsPemFailure,
     },
+    #[error("TLS CA certificate is unusable: {source}")]
+    CaCertificate { source: rustls::Error },
     #[error("the certificate chain and private key do not form a usable key: {source}")]
     CertifiedKey { source: rustls::Error },
     #[error("the rustls crypto provider is not installed")]
@@ -217,17 +242,18 @@ pub(in crate::application) enum TlsMaterialError {
 }
 
 impl TlsMaterialError {
-    /// The PEM failure reading `path`, keeping a file without PEM items apart from a malformed one.
-    fn pem(path: &Path, source: PemError) -> Report<Self> {
-        match source {
-            PemError::NoItemsFound => Report::new(Self::NoPemItems {
-                path: path.to_path_buf(),
-            }),
-            source => Report::new(Self::Pem {
-                path: path.to_path_buf(),
-                source,
-            }),
-        }
+    /// Keep a file without PEM items apart from a malformed one.
+    fn pem(file: TlsFileKind, source: PemError) -> Report<Self> {
+        let kind = match source {
+            PemError::NoItemsFound => return Report::new(Self::NoPemItems { file }),
+            PemError::MissingSectionEnd { .. } => TlsPemFailure::MissingSectionEnd,
+            PemError::IllegalSectionStart { .. } => TlsPemFailure::IllegalSectionStart,
+            PemError::Base64Decode(_) => TlsPemFailure::Base64Decode,
+            PemError::Io(error) => TlsPemFailure::Io(error.kind()),
+            PemError::SectionTooLarge => TlsPemFailure::SectionTooLarge,
+            _ => TlsPemFailure::Unclassified,
+        };
+        Report::new(Self::Pem { file, kind })
     }
 }
 
@@ -270,8 +296,8 @@ pub(in crate::application) fn load_web_console_tls_server_config(
     key_path: &Path,
 ) -> Result<StdArc<ServerConfig>, Report<AppError>> {
     nervix_interconnect::install_rustls_crypto_provider();
-    let cert_chain =
-        load_certificates_from_pem_file(cert_path).change_context(AppError::LoadWebConsoleTls)?;
+    let cert_chain = load_certificates_from_pem_file(cert_path, TlsFileKind::Certificate)
+        .change_context(AppError::LoadWebConsoleTls)?;
     let private_key =
         load_private_key_from_pem_file(key_path).change_context(AppError::LoadWebConsoleTls)?;
     let config = ServerConfig::builder()
@@ -306,17 +332,17 @@ pub(in crate::application) async fn load_vhost_tls_materials(
     let cert_path = resource_store
         .resolve_content_path(id, VHOST_TLS_CERT_PATH)
         .change_context(TlsMaterialError::ResolvePath {
-            file: VHOST_TLS_CERT_PATH,
+            file: TlsFileKind::Certificate,
         })?;
     let key_path = resource_store
         .resolve_content_path(id, VHOST_TLS_KEY_PATH)
         .change_context(TlsMaterialError::ResolvePath {
-            file: VHOST_TLS_KEY_PATH,
+            file: TlsFileKind::PrivateKey,
         })?;
     let ca_path = resource_store
         .resolve_content_path(id, VHOST_TLS_CA_PATH)
         .change_context(TlsMaterialError::ResolvePath {
-            file: VHOST_TLS_CA_PATH,
+            file: TlsFileKind::CaCertificate,
         })?;
 
     ensure_file_exists(&cert_path, "tls certificate")
@@ -330,7 +356,7 @@ pub(in crate::application) async fn load_vhost_tls_materials(
         .change_context(TlsMaterialError::Unavailable)?;
 
     load_root_store_from_pem_file(&ca_path)?;
-    let cert_chain = load_certificates_from_pem_file(&cert_path)?;
+    let cert_chain = load_certificates_from_pem_file(&cert_path, TlsFileKind::Certificate)?;
     let private_key = load_private_key_from_pem_file(&key_path)?;
     let Some(provider) = rustls::crypto::CryptoProvider::get_default() else {
         return Err(Report::new(TlsMaterialError::CryptoProvider));
@@ -343,48 +369,37 @@ pub(in crate::application) async fn ensure_file_exists(
     path: &Path,
     label: &'static str,
 ) -> Result<(), Report<ResourceFileError>> {
-    let metadata = tokio::fs::metadata(path).await.map_err(|source| {
-        Report::new(ResourceFileError::Missing {
-            label,
-            path: path.to_path_buf(),
-            source,
-        })
-    })?;
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|source| Report::new(ResourceFileError::Missing { label, source }))?;
     if metadata.is_file() {
         Ok(())
     } else {
-        Err(Report::new(ResourceFileError::NotAFile {
-            label,
-            path: path.to_path_buf(),
-        }))
+        Err(Report::new(ResourceFileError::NotAFile { label }))
     }
 }
 
 fn load_root_store_from_pem_file(path: &Path) -> Result<RootCertStore, Report<TlsMaterialError>> {
-    let certs = load_certificates_from_pem_file(path)?;
+    let certs = load_certificates_from_pem_file(path, TlsFileKind::CaCertificate)?;
     let mut roots = RootCertStore::empty();
     for cert in certs {
-        roots.add(cert).map_err(|source| {
-            Report::new(TlsMaterialError::CaCertificate {
-                path: path.to_path_buf(),
-                source,
-            })
-        })?;
+        roots
+            .add(cert)
+            .map_err(|source| Report::new(TlsMaterialError::CaCertificate { source }))?;
     }
     Ok(roots)
 }
 
 fn load_certificates_from_pem_file(
     path: &Path,
+    file: TlsFileKind,
 ) -> Result<Vec<CertificateDer<'static>>, Report<TlsMaterialError>> {
     let certs = CertificateDer::pem_file_iter(path)
-        .map_err(|source| TlsMaterialError::pem(path, source))?
+        .map_err(|source| TlsMaterialError::pem(file, source))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| TlsMaterialError::pem(path, source))?;
+        .map_err(|source| TlsMaterialError::pem(file, source))?;
     if certs.is_empty() {
-        return Err(Report::new(TlsMaterialError::NoCertificates {
-            path: path.to_path_buf(),
-        }));
+        return Err(Report::new(TlsMaterialError::NoCertificates { file }));
     }
     Ok(certs)
 }
@@ -392,7 +407,8 @@ fn load_certificates_from_pem_file(
 fn load_private_key_from_pem_file(
     path: &Path,
 ) -> Result<PrivateKeyDer<'static>, Report<TlsMaterialError>> {
-    PrivateKeyDer::from_pem_file(path).map_err(|source| TlsMaterialError::pem(path, source))
+    PrivateKeyDer::from_pem_file(path)
+        .map_err(|source| TlsMaterialError::pem(TlsFileKind::PrivateKey, source))
 }
 
 /// Which VHOST of which domain a listener entry presents.
@@ -641,14 +657,15 @@ mod tests {
         ClusterSchedule, CreateVhost, DomainName, DomainSchedule, Model, ResourceId, ScheduledNode,
         SchemaFingerprint, VhostTlsResource,
     };
+    use rustls_pki_types::pem::Error as PemError;
 
     use super::{
         super::test_fixtures::{
             TestService, build_test_service, named, node_named, test_tls_files,
         },
         HttpsListenerError, ListenerVhostKey, ListenerVhosts, ResourceFileError, ResourceStore,
-        TlsMaterialError, VHOST_TLS_CA_PATH, VHOST_TLS_CERT_PATH, VHOST_TLS_KEY_PATH,
-        load_vhost_tls_materials,
+        TlsFileKind, TlsMaterialError, TlsPemFailure, VHOST_TLS_CA_PATH, VHOST_TLS_CERT_PATH,
+        VHOST_TLS_KEY_PATH, load_vhost_tls_materials,
     };
 
     fn vhost(name: &str, hostname: &str, tls_version: Option<u64>) -> Model {
@@ -845,10 +862,16 @@ mod tests {
         assert!(
             matches!(
                 error.current_context(),
-                TlsMaterialError::NoPemItems { path } if path.ends_with(VHOST_TLS_KEY_PATH)
+                TlsMaterialError::NoPemItems {
+                    file: TlsFileKind::PrivateKey
+                }
             ),
             "{error:?}"
         );
+        let private_key_path = content.join(VHOST_TLS_KEY_PATH);
+        let private_key_path = private_key_path.to_str().expect("fixture path is UTF-8");
+        assert!(!format!("{error:#}").contains(private_key_path));
+        assert!(!format!("{error:?}").contains(private_key_path));
 
         std::fs::write(
             content.join(VHOST_TLS_KEY_PATH),
@@ -861,10 +884,15 @@ mod tests {
         assert!(
             matches!(
                 error.current_context(),
-                TlsMaterialError::Pem { path, .. } if path.ends_with(VHOST_TLS_KEY_PATH)
+                TlsMaterialError::Pem {
+                    file: TlsFileKind::PrivateKey,
+                    ..
+                }
             ),
             "{error:?}"
         );
+        assert!(!format!("{error:#}").contains(private_key_path));
+        assert!(!format!("{error:?}").contains(private_key_path));
 
         std::fs::write(content.join(VHOST_TLS_KEY_PATH), &usable_key)
             .expect("the usable key is restored");
@@ -879,10 +907,14 @@ mod tests {
         assert!(
             matches!(
                 error.current_context(),
-                TlsMaterialError::CaCertificate { path, .. } if path.ends_with(VHOST_TLS_CA_PATH)
+                TlsMaterialError::CaCertificate { .. }
             ),
             "{error:?}"
         );
+        let ca_path = content.join(VHOST_TLS_CA_PATH);
+        let ca_path = ca_path.to_str().expect("fixture path is UTF-8");
+        assert!(!format!("{error:#}").contains(ca_path));
+        assert!(!format!("{error:?}").contains(ca_path));
 
         std::fs::write(content.join(VHOST_TLS_CA_PATH), &usable_ca)
             .expect("the usable CA is restored");
@@ -897,6 +929,10 @@ mod tests {
             matches!(error.current_context(), TlsMaterialError::Unavailable),
             "{error:?}"
         );
+        let certificate_path = content.join(VHOST_TLS_CERT_PATH);
+        let certificate_path = certificate_path.to_str().expect("fixture path is UTF-8");
+        assert!(!format!("{error:#}").contains(certificate_path));
+        assert!(!format!("{error:?}").contains(certificate_path));
         assert!(
             matches!(
                 error.downcast_ref::<ResourceFileError>(),
@@ -910,6 +946,45 @@ mod tests {
 
         drop(service);
         std::fs::remove_dir_all(&path).expect("the test database directory is removed");
+    }
+
+    #[test]
+    fn malformed_pem_diagnostics_discard_source_material() {
+        let material = "SECRET_CERTIFICATE_OR_KEY_MATERIAL";
+        let samples = [
+            (
+                PemError::IllegalSectionStart {
+                    line: material.as_bytes().to_vec(),
+                },
+                TlsPemFailure::IllegalSectionStart,
+            ),
+            (
+                PemError::MissingSectionEnd {
+                    end_marker: material.as_bytes().to_vec(),
+                },
+                TlsPemFailure::MissingSectionEnd,
+            ),
+            (
+                PemError::Base64Decode(material.to_string()),
+                TlsPemFailure::Base64Decode,
+            ),
+        ];
+        let byte_debug = format!("{:?}", material.as_bytes());
+
+        for (source, expected_kind) in samples {
+            let error = TlsMaterialError::pem(TlsFileKind::PrivateKey, source);
+            assert!(matches!(
+                error.current_context(),
+                TlsMaterialError::Pem {
+                    file: TlsFileKind::PrivateKey,
+                    kind,
+                } if *kind == expected_kind
+            ));
+            for rendered in [format!("{error:#}"), format!("{error:?}")] {
+                assert!(!rendered.contains(material));
+                assert!(!rendered.contains(&byte_debug));
+            }
+        }
     }
 
     #[tokio::test]

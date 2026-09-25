@@ -11,6 +11,7 @@
 use std::{collections::BTreeSet, num::NonZeroU64};
 
 use ahash::{HashMap, HashSet};
+use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_client_core::Client as NervixClient;
 use nervix_connector_kafka::TopicPartitionInspector;
@@ -51,6 +52,34 @@ pub(in crate::application) const RUNTIME_REVISION_READINESS_PROPAGATION_BOUND: D
 
 const SHUTDOWN_CORDON_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_LEADER_OBSERVATION_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Debug, thiserror::Error)]
+pub(in crate::application) enum SchedulePublicationError {
+    #[cfg(feature = "testing")]
+    #[error("injected schedule publication fault for domain '{domain}'")]
+    FaultInjected { domain: DomainName },
+    #[error("domain '{domain}' does not exist")]
+    DomainNotFound { domain: DomainName },
+    #[error("domain '{domain}' has invalid schedule planning inputs")]
+    InvalidInputs { domain: DomainName },
+    #[error("domain '{domain}' has ineligible schedule placement")]
+    IneligiblePlacement { domain: DomainName },
+    #[error("failed to publish schedule for domain '{domain}'")]
+    Replace { domain: DomainName },
+    #[error("failed to instantiate runtime schedule for domain '{domain}'")]
+    Apply { domain: DomainName },
+}
+
+#[derive(Debug, thiserror::Error)]
+enum KafkaPartitionPublicationError {
+    #[error(
+        "failed to publish Kafka partition schedule for ingestor '{ingestor}' in domain '{domain}'"
+    )]
+    Update {
+        domain: DomainName,
+        ingestor: IngestorName,
+    },
+}
 
 /// The one drain timeout that a graceful shutdown's ownership move and local graph drain share,
 /// which never reaches past the shutdown deadline.
@@ -186,22 +215,25 @@ impl SessionServiceImpl {
         domain: &DomainName,
         graph: Option<ActiveGraph>,
         mutation: Option<&DomainMutationLease>,
-    ) -> Result<usize, String> {
+    ) -> error_stack::Result<usize, SchedulePublicationError> {
         #[cfg(feature = "testing")]
         if self
             .inner
             .runtime
             .take_armed_schedule_publication_fault(domain)
         {
-            return Err(format!(
-                "injected schedule publication fault for domain '{}'",
-                domain.as_str()
-            ));
+            return Err(Report::new(SchedulePublicationError::FaultInjected {
+                domain: domain.clone(),
+            }));
         }
         let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
         let default_policy = inputs
             .state()
-            .ok_or_else(|| format!("domain '{}' does not exist", domain.as_str()))?
+            .ok_or_else(|| {
+                Report::new(SchedulePublicationError::DomainNotFound {
+                    domain: domain.clone(),
+                })
+            })?
             .config
             .placement;
         let planning = self
@@ -214,22 +246,26 @@ impl SessionServiceImpl {
         } = planning.prepare(&inputs, domain, graph, default_policy, inputs.schedule());
         self.validate_domain_planning_inputs(&inputs)
             .await
-            .map_err(|error| error.to_string())?;
-        planning
-            .validate_eligibility(self)
-            .await
-            .map_err(|error| error.to_string())?;
+            .change_context(SchedulePublicationError::InvalidInputs {
+                domain: domain.clone(),
+            })?;
+        planning.validate_eligibility(self).await.change_context(
+            SchedulePublicationError::IneligiblePlacement {
+                domain: domain.clone(),
+            },
+        )?;
         self.inner
             .consensus
             .replace_domain_schedule(inputs, schedule, mutation)
             .await
-            .map_err(|error| error.to_string())?;
-        self.apply_current_cluster_state().await.map_err(|error| {
-            format!(
-                "failed to instantiate runtime schedule for domain '{}': {error}",
-                domain.as_str()
-            )
-        })?;
+            .change_context(SchedulePublicationError::Replace {
+                domain: domain.clone(),
+            })?;
+        self.apply_current_cluster_state().await.change_context(
+            SchedulePublicationError::Apply {
+                domain: domain.clone(),
+            },
+        )?;
         Ok(relocations)
     }
 
@@ -238,12 +274,12 @@ impl SessionServiceImpl {
         domain: &DomainName,
         graph: Option<ActiveGraph>,
         placement: PlacementPolicy,
-    ) -> Result<PreparedDomainSchedule, String> {
+    ) -> PreparedDomainSchedule {
         let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
         let snapshot = self
             .capture_domain_schedule_planning_snapshot(&inputs)
             .await;
-        Ok(snapshot.prepare(&inputs, domain, graph, placement, inputs.schedule()))
+        snapshot.prepare(&inputs, domain, graph, placement, inputs.schedule())
     }
 
     pub(in crate::application) async fn drop_node(
@@ -1856,7 +1892,7 @@ impl SessionServiceImpl {
         topic: &str,
         instances: NonZeroU64,
         observed_partitions: Vec<i32>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), KafkaPartitionPublicationError> {
         let leader = self.inner.consensus.current_leader().await;
         if leader.as_ref() != Some(self.inner.consensus.local_node_id()) {
             return Ok(());
@@ -1907,7 +1943,10 @@ impl SessionServiceImpl {
             .consensus
             .update_kafka_partition_schedule(inputs, next_domain_schedule)
             .await
-            .map_err(|error| error.to_string())
+            .change_context(KafkaPartitionPublicationError::Update {
+                domain: domain.clone(),
+                ingestor: ingestor.clone(),
+            })
     }
 
     pub(in crate::application) async fn reconcile_kafka_partition_watchers(
