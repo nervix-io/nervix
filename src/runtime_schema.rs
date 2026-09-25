@@ -75,9 +75,13 @@ use thiserror::Error;
 use triomphe::Arc;
 
 mod arrow_body;
+mod batch_container;
 mod jaq_unfold;
 mod syslog;
 
+pub(crate) use batch_container::{
+    BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
+};
 pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -794,6 +798,20 @@ impl CompiledCodecBatchEncoder<'_> {
         }
     }
 
+    /// Fails when `row_index` names no row of the batch being encoded.
+    fn check_row(&self, row_index: usize) -> error_stack::Result<(), CodecError> {
+        let row_count = self.batch.batch.num_rows();
+        if row_index < row_count {
+            return Ok(());
+        }
+        Err(Report::new(CodecError::InvalidCodec {
+            codec: self.codec.name.as_str().to_string(),
+            reason: format!(
+                "columnar encode row {row_index} is outside batch with {row_count} rows"
+            ),
+        }))
+    }
+
     /// Writes the encoding of row `row_index` into `output`, piece by piece as the format
     /// produces it.
     ///
@@ -806,15 +824,7 @@ impl CompiledCodecBatchEncoder<'_> {
         output: &mut W,
     ) -> error_stack::Result<(), CodecError> {
         let codec = self.codec.name.as_str();
-        if row_index >= self.batch.batch.num_rows() {
-            return Err(Report::new(CodecError::InvalidCodec {
-                codec: codec.to_string(),
-                reason: format!(
-                    "columnar encode row {row_index} is outside batch with {} rows",
-                    self.batch.batch.num_rows()
-                ),
-            }));
-        }
+        self.check_row(row_index)?;
         let row = ArrowCodecRow::new(self.codec, self.batch, row_index);
         match &self.codec.wire_schema {
             CompiledWireSchema::Json(_) => {
@@ -855,7 +865,7 @@ impl CompiledCodecBatchEncoder<'_> {
                 let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
                 native
                     .format
-                    .write_value_into(value, output)
+                    .write_value_into(&value, output)
                     .map_err(|error| {
                         Report::new(CodecError::JaqNativeEncode {
                             codec: codec.to_string(),

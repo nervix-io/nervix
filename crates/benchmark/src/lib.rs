@@ -23,12 +23,12 @@ pub use comparison::{
     BenchmarkComparison, BenchmarkRunFailure, BenchmarkSuiteReport, ComparisonError,
 };
 pub use definition::{
-    BenchmarkDefinition, BenchmarkDependency, ContainerImplementation, Implementation,
-    LoadConfiguration, LoadDuration, LoadShape, NervixImplementation,
+    BenchmarkDefinition, BenchmarkDependency, ContainerImplementation, DefinitionError,
+    Implementation, LoadConfiguration, LoadDuration, LoadSetting, LoadShape, NervixImplementation,
 };
 pub use kafka::provision_topics;
 pub use metrics_report::{
     BatchTargetMetrics, MetricsReportError, NERVIX_METRICS_PROMETHEUS_FILE,
     NERVIX_METRICS_REPORT_FILE, NervixMetricsReport, RelayBufferMetrics,
 };
-pub use settings::{RunSettings, SettingsError};
+pub use settings::{ByteSizeError, RunSettings, SettingsError};

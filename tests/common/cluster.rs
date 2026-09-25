@@ -3511,15 +3511,27 @@ struct ClusterStatus {
 
 #[derive(Debug)]
 pub(crate) struct BrokerMessage {
+    /// The payload as text, with any byte that is not valid UTF-8 replaced.
     pub(crate) payload: String,
+    /// The payload exactly as the broker delivered it.
+    pub(crate) bytes: Vec<u8>,
     pub(crate) headers: Vec<(String, String)>,
 }
 
 impl BrokerMessage {
     fn payload(payload: String) -> Self {
         Self {
+            bytes: payload.as_bytes().to_vec(),
             payload,
             headers: Vec::new(),
+        }
+    }
+
+    fn from_bytes(bytes: &[u8], headers: Vec<(String, String)>) -> Self {
+        Self {
+            payload: String::from_utf8_lossy(bytes).to_string(),
+            bytes: bytes.to_vec(),
+            headers,
         }
     }
 }
@@ -4757,8 +4769,7 @@ async fn observe_kafka(
             tokio::task::consume_budget().await;
             match message {
                 Ok(message) => {
-                    let payload =
-                        String::from_utf8_lossy(message.payload().unwrap_or_default()).to_string();
+                    let bytes = message.payload().unwrap_or_default();
                     let headers = message
                         .headers()
                         .map(|headers| {
@@ -4778,7 +4789,9 @@ async fn observe_kafka(
                             values
                         })
                         .unwrap_or_default();
-                    let _ = payload_tx.send(BrokerMessage { payload, headers }).await;
+                    let _ = payload_tx
+                        .send(BrokerMessage::from_bytes(bytes, headers))
+                        .await;
                 }
                 Err(_) => continue,
             }
@@ -4949,7 +4962,7 @@ async fn observe_nats(
     let task = tokio::spawn(async move {
         while let Some(message) = subscriber.next().await {
             tokio::task::consume_budget().await;
-            let payload = String::from_utf8_lossy(message.payload.as_ref()).to_string();
+            let bytes = message.payload.as_ref();
             let headers = message
                 .headers
                 .as_ref()
@@ -4965,7 +4978,7 @@ async fn observe_nats(
                 })
                 .unwrap_or_default();
             if payload_tx
-                .send(BrokerMessage { payload, headers })
+                .send(BrokerMessage::from_bytes(bytes, headers))
                 .await
                 .is_err()
             {

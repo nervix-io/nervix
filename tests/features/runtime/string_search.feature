@@ -12,7 +12,7 @@ Feature: Practical string search and normalization
       CREATE SCHEMA searched_text (
         id STRING, raw STRING, pattern STRING,
         bytes I64, parts STRING, joined STRING,
-        wildcard BOOL, insensitive BOOL, any_match BOOL,
+        wildcard BOOL, insensitive BOOL, any_match BOOL, dynamic_match BOOL,
         captured STRING OPTIONAL, normalized STRING
       );
       CREATE SCHEMA search_error (source_id STRING, error_code STRING, error_message STRING);
@@ -36,6 +36,7 @@ Feature: Practical string search and normalization
               wildcard = like(input.raw, input.pattern),
               insensitive = ilike(input.raw, input.pattern),
               any_match = contains_any(input.raw, vec('café', 'HELLO')),
+              dynamic_match = contains_any(input.raw, vec(input.pattern, 'HELLO')),
               captured = CASE
                 WHEN input.id = 'bad' THEN regexp_extract(input.raw, '(', 1)
                 ELSE regexp_extract(input.raw, '([[:alpha:]]+)', 1)
@@ -72,9 +73,9 @@ Feature: Practical string search and normalization
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "id":"accent" | "bytes":12 | "parts":"café|HELLO" | "joined":"accent-café HELLO" | "wildcard":false | "insensitive":true | "any_match":true | "captured":"cafe" | "normalized":"café HELLO"
-      "id":"escape" | "bytes":3 | "parts":"a%b" | "wildcard":true | "captured":"a"
-      "id":"empty" | "bytes":0 | "parts":"" | "joined":"empty-" | "wildcard":true | "any_match":false
+      "id":"accent" | "bytes":12 | "parts":"café|HELLO" | "joined":"accent-café HELLO" | "wildcard":false | "insensitive":true | "any_match":true | "dynamic_match":true | "captured":"cafe" | "normalized":"café HELLO"
+      "id":"escape" | "bytes":3 | "parts":"a%b" | "wildcard":true | "dynamic_match":false | "captured":"a"
+      "id":"empty" | "bytes":0 | "parts":"" | "joined":"empty-" | "wildcard":true | "any_match":false | "dynamic_match":false
       "id":"combining" | "bytes":3 | "wildcard":false | "normalized":"é"
       "source_id":"bad" | "error_code":"evaluation" | invalid regular expression
       """

@@ -6,7 +6,10 @@
 //! - **Depends on.** Arrow arrays, the linear-time Aho-Corasick matcher, and VM row errors.
 //! - **Must not know.** NSPL Models, graph ownership, branches, or external connectors.
 
-use std::num::NonZeroUsize;
+use std::{
+    hash::{Hash, Hasher},
+    num::NonZeroUsize,
+};
 
 use aho_corasick::AhoCorasick;
 use arrow_array::{
@@ -16,7 +19,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field};
 use arrow_string::like::{ilike, like};
 use error_stack::Report;
-use indexmap::IndexMap;
+use indexmap::{Equivalent, IndexMap};
 use meticulous::OptionExt as _;
 use triomphe::Arc;
 use unicode_normalization::UnicodeNormalization;
@@ -34,6 +37,43 @@ const MAX_PATTERNS: usize = 128;
 const MAX_PATTERN_BYTES: usize = 64 * 1024;
 const PATTERN_SETS_PER_BATCH: usize = 64;
 const LIKE_PATTERN_BYTES_LIMIT: usize = 4 * 1024;
+
+/// A borrowed cache query over one Arrow list. Hashing matches `Vec<String>` exactly, including
+/// the number of non-null patterns, so a hit needs no owned strings or temporary vector.
+struct PatternLookup<'a> {
+    items: &'a StringArray,
+}
+
+impl PatternLookup<'_> {
+    fn count(&self) -> usize {
+        self.items
+            .len()
+            .checked_sub(self.items.null_count())
+            .assured("Arrow null count cannot exceed array length")
+    }
+}
+
+impl Hash for PatternLookup<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.count().hash(state);
+        for pattern in self.items.iter().flatten() {
+            pattern.hash(state);
+        }
+    }
+}
+
+impl Equivalent<Vec<String>> for PatternLookup<'_> {
+    fn equivalent(&self, key: &Vec<String>) -> bool {
+        if self.count() != key.len() {
+            return false;
+        }
+        self.items
+            .iter()
+            .flatten()
+            .zip(key)
+            .all(|(pattern, cached)| pattern == cached)
+    }
+}
 
 struct JoinedSize {
     parts: usize,
@@ -483,7 +523,7 @@ pub(crate) fn contains_any(
                 actual: items.data_type().clone(),
             }));
         };
-        let mut patterns = Vec::with_capacity(items.len().min(MAX_PATTERNS));
+        let mut pattern_count = 0_usize;
         let mut bytes = 0_usize;
         let mut too_large = false;
         for pattern in items.iter().flatten() {
@@ -492,43 +532,50 @@ pub(crate) fn contains_any(
                 break;
             };
             bytes = next_bytes;
-            if patterns.len() == MAX_PATTERNS || bytes > MAX_PATTERN_BYTES {
+            if pattern_count == MAX_PATTERNS || bytes > MAX_PATTERN_BYTES {
                 too_large = true;
                 break;
             }
-            patterns.push(pattern.to_owned());
+            pattern_count += 1;
         }
         if too_large {
             output.append_null();
             failure(row, SideErrorReason::PatternSetTooLarge, errors, span);
             continue;
         }
-        if patterns.is_empty() {
+        if pattern_count == 0 {
             output.append_value(false);
             continue;
         }
-        if !cache.contains_key(&patterns) {
-            let Ok(matcher) = AhoCorasick::new(&patterns) else {
-                output.append_null();
-                failure(row, SideErrorReason::PatternSetTooLarge, errors, span);
-                continue;
-            };
-            if cache.len() == PATTERN_SETS_PER_BATCH {
-                cache.shift_remove_index(0);
-            }
-            cache.insert(patterns.clone(), matcher);
+        let lookup = PatternLookup { items };
+        if let Some(matcher) = cache.get(&lookup) {
+            output.append_value(matcher.is_match(text.value(row)));
+            continue;
         }
-        let matcher = cache
-            .get(&patterns)
-            .verified("the matcher was inserted or already present");
-        output.append_value(matcher.is_match(text.value(row)));
+        let patterns: Vec<String> = items.iter().flatten().map(str::to_owned).collect();
+        let Ok(matcher) = AhoCorasick::new(&patterns) else {
+            output.append_null();
+            failure(row, SideErrorReason::PatternSetTooLarge, errors, span);
+            continue;
+        };
+        let matched = matcher.is_match(text.value(row));
+        if cache.len() == PATTERN_SETS_PER_BATCH {
+            cache.shift_remove_index(0);
+        }
+        cache.insert(patterns, matcher);
+        output.append_value(matched);
     }
     Ok(output.finish())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{num::NonZeroUsize, sync::Arc as StdArc};
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+        num::NonZeroUsize,
+        sync::Arc as StdArc,
+    };
 
     use arrow_array::{
         Array, StringArray,
@@ -537,7 +584,8 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::{
-        ContainsAnyCall, concat_ws, contains_any, join, normalize_nfc, split, wildcard_match,
+        ContainsAnyCall, PatternLookup, concat_ws, contains_any, join, normalize_nfc, split,
+        wildcard_match,
     };
     use crate::{RowErrors, TypedArray, operand::Operand, program::Span};
 
@@ -639,6 +687,55 @@ mod tests {
             vec![Some(true), Some(true), None]
         );
         assert!(!errors.is_error_free());
+    }
+
+    #[test]
+    fn borrowed_pattern_lookup_matches_owned_cache_keys() {
+        let items = StringArray::from(vec![Some("é"), None, Some("needle")]);
+        let lookup = PatternLookup { items: &items };
+        let key = vec!["é".to_owned(), "needle".to_owned()];
+        let mut borrowed_hash = DefaultHasher::new();
+        lookup.hash(&mut borrowed_hash);
+        let mut owned_hash = DefaultHasher::new();
+        key.hash(&mut owned_hash);
+        assert_eq!(borrowed_hash.finish(), owned_hash.finish());
+        assert!(indexmap::Equivalent::equivalent(&lookup, &key));
+        assert!(!indexmap::Equivalent::equivalent(
+            &lookup,
+            &vec!["needle".to_owned(), "é".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn dynamic_pattern_sets_reuse_matching_keys_with_null_items() {
+        let text = StringArray::from(vec!["éclair", "alpha", "alpha", "beta", "alpha"]);
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        for pattern in ["é", "x", "alpha", "é", "x"] {
+            builder.values().append_null();
+            builder.values().append_value(pattern);
+            builder.append(true);
+        }
+        let lists = TypedArray::Generic(StdArc::new(builder.finish()));
+        let mut errors = RowErrors::new(text.len());
+        let result = contains_any(
+            &ContainsAnyCall::Dynamic,
+            &text,
+            Some(&lists),
+            &mut errors,
+            SPAN,
+        )
+        .assured("the list holds bounded STRING pattern sets");
+        assert_eq!(
+            result.iter().collect::<Vec<_>>(),
+            vec![
+                Some(true),
+                Some(false),
+                Some(true),
+                Some(false),
+                Some(false)
+            ]
+        );
+        assert!(errors.is_error_free());
     }
 
     #[test]

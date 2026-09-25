@@ -19397,8 +19397,53 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     duration: String,
     #[step] step: &Step,
 ) {
+    receive_subscription_fragment_sets(world, &duration, step).await;
+}
+
+/// Like the step above, and every payload matching a fragment set carries the same value in the
+/// named JSON field, such as the one error reference the members of a failed batch share.
+#[then(
+    expr = "within {string} the relay subscription receives payloads containing all fragments \
+            that share one {string}"
+)]
+async fn then_within_duration_the_stream_subscription_receives_fragments_sharing_one_field(
+    world: &mut ScenarioWorld,
+    duration: String,
+    field: String,
+    #[step] step: &Step,
+) {
+    let matched = receive_subscription_fragment_sets(world, &duration, step).await;
+    let values = matched
+        .iter()
+        .map(|payload| {
+            let payload: serde_json::Value =
+                serde_json::from_str(payload).unwrap_or_else(|error| {
+                    panic!("subscription payload {payload:?} is not JSON: {error}")
+                });
+            payload
+                .get(&field)
+                .cloned()
+                .unwrap_or_else(|| panic!("subscription payload {payload} has no field {field:?}"))
+        })
+        .collect::<Vec<_>>();
+    let Some(first) = values.first() else {
+        panic!("no subscription payload matched the expected fragment sets");
+    };
+    assert!(
+        values.iter().all(|value| value == first),
+        "payloads matching the fragment sets carry different {field:?} values: {values:?}"
+    );
+}
+
+/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
+/// payload, and returns the payloads that matched, in the order they arrived.
+async fn receive_subscription_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    step: &Step,
+) -> Vec<String> {
     let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        humantime::parse_duration(duration).expect("step duration must be a valid duration");
     let expected_fragment_sets = docstring(step)
         .lines()
         .map(str::trim)
@@ -19424,6 +19469,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     let deadline = Instant::now() + duration;
     let mut remaining = expected_fragment_sets;
     let mut observed = Vec::new();
+    let mut matched = Vec::new();
 
     while !remaining.is_empty() {
         let now = Instant::now();
@@ -19455,8 +19501,10 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
             .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)))
         {
             remaining.remove(index);
+            matched.push(payload);
         }
     }
+    matched
 }
 
 #[then("the relay subscription does not receive a payload")]
@@ -21630,21 +21678,92 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_payload
     duration: String,
     #[step] step: &Step,
 ) {
-    let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
-    let mut remaining = BTreeMap::<String, usize>::new();
+    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
     for line in docstring(step).lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let payload = expand_placeholders(world, line);
-        *remaining.entry(payload).or_insert(0) += 1;
+        *expected.entry(payload.into_bytes()).or_insert(0) += 1;
     }
+    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+}
+
+/// Like the step above, for payloads that are not all text. Each docstring line is `text:`
+/// followed by the exact payload text, or `hex:` followed by the exact payload bytes in hex.
+#[then(expr = "within {string} the observed broker receives exactly these encoded payloads")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded_payloads(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let payload = if let Some(text) = line.strip_prefix("text:") {
+            expand_placeholders(world, text).into_bytes()
+        } else if let Some(hex) = line.strip_prefix("hex:") {
+            decode_hex_payload(hex)
+        } else {
+            panic!("encoded payload line must start with 'text:' or 'hex:', found {line:?}");
+        };
+        *expected.entry(payload).or_insert(0) += 1;
+    }
+    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+}
+
+fn decode_hex_payload(hex: &str) -> Vec<u8> {
+    let digits = hex
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<Vec<_>>();
+    assert!(
+        digits.len() % 2 == 0,
+        "hex payload must hold an even number of digits: {hex:?}"
+    );
+    digits
+        .chunks(2)
+        .map(|pair| {
+            let pair = pair.iter().collect::<String>();
+            u8::from_str_radix(&pair, 16)
+                .unwrap_or_else(|error| panic!("invalid hex byte {pair:?} in {hex:?}: {error}"))
+        })
+        .collect()
+}
+
+fn describe_broker_payload(payload: &[u8]) -> String {
+    let hex = payload
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "{:?} (hex {hex}, {} bytes)",
+        String::from_utf8_lossy(payload),
+        payload.len()
+    )
+}
+
+async fn receive_exactly_these_broker_payloads(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    mut remaining: BTreeMap<Vec<u8>, usize>,
+) {
+    let duration =
+        humantime::parse_duration(duration).expect("step duration must be a valid duration");
     assert!(
         !remaining.is_empty(),
         "step docstring must contain at least one expected payload"
     );
+    let describe_remaining = |remaining: &BTreeMap<Vec<u8>, usize>| {
+        remaining
+            .iter()
+            .map(|(payload, count)| format!("{count} x {}", describe_broker_payload(payload)))
+            .collect::<Vec<_>>()
+    };
 
     let deadline = Instant::now() + duration;
     let mut observed = Vec::new();
@@ -21653,47 +21772,50 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_payload
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out waiting for broker payloads; expected remaining {remaining:?}, observed \
-             {observed:?}"
+            "timed out waiting for broker payloads; expected remaining {:?}, observed {observed:?}",
+            describe_remaining(&remaining)
         );
-        let payload = world
+        let message = world
             .broker_observer
             .as_mut()
             .expect("a broker observer must exist before assertion")
-            .try_next_payload(deadline.saturating_duration_since(now))
+            .try_next_message(deadline.saturating_duration_since(now))
             .await
             .expect("failed while waiting for exact broker payloads");
-        let Some(payload) = payload else {
+        let Some(message) = message else {
             panic!(
-                "timed out waiting for broker payloads; expected remaining {remaining:?}, \
-                 observed {observed:?}"
+                "timed out waiting for broker payloads; expected remaining {:?}, observed \
+                 {observed:?}",
+                describe_remaining(&remaining)
             );
         };
-        let Some(count) = remaining.get_mut(&payload) else {
+        let Some(count) = remaining.get_mut(&message.bytes) else {
             panic!(
-                "observed an unexpected broker payload {payload:?} ({} bytes); expected remaining \
-                 {remaining:?}, observed before it {observed:?}",
-                payload.len()
+                "observed an unexpected broker payload {}; expected remaining {:?}, observed \
+                 before it {observed:?}",
+                describe_broker_payload(&message.bytes),
+                describe_remaining(&remaining)
             );
         };
         *count -= 1;
         if *count == 0 {
-            remaining.remove(&payload);
+            remaining.remove(&message.bytes);
         }
-        world.last_broker_payload = Some(payload.clone());
-        observed.push(payload);
+        world.last_broker_payload = Some(message.payload.clone());
+        observed.push(describe_broker_payload(&message.bytes));
     }
 
     let extra = world
         .broker_observer
         .as_mut()
         .expect("a broker observer must exist before assertion")
-        .try_next_payload(Duration::from_secs(2))
+        .try_next_message(Duration::from_secs(2))
         .await
         .expect("failed while checking for an unexpected broker payload");
     assert!(
         extra.is_none(),
-        "observed a broker payload beyond the expected ones: {extra:?}; observed {observed:?}"
+        "observed a broker payload beyond the expected ones: {:?}; observed {observed:?}",
+        extra.map(|message| describe_broker_payload(&message.bytes))
     );
 }
 

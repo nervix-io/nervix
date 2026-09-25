@@ -182,6 +182,7 @@ mod domain_clock;
 mod domain_execution;
 mod domain_rebuild;
 mod domain_wire_schemas;
+mod emitter_batch_packing;
 mod emitter_buffer;
 mod emitter_encoding;
 mod emitter_publishing;

@@ -461,6 +461,11 @@ bench-wasm-checkpoint *args:
 bench-vm *args:
     cargo bench --package nervix-vm --bench vm -- {{ args }}
 
+# Run the same VM Criterion harness with one-shot allocation and output-size probes. The
+# instrumentation is compiled only for this recipe; use `bench-vm` for timing comparisons.
+bench-vm-alloc *args:
+    cargo bench --package nervix-vm --bench vm --features benchmark-allocations -- {{ args }}
+
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
 # such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
 benchmark *args:
@@ -670,9 +675,9 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
 
 # Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
 # graphs use the real synchronization crates directly and contain no Shuttle package.
@@ -717,6 +722,11 @@ validate-simulation-feature-conflict:
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py
+
+# Reject `Result<_, String>` in product code. A typed error is a rule, not a count, so there is no
+# baseline to raise: any occurrence fails and names the rule.
+validate-typed-errors:
+    python3 -m scripts.check_typed_errors
 
 # Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
