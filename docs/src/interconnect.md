@@ -14,244 +14,38 @@ can distinguish those outcomes.
 
 ## Simulation Boundary
 
-The interconnect and its execution dependency have an optional Turmoil test mode. It is separate
-from the Shuttle scheduler mode; selecting both is an invalid build configuration that fails to
-compile with a diagnostic naming both modes. The normal runtime dependency graph contains neither
-simulation scheduler. The synchronous Turmoil runner is a test harness outside product ownership.
-Every run is built from one configuration: a seed, a UTC epoch, an IPv4 or IPv6 topology, the link
-parameters (message latency range, loss and repair rates, and TCP buffer capacity), a simulated
-duration, a step limit, and a real wall-clock bound. The runner refuses to start unless the test
-build sets `tokio_unstable`, because without it Tokio's scheduling would not follow the seed and a
-panicking task on a simulated host would not fail the run. How the runner supervises a run, and how
-a failed run is recorded and replayed, is described in
-[Supervision, Failure Records, And Replay](#supervision-failure-records-and-replay).
+The transport also runs, unchanged, inside a seeded Turmoil network simulation. That simulation is a
+test harness outside product ownership, and
+[Deterministic Interconnect Simulation](./interconnect-simulation.md) owns it: its build mode, the
+fault model, supervision, replay and failure records, the scenario matrix, the commands and CI
+budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
+plugs into. Each seam has one production behavior, which is what every node uses:
 
-The runner exercises the interconnect's actual bounded rkyv encode and decode path through
-`nervix-execution`. In this build mode, admitted CPU jobs run as Tokio tasks on the simulated
-scheduler; production and Shuttle builds continue to use the blocking pool. Queue slots, per-class
-worker reservations, memory charges, and cooperative cancellation follow the same policy in both
-modes. A queued caller that leaves releases its slot and charge; a running job keeps its worker and
-charge until it exits, even if its caller leaves. Each synchronous CPU job body is one scheduler
-step. Turmoil can vary task ordering around it, but instruction-level CPU races inside a job need
-Shuttle or real-thread testing. Only bounded executor probes and interconnect codec jobs are
-approved for this suite; storage jobs, external drivers and unbounded CPU work are outside it.
-
-The dedicated Turmoil build selects simulated TCP listeners, outbound sockets and DNS lookups at
-the interconnect I/O boundary. The same production TLS, HTTP/2, request, relay-envelope and Arrow
-IPC paths run above those sockets. Each transport, credential bundle, executor and peer topology is
-constructed inside its own simulated host; live sockets and transports are never shared between
-hosts. The test harness shares only bounded readiness and completion signals. It shuts down every
-transport before its host exits, so listener cleanup and rebinding are observable in the same host.
-The two-host exchange transfers an Arrow batch both in a typed request and as a relay payload; a
-three-host scenario resolves and exchanges with two peers and checks certificate-name rejection.
-Fault scenarios partition a link before connection setup, partition one direction before setup,
-hold traffic after an authenticated exchange, and partition an established exchange. The setup
-partitions remain in place for twelve seconds of simulated time so bounded reconnect behavior is
-observable. The established-link faults expire both a one-second liveness probe and a two-second
-typed request. A repaired hold releases queued traffic; a repaired partition that dropped TCP
-segments also closes and rebinds the listener and retires the client pool before reconnecting.
-The same seed and fault plan run twice and compare semantic event times and outcomes. Snapshots
-bound open connections, pending requests, reconnect failures, and simulated sockets during
-disruption. Transport connection counts are checked after shutdown. Turmoil's socket count can
-retain failed connect attempts after a partition, so it is not a session-cleanup measure.
-Transport readiness and authenticated application liveness are checked before disruption and
-after recovery. The three-host isolation fixture, which stalls one peer while another keeps
-exchanging every traffic class, is described with the capacity it checks in
-[Traffic And Resource Isolation](#traffic-and-resource-isolation).
-
-Turmoil's `hold` queues simulated messages and `release` delivers them; a request whose deadline
-expires while messages are held stays expired when they are released. `partition` drops simulated
-messages and `repair` restores delivery without replaying dropped messages. One-way partitions are
-used separately from holds because Turmoil does not support combining them. The pinned Turmoil
-version has no separate disconnect control; listener shutdown and rebinding exercise TCP closure
-through the production transport. These tests establish behavior of the simulated TCP link and
-physical transport deadlines. They do not model kernel retransmission timing.
-
-Transport deadlines are Tokio instants, so on a simulated host they follow the simulated clock:
-connection setup, request and progress timeouts, reconnect backoff, relay grant lifetimes, and the
-drain deadline derived from certificate expiry all expire after simulated, not real, elapsed time.
-Certificate validity is judged by the one UTC clock carried by each credential bundle. The runner
-gives every host a clock that reads the configured UTC epoch plus simulated elapsed time, with an
-optional per-host skew. Rustls verification on the client and the server, the transport's own
-check of its local certificate, the check of the authenticated peer certificate, and the mapping of
-certificate expiry onto a monotonic drain deadline all read that clock. Outside a simulated host
-the simulated clock has no reading, and a certificate check fails rather than consulting the host
-wall clock. The suite exercises not-yet-valid and expired boundaries of both the local and the
-peer certificate, rejection by the client's and by the server's Rustls verifier, the drain of an
-accepted session at the earlier expiry on both peers, and the setup deadline of a stalled handshake,
-over simulated TCP with fixed-validity certificate fixtures and real TLS 1.3 cryptography.
-
-The process epoch and relay grant identifiers are drawn from the transport's configured entropy.
-Production uses the operating system's secure random source; a simulated host is given a seeded
-source per host, so one scenario, seed and configuration allocates the same identities in every
-process. Randomness inside TLS stays real. Replay is compared by a semantic trace: each event
-records its simulated time, host, and the identity, admission decision or outcome it describes,
-and excludes key material, certificate bytes, ciphertext and payload values, which either differ
-between runs without changing any decision or do not belong in a failure record. Every scenario
-seed runs twice, each time in a fresh process, and must record identical traces, and the
-certificate-clock checks also run one scenario in two fresh processes; any causally relevant
-difference is a defect.
+- **Sockets and DNS.** The TCP listener, outbound streams, and peer resolution use Tokio's
+  operating-system APIs. The dedicated `turmoil` test build selects Turmoil's simulated TCP and DNS
+  at that one boundary; TLS, HTTP/2, the envelope codec, and Arrow IPC above it are the same code in
+  every build.
+- **Certificate time.** Each credential bundle carries the one UTC clock its certificates are judged
+  by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
+  Production bundles use the system clock.
+- **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
+  configured entropy, which in production is the operating system's secure random source.
+- **Deadlines.** Every transport deadline is a Tokio instant, so it follows the clock of the runtime
+  it runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
+  lifetimes, and the drain deadline derived from certificate expiry.
+- **CPU work.** Encoding and decoding run through `nervix-execution`. Its Turmoil build runs bounded
+  CPU jobs as tasks on the simulated scheduler under the same admission, charge, and cancellation
+  policy.
 
 The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes
 effects, the walk runs in the key's semantic order instead of map order: retiring removed or
 departed peer targets, cancelling a node's or every connection slot, re-establishing preconnected
 slots after a credential replacement, and sending relay progress reports. Walks that only count,
 take a maximum, or remove entries independently of one another keep map order, because it cannot
-change their result. Residual sources outside the simulated contract are Rustls and AWS-LC
-randomness, which changes cipher bytes but no decision; Tokio's per-runtime scheduling seed, which
-Turmoil derives from the simulation seed only when the build sets `tokio_unstable`, as the runner
-requires; and Tokio's task numbers, which are counted across the whole process. A runtime tears its
-tasks down in an order derived from those numbers, so when a simulated host crashes, the order in
-which its connections close depends on every task the process created before. Each scenario
-attempt and each replay therefore runs in a fresh process, where that count starts from the same
-state.
+change their result.
 
-Production builds use Tokio's operating-system TCP and DNS APIs. The Turmoil build uses only
-simulated TCP and DNS for the interconnect, so transport fault scenarios cannot escape to the host
-network within that boundary. External connectors, filesystem and database work, gossip and
-consensus randomness, and domain-clock authority are outside this simulation boundary. The
-transport clock is physical infrastructure time only; it neither defines domain time nor stamps
-connector arrivals. A simulated host crash tears down its runtime and is not evidence of
-power-loss or SIGKILL durability. A simulation result does not establish kernel retransmission
-behavior or full-node recovery.
-
-### Supervision, Failure Records, And Replay
-
-The runner supervises every way a run can end.
-
-| Ending | How the run fails |
-| --- | --- |
-| A host or client returns an error | With that error |
-| A panic on the scheduler thread | With the first panic's message and source location. This covers a panic in a task on a simulated host, which shuts that host's runtime down, and a panic Tokio catches while it drops a task, which would otherwise only be printed |
-| The simulated duration or the step limit runs out | With the bound and the simulated time reached |
-| The real-time bound expires | With the phase the scheduler was in, the steps it completed, and the simulated time they reached, which locates a step that blocked the scheduler thread |
-| Cleanup panics after the run completed | As a cleanup failure, even though every step succeeded |
-
-The real-time deadline is fixed before the scheduler thread starts and is measured outside it, so it
-expires even when a host blocks that thread and simulated time cannot advance; the blocked thread is
-then abandoned, and ends with the process that runs the attempt. When the steps complete, the
-simulation and every host runtime are dropped in a cleanup phase of their own, inside the same
-deadline. A cleanup failure that follows a failed run is written to standard error beside the run's
-own failure.
-
-Each interconnect scenario has a name, a written fault plan, and a small set of committed regression
-seeds. An ordinary run executes every committed seed twice, each time in a fresh process of the test
-binary, and requires the same outcome and the same trace from both. The attempt's process reports
-what it observed back to the test that started it. A process that ends without reporting, because it
-aborted or because it outlived its run's real-time bound by 30 seconds and was killed, fails the
-seed with its exit and the last 40 lines of its output. The runner's own checks, and the
-library-level clock and codec checks, use fixed seeds and are rerun by name.
-
-A scenario that fails, panics around its simulation, or diverges between its two runs leaves a JSON
-failure record under `target/turmoil-failures`, one file for each test, case and seed. The test then
-fails with a summary of the trace and the command that replays the record.
-
-| Record field | Contents |
-| --- | --- |
-| `scenario` | The Cargo package, test target and libtest name that select the test, the case within it, and its fault plan |
-| `build` | The checked-out commit and whether tracked files were modified, the SHA-256 of `Cargo.lock`, `rustc -vV`, and whether `tokio_unstable` and debug assertions were compiled in |
-| `inputs` | The seed, epoch, topology, link parameters, simulated and real-time bounds, and any injected failure |
-| `run` | Whether the first or the repeat run of the determinism check failed |
-| `outcome` | Running, failed, panicked, diverged, or unreported, with the error, the panic, the first differing event of each run, or the process's ending and output |
-| `events` | The semantic trace, as far as the run got |
-
-A record holds identities, inputs, outcomes and semantic events only. It never holds certificates,
-key material, ciphertext or payload values, and the fixtures' payload assertions do not print the
-values they compare. The record is written before each seed starts, marked running, and removed when
-the seed passes, so a test process ended from outside, such as by the suite's real-time budget,
-still leaves the inputs of the run it was in.
-
-`just test-turmoil-replay <record>` replays a record in a fresh process, the same starting state
-every attempt had. It selects the recorded package, test target and test, and the recorded case
-within that test, and runs it once with exactly the recorded inputs, whatever the scenario's current
-seeds and bounds are. It reports each difference between the recorded build and its own, since a
-different source, lockfile or toolchain can legitimately change a run, and then compares its outcome
-and trace with the record: the failure reproduced, the replay failed differently, or it passed. A
-replay that fails exits with a failure status. One that passes prints that the recorded failure did
-not reproduce, which is how a fix is confirmed.
-
-The replay path is checked itself. `NERVIX_TURMOIL_INJECT_FAILURE`, set to a simulated time such as
-`5s`, adds a harness host that fails at that time. The injection is one of the run's recorded
-inputs, so a replay injects it again. A regression test injects a failure into a scenario in a fresh
-process, requires exactly one record, replays that record in a second fresh process, and requires
-the recorded outcome and trace. `just test-turmoil-replay-check` does the same through the
-documented replay command. Two further scenarios, one whose trace names the process that ran it and
-one whose check after the simulation fails, are started in fresh processes by a regression test that
-requires a diverged and a panicked record. The suite contains no failing test: the injection exists
-only in the environment of those processes, and the two failing scenarios are ignored unless a test
-starts them.
-
-`just test-turmoil-sweep <first> <count>` runs every scenario over a range of seeds in place of its
-committed seeds, each seed twice and with the same failure records. Its default, sixty-four seeds
-from 1000, ran for 8 minutes 11 seconds after the build on a 32-thread development workstation, one
-attempt at a time; the recipe's default real-time budget of 25 minutes leaves three times that, and
-the recipe ends with status `124` when the budget expires. A seed that exposes a defect joins its
-scenario's committed seeds with the fix, so the regression set grows only by seeds that found
-something. The first was seed 1036 of the receiver restart with a delayed relay response: its two
-runs diverged while they shared one process, which exposed the task-numbering dependence described
-above.
-
-In CI the Turmoil suite is a job of its own, beside the default suite and the Shuttle checks. Its
-build enables the `turmoil` feature and `tokio_unstable`, so it shares no compilation with them. The
-job runs `just test-turmoil`, which gives the tests an 8-minute real-time budget after the build and
-ends with status `124` when the budget expires, and then `just test-turmoil-replay-check`. When a
-step fails, it uploads `target/turmoil-failures` as the `turmoil-failures` artifact. The job's
-30-minute limit is the emergency guard outside the budget, following the convention of the
-[Integration Test Lifecycle](./integration-test-lifecycle.md#the-suite-watchdog). No build combines
-the two scheduler modes: the workspace-wide all-features builds exclude every package that offers
-them, and validation checks that the production dependency graph, with or without default features,
-contains no Turmoil package, and that selecting both modes in either package fails with its
-diagnostic.
-
-### Qualification Matrix And Limits
-
-The committed matrix runs each seed twice in separate test processes and compares the outcome and
-the ordered, simulated-time semantic events. The wider sweep replaces every case's committed seeds
-with the same range; it does not weaken the assertions in any case. These are simulation limits,
-not elapsed test times:
-
-| Case | Committed seeds | Maximum simulated time | Main assertion |
-| --- | --- | --- | --- |
-| DNS and bounded CPU execution | 41 and 1–12 | 1 second | Simulated resolution and all CPU classes run on the host scheduler; reservations return |
-| Authenticated Arrow exchange and three-host identity rejection | 49, 57 | 30 seconds | Production TLS, HTTP/2, typed envelopes and Arrow IPC carry the exchange; the wrong identity is rejected |
-| Partition before dial, one-way partition, held exchange, partitioned exchange | 61–64 | 60 seconds | Setup and request deadlines expire; repair restores authenticated service within connection and request bounds |
-| Lost relay reply and cancellation before grant, during reply loss, and during reconnect | 71–74 | 30 seconds | Same-epoch retry reconciles admission and ACK identity; cancellation respects the grant boundary |
-| Receiver restart after body receipt, after admission, and with a delayed reply | 81, 83, 85, 1036 | 90 seconds | A new process epoch fences unresolved volatile delivery and accepts fresh work |
-| Stalled peer with a healthy peer using every traffic class | 91–93 | 120 seconds | Pool and subquota reservations remain bounded, unrelated work progresses, and teardown releases charges |
-
-The transport and relay cases allow at most 50,000 scheduler steps and 90 seconds of real time per
-attempt. The isolation case allows 120,000 steps and 120 seconds. The one-second harness cases allow
-200 steps and three seconds. The isolation fixture fills 32 shared management streams and one bulk
-worker plus eight pending jobs, checks that two additional submissions are refused, and observes
-the exact memory, stream and relay reservations during cancellation and release. Other transport
-cases check open connections, pending requests, reconnect failures and simulated sockets against
-their configured bounds. The suite-level real-time budget is eight minutes after compilation;
-the 64-seed exploratory sweep has a 25-minute bound and is run outside ordinary CI.
-
-An audit of the simulated path covers the socket and DNS alias, transport identity and certificate
-clocks, request and relay deadlines, map walks with side effects, the bounded CPU executor and the
-runner. The product path uses Turmoil's TCP and DNS, Tokio's scheduler clock, supplied UTC and
-seeded identity entropy. The harness itself uses a real thread and wall clock to detect a blocked
-scheduler; those observations decide when to fail a test, not how a simulated request proceeds.
-The execution storage class still uses a real blocking thread and is outside these cases. Default
-worker counts can reflect the host CPU count, so comparisons establish replay on the tested host
-configuration, not byte-for-byte independence from host capacity. Rustls and AWS-LC retain their
-cryptographic randomness; traces compare authenticated decisions and outcomes rather than
-ciphertext. The surrounding cluster's Raft and gossip entropy, Fjall and filesystem effects,
-cross-host attribution, domain time and external connectors remain prerequisites for a later
-whole-cluster simulation. Real-process SIGKILL and durability claims require the separate process
-recovery scenarios.
-
-Qualification runs `just test-shuttle` on the same revision as `just test-turmoil`,
-`just test-turmoil-replay-check` and the wider seed sweep. The normal feature configuration is
-checked with `just test-execution`, `just test-interconnect` and `just validate`, including the
-production dependency and scheduler-feature checks. Public `internal_tls` scenarios exercise real
-authentication on one- and three-node clusters; `interconnect_health`, `interconnect_lifetime` and
-`interconnect_observability` exercise real cluster transport and quotas. The
-`process_crash_recovery` feature starts a server process and sends SIGKILL, so its durable recovery
-evidence is kept separate from Turmoil's simulated host restart. The qualification run's revision,
-wall times, results and any failures belong with the task evidence; the matrix above names the
-contract that subsequent runs must continue to check.
+The Shuttle and Turmoil scheduler modes cannot be selected together; that build fails to compile
+with a diagnostic naming both. The normal runtime dependency graph contains neither.
 
 ## Listener And Peer Topology
 
@@ -559,25 +353,14 @@ A CPU class admits each job separately: one of its workers runs, a bounded numbe
 next job is refused at once instead of joining an unbounded queue. A typed request runs several
 jobs of its class in turn, encoding its payload and envelope and later decoding the response.
 While a burst keeps the queue full, a request that was admitted for one job can therefore be
-refused at its next one. Every refused job holds no memory charge, and every other class keeps
-admitting independently.
+refused at its next one. A request refused at its first encode fails with `RequestError::Encode`,
+and one refused at a later stage fails with `RequestError::Transport`. Every refused job holds no
+memory charge, and every other class keeps admitting independently.
 
-The Turmoil isolation fixture runs a hub and two peers in separate simulated hosts. The stalled
-peer accepts shared management operations and never answers them, leaves resource streams unread,
-and sends a relay batch the hub holds without admitting. The healthy peer keeps exchanging shared
-management work, liveness, typed Arrow commands, whole resource streams, and admitted relay
-batches with the hub throughout. Every observation of a host checks its pool connections per peer,
-leased streams per connection, admissions per direction and subquota, worker queues, and memory
-budgets against their configured bounds. Key transitions assert exact counts and reservations: the
-32 leased management streams, the bulk worker's full queue and refused burst, the unread streams
-stopped at one window each and released at the progress deadline, and the held relay reservation.
-The fixture then holds the stalled link with Turmoil's `hold`. The hub's own liveness deadline
-ends its probe while the healthy peer keeps exchanging every traffic class. Removing the stalled
-peer from membership ends the hub's operations to it and closes the hub's pools to it at once,
-without that peer's cooperation. Tearing the stalled host down while the link is still held closes
-the connections the hub opened to it at once, together with the handlers still waiting to answer.
-Releasing the link closes the hub's inbound connections from the torn-down peer. The same seed runs twice and must
-record the same semantic trace.
+The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
+bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of
+the hub's pools, streams, admissions, worker queues, and memory budgets stays within its configured
+bound until teardown releases them.
 
 ## Exchange Forms
 
@@ -703,32 +486,11 @@ reconcile. A consultation reads the watermark through a shared lookup and refres
 with one atomic maximum, so checking a delivery against its channel takes no exclusive lock on the
 watermark.
 
-The Turmoil relay fixture exercises this boundary through the production authenticated connection:
-it drops the receiver-to-sender body reply after an Arrow batch enters the receiver queue, then
-reconnects to the same receiver process and retries the same delivery identity. The retained
-attempt returns its admitted outcome and semantic ACK without a second application enqueue. The
-fixture also checks cancellation before grant, while the body reply is unavailable, and during
-reconnection. Its bounded seeded trace records delivery identities and protocol outcomes without
-payload values. These checks apply within the retention contract above; they do not extend the
-guarantee across a receiver process restart.
-
-The receiver-restart fixture continues from a lost body reply at two milestones: after the Arrow
-body enters the receiver queue but before runtime admission, and after runtime admission. It also
-holds an admitted attempt's reply and releases it after the crash. That reply can confirm
-historical body receipt, but reconciliation with the new epoch still returns indeterminate for
-runtime admission. Its controller crashes the simulated receiver at the
-selected milestone, then bounces the same named host. Each invocation binds a new transport with
-controlled entropy, so the stable node identity has a distinct process epoch. The sender's retained
-delivery resolves as indeterminate against that epoch; it does not enter the restarted receiver's
-queue. A new delivery identity then crosses the restarted listener and authenticated connection,
-and its admission-status request returns admitted. The fixture checks the Arrow batch and the two
-process identities at the protocol boundary.
-
-For this fixture, `Sim::crash` cancels the receiver host's simulated Tokio tasks. Bouncing reruns
-the host software and rebinds its listener. The scenario uses no simulated filesystem and no
-background thread owned by the receiver host. It therefore makes no claim about fsync, power-loss
-survival, full-cluster recovery, or WASM checkpoint durability. Those durable-state guarantees
-require real-process crash and recovery qualification.
+The [relay reconciliation and receiver-restart simulations](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
+check this boundary through the production authenticated connection. They lose the reply after an
+Arrow batch reaches the receiver, reconnect to the same process or restart it, and require
+reconciliation within this retention contract and an indeterminate result against a new process
+epoch.
 
 Each attempt carries the channel and admission identities it was granted under. Once the receiver
 has delivered an attempt's terminal outcome, it retires that same attempt: it advances the channel
