@@ -1,0 +1,27 @@
+[package]
+description = "Asynchronous host name resolution for the connections a Nervix node opens"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-dns"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+arch-into = { workspace = true }
+error-stack = { workspace = true }
+hickory-resolver = { workspace = true }
+indexmap = { workspace = true }
+meticulous = { workspace = true }
+resolv-conf = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true }
+triomphe = { workspace = true }
+
+[dev-dependencies]
+nervix-test-environment = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

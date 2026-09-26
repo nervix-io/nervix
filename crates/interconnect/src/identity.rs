@@ -2,7 +2,8 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Loading cluster trust, TLS 1.3 configuration, and certificate SAN identity.
+//! - **Owns.** Loading cluster trust, TLS 1.3 configuration, certificate SAN identity, and the
+//!   identity a transport binds as.
 //! - **Depends on.** The shared cluster node name vocabulary and X.509/TLS primitives.
 //! - **Must not know.** HTTP/2 pools, request routing, or runtime operations.
 
@@ -185,6 +186,15 @@ fn parse_identity_uri(raw: &str) -> Result<(String, ClusterNodeName), Report<Tls
         }
     })?;
     Ok((cluster_id, node_id))
+}
+
+/// Who one transport is: the cluster and node its certificate must name, and the host it
+/// advertises, which its certificate must also name.
+#[derive(Debug, Clone)]
+pub struct TransportIdentity {
+    pub cluster_id: String,
+    pub node_id: ClusterNodeName,
+    pub advertised_host: String,
 }
 
 #[derive(Clone)]

@@ -45,10 +45,15 @@ impl NodeEndpoint {
 
     /// The `host:port` authority, bracketing a literal IPv6 host.
     pub fn authority(&self) -> String {
+        format!("{}:{}", self.url_host(), self.port)
+    }
+
+    /// The host as a URL writes it, bracketing a literal IPv6 host.
+    pub fn url_host(&self) -> String {
         if self.host.contains(':') && !self.host.starts_with('[') {
-            format!("[{}]:{}", self.host, self.port)
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
         }
     }
 }

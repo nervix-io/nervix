@@ -45,7 +45,7 @@ them substitutes for another.
 
 | Path | Kind | Owns |
 | --- | --- | --- |
-| `crates/interconnect/src/socket.rs` | Product seam | Selects the TCP listener, outbound stream, and resolver: Tokio's in production, `turmoil::net` in the Turmoil build |
+| `crates/interconnect/src/socket.rs` | Product seam | Selects the TCP listener, the outbound stream, and the `PeerResolver`: Tokio sockets and the node's Hickory resolver in production, `turmoil::net` sockets and DNS in the Turmoil build |
 | `crates/interconnect/src/authentication.rs` | Product seam | `TransportClock`, the one UTC clock each TLS bundle judges certificates by. `TransportClock::system` in production, `TransportClock::from_provider` for a controlled environment |
 | `crates/interconnect/src/entropy.rs` | Product seam | `TransportEntropy`, the source of the process epoch and relay grant identifiers. `TransportEntropy::operating_system` in production, `TransportEntropy::from_source` for a controlled environment |
 | `crates/execution/src/workers.rs` | Product seam | The strategy that runs an admitted CPU job: the blocking pool, or a scheduler task in the Turmoil build |
@@ -74,7 +74,7 @@ compilation with the production or Shuttle builds.
 
 | Build | Selected by | Sockets and DNS | CPU jobs | Synchronization primitives | Tokio configuration |
 | --- | --- | --- | --- | --- | --- |
-| Normal | Default features | Tokio's operating-system APIs | Tokio's blocking pool | Tokio, `parking_lot`, `dashmap`, `tokio-util` | Stable |
+| Normal | Default features | Tokio's operating-system sockets and the node's Hickory resolver | Tokio's blocking pool | Tokio, `parking_lot`, `dashmap`, `tokio-util` | Stable |
 | Shuttle | The `shuttle` feature of each owning package | Not driven by the checks | `spawn_blocking` of Shuttle's modeled Tokio | Shuttle's modeled `tokio`, `parking_lot`, `dashmap`, and `tokio-util` | Stable |
 | Turmoil | The `turmoil` feature of `nervix-interconnect`, which enables `nervix-execution/turmoil` | `turmoil::net` | A task on the simulated host's scheduler; storage jobs stay on the blocking pool | Real | `--cfg tokio_unstable` |
 | Shuttle and Turmoil | Both features in one package | Fails to compile with `Shuttle and Turmoil scheduler modes cannot be enabled together` | | | |
@@ -101,18 +101,28 @@ Validation keeps the modes apart:
 ## The Simulated Host
 
 A simulated host is a named Turmoil host running one production transport. Everything the transport
-owns is constructed inside the host: its credential bundle, executor, transport, and peer targets.
+owns is constructed inside the host: its credential bundle, executor, peer resolver, transport, and
+peer targets.
 Live sockets and transports are never shared between hosts. Hosts share only bounded readiness and
 completion signals with each other and with the observing client.
 
 ### Sockets And DNS
 
-The Turmoil build aliases `TcpListener`, `TcpStream`, and `lookup_host` to `turmoil::net`, so the
-listener, every outbound dial, and peer resolution use simulated TCP and DNS. A peer endpoint such
-as `server:7443` resolves to the address Turmoil assigned to the host named `server`, in IPv4 or
-IPv6 by configuration. Nothing in the simulated path opens an operating-system socket or queries the
-host resolver, so a fault scenario cannot escape to the real network. The layers above the socket,
-`tokio-rustls`, `h2`, the envelope codec, and Arrow IPC, are the production code.
+The Turmoil build aliases `TcpListener` and `TcpStream` to `turmoil::net` and builds every transport
+with `PeerResolver::simulated`, which answers from the simulated host's DNS table through
+`turmoil::net::lookup_host`. The listener, every outbound dial, and peer resolution therefore use
+simulated TCP and DNS. A peer endpoint such as `server:7443` resolves to the address Turmoil
+assigned to the host named `server`, in IPv4 or IPv6 by configuration, and a name the table does not
+hold fails as a name that does not exist. The scenarios register peers at their advertised
+endpoints, so, as in production, every connection attempt resolves the peer's name again inside its
+setup deadline and dials the answer. Nothing in the simulated path opens an operating-system socket,
+constructs the production Hickory resolver, reads a resolver configuration or hosts file, or sends a
+DNS packet, so a fault scenario cannot escape to the real network and no resolver state is shared
+between hosts. The layers above the socket, `tokio-rustls`, `h2`, the envelope codec, and Arrow IPC,
+are the production code. These scenarios exercise the transport over simulated names; Hickory's DNS
+protocol, cache, and failure handling are checked by the resolver crate's own tests against local
+DNS authorities outside the simulation, as described in [Peer Name
+Resolution](./interconnect.md#peer-name-resolution).
 
 ### Bounded CPU Execution
 
@@ -681,9 +691,9 @@ The simulation guarantees, for the audited path:
 - Every run, attempt, suite, and sweep ends inside a real-time bound, including one whose host
   blocks the scheduler thread.
 
-The audit behind those guarantees covered the socket and DNS alias, the transport identities and
-certificate clocks, request and relay deadlines, the map walks with side effects, the bounded CPU
-executor, and the runner. Its limits:
+The audit behind those guarantees covered the socket alias and simulated resolver, the transport
+identities and certificate clocks, request and relay deadlines, the map walks with side effects, the
+bounded CPU executor, and the runner. Its limits:
 
 - The runner's real thread and wall clock decide only when a test fails, never how a request
   proceeds.

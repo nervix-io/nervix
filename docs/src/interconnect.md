@@ -21,10 +21,12 @@ fault model, supervision, replay and failure records, the scenario matrix, the c
 budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
 plugs into. Each seam has one production behavior, which is what every node uses:
 
-- **Sockets and DNS.** The TCP listener, outbound streams, and peer resolution use Tokio's
-  operating-system APIs. The dedicated `turmoil` test build selects Turmoil's simulated TCP and DNS
-  at that one boundary; TLS, HTTP/2, the envelope codec, and Arrow IPC above it are the same code in
-  every build.
+- **Sockets and name resolution.** The TCP listener and outbound streams use Tokio's
+  operating-system sockets, and peer names resolve through the node's own resolver, described in
+  [Peer Name Resolution](#peer-name-resolution). The dedicated `turmoil` test build selects
+  Turmoil's simulated TCP and its simulated DNS table at that one boundary and never constructs the
+  node resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above it are the same code in every
+  build.
 - **Certificate time.** Each credential bundle carries the one UTC clock its certificates are judged
   by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
   Production bundles use the system clock.
@@ -97,6 +99,91 @@ The built-in topology limit is 64 peers. A node admits at most 768 incoming and 
 connections in total and performs at most 32 connection handshakes concurrently. Those limits cover
 the six possible connections in each direction for every peer: five preconnected connections plus
 the on-demand bulk connection.
+
+## Peer Name Resolution
+
+A node resolves every host name the interconnect dials through one resolver, owned by the
+`nervix-dns` crate and loaded once when the node starts. The resolver is Hickory's asynchronous DNS
+client: lookups never occupy Tokio's blocking pool and never call the C library resolver. It reads
+its configuration from three server options:
+
+| Option | Environment variable | Default | Meaning |
+| --- | --- | --- | --- |
+| `--dns-resolver-config` | `NERVIX_DNS_RESOLVER_CONFIG` | `/etc/resolv.conf` | A `resolv.conf`-format file: its `nameserver` lines, its last `search` or `domain` line, and the `ndots`, `timeout`, `attempts`, and `edns0` options |
+| `--dns-hosts-file` | `NERVIX_DNS_HOSTS_FILE` | `/etc/hosts` | A hosts-format file consulted before DNS |
+| `--dns-name-server` | `NERVIX_DNS_NAME_SERVERS` | none | A name server address with its port, repeatable or comma-separated, that replaces the resolver configuration's `nameserver` lines while the rest of that file still applies |
+
+A `nameserver` line names a server on port 53, asked over UDP and, for a truncated answer, over
+TCP. `attempts` counts tries of each server, as the C library counts them, and `timeout` bounds each
+try. When the file has neither a `search` nor a `domain` line, the domain of the host's own name is
+the search list, as the C library does. Lines the grammar cannot read are logged as warnings and
+ignored. Both files are read once, on the blocking pool; a changed file takes effect when the node
+next starts. Startup fails with `failed to load the name resolver configuration` when either file
+cannot be read, when no name server remains, or when a search domain is not a valid DNS name. There
+is no fallback to a public resolver or to the C library.
+
+A host resolves in this order:
+
+1. A literal IPv4 or IPv6 address, bracketed or not, is its own answer and sends no query.
+2. A name the hosts file lists, compared exactly and without case, answers with every address the
+   file gives it in either family, and nothing is asked of DNS for it.
+3. Any other name is asked of the name servers for IPv4 and IPv6 addresses together, completed by
+   the search list according to `ndots`. A name with a trailing dot is fully qualified and asked
+   exactly as written. The answer lists IPv4 addresses first, then IPv6 addresses, each in the
+   order the server gave them.
+
+### Where The Interconnect Resolves
+
+At startup a node resolves its own advertised interconnect endpoint, whose first address becomes
+its gossip identity address, and its bootstrap endpoint, every address of which becomes a gossip
+seed. Each lookup has the connection setup timeout, five seconds by default, and a lookup that fails
+fails startup.
+
+A discovered peer is registered at the interconnect endpoint it advertised, and every attempt to
+open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
+deadline. The attempt dials the resolved addresses in order, giving each an equal share of the time
+that remains, so an address that refuses or never answers leaves time for the next one. The first
+address that accepts carries the TLS handshake. The advertised host stays the TLS server name, which
+the peer's certificate must name, and the authority of every request on the connection; a literal
+IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it dials the
+exact seed address it was given, and the node it authenticates is dialled at that address until
+discovery publishes the node's own endpoint.
+
+Answers are cached for their DNS TTL, bounded above by one hour for addresses and thirty seconds for
+a name that does not exist or has no address, in a cache of 4,096 entries; an expired answer is
+asked again on the next attempt. Pool connections are keyed by the advertised endpoint rather than
+by an address, so a changed answer or an expired TTL never retires an established connection. Only
+the next connection attempt, after a connection ends, uses the new answer. A changed advertised
+host or port is a different endpoint and retires the old one, as described in
+[Connection And Credential Lifecycle](#connection-and-credential-lifecycle).
+
+At most 64 lookups run at once on a node; a lookup beyond that waits for a slot inside its own
+deadline. The resolver configuration's `timeout` and `attempts` bound each query, the connection
+setup deadline bounds the lookup, and the pool slot's reconnect backoff is the only retry around it,
+so DNS retries never multiply the transport's own.
+
+A lookup ends in an address list or in one of these failures: the name does not exist, the name has
+no address, no answer arrived in time, a name server refused or failed the query, no name server
+could be reached, or the host is not a valid DNS name. A failed lookup is a connection setup
+failure: the slot retries with its backoff, the attempt is counted with reason `resolution` in
+`nervix_interconnect_connection_failures_total`, and the failure is logged at `debug` with the
+endpoint and its kind. A peer whose name does not resolve stays a health target, and its probes
+fail as they would for a peer that cannot be reached.
+
+### Resolver Limits
+
+The resolver implements the `resolv.conf` and hosts-file behavior above and nothing else of the
+operating system's name service. It does not consult `nsswitch.conf`, so the hosts file always
+answers before DNS; it does not load NSS modules, so names served only by LDAP, NIS, `mdns`, or
+`myhostname` do not resolve; it does not answer `.local` names by multicast DNS; and it ignores the
+`rotate`, `single-request`, `use-vc`, `no-aaaa`, and `trust-ad` options. A platform split-DNS policy
+applies only as far as the name server the configuration names applies it, for example the
+`systemd-resolved` stub at `127.0.0.53`. Docker's embedded DNS and Kubernetes cluster DNS, with
+their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
+
+The node resolver serves the interconnect. Connectors, client libraries, and exporters still resolve
+through their own drivers; the ledger in `tests/dns-resolution-ledger.md` records each of those
+boundaries and which delivery moves it.
 
 ## Peer Identity And Authentication
 
@@ -773,11 +860,11 @@ probe is running, its late result is ignored.
 Health observations distinguish:
 
 - **Healthy:** the current target returned the expected application identity within the deadline.
-- **Failure:** the current target returned an error or did not answer within the deadline.
+- **Failure:** the current target returned an error or did not answer within the deadline,
+  including a target whose advertised host does not resolve.
 - **Capacity exhausted:** the probe could not obtain its reserved local capacity.
-- **Unscheduled:** no probe was due for that target in the current round.
 
-A missing, stale, capacity-exhausted, or unscheduled observation produces unknown availability. It
+A missing, stale, or capacity-exhausted observation produces unknown availability. It
 does not mark a peer unavailable and does not extend a previous run of failures. Only continuous,
 fresh failures for the configured node-unavailability interval produce unavailable status; a healthy
 observation resets that run. Scheduling and runtime availability use this application result, while
@@ -792,7 +879,8 @@ probe is healthy, rather than merely that a transport pool exists.
 A preconnected pool slot that fails reconnects with exponential backoff beginning at 200
 milliseconds and capped at five seconds. A peer removal, incarnation change, or advertised endpoint
 change retires the old target and cancels work tied to its slots. New operations use only the new
-target generation.
+target generation. A new DNS answer for the same advertised endpoint is not a target change: it
+leaves established connections in place and is used by the next connection attempt.
 
 Interconnect certificate, key, and CA files are watched as one credential bundle. A candidate must
 be complete, valid, and identical in two consecutive reads before it replaces the active bundle, so
@@ -836,24 +924,24 @@ observed. These owners keep admitted work visible while the supporting interconn
 still running.
 
 Only after drain support completes or reports abandonment does terminal teardown call transport
-shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation
-waiters, and retires every pool connection the node opened: each stops leasing and closes once its
-leased streams return. Connections that peers opened to the node close at once, together with the
-handlers still serving their streams, so a peer's request the node has not answered fails instead
-of completing. Whatever remains after ten seconds is then closed. Connection setup and incomplete
-TLS handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM`, or the shutdown deadline
-passing, ends the process without running the rest of its shutdown, so its peers observe its
-connections ending exactly as they do when the process crashes.
+shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation waiters,
+and retires every pool connection the node opened: each stops leasing and closes once its leased
+streams return. Connections that peers opened to the node close at once, together with the handlers
+still serving their streams, so a peer's request the node has not answered fails instead of
+completing. Whatever remains after ten seconds is then closed. Connection setup, including the name
+resolution it performs, and incomplete TLS handshakes remain inside this bound. A repeated `SIGINT`
+or `SIGTERM`, or the shutdown deadline passing, ends the process without running the rest of its
+shutdown, so its peers observe its connections ending exactly as they do when the process crashes.
 
 See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the deadline and exit
 statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
 
-Transport failures identify setup, authentication, admission, encoding, decoding, flow-control,
-timeout, remote-response, and target-departure failures separately. Typed remote errors remain
-available to the operation owner, which decides whether a request is safe to retry. The interconnect
-does not infer idempotency for arbitrary control-plane or runtime operations.
+Transport failures identify name-resolution, setup, authentication, admission, encoding, decoding,
+flow-control, timeout, remote-response, and target-departure failures separately. Typed remote
+errors remain available to the operation owner, which decides whether a request is safe to retry.
+The interconnect does not infer idempotency for arbitrary control-plane or runtime operations.
 
 Connections, request state, relay grants, delivery reconciliation, progress trackers, and
 acknowledgement maps are never persisted. Durable control-plane state remains in consensus, and
@@ -871,7 +959,9 @@ Each node exports interconnect measurements through its local metrics endpoint. 
 cover connection and stream occupancy, pending operations, setup failures and resets, quota
 exhaustion, request latency, relay channels and grants, admission wait, unresolved delivery age, and
 bulk-transfer bytes. Interconnect memory, worker queues, reactor delay, and consensus retention show
-whether pressure originates in transport, execution, or the protocol using it.
+whether pressure originates in transport, execution, or the protocol using it. A connection attempt
+that could not resolve its peer's advertised host is counted with reason `resolution`, apart from
+setup, handshake, capacity, and closed failures, so a DNS outage is visible as itself.
 
 Typed-request observations identify application health as operation `liveness` and replaceable
 domain-clock delivery and HTTPS listener installation probes as operation `progress`, so their
