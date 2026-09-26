@@ -1109,8 +1109,151 @@ mod tests {
         },
     };
     use arrow_schema::Field;
+    use meticulous::ResultExt as _;
+    use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+
+    #[tokio::test]
+    async fn iceberg_catalog_authentication_uses_the_node_dns_client() {
+        const CATALOG: &str = "catalog.nervix.test";
+        const AUTH: &str = "auth.nervix.test";
+        let authority = DnsAuthority::start_on_loopback()
+            .await
+            .assured("the fixture can bind a loopback DNS port");
+        for name in [CATALOG, AUTH] {
+            authority.set(
+                name,
+                DnsAnswer::Addresses {
+                    addresses: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+                    ttl: Duration::from_secs(1),
+                },
+            );
+        }
+        let files = tempfile::tempdir().assured("the fixture can create a directory");
+        let resolver_configuration = files.path().join("resolv.conf");
+        let hosts_file = files.path().join("hosts");
+        std::fs::write(
+            &resolver_configuration,
+            "search nervix.test\noptions ndots:1 timeout:1 attempts:1\n",
+        )
+        .assured("the fixture resolver configuration can be written");
+        std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+        let dns = DnsResolver::load(DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: NameServers::Explicit(vec![authority.address()]),
+        })
+        .await
+        .assured("the fixture resolver configuration is valid");
+
+        let auth_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("the OAuth endpoint can bind");
+        let auth_port = auth_listener
+            .local_addr()
+            .assured("the OAuth endpoint has an address")
+            .port();
+        let auth_server = tokio::spawn(async move {
+            let (mut stream, _) = auth_listener
+                .accept()
+                .await
+                .assured("the OAuth request connects");
+            let mut bytes = [0_u8; 4096];
+            let length = stream
+                .read(&mut bytes)
+                .await
+                .assured("the OAuth request is readable");
+            let request = String::from_utf8_lossy(&bytes[..length]).to_ascii_lowercase();
+            assert!(request.starts_with("post /token http/1.1"), "{request}");
+            assert!(
+                request.contains(&format!("host: {AUTH}:{auth_port}")),
+                "{request}"
+            );
+            let body = r#"{"access_token":"fixture-token","token_type":"Bearer"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .assured("the OAuth response can be written");
+        });
+
+        let catalog_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("the catalog endpoint can bind");
+        let catalog_port = catalog_listener
+            .local_addr()
+            .assured("the catalog endpoint has an address")
+            .port();
+        let catalog_server = tokio::spawn(async move {
+            let (mut stream, _) = catalog_listener
+                .accept()
+                .await
+                .assured("the catalog request connects");
+            let mut bytes = [0_u8; 4096];
+            let length = stream
+                .read(&mut bytes)
+                .await
+                .assured("the catalog request is readable");
+            let request = String::from_utf8_lossy(&bytes[..length]).to_ascii_lowercase();
+            assert!(request.starts_with("get /v1/config http/1.1"), "{request}");
+            assert!(
+                request.contains(&format!("host: {CATALOG}:{catalog_port}")),
+                "{request}"
+            );
+            assert!(
+                request.contains("authorization: bearer fixture-token"),
+                "{request}"
+            );
+            let body = r#"{"overrides":{},"defaults":{}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .assured("the catalog response can be written");
+        });
+
+        let properties = IcebergObjectStoreProperties {
+            backend: IcebergStorageBackend::S3,
+            props: HashMap::default(),
+        };
+        let catalog_config = [
+            ClientConfigEntry {
+                key: "uri".to_string(),
+                value: format!("http://{CATALOG}:{catalog_port}"),
+            },
+            ClientConfigEntry {
+                key: "credential".to_string(),
+                value: "client:secret".to_string(),
+            },
+            ClientConfigEntry {
+                key: "oauth2-server-uri".to_string(),
+                value: format!("http://{AUTH}:{auth_port}/token"),
+            },
+        ];
+        let catalog = properties
+            .rest_catalog("fixture", &catalog_config, &dns)
+            .await
+            .assured("the REST catalog can be configured");
+        tokio::time::timeout(Duration::from_secs(10), catalog.invalidate_token())
+            .await
+            .assured("the catalog initialization completes")
+            .assured("the catalog accepts its runtime configuration");
+        assert!(authority.questions_for(CATALOG) > 0);
+        assert!(authority.questions_for(AUTH) > 0);
+        auth_server.await.assured("the OAuth server task completes");
+        catalog_server
+            .await
+            .assured("the catalog server task completes");
+    }
 
     fn commit_policy(interval_millis: u64, max_size: u64) -> IcebergCommitPolicy {
         IcebergCommitPolicy {
