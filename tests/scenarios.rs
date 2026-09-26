@@ -10461,6 +10461,28 @@ async fn then_last_accepted_operation_is(world: &mut ScenarioWorld, expected: us
     assert_eq!(admission.operation.get(), expected);
 }
 
+#[then(expr = "the last client request failed with one diagnostic spanning bytes {int} to {int}")]
+fn then_last_client_request_has_diagnostic_span(
+    world: &mut ScenarioWorld,
+    expected_start: u32,
+    expected_end: u32,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .verified("the scenario submitted a named client request above");
+    assert_eq!(
+        outcome.disposition,
+        nervix_client_core::CommandDisposition::Failed
+    );
+    assert_eq!(outcome.diagnostics.len(), 1);
+    let span = outcome.diagnostics[0]
+        .span
+        .verified("the parser diagnostic for this malformed command has a source span");
+    assert_eq!(span.start(), expected_start);
+    assert_eq!(span.end(), expected_end);
+}
+
 /// Compares the typed inspection the last named client command carried with `field: value` lines.
 #[then("the last inspection reports")]
 async fn then_last_inspection_reports(world: &mut ScenarioWorld, #[step] step: &Step) {

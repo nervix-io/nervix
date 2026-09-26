@@ -38,11 +38,12 @@ use crate::registry::{
         connector::{
             HttpEmitterRequestPlan, effective_emitter_filter_map_schema,
             effective_ingestor_output_filter_map_schema, ensure_ingestor_timestamp_source,
-            ensure_signaling_protocol_is_valid, validate_emitter_batch_container,
-            validate_emitter_publishing_contract, validate_endpoint_paths,
-            validate_http_emitter_client, validate_http_literal_request_fields,
-            validate_http_request_expressions, validate_ingestor_filter_where_for_internal_schemas,
-            validate_ingestor_source, validate_sqs_fifo_group_expression, validate_vhost_hostnames,
+            ensure_signaling_protocol_is_valid, validate_direct_values_sensitivity,
+            validate_emitter_batch_container, validate_emitter_publishing_contract,
+            validate_endpoint_paths, validate_http_emitter_client,
+            validate_http_literal_request_fields, validate_http_request_expressions,
+            validate_ingestor_filter_where_for_internal_schemas, validate_ingestor_source,
+            validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
         expression::add_udf_dependency_edges,
         materialized_state::{
@@ -1358,6 +1359,13 @@ impl DomainState {
                             }));
                         }
                     }
+                    validate_direct_values_sensitivity(
+                        domain,
+                        identifier,
+                        models,
+                        emitter,
+                        producer_schema,
+                    )?;
                     validate_sqs_fifo_group_expression(
                         domain,
                         identifier,

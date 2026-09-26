@@ -2347,6 +2347,25 @@ impl EmitSink {
         }
     }
 
+    /// The expressions a direct `VALUES` sink sends across its external boundary, in written order.
+    pub fn direct_value_mappings(&self) -> impl Iterator<Item = &ClickHouseValueMapping> {
+        let (values, attributes, resource): (&[_], &[_], &[_]) = match self {
+            Self::Otel {
+                values,
+                attributes,
+                resource,
+                ..
+            } => (values, attributes, resource),
+            Self::ClickHouse { values, .. }
+            | Self::Postgres { values, .. }
+            | Self::MySql { values, .. }
+            | Self::MongoDb { values, .. }
+            | Self::Iceberg { values, .. } => (values, &[], &[]),
+            _ => (&[], &[], &[]),
+        };
+        values.iter().chain(attributes).chain(resource)
+    }
+
     pub fn accepts_publishing_mode(&self, mode: &EmitterPublishingMode) -> bool {
         match self {
             Self::Kafka { .. } | Self::Pulsar { .. } | Self::RabbitMq { .. } => {
@@ -2966,6 +2985,15 @@ impl BranchSelection {
         match self {
             Self::BranchedBy { .. } => false,
             Self::Unbranched => true,
+        }
+    }
+}
+
+impl std::fmt::Display for BranchSelection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BranchedBy { branch } => write!(formatter, "{branch}"),
+            Self::Unbranched => formatter.write_str("UNBRANCHED"),
         }
     }
 }
@@ -5994,23 +6022,103 @@ mod tests {
         AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
         AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation,
         AlterReorderer, AlterReordererError, AlterReordererOperation, BranchSelection,
-        ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule, CodecBatchContainer,
-        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
-        CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement, CreateReingestor,
-        CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
+        ClickHouseValueMapping, ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule,
+        CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        CodecWireFormat, CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement,
+        CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
         EmitterBatchContractError, EmitterBody, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
-        GeneralErrorPolicy, InferencerTensorDimension, InferencerTensorElementType,
-        InferencerTensorRepresentation, InferencerTensorSchema, KafkaPartitionSchedule,
-        MaterializedRelayState, Model, ModelKind, MongoDbConflictAction, MySqlConflictAction,
-        PlacementPolicy, PostgresConflictAction, RelayBranching, ResolvedBranching, RetryPolicy,
-        ScheduledNode,
+        GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, InferencerTensorDimension,
+        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
+        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, MongoDbConflictAction,
+        MySqlConflictAction, OtelSignal, PlacementPolicy, PostgresConflictAction, RelayBranching,
+        ResolvedBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
-        ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
-        Expression, IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
-        MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        SchemaField, SchemaFingerprint,
+        ClientName, ClusterNodeName, CollectionName, CreateIngestor, CreateJunction, DomainName,
+        EndpointIngestMode, Expression, IngestQuiesceMode, IngestSource, Literal,
+        MaterializedStateDependency, MaterializedStatePolicy, ParseAsType, ProcessorInputs,
+        ProcessorOutput, ProcessorOutputs, SchemaField, SchemaFingerprint, TableName,
     };
+
+    #[test]
+    fn branch_selection_displays_its_named_or_unbranched_declaration() {
+        let name =
+            crate::BranchName::parse("by_tenant").assured("by_tenant is a valid branch identifier");
+        assert_eq!(BranchSelection::branched_by(name).to_string(), "by_tenant");
+        assert_eq!(BranchSelection::unbranched().to_string(), "UNBRANCHED");
+    }
+
+    #[test]
+    fn direct_value_mappings_cover_all_external_value_sections() {
+        let client: ClientName = named("sink");
+        let table: TableName = named("events");
+        let mapping = |column: &str| ClickHouseValueMapping {
+            column: column.to_owned(),
+            expression: Expression::Literal(Literal::String(column.to_owned())),
+        };
+        let single_value = || vec![mapping("value")];
+        let sinks = [
+            EmitSink::Otel {
+                client: client.clone(),
+                signal: OtelSignal::Logs,
+                values: single_value(),
+                attributes: vec![mapping("attribute")],
+                resource: vec![mapping("resource")],
+                scope: None,
+            },
+            EmitSink::ClickHouse {
+                client: client.clone(),
+                table: table.clone(),
+                values: single_value(),
+            },
+            EmitSink::Postgres {
+                client: client.clone(),
+                table: table.clone(),
+                values: single_value(),
+                conflict_action: PostgresConflictAction::None,
+            },
+            EmitSink::MySql {
+                client: client.clone(),
+                table: table.clone(),
+                values: single_value(),
+                conflict_action: MySqlConflictAction::None,
+            },
+            EmitSink::MongoDb {
+                client: client.clone(),
+                collection: named::<CollectionName>("events"),
+                values: single_value(),
+                conflict_action: MongoDbConflictAction::None,
+            },
+            EmitSink::Iceberg {
+                backend: IcebergStorageBackend::S3,
+                client: client.clone(),
+                table,
+                values: single_value(),
+                location: "s3://bucket/events".to_owned(),
+                catalog: IcebergCatalog::Rest {
+                    client: client.clone(),
+                },
+                commit_each: "1s".to_owned(),
+                max_commit_size: "1MB".to_owned(),
+            },
+        ];
+
+        for (index, sink) in sinks.iter().enumerate() {
+            let columns = sink
+                .direct_value_mappings()
+                .map(|mapping| mapping.column.as_str())
+                .collect::<Vec<_>>();
+            let expected = if index == 0 {
+                vec!["value", "attribute", "resource"]
+            } else {
+                vec!["value"]
+            };
+            assert_eq!(columns, expected, "{sink:?}");
+        }
+
+        let sink_without_values = EmitSink::Sentry { client };
+        assert_eq!(sink_without_values.direct_value_mappings().count(), 0);
+    }
 
     #[test]
     fn pool_bounds_accept_a_minimum_up_to_the_maximum_and_reject_one_above_it() {

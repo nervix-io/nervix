@@ -3529,6 +3529,8 @@ pub struct InferredSetField {
     pub field: String,
     pub data_type: DataType,
     pub nullable: bool,
+    /// Whether the inferred expression still carries sensitive input data.
+    pub sensitive: bool,
 }
 
 pub fn infer_set_expr_types_for_bindings(
@@ -3572,11 +3574,13 @@ pub fn infer_set_expr_types_for_bindings_with_udfs(
         {
             existing.data_type = data_type;
             existing.nullable = nullable;
+            existing.sensitive = sensitive;
         } else {
             output.push(InferredSetField {
                 field: field_ref.field.clone(),
                 data_type,
                 nullable,
+                sensitive,
             });
         }
     }

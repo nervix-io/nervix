@@ -156,6 +156,10 @@ field names, while sensitive payload values stay out of errors and logs. A truly
 continues as `Option` until its consumer decides whether absence is valid. A label or rendered
 string is only a presentation of the state and never an input to execution.
 
+Error-route branch validation carries the node, source route, error relay, and both branch
+declarations as typed data. Direct emitter `VALUES` validation identifies a sensitive external
+target by name and requires explicit leakage; neither error needs the source payload value.
+
 ## Qualification Evidence
 
 The [typed states qualification ledger](https://github.com/nervix-io/nervix/blob/main/tests/typed-states-qualification-ledger.md)

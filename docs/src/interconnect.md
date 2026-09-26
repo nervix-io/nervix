@@ -443,6 +443,11 @@ and nesting depth, before exposing it to an operation handler. Encoded and decod
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed
 archives, and values above the operation limit fail at the transport boundary.
 
+Control-operation responses preserve a typed failure class and subject across the wire. A receiver
+can distinguish a node that rejects ownership, an unavailable subject, a subject that is not ready,
+and an operation that ran and failed without parsing display text. Only the final class carries an
+operator-facing reason; callers decide retry and relocation from the class and subject.
+
 Relay metadata uses the same validated control encoding, while relay bodies remain Arrow IPC from
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let
 the owning resource, snapshot, or state protocol interpret the stream. The primary payload limits

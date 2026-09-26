@@ -189,6 +189,12 @@ Sensitivity is a compile-time property:
 - **Unbound sensitivity.** A binding compiled without its sensitive fields enforces nothing. A
   caller whose output can leave Nervix must bind the sensitivity of every input it reads.
 
+For direct emitter `VALUES`, the registry lowers each mapping through the same route frontend and
+infers its type and sensitivity against the declared input schema. The inference result retains
+sensitivity for each assigned field, including a field assigned more than once. The registry
+rejects a sensitive mapping before activation unless its expression explicitly calls
+`leak_sensitive(...)`; the target column or attribute is identified without including its value.
+
 A `CompileError` carries a stable code, a message, and its operation's span. The codes fall into
 these groups:
 
