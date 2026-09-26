@@ -38,6 +38,10 @@ its final log position, membership, transaction progress, and revision. Recovery
 complete applied range or replays its committed entries; it never reconstructs an acknowledged
 command from a partial state-machine update.
 
+[Errors And Diagnostics](./errors-and-diagnostics.md) owns how validation and planning failures
+accumulate context and become client diagnostics. This chapter owns the command's durability and
+transaction outcome.
+
 Consensus uses a dedicated database and journal under `<db-path>/consensus`. Registry and runtime
 state remain in the node database at `<db-path>`, so consensus synchronization does not flush or
 wait behind data-plane journal writes. The full durability boundary, append-stream pacing, log
@@ -302,9 +306,9 @@ Data-plane records remain outside this control-plane atomicity.
 Each node publishes application-health observations independently as its probes complete. The
 scheduler reads the current observation snapshot and applies the configured node-unavailability
 policy. A peer leaves the live scheduling set only after a current sequence of application probe
-failures has lasted for that policy's interval. A stale or unscheduled observation is unknown, and
-probe-capacity exhaustion remains distinct from a peer failure, so none of those conditions alone
-makes a healthy node unavailable.
+failures has lasted for that policy's interval. A stale observation is unknown, and probe-capacity
+exhaustion remains distinct from a peer failure, so neither condition alone makes a healthy node
+unavailable.
 
 Automatic scheduling runs independently of the health-probe sweep, resource downloads, and Raft
 learner catch-up. It does not wait for any of them to finish. Slow health responses, learner

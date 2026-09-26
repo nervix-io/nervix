@@ -16,6 +16,7 @@ use std::{
 use error_stack::{Report, ResultExt};
 use fjall::Database;
 use nervix_consensus::{Consensus, ConsensusSettings, RaftRetentionPolicy};
+use nervix_dns::{DnsConfiguration, NameServers};
 use nervix_execution::{Executor, MemoryClass, StorageClass};
 use nervix_interconnect::{HandlerRegistrationError, Transport};
 use nervix_models::NodeEndpoint;
@@ -235,6 +236,18 @@ impl TryFrom<Args> for Application {
                 grpc_advertise_addr.with_port(port)
             }
         };
+        // An empty list is how the command line says no server was named, so the resolver
+        // configuration's own servers apply.
+        let name_servers = if args.dns_name_servers.is_empty() {
+            NameServers::ResolverConfiguration
+        } else {
+            NameServers::Explicit(args.dns_name_servers)
+        };
+        let dns = DnsConfiguration {
+            resolver_configuration: args.dns_resolver_config,
+            hosts_file: args.dns_hosts_file,
+            name_servers,
+        };
         let memory_pressure = match (args.memory_high_watermark, args.memory_low_watermark) {
             (Some(high_watermark), Some(low_watermark)) => {
                 let config = MemoryPressureConfig::builder()
@@ -304,6 +317,7 @@ impl TryFrom<Args> for Application {
             .shutdown(ShutdownCoordinator::new(args.shutdown_timeout))
             .drain_timeout(args.drain_timeout)
             .cluster_bootstrap_host(args.cluster_bootstrap_host)
+            .dns(dns)
             .db_path(PathBuf::from(args.db_path))
             .temp_dir(args.temp_dir)
             .resource_store_limits(ResourceStoreLimits {

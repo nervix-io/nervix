@@ -1,13 +1,13 @@
-//! Packing one buffered batch's rows into bounded batch payloads.
+//! Packing selected rows from successive Arrow carriers into bounded batch payloads.
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Preparing every pending row as a batch member, taking candidates in packing order
-//!   up to `MAX MESSAGES` while their members stay batch-compatible, halving a candidate whose
+//! - **Owns.** Preparing selected rows as batch members across carriers, taking candidates in
+//!   source order up to `MAX MESSAGES` while their members stay batch-compatible, halving one whose
 //!   encoding reached `MAX SIZE`, and the outcome every row ends with: a member of one payload,
 //!   rejected alone, or rejected together with the candidate it shared a failed container with.
 //! - **Depends on.** The emitter's compiled codec, which prepares members and encodes containers,
-//!   and its declared batching policy.
+//!   and its declared batching policy, with source relay and concrete branch identity.
 //! - **Must not know.** Which sink publishes a payload, how its members are acknowledged, or when
 //!   the emitter flushes.
 //!
@@ -18,9 +18,11 @@ use std::num::NonZeroUsize;
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
-use nervix_models::EmitterBatchPolicy;
+use nervix_connector::SinkRecordPosition;
+use nervix_models::{EmitterBatchPolicy, RelayName};
+use triomphe::Arc;
 
-use super::EmitterHeaders;
+use super::{BranchKey, EmitterHeaders};
 use crate::runtime_schema::{
     BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding, CodecError,
     CompiledCodec, PayloadLimitExceeded, RuntimeRecordBatch,
@@ -35,17 +37,30 @@ pub(super) struct BatchEnvelope {
     pub(super) message_group: Option<String>,
 }
 
-/// One pending row offered for packing, with the envelope it would be published under.
+/// One row of a carrier, or a rejected row that seals the current payload.
 #[derive(Debug)]
-pub(super) struct PackingRow {
-    pub(super) row_index: usize,
-    pub(super) envelope: BatchEnvelope,
+pub(super) enum PackingRow {
+    Ready {
+        position: SinkRecordPosition,
+        envelope: BatchEnvelope,
+    },
+    Seal,
+}
+
+/// One Arrow carrier and the rows selected from it. Its Arc'd columns stay intact while the codec
+/// reads row views; neither the host nor the packer copies a row into a field map.
+#[derive(Debug)]
+pub(super) struct PackingCarrier {
+    pub(super) source_relay: RelayName,
+    pub(super) branch_key: Option<BranchKey>,
+    pub(super) batch: Arc<RuntimeRecordBatch>,
+    pub(super) rows: Vec<PackingRow>,
 }
 
 /// One payload a candidate was encoded into, with the rows it carries in packing order.
 #[derive(Debug)]
 pub(super) struct BatchPayload {
-    pub(super) rows: Vec<usize>,
+    pub(super) rows: Vec<SinkRecordPosition>,
     pub(super) envelope: BatchEnvelope,
     pub(super) payload: Vec<u8>,
 }
@@ -57,23 +72,23 @@ pub(super) enum PackedOutcome {
     Payload(BatchPayload),
     /// The row's member value could not be produced, so it is rejected alone before packing.
     MemberFailed {
-        row_index: usize,
+        position: SinkRecordPosition,
         error: Report<CodecError>,
     },
     /// The row alone still exceeds `MAX SIZE` after a bounded encoding of it.
     Oversize {
-        row_index: usize,
+        position: SinkRecordPosition,
         exceeded: PayloadLimitExceeded,
     },
     /// The container of the candidate these rows formed could not be produced, so they fail
     /// together.
     ContainerFailed {
-        rows: Vec<usize>,
+        rows: Vec<SinkRecordPosition>,
         error: BatchContainerError,
     },
 }
 
-/// Everything packing one buffered batch produced.
+/// Everything packing the emitter's currently released carriers produced.
 #[derive(Debug, Default)]
 pub(super) struct BufferedBatchPacking {
     pub(super) outcomes: Vec<PackedOutcome>,
@@ -82,112 +97,151 @@ pub(super) struct BufferedBatchPacking {
 }
 
 /// A row prepared as a batch member.
-struct PreparedMember {
-    row_index: usize,
-    envelope: BatchEnvelope,
+struct PreparedMember<'a> {
+    position: SinkRecordPosition,
+    source_relay: &'a RelayName,
+    branch_key: &'a Option<BranchKey>,
+    envelope: &'a BatchEnvelope,
     member: BatchMember,
 }
 
-impl PreparedMember {
+impl PreparedMember<'_> {
     fn shares_batch_with(&self, other: &Self) -> bool {
-        self.envelope == other.envelope && self.member.shares_container_with(&other.member)
+        self.source_relay == other.source_relay
+            && self.branch_key == other.branch_key
+            && self.envelope == other.envelope
+            && self.member.shares_container_with(&other.member)
     }
 }
 
-/// Packs `rows` of `batch`, in the order given, into payloads bounded by `policy`.
-///
-/// Fails only when the batch cannot be encoded with `codec` at all; every failure that belongs to
-/// a row or a candidate is one of the outcomes instead.
-pub(super) fn pack_buffered_batch(
+/// Packs the selected rows of successive carriers in their arrival order. Each carrier keeps its
+/// own Arc-backed Arrow columns and source identity; a failed or rejected row seals the open run.
+pub(super) fn pack_buffered_batches(
     codec: &CompiledCodec,
-    batch: &RuntimeRecordBatch,
-    rows: Vec<PackingRow>,
+    carriers: Vec<PackingCarrier>,
     policy: EmitterBatchPolicy,
 ) -> error_stack::Result<BufferedBatchPacking, CodecError> {
-    let encoder = codec.batch_encoder(batch)?;
     let mut packing = BufferedBatchPacking::default();
-    let mut members = Vec::with_capacity(rows.len());
-    for PackingRow {
-        row_index,
-        envelope,
-    } in rows
-    {
-        match encoder.batch_member(row_index, policy.max_size) {
-            Ok(BatchMemberEncoding::Member(member)) => members.push(PreparedMember {
-                row_index,
-                envelope,
-                member,
-            }),
-            Ok(BatchMemberEncoding::Oversize(exceeded)) => {
-                packing.outcomes.push(PackedOutcome::Oversize {
-                    row_index,
-                    exceeded,
-                });
-            }
-            Err(error) => {
-                packing
-                    .outcomes
-                    .push(PackedOutcome::MemberFailed { row_index, error });
+    let mut run = Vec::new();
+    let max_messages = NonZeroUsize::try_from(policy.max_messages.get())
+        .assured("Nervix builds for 64-bit targets only, where usize holds every u32");
+    for carrier in &carriers {
+        if carrier.rows.is_empty() {
+            continue;
+        }
+        let encoder = codec.batch_encoder(&carrier.batch)?;
+        for row in &carrier.rows {
+            let (position, envelope) = match row {
+                PackingRow::Ready { position, envelope } => (*position, envelope),
+                PackingRow::Seal => {
+                    packing.pack_run(codec, &mut run, policy, max_messages);
+                    continue;
+                }
+            };
+            match encoder.batch_member(position.row_index, policy.max_size) {
+                Ok(BatchMemberEncoding::Member(member)) => {
+                    let prepared = PreparedMember {
+                        position,
+                        source_relay: &carrier.source_relay,
+                        branch_key: &carrier.branch_key,
+                        envelope,
+                        member,
+                    };
+                    if let Some(first) = run.first()
+                        && !first.shares_batch_with(&prepared)
+                    {
+                        packing.pack_run(codec, &mut run, policy, max_messages);
+                    }
+                    run.push(prepared);
+                    if run.len() == max_messages.get() {
+                        packing.pack_run(codec, &mut run, policy, max_messages);
+                    }
+                }
+                Ok(BatchMemberEncoding::Oversize(exceeded)) => {
+                    packing.pack_run(codec, &mut run, policy, max_messages);
+                    packing
+                        .outcomes
+                        .push(PackedOutcome::Oversize { position, exceeded });
+                }
+                Err(error) => {
+                    packing.pack_run(codec, &mut run, policy, max_messages);
+                    packing
+                        .outcomes
+                        .push(PackedOutcome::MemberFailed { position, error });
+                }
             }
         }
     }
-
-    let max_messages = NonZeroUsize::try_from(policy.max_messages.get())
-        .assured("Nervix builds for 64-bit targets only, where usize holds every u32");
-    let candidates = subdivide(
-        &members,
-        max_messages,
-        PreparedMember::shares_batch_with,
-        |candidate| {
-            let references = candidate
-                .iter()
-                .map(|prepared| &prepared.member)
-                .collect::<Vec<_>>();
-            let encoded = codec
-                .encode_batch_within(&references, policy.max_size)
-                .map_err(|error| *error.current_context())?;
-            match encoded {
-                BoundedBatchEncoding::Encoded(payload) => Ok(CandidateEncoding::Fits(payload)),
-                BoundedBatchEncoding::Oversize(exceeded) => {
-                    Ok(CandidateEncoding::Oversize(exceeded))
-                }
-            }
-        },
-    );
-    packing.subdivisions = candidates.subdivisions;
-    for candidate in candidates.candidates {
-        let chosen = members
-            .get(candidate.start..candidate.end)
-            .assured("subdivide yields ranges within the members it was given");
-        let rows = chosen
-            .iter()
-            .map(|prepared| prepared.row_index)
-            .collect::<Vec<_>>();
-        let outcome = match candidate.result {
-            CandidateResult::Encoded(payload) => {
-                let first = chosen
-                    .first()
-                    .assured("subdivide never yields an empty candidate");
-                PackedOutcome::Payload(BatchPayload {
-                    rows,
-                    envelope: first.envelope.clone(),
-                    payload,
-                })
-            }
-            CandidateResult::Oversize(exceeded) => {
-                let row_index = *rows
-                    .first()
-                    .assured("subdivide rejects an oversize candidate only once it holds one row");
-                PackedOutcome::Oversize {
-                    row_index,
-                    exceeded,
-                }
-            }
-            CandidateResult::Failed(error) => PackedOutcome::ContainerFailed { rows, error },
-        };
-        packing.outcomes.push(outcome);
-    }
+    packing.pack_run(codec, &mut run, policy, max_messages);
     Ok(packing)
+}
+
+impl BufferedBatchPacking {
+    fn pack_run(
+        &mut self,
+        codec: &CompiledCodec,
+        members: &mut Vec<PreparedMember<'_>>,
+        policy: EmitterBatchPolicy,
+        max_messages: NonZeroUsize,
+    ) {
+        if members.is_empty() {
+            return;
+        }
+        let candidates = subdivide(
+            members,
+            max_messages,
+            PreparedMember::shares_batch_with,
+            |candidate| {
+                let references = candidate
+                    .iter()
+                    .map(|prepared| &prepared.member)
+                    .collect::<Vec<_>>();
+                let encoded = codec
+                    .encode_batch_within(&references, policy.max_size)
+                    .map_err(|error| *error.current_context())?;
+                match encoded {
+                    BoundedBatchEncoding::Encoded(payload) => Ok(CandidateEncoding::Fits(payload)),
+                    BoundedBatchEncoding::Oversize(exceeded) => {
+                        Ok(CandidateEncoding::Oversize(exceeded))
+                    }
+                }
+            },
+        );
+        self.subdivisions = self
+            .subdivisions
+            .checked_add(candidates.subdivisions)
+            .assured("the subdivision count cannot exceed work on buffered source rows");
+        for candidate in candidates.candidates {
+            let chosen = members
+                .get(candidate.start..candidate.end)
+                .assured("subdivide yields ranges within the members it was given");
+            let rows = chosen
+                .iter()
+                .map(|prepared| prepared.position)
+                .collect::<Vec<_>>();
+            let outcome = match candidate.result {
+                CandidateResult::Encoded(payload) => {
+                    let first = chosen
+                        .first()
+                        .assured("subdivide never yields an empty candidate");
+                    PackedOutcome::Payload(BatchPayload {
+                        rows,
+                        envelope: (*first.envelope).clone(),
+                        payload,
+                    })
+                }
+                CandidateResult::Oversize(exceeded) => {
+                    let position = *rows.first().assured(
+                        "subdivide rejects an oversize candidate only once it holds one row",
+                    );
+                    PackedOutcome::Oversize { position, exceeded }
+                }
+                CandidateResult::Failed(error) => PackedOutcome::ContainerFailed { rows, error },
+            };
+            self.outcomes.push(outcome);
+        }
+        members.clear();
+    }
 }
 
 /// What encoding one candidate produced.
@@ -279,7 +333,230 @@ fn subdivide<M, O, F>(
 mod tests {
     use std::cell::RefCell;
 
+    use nervix_models::{
+        BatchMessageLimit, CodecWireFormat, CreateCodec, CreateWireSchema, FieldName, JsonType,
+        ResolvedCodecWireFormat, WireSchemaField,
+    };
+
     use super::*;
+    use crate::{
+        runtime::{
+            RuntimeValue,
+            test_fixtures::{input_batch_with, input_schema, named},
+        },
+        runtime_ack::AckSet,
+        runtime_schema::compile_codec,
+    };
+
+    fn test_codec() -> Arc<CompiledCodec> {
+        let wire = CreateWireSchema {
+            name: named("input_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("value"),
+                ty: JsonType::Integer,
+                optional: false,
+            }],
+        };
+        let model = CreateCodec {
+            name: named("input_codec"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: wire.name.clone(),
+            },
+            schema: named("emitter_input"),
+            encoding_rules: Vec::new(),
+        };
+        compile_codec(&model, input_schema(), ResolvedCodecWireFormat::Json(&wire))
+            .assured("the test codec and Arrow schema both define one required integer field")
+    }
+
+    fn test_policy(max_messages: u32) -> EmitterBatchPolicy {
+        EmitterBatchPolicy {
+            max_messages: BatchMessageLimit::try_from(max_messages)
+                .assured("the test limit is positive and below the declared maximum"),
+            max_size: "1KiB"
+                .parse()
+                .assured("the fixed test size is a positive byte limit"),
+        }
+    }
+
+    fn carrier(value: i64, batch_index: usize, relay: &str, group: &str) -> PackingCarrier {
+        let source = input_batch_with(value, 0, AckSet::empty());
+        PackingCarrier {
+            source_relay: named(relay),
+            branch_key: source.key,
+            batch: source.batch,
+            rows: vec![PackingRow::Ready {
+                position: SinkRecordPosition {
+                    batch_index,
+                    row_index: 0,
+                },
+                envelope: BatchEnvelope {
+                    key: None,
+                    headers: Vec::new(),
+                    message_group: Some(group.to_string()),
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn packs_across_arrow_carriers_but_seals_on_ordering_group_and_source_relay() {
+        let carriers = vec![
+            carrier(1, 0, "source_a", "one"),
+            carrier(2, 1, "source_a", "one"),
+            carrier(3, 2, "source_a", "two"),
+            carrier(4, 3, "source_b", "one"),
+            carrier(5, 4, "source_b", "one"),
+        ];
+        let packed = pack_buffered_batches(&test_codec(), carriers, test_policy(3))
+            .assured("all selected Arrow rows match the test codec");
+        let payloads = packed
+            .outcomes
+            .into_iter()
+            .map(|outcome| match outcome {
+                PackedOutcome::Payload(payload) => (payload.rows, payload.payload),
+                other => panic!("every test row should encode into a payload, found {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            payloads,
+            vec![
+                (
+                    vec![
+                        SinkRecordPosition {
+                            batch_index: 0,
+                            row_index: 0
+                        },
+                        SinkRecordPosition {
+                            batch_index: 1,
+                            row_index: 0
+                        },
+                    ],
+                    br#"[{"value":1},{"value":2}]"#.to_vec(),
+                ),
+                (
+                    vec![SinkRecordPosition {
+                        batch_index: 2,
+                        row_index: 0
+                    }],
+                    br#"[{"value":3}]"#.to_vec(),
+                ),
+                (
+                    vec![
+                        SinkRecordPosition {
+                            batch_index: 3,
+                            row_index: 0
+                        },
+                        SinkRecordPosition {
+                            batch_index: 4,
+                            row_index: 0
+                        },
+                    ],
+                    br#"[{"value":4},{"value":5}]"#.to_vec(),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rejected_row_seals_the_payload_between_compatible_carriers() {
+        let mut rejected = carrier(2, 1, "source_a", "one");
+        rejected.rows = vec![PackingRow::Seal];
+        let carriers = vec![
+            carrier(1, 0, "source_a", "one"),
+            rejected,
+            carrier(3, 2, "source_a", "one"),
+        ];
+        let packed = pack_buffered_batches(&test_codec(), carriers, test_policy(3))
+            .assured("the selected Arrow rows match the test codec");
+        let rows = packed
+            .outcomes
+            .into_iter()
+            .map(|outcome| match outcome {
+                PackedOutcome::Payload(payload) => payload.rows,
+                other => panic!("the selected rows should encode, found {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                vec![SinkRecordPosition {
+                    batch_index: 0,
+                    row_index: 0
+                }],
+                vec![SinkRecordPosition {
+                    batch_index: 2,
+                    row_index: 0
+                }],
+            ]
+        );
+    }
+
+    #[test]
+    fn holds_at_most_the_declared_message_count_across_carriers() {
+        let carriers = (1_i64..=5)
+            .enumerate()
+            .map(|(index, value)| carrier(value, index, "source_a", "one"))
+            .collect();
+        let packed = pack_buffered_batches(&test_codec(), carriers, test_policy(2))
+            .assured("all five selected Arrow rows match the test codec");
+        let member_counts = packed
+            .outcomes
+            .into_iter()
+            .map(|outcome| match outcome {
+                PackedOutcome::Payload(payload) => payload.rows.len(),
+                other => panic!("every test row should encode into a payload, found {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(member_counts, vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn a_different_concrete_branch_seals_the_payload() {
+        let mut carriers = vec![
+            carrier(1, 0, "source_a", "one"),
+            carrier(2, 1, "source_a", "one"),
+            carrier(3, 2, "source_a", "one"),
+        ];
+        for (carrier, tenant) in carriers.iter_mut().zip(["acme", "beta", "acme"]) {
+            carrier.branch_key = Some(
+                BranchKey::from_fields([(
+                    FieldName::parse("tenant")
+                        .assured("the fixed field satisfies the field name grammar"),
+                    RuntimeValue::String(tenant.to_string()),
+                )])
+                .assured("the fixed field makes a concrete branch key"),
+            );
+        }
+        let packed = pack_buffered_batches(&test_codec(), carriers, test_policy(3))
+            .assured("all selected Arrow rows match the test codec");
+        let positions = packed
+            .outcomes
+            .into_iter()
+            .map(|outcome| match outcome {
+                PackedOutcome::Payload(payload) => payload.rows,
+                other => panic!("every test row should encode into a payload, found {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            positions,
+            vec![
+                vec![SinkRecordPosition {
+                    batch_index: 0,
+                    row_index: 0
+                }],
+                vec![SinkRecordPosition {
+                    batch_index: 1,
+                    row_index: 0
+                }],
+                vec![SinkRecordPosition {
+                    batch_index: 2,
+                    row_index: 0
+                }],
+            ]
+        );
+    }
 
     fn limit(messages: usize) -> NonZeroUsize {
         NonZeroUsize::new(messages).assured("every limit these tests use is positive")

@@ -6,6 +6,7 @@ pub(crate) mod dependencies;
 pub(crate) mod http_receiver;
 pub(crate) mod node_liveness;
 pub(crate) mod node_startup;
+pub(crate) mod peer_addressing;
 pub(crate) mod phase_deadline;
 pub(crate) mod port_pool;
 pub(crate) mod raw_session;

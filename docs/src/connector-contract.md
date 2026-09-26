@@ -105,6 +105,15 @@ once per batch and excludes rows with mapping errors before calling a row sink. 
 by position, so no runtime ACK map enters the connector. Each publish is one call per batch,
 never a virtual call per row.
 
+An ordering group exists only where the sink plan declares one; today that is the SQS
+`FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
+carries the result beside the batch: the batch's branch key for `FROM BRANCH`, or a string column
+for an expression, whose null rows keep the reason they have no group. It selects that column
+through the rows the emitter's route keeps, so each record keeps the group of its own input row. A
+record without a group is rejected by the host under the emitter's message error policy and never
+reaches the connector, which receives each remaining record's group already evaluated. An emitter
+whose plan declares no group carries nothing beside its batches.
+
 Each connector classifies definite delivery and rejection per record, and may report one
 infrastructure failure for the attempt. The host applies those outcomes to the corresponding ACK
 roots and error policy. The emitter task owns its buffer, maximum batch size, flush cadence,
@@ -113,6 +122,15 @@ operation and its completion point. A receiver-requested delay can extend, but c
 the host's retry backoff. `finish` lets a transport empty a client-side queue within the remaining
 stop deadline; Kafka uses it. A sink may keep its client after a publish failure when reopening it
 would discard staged work or a persistent session.
+
+For a record sink using the emitter `BATCH` clause, the host selects rows from successive
+Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
+branch key, execution time and original batch and row position. The host prepares members in
+arrival order and seals a payload when the source relay, branch, key, ordered headers, ordering
+group or codec container metadata changes. The codec encodes each candidate under `MAX SIZE`, and
+the host subdivides a candidate that does not fit; Arrow memory accounting still belongs to
+`FLUSH`. The connector sees one encoded record per completed payload and returns its outcome under
+the first member's position. The host maps that outcome back to every member's original position.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in

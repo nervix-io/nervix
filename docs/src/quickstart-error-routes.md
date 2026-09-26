@@ -4,6 +4,8 @@ So far every failure policy has been `LOG`. Nervix can instead capture a failing
 structured error — with a stable reference, code, message, and the partially constructed output —
 and send it to a dead-letter relay for inspection or downstream handling. See
 [Message Errors](processors.md#message-errors).
+The [Errors And Diagnostics](./errors-and-diagnostics.md) architecture chapter explains how a
+runtime failure becomes this structured error and how sensitive data stays out of it.
 
 To provoke real failures, this step computes a per-unit price: `amount / quantity` fails when a
 record arrives with `quantity` of zero.

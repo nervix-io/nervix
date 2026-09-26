@@ -73,6 +73,16 @@ Per-row mutation is kept close to the lane that orders it. A global concurrent m
 those lanes, not the owner of their inner state. Once a task has found its lane, later mutation does
 not repeatedly acquire the registry guard.
 
+### Emitter payload assembly
+
+One emitter task owns the released carriers and their flush order. Its batch packer borrows each
+carrier's source relay, concrete branch key and ordered metadata while it prepares selected Arrow
+rows. It clones the Arc-backed Arrow batch once per carrier passed to the packer; no row
+acquires a lock or increments an Arc reference count for source identity. The open candidate holds
+at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or source changes, a failed
+member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
+`MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
+
 ### Branch processor state
 
 Each concrete branch has one dispatch lane and one mutable processor runtime. The lane admits one
@@ -287,11 +297,12 @@ These sites are accepted for the contract and bound named above. A lock that mer
 state convenient, protects immutable configuration, or repeats registry discovery on every batch
 does not belong in this category.
 
-The simulated relay fault checks drive the production receipt, admission, and cancellation APIs
-through authenticated connections. They synchronize on the received Arrow batch and verify the
-same attempt cannot be admitted twice after a lost reply. Cancellation before grant and while
-receipt or reconnection is unresolved must win the attempt's existing admission fence before the
-runtime can admit it. A cancellation after admission returns the admitted outcome.
+The [simulated relay fault checks](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
+drive the production receipt, admission, and cancellation APIs through authenticated connections.
+They synchronize on the received Arrow batch and verify the same attempt cannot be admitted twice
+after a lost reply. Cancellation before grant and while receipt or reconnection is unresolved must
+win the attempt's existing admission fence before the runtime can admit it. A cancellation after
+admission returns the admitted outcome.
 
 Relay fan-out itself uses one bounded queue per consumer. Publishers share no fan-out lock;
 capacity and receiver counts are atomic, and a publisher registers for notification only when a
@@ -440,5 +451,5 @@ A family of names means each member runs independently through the recipe.
 
 The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
 contract. Their state semantics live in the WASM state documentation; they do not turn Shuttle
-into a disk or replica simulator. Interconnect fault simulation and Cucumber cover the network
-and process behavior outside this in-process scheduling boundary.
+into a disk or replica simulator. [Deterministic interconnect simulation](./interconnect-simulation.md)
+and Cucumber cover the network and process behavior outside this in-process scheduling boundary.

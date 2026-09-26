@@ -302,10 +302,9 @@ pub(crate) enum PeerHealthProbeOutcome {
     Healthy(ClusterNodeIdentity),
     Failure,
     CapacityExhausted,
-    Unscheduled,
 }
 
-/// One completed or deliberately unscheduled probe, timestamped on this observing node.
+/// One completed probe, timestamped on this observing node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PeerHealthProbeResult {
     target: PeerHealthProbeTarget,
@@ -397,7 +396,6 @@ pub(crate) enum PeerHealthObservationKind {
     Healthy,
     Failure,
     CapacityExhausted,
-    Unscheduled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -506,7 +504,6 @@ impl PeerHealthStateSnapshot {
             PeerHealthProbeOutcome::CapacityExhausted => {
                 PeerHealthObservationKind::CapacityExhausted
             }
-            PeerHealthProbeOutcome::Unscheduled => PeerHealthObservationKind::Unscheduled,
         };
         if let Some(current) = peer.observation.as_ref()
             && current.observed_at >= result.observed_at
@@ -655,8 +652,7 @@ impl RetainedPeerHealth {
         }
         match observation.outcome {
             PeerHealthObservationKind::Healthy => PeerHealthStatus::Healthy,
-            PeerHealthObservationKind::CapacityExhausted
-            | PeerHealthObservationKind::Unscheduled => PeerHealthStatus::Unknown,
+            PeerHealthObservationKind::CapacityExhausted => PeerHealthStatus::Unknown,
             PeerHealthObservationKind::Failure => {
                 let Some(failure_since) = observation.failure_since else {
                     return PeerHealthStatus::Unknown;
@@ -898,7 +894,7 @@ impl InterconnectGossipTransport {
         let registration = self
             .inner
             .interconnect
-            .register_outbound_target(context.peer_node_id().clone(), target.clone());
+            .register_outbound_target(context.peer_node_id().clone(), target.endpoint());
         if let Err(error) = registration {
             debug!(
                 peer = %context.peer_node_id(),
@@ -942,7 +938,7 @@ impl InterconnectGossipTransport {
             if self
                 .inner
                 .interconnect
-                .register_outbound_target(node_id.clone(), target.clone())
+                .register_outbound_target(node_id.clone(), endpoint)
                 .is_ok()
             {
                 self.inner.routes.insert(
@@ -1084,11 +1080,15 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
             .as_nanos(),
     )
     .assured("nanoseconds since the epoch stay within a u64 until the year 2554");
-    let advertised_targets = PeerTarget::resolve(&settings.interconnect_advertise_addr).await?;
+    let advertised_targets = settings
+        .interconnect
+        .resolve(&settings.interconnect_advertise_addr)
+        .await
+        .map_err(|report| io::Error::other(report.into_error()))?;
     let gossip_advertise_addr = advertised_targets
         .into_iter()
         .next()
-        .assured("PeerTarget::resolve rejects an endpoint that resolves to no addresses")
+        .assured("a successful resolution holds at least one target")
         .addr;
     let mut seed_targets = Vec::new();
     let seed_nodes = match settings.bootstrap_host.as_deref() {
@@ -1096,7 +1096,11 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
             let seed = seed
                 .parse::<NodeEndpoint>()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let targets = PeerTarget::resolve(&seed).await?;
+            let targets = settings
+                .interconnect
+                .resolve(&seed)
+                .await
+                .map_err(|report| io::Error::other(report.into_error()))?;
             let mut addresses = Vec::new();
             for target in targets {
                 addresses.push(target.addr.to_string());
@@ -1578,7 +1582,6 @@ impl ClusterHandle {
                     Some(PeerHealthObservationKind::Healthy) => "healthy",
                     Some(PeerHealthObservationKind::Failure) => "failure",
                     Some(PeerHealthObservationKind::CapacityExhausted) => "capacity-exhausted",
-                    Some(PeerHealthObservationKind::Unscheduled) => "unscheduled",
                     None => "none",
                 };
                 let observation_age = match effective.observed_at(node_id) {
@@ -2271,7 +2274,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_and_unscheduled_results_break_a_failure_run_without_marking_the_peer_dead() {
+    fn capacity_results_break_a_failure_run_without_marking_the_peer_dead() {
         let timeout = Duration::from_secs(10);
         let started_at = Instant::now();
         let mut state = PeerHealthStateSnapshot::default();
@@ -2315,27 +2318,6 @@ mod tests {
             Some(PeerHealthObservationKind::CapacityExhausted)
         );
         assert!(capacity.unavailable_nodes().is_empty());
-
-        let unscheduled_at = capacity_at
-            .checked_add(Duration::from_secs(1))
-            .assured("the test unscheduled observation fits in the monotonic clock range");
-        state.record_result(
-            PeerHealthProbeResult::new(target, PeerHealthProbeOutcome::Unscheduled, unscheduled_at),
-            timeout,
-        );
-        let unscheduled = state.effective_snapshot(unscheduled_at, timeout);
-        assert_eq!(
-            unscheduled
-                .status(&ClusterNodeName::parse("node-2").assured("the test node name is valid")),
-            Some(PeerHealthStatus::Unknown)
-        );
-        assert_eq!(
-            unscheduled.latest_outcome(
-                &ClusterNodeName::parse("node-2").assured("the test node name is valid")
-            ),
-            Some(PeerHealthObservationKind::Unscheduled)
-        );
-        assert!(unscheduled.unavailable_nodes().is_empty());
     }
 
     #[tokio::test]

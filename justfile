@@ -346,6 +346,11 @@ test-consensus *args:
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
 
+# Run the resolver's unit tests and its focused protocol tests, which ask local DNS authorities the
+# tests start themselves.
+test-dns *args:
+    cargo test --package nervix-dns --all-targets -- {{ args }}
+
 # Run the connector unit tests, which live in the nervix-connector contract crate and in every
 # nervix-connector-* integration crate rather than the server lib.
 test-connectors *args:
@@ -473,6 +478,11 @@ test-coverage: tests-deps
     cargo crap --lcov lcov.info --min 30 --threshold 30
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
+
+# Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
+# workspace package, so crate lines the server's tests executed are measured as CI measures them.
+coverage-report-workspace:
+    cargo llvm-cov report --workspace --lcov --output-path lcov.info
 
 # Measure changed server lines against its unit tests and selected Cucumber features while iterating.
 # The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.

@@ -6951,6 +6951,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "nervix-dns"
+version = "0.1.0-dev"
+dependencies = [
+ "arch-into",
+ "error-stack",
+ "hickory-resolver",
+ "indexmap 2.14.2",
+ "meticulous",
+ "nervix-test-environment",
+ "resolv-conf",
+ "strum 0.26.3",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "triomphe",
+]
+
+[[package]]
 name = "nervix-execution"
 version = "0.1.0-dev"
 dependencies = [
@@ -7002,6 +7021,7 @@ dependencies = [
  "http",
  "humantime",
  "meticulous",
+ "nervix-dns",
  "nervix-execution",
  "nervix-models",
  "nervix-recovery",
@@ -7240,6 +7260,7 @@ dependencies = [
  "nervix-connector-zeromq",
  "nervix-consensus",
  "nervix-dataflow-graph",
+ "nervix-dns",
  "nervix-execution",
  "nervix-expiry-map",
  "nervix-interconnect",
@@ -7322,8 +7343,10 @@ dependencies = [
  "blake3",
  "clap",
  "error-stack",
+ "hickory-proto",
  "meticulous",
  "nervix-recovery",
+ "parking_lot",
  "reqwest 0.13.5",
  "serde_json",
  "tempfile",

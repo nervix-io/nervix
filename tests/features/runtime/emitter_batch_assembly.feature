@@ -1,0 +1,101 @@
+Feature: Emitter payload assembly across Arrow carriers
+  A batching emitter packs compatible rows from successive carriers of one source relay and
+  concrete branch. Metadata boundaries, another named branch and the two payload limits divide
+  the stream without changing its source order.
+
+  @emitter_batch_assembly
+  Scenario Outline: A flush combines compatible carriers and seals payloads at limits and source boundaries
+    Given Kafka is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And Kafka topic "assembled_{{test_id}}" exists with 1 partitions
+    And Kafka topic "assembled_{{test_id}}" is observed
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA event ( seq I64, tenant STRING, source STRING );
+      CREATE WIRE JSON SCHEMA event_wire MODE STRICT (
+        seq integer, tenant string, source string
+      );
+      CREATE CODEC event_codec FROM WIRE JSON SCHEMA event_wire TO SCHEMA event;
+      CREATE SCHEMA tenant_branch ( tenant STRING );
+      CREATE BRANCH by_source_a SCHEMA tenant_branch TTL 5m;
+      CREATE BRANCH by_source_b SCHEMA tenant_branch TTL 5m;
+      CREATE RELAY source_a_events SCHEMA event BRANCHED BY by_source_a;
+      CREATE RELAY source_b_events SCHEMA event BRANCHED BY by_source_b;
+      CREATE VHOST edge assembled-{{test_id}}.example.com;
+      CREATE ENDPOINT source_a_ingress ON edge PATH '/a' TYPE HTTP;
+      CREATE ENDPOINT source_b_ingress ON edge PATH '/b' TYPE HTTP;
+      CREATE INGESTOR source_a
+        FROM ENDPOINT source_a_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO source_a_events
+          INHERIT ALL BRANCHED BY by_source_a SET tenant = message.tenant
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE INGESTOR source_b
+        FROM ENDPOINT source_b_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING event_codec
+        TO source_b_events
+          INHERIT ALL BRANCHED BY by_source_b SET tenant = message.tenant
+          FLUSH IMMEDIATE ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE CLIENT kafka_main TYPE KAFKA CONFIG { 'bootstrap.servers' = '{{kafka_addr}}' };
+      CREATE EMITTER assembled
+        FROM source_a_events, source_b_events
+        TO KAFKA kafka_main TOPIC assembled_{{test_id}}
+          MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 50ms MAX 1s
+          ENCODE USING event_codec
+        INHERIT ALL
+        INVOKE write_header('source', output.source)
+        BATCH MAX MESSAGES <max_messages> MAX SIZE <max_size>
+        FLUSH EACH 20s MAX BATCH SIZE 1MiB
+        ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
+      START;
+      """
+    And http payload is posted to host "assembled-{{test_id}}.example.com" path "/a"
+      """
+      {"seq":1,"tenant":"acme","source":"a"}
+      """
+    And http payload is posted to host "assembled-{{test_id}}.example.com" path "/a"
+      """
+      {"seq":2,"tenant":"acme","source":"a"}
+      """
+    And http payload is posted to host "assembled-{{test_id}}.example.com" path "/a"
+      """
+      {"seq":3,"tenant":"acme","source":"a"}
+      """
+    And http payload is posted to host "assembled-{{test_id}}.example.com" path "/b"
+      """
+      {"seq":5,"tenant":"acme","source":"a"}
+      """
+    And http payload is posted to host "assembled-{{test_id}}.example.com" path "/b"
+      """
+      {"seq":6,"tenant":"acme","source":"a"}
+      """
+    And http payload is posted to host "assembled-{{test_id}}.example.com" path "/a"
+      """
+      {"seq":4,"tenant":"acme","source":"divider"}
+      """
+    And http payload is posted to host "assembled-{{test_id}}.example.com" path "/a"
+      """
+      {"seq":7,"tenant":"acme","source":"a"}
+      """
+    Then within "45s" the observed broker receives exactly these payloads
+      """
+      [{"seq":1,"tenant":"acme","source":"a"},{"seq":2,"tenant":"acme","source":"a"}]
+      [{"seq":3,"tenant":"acme","source":"a"}]
+      [{"seq":5,"tenant":"acme","source":"a"},{"seq":6,"tenant":"acme","source":"a"}]
+      [{"seq":4,"tenant":"acme","source":"divider"}]
+      [{"seq":7,"tenant":"acme","source":"a"}]
+      """
+
+    Examples:
+      | cluster_size | max_messages | max_size |
+      | 1            | 2            | 100B     |
+      | 3            | 2            | 100B     |
+      | 1            | 3            | 80B      |
+      | 3            | 3            | 80B      |

@@ -25,7 +25,7 @@ use std::{
 
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{CpuClass, Executor, MemoryClass};
-use nervix_interconnect::{PeerTarget, TransportEntropy};
+use nervix_interconnect::{PeerResolver, PeerTarget, TransportEntropy};
 use nervix_models::NodeEndpoint;
 use runner::{
     ClockSkew, HostSupervisor, NetworkParameters, SchedulerPhase, SemanticTrace, SimulatedEntropy,
@@ -79,7 +79,11 @@ fn peer_resolution_uses_simulated_dns() {
         run.simulate(move |simulation| {
             simulation.host("server", || async { Ok(()) });
             simulation.client("observer", async move {
-                let targets = PeerTarget::resolve(&NodeEndpoint::new("server", 7443)).await?;
+                let endpoint = NodeEndpoint::new("server", 7443);
+                let targets =
+                    PeerTarget::resolve(&PeerResolver::simulated(), &endpoint, Duration::ZERO)
+                        .await
+                        .assured("the simulated DNS table holds the server");
                 assert_eq!(targets.len(), 1);
                 assert_eq!(targets[0].addr.ip(), turmoil::lookup("server"));
                 assert_eq!(targets[0].server_name, "server");

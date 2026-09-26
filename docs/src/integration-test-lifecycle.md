@@ -525,6 +525,7 @@ running the same suite, which is why a node startup retries a lost bind on fresh
 | In-process node | 7: gRPC, gRPC over HTTPS, HTTP, HTTPS, observability, web console, and interconnect | After its task has ended: at cluster cleanup, when a scenario stops every node, and when a failed startup attempt moves to fresh ports |
 | Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit | At the end of cleanup |
 | HTTP receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
+| DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
 | Server process | 6 | When the process is dropped |
 | A node moved to a new interconnect address | 1 new interconnect port | The port it gave up stays reserved for the rest of the run |
 
@@ -614,6 +615,44 @@ scenario cleanup forced: HTTP receiver <name>: <the same record>
 The second line appears only when a connection or the accept loop had to be aborted, or panicked.
 A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
 cleanup, once the nodes that dialed it have ended.
+
+## DNS Authorities
+
+A scenario about how nodes find one another by name selects its cluster's peer addressing before the
+cluster starts, with `Given cluster peers are addressed by "<addressing>"`. Every other cluster uses
+literal IPv4 loopback endpoints, starts no DNS fixture, and lets its nodes load the host's own
+resolver configuration, as a production node does.
+
+| Addressing | Each node listens on | Each node advertises | Its name answers with |
+| --- | --- | --- | --- |
+| `literal IPv4 endpoints` | `127.0.0.1` | `127.0.0.1` | No fixture |
+| `literal IPv6 endpoints` | `::1` | `::1` | No fixture |
+| `DNS names` | `127.0.2.<n>` | `node-<n>.nervix.test` | Its listen address |
+| `DNS names behind an unreachable address` | `127.0.2.<n>` | `node-<n>.nervix.test` | `127.0.4.<n>`, where nothing listens, then its listen address |
+| `single-label DNS names` | `127.0.2.<n>` | `node-<n>`, completed by the search domain | Its listen address |
+| `hosts file names` | `127.0.2.<n>` | `node-<n>.nervix.test` | Nothing: the hosts file lists the name and the fixture never answers it |
+
+A cluster addressed by names starts one in-process DNS authority on a loopback UDP port drawn from
+the port pool. The harness writes a resolver configuration with the search domain `nervix.test`,
+`ndots:1`, and one-second queries with one retry, and a hosts file, into the cluster's directory,
+and starts every node with that configuration and the authority as its only name server. Every
+answer carries a one-second TTL, positive or negative, so a zone change reaches a node within
+seconds of the cached answer expiring. A scenario can move a stopped node to `127.0.3.<n>` behind
+the same name, and answer a node's name as a name that does not exist, a name with no address, or
+not at all. A name outside the zone does not exist, with a negative TTL of zero. Every test
+certificate names `localhost`, `127.0.0.1`, `::1`, `node-<n>`, and `node-<n>.nervix.test`, so each
+addressing presents the name its peers expect.
+
+The authority answers from memory and holds nothing else: it counts questions for at most 1,024
+names, and a scenario can assert that its nodes asked nothing for their names. It answers until the
+cluster is dropped at the end of cleanup, after every node has stopped, so no node's lookup outlives
+it; dropping it aborts its answer loop, and its port goes back to the pool. How long a node waits
+for an answer is product behavior, bounded by its connection setup deadline and described in [Peer
+Name Resolution](./interconnect.md#peer-name-resolution); the scenario's own waits are status waits.
+
+The resolver crate's focused checks use the same authority, started on an unused port of their own,
+to observe DNS messages directly: TTL expiry, negative caching, refusals, silence, the lookup
+budget, the concurrency bound, and runtime teardown. `just test-dns` runs them.
 
 ## Client Probes
 

@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::{Arc as StdArc, LazyLock, OnceLock},
     time::{Duration, Instant, SystemTime},
@@ -37,12 +37,13 @@ use nervix_connector_kafka::testing_rdkafka::{
     topic_partition_list::{Offset, TopicPartitionList},
 };
 use nervix_consensus::RaftRetentionPolicy;
+use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_execution::Executor;
 use nervix_interconnect::{
-    ControlEnvelope, Envelope, PeerTarget, RuntimeErrorEvent, TlsConfigBundle, Transport,
-    TransportClock, TransportOptions,
+    ControlEnvelope, Envelope, PeerResolver, PeerTarget, RuntimeErrorEvent, TlsConfigBundle,
+    Transport, TransportClock, TransportIdentity, TransportOptions,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, NodeEndpoint};
 
 /// Cucumber node ids are fixed strings from the feature files, so they always parse.
 pub(crate) fn node_name(raw: &str) -> ClusterNodeName {
@@ -108,6 +109,10 @@ use super::{
     node_startup::{
         ATTEMPT_READINESS_BUDGET, AttemptCleanup, NODE_STARTUP_BUDGET, NodeStartup, StartableNode,
         cluster_startup_budget,
+    },
+    peer_addressing::{
+        ClusterDns, FixtureAnswer, InterconnectAddress, PeerAddressing, PublishedNode,
+        qualified_name,
     },
     phase_deadline::PhaseDeadline,
     port_pool::{next_ports, release_test_ports},
@@ -660,8 +665,14 @@ impl InterconnectTestCa {
         validity: TestCertificateValidity,
         directory: &std::path::Path,
     ) -> io::Result<(PathBuf, PathBuf)> {
-        let mut params = CertificateParams::new(vec!["localhost".to_string(), HOST.to_string()])
-            .map_err(io::Error::other)?;
+        let subject_names = vec![
+            "localhost".to_string(),
+            HOST.to_string(),
+            Ipv6Addr::LOCALHOST.to_string(),
+            node_id.to_string(),
+            qualified_name(node_id),
+        ];
+        let mut params = CertificateParams::new(subject_names).map_err(io::Error::other)?;
         params.subject_alt_names.push(SanType::URI(
             format!("nervix://cluster/{cluster_id}/node/{node_id}")
                 .try_into()
@@ -701,6 +712,9 @@ pub(crate) enum InterconnectCredentialFault {
 pub(crate) struct Cluster {
     _root_dir: TempDir,
     interconnect_ca: InterconnectTestCa,
+    peer_addressing: PeerAddressing,
+    /// The DNS a named cluster resolves peers through; a literally addressed cluster has none.
+    dns: Option<ClusterDns>,
     nodes: BTreeMap<String, NodeHandle>,
     fault_injection: FaultInjection,
     dependencies: DependencyEndpoints,
@@ -732,6 +746,7 @@ pub(crate) struct TestClusterConfig {
     pub raft_retention: RaftRetentionPolicy,
     pub temp_dir: Option<PathBuf>,
     pub dependencies: DependencyEndpoints,
+    pub peer_addressing: PeerAddressing,
 }
 
 impl Default for TestClusterConfig {
@@ -758,6 +773,7 @@ impl Default for TestClusterConfig {
             raft_retention: RaftRetentionPolicy::default(),
             temp_dir: None,
             dependencies: DependencyEndpoints::default(),
+            peer_addressing: PeerAddressing::default(),
         }
     }
 }
@@ -786,11 +802,44 @@ impl Cluster {
         let root_dir = tempdir()?;
         let interconnect_ca = InterconnectTestCa::new(&root_dir)?;
         let live = LiveClusterRegistration::start(scenario);
+        /// One node of the cluster being built, before its spec exists.
+        struct PlannedNode {
+            node_id: String,
+            index: u8,
+            address: InterconnectAddress,
+        }
+        let peer_addressing = config.peer_addressing;
+        let mut planned = Vec::with_capacity(node_count);
+        for position in 1..=node_count {
+            let node_id = format!("node-{position}");
+            let index = NodeSpec::index(&node_id)?;
+            let address = peer_addressing.address(&node_id, index);
+            planned.push(PlannedNode {
+                node_id,
+                index,
+                address,
+            });
+        }
+        let mut published = Vec::with_capacity(planned.len());
+        for node in &planned {
+            published.push(PublishedNode {
+                node_id: &node.node_id,
+                index: node.index,
+                listen_ip: node.address.listen_ip,
+            });
+        }
+        let dns = ClusterDns::start(peer_addressing, root_dir.path(), &published).await?;
         let mut nodes = BTreeMap::new();
 
-        for index in 1..=node_count {
-            let node_id = format!("node-{index}");
-            let spec = NodeSpec::new(&root_dir, &interconnect_ca, &node_id, index == 1)?;
+        for PlannedNode {
+            node_id,
+            index,
+            address,
+        } in planned
+        {
+            let mut spec = NodeSpec::new(&root_dir, &interconnect_ca, &node_id, index == 1)?;
+            spec.set_interconnect_address(address);
+            spec.dns = dns.as_ref().map(ClusterDns::configuration);
             fault_injection
                 .set_syslog_ingestor_bind_ip(node_name(&node_id), spec.syslog_ingestor_host);
             nodes.insert(
@@ -802,6 +851,8 @@ impl Cluster {
         let mut cluster = Self {
             _root_dir: root_dir,
             interconnect_ca,
+            peer_addressing,
+            dns,
             fault_injection,
             nodes,
             dependencies: config.dependencies,
@@ -830,7 +881,7 @@ impl Cluster {
             .get("node-1")
             .expect("bootstrap node exists")
             .spec
-            .interconnect_addr();
+            .interconnect_endpoint();
         for (node_id, node) in &mut self.nodes {
             if node_id != "node-1" {
                 node.spec.bootstrap_host = Some(bootstrap_cluster_addr.clone());
@@ -980,7 +1031,7 @@ impl Cluster {
             .nodes
             .values()
             .find(|node| node.task.is_running())
-            .map(|node| node.spec.interconnect_addr())
+            .map(|node| node.spec.interconnect_endpoint())
             .ok_or_else(|| io::Error::other("a running bootstrap node is required"))?;
         let config = self
             .nodes
@@ -990,6 +1041,13 @@ impl Cluster {
             .config
             .clone();
         let mut spec = NodeSpec::new(&self._root_dir, &self.interconnect_ca, node_id, false)?;
+        let index = NodeSpec::index(node_id)?;
+        let address = self.peer_addressing.address(node_id, index);
+        if let Some(dns) = &self.dns {
+            dns.publish(node_id, index, address.listen_ip);
+        }
+        spec.set_interconnect_address(address);
+        spec.dns = self.dns.as_ref().map(ClusterDns::configuration);
         spec.bootstrap_host = Some(bootstrap_host);
         self.fault_injection
             .set_syslog_ingestor_bind_ip(node_name(node_id), spec.syslog_ingestor_host);
@@ -1052,6 +1110,57 @@ impl Cluster {
         handle.stop().await
     }
 
+    /// Move a stopped node's interconnect to another loopback address behind the same advertised
+    /// name, and answer that name with the new address from the next question on.
+    pub(crate) fn move_behind_its_name(&mut self, node_id: &str) -> io::Result<()> {
+        let Some(dns) = &self.dns else {
+            return Err(io::Error::other(
+                "only a cluster addressed by names can move a node behind its name",
+            ));
+        };
+        let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
+        })?;
+        if handle.task.is_running() {
+            return Err(io::Error::other(format!(
+                "node '{node_id}' must be stopped before it moves"
+            )));
+        }
+        let index = NodeSpec::index(node_id)?;
+        let address = self.peer_addressing.moved_address(node_id, index);
+        dns.publish(node_id, index, address.listen_ip);
+        handle.spec.set_interconnect_address(address);
+        Ok(())
+    }
+
+    /// Answer `node_id`'s name with `answer` in place of its address.
+    pub(crate) fn answer_node_name(&self, node_id: &str, answer: FixtureAnswer) -> io::Result<()> {
+        let Some(dns) = &self.dns else {
+            return Err(io::Error::other(
+                "only a cluster addressed by names has a DNS fixture to answer with",
+            ));
+        };
+        if !self.nodes.contains_key(node_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("unknown node '{node_id}'"),
+            ));
+        }
+        dns.answer(node_id, answer);
+        Ok(())
+    }
+
+    /// Questions the cluster's DNS fixture received for the names of its nodes.
+    pub(crate) fn dns_questions_for_node_names(&self) -> io::Result<u64> {
+        let Some(dns) = &self.dns else {
+            return Err(io::Error::other(
+                "only a cluster addressed by names has a DNS fixture",
+            ));
+        };
+        let node_ids = self.node_ids();
+        Ok(dns.questions_for(&node_ids))
+    }
+
     pub(crate) async fn restart_node_with_new_interconnect_address(
         &mut self,
         node_id: &str,
@@ -1063,7 +1172,7 @@ impl Cluster {
             .find(|(candidate_id, candidate)| {
                 candidate_id.as_str() != node_id && candidate.task.is_running()
             })
-            .map(|(_, candidate)| candidate.spec.interconnect_addr());
+            .map(|(_, candidate)| candidate.spec.interconnect_endpoint());
         let handle = self.nodes.get_mut(node_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
         })?;
@@ -1099,7 +1208,7 @@ impl Cluster {
         let handle = self.nodes.get(node_id).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, format!("unknown node '{node_id}'"))
         })?;
-        TcpStream::connect(parse_addr(&handle.spec.interconnect_addr())?).await
+        TcpStream::connect(handle.spec.interconnect_listen_addr()).await
     }
 
     pub(crate) async fn attempt_interconnect_with_invalid_credentials(
@@ -1113,7 +1222,7 @@ impl Cluster {
                 format!("unknown node '{target_node_id}'"),
             )
         })?;
-        let target_addr = parse_addr(&target.spec.interconnect_addr())?;
+        let target_addr = target.spec.interconnect_listen_addr();
         let probe_directory = tempfile::tempdir_in(self._root_dir.path())?;
         let untrusted_authority = if let InterconnectCredentialFault::UntrustedClient = fault {
             Some(InterconnectTestCa::new(&probe_directory)?)
@@ -1156,14 +1265,20 @@ impl Cluster {
             shutdown_drain_timeout: Duration::from_millis(250),
             ..TransportOptions::default()
         };
+        let dns = DnsResolver::load(DnsConfiguration::system())
+            .await
+            .map_err(|report| io::Error::other(format!("{report:?}")))?;
         let (transport, _incoming) = Transport::bind(
             "127.0.0.1:0".parse().expect("probe address is valid"),
-            "localhost",
-            certificate_cluster_id,
-            probe_node_id,
+            TransportIdentity {
+                cluster_id: certificate_cluster_id.to_string(),
+                node_id: probe_node_id,
+                advertised_host: "localhost".to_string(),
+            },
             tls,
             options,
             Executor::default(),
+            PeerResolver::new(dns),
         )
         .await
         .map_err(io::Error::other)?;
@@ -1176,7 +1291,7 @@ impl Cluster {
         let attempt = if let InterconnectCredentialFault::WrongNodeIdentity = fault {
             let addressed_node = ClusterNodeName::parse("node-254").map_err(io::Error::other)?;
             transport
-                .register_outbound_target(addressed_node.clone(), peer_target)
+                .register_outbound_target(addressed_node.clone(), peer_target.endpoint())
                 .map_err(io::Error::other)?;
             transport
                 .send(
@@ -2697,8 +2812,13 @@ impl NodeHandle {
             .node_id(node_name(&self.spec.node_id))
             .grpc_advertise_addr(parse_addr(&self.spec.grpc_addr())?.into())
             .grpc_https_advertise_addr(Some(parse_addr(&self.spec.grpc_https_addr())?.into()))
-            .interconnect_listen_addr(parse_addr(&self.spec.interconnect_addr())?)
-            .interconnect_advertise_addr(parse_addr(&self.spec.interconnect_addr())?.into())
+            .interconnect_listen_addr(self.spec.interconnect_listen_addr())
+            .interconnect_advertise_addr(
+                self.spec
+                    .interconnect_endpoint()
+                    .parse::<NodeEndpoint>()
+                    .map_err(io::Error::other)?,
+            )
             .interconnect_tls_ca(self.spec.interconnect_tls_ca.clone())
             .interconnect_tls_cert(self.spec.interconnect_tls_cert.clone())
             .interconnect_tls_key(self.spec.interconnect_tls_key.clone())
@@ -2724,6 +2844,12 @@ impl NodeHandle {
             .memory_pressure(self.config.memory_pressure)
             .raft_retention(self.config.raft_retention)
             .cluster_bootstrap_host(self.spec.bootstrap_host.clone())
+            .dns(
+                self.spec
+                    .dns
+                    .clone()
+                    .unwrap_or_else(DnsConfiguration::system),
+            )
             .db_path(db_path)
             .temp_dir(
                 self.config
@@ -2976,6 +3102,12 @@ struct NodeSpec {
     observability_port: u16,
     web_console_port: u16,
     interconnect_port: u16,
+    /// The loopback address the interconnect listens on.
+    interconnect_ip: IpAddr,
+    /// The host the node advertises for its interconnect endpoint.
+    interconnect_host: String,
+    /// The resolver configuration the node loads, or `None` for the host's own.
+    dns: Option<DnsConfiguration>,
 }
 
 struct NodePorts {
@@ -3033,11 +3165,15 @@ impl NodeSpec {
             observability_port: ports.observability,
             web_console_port: ports.web_console,
             interconnect_port: ports.interconnect,
+            interconnect_ip: HOST,
+            interconnect_host: HOST.to_string(),
+            dns: None,
         })
     }
 
-    fn syslog_ingestor_host(node_id: &str) -> io::Result<IpAddr> {
-        let node_index = node_id
+    /// The `<n>` of a test node id `node-<n>`.
+    fn index(node_id: &str) -> io::Result<u8> {
+        node_id
             .strip_prefix("node-")
             .and_then(|value| value.parse::<u8>().ok())
             .filter(|value| (1..=254).contains(value))
@@ -3046,8 +3182,17 @@ impl NodeSpec {
                     io::ErrorKind::InvalidInput,
                     format!("test node id '{node_id}' must have the form node-1 through node-254"),
                 )
-            })?;
+            })
+    }
+
+    fn syslog_ingestor_host(node_id: &str) -> io::Result<IpAddr> {
+        let node_index = Self::index(node_id)?;
         Ok(IpAddr::V4(Ipv4Addr::new(127, 0, 0, node_index)))
+    }
+
+    fn set_interconnect_address(&mut self, address: InterconnectAddress) {
+        self.interconnect_ip = address.listen_ip;
+        self.interconnect_host = address.advertised_host;
     }
 
     fn reallocate_ports(&mut self) -> io::Result<()> {
@@ -3165,8 +3310,13 @@ impl NodeSpec {
         format!("{HOST}:{}", self.web_console_port)
     }
 
-    fn interconnect_addr(&self) -> String {
-        format!("{HOST}:{}", self.interconnect_port)
+    fn interconnect_listen_addr(&self) -> SocketAddr {
+        SocketAddr::new(self.interconnect_ip, self.interconnect_port)
+    }
+
+    /// The `host:port` endpoint the node advertises and a joining node bootstraps from.
+    fn interconnect_endpoint(&self) -> String {
+        NodeEndpoint::new(self.interconnect_host.clone(), self.interconnect_port).to_string()
     }
 
     fn db_path(&self) -> io::Result<PathBuf> {

@@ -83,9 +83,9 @@ use nervix_models::{
     RabbitMqIngestMode, RelayName, RemoteAckOutcome, RemoteAckRegistration, RemoteAckResolution,
     RemoteRuntimeField, ResolvedBranching, ResourceId, ResourceName, RetryPolicy,
     RouteConstruction, ScheduledModel, ScheduledNode, ScheduledNodes, SchemaFingerprint,
-    SignalingProtocolName, SignalingWireFormat, SqsFifoGroup, SqsIngestMode,
-    StructuredMessageError, SubscriptionName, Timestamp, WasmCheckpointInspection,
-    WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
+    SignalingProtocolName, SignalingWireFormat, SqsIngestMode, StructuredMessageError,
+    SubscriptionName, Timestamp, WasmCheckpointInspection, WasmRejectedStatePolicy,
+    WasmSavedStateRejection, WasmStateGeneration, WasmStateResetScope,
 };
 #[cfg(test)]
 use nervix_models::{
@@ -185,6 +185,7 @@ mod domain_wire_schemas;
 mod emitter_batch_packing;
 mod emitter_buffer;
 mod emitter_encoding;
+mod emitter_ordering_group;
 mod emitter_publishing;
 mod emitter_retry;
 mod emitter_sinks;
@@ -310,6 +311,7 @@ use emitter_buffer::{
     PublishReport,
 };
 use emitter_encoding::EncodedRecordSink;
+use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{
     EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterSink,
     EmitterSinkState, RejectedEmitterRecord, await_emitter_confirmation,
@@ -346,7 +348,6 @@ use filter_map::{
     execute_filter_map_program_on_batch, expression_reads_sensitive_source,
     plan_emitter_filter_map_batch, plan_filter_map_messages,
 };
-pub(in crate::runtime) use filter_map::{SqsMessageGroupError, evaluate_sqs_fifo_group_program};
 use force_flush::{
     DomainForceFlush, DomainForceFlushCompletion, DomainForceFlushParticipant,
     IngestorAckRootTrackers,
@@ -510,15 +511,16 @@ use test_fixtures::{
 pub(in crate::runtime) use vm_compile::{
     CompiledBranchProgram, CompiledEmitterFilterMapProgram, EmitterHeaders, KeyProjectionKind,
     MaterializedFieldInterest, MaterializedLookupKeyMode, compile_emitter_filter_map_program,
-    compile_key_projection_program, compile_sqs_fifo_group_program,
+    compile_key_projection_program,
 };
 use vm_compile::{
     CompiledMessageErrorSites, GeneratorSetProgramSchemas, OutputNamespaceInput,
     RuntimeCompileTarget, RuntimeFilterScope, RuntimeVmSchema, RuntimeVmSchemaPair,
-    compile_expression_filter_program, compile_generator_set_program,
-    compile_ingestor_filter_map_program, compile_message_error_set_program,
-    compile_output_branch_program, compile_processor_output_filter_map_program,
-    compile_processor_output_program, compile_reorderer_program, compile_scoped_filter_program,
+    compile_emitter_filter_map_part, compile_expression_filter_program,
+    compile_generator_set_program, compile_ingestor_filter_map_program,
+    compile_message_error_set_program, compile_output_branch_program,
+    compile_processor_output_filter_map_program, compile_processor_output_program,
+    compile_reorderer_program, compile_scoped_filter_program,
     compile_wasm_output_filter_map_program, compiled_message_error_sites,
     evaluate_constant_expression_vm, referenced_materialized_stream_bindings,
     relay_branch_schema_for_routing, relay_schema_for_routing, relay_schema_for_runtime,
@@ -526,8 +528,8 @@ use vm_compile::{
 };
 use vm_input::{
     SharedBatchColumns, VmInputProjectionSources, compute_lookup_hash_map_columns,
-    project_vm_input_batch, relay_state_snapshot_from_side_inputs, runtime_value_type_name,
-    runtime_values_input_column, vm_output_value, vm_typed_batch_selected_rows_to_runtime_batch,
+    project_vm_input_batch, relay_state_snapshot_from_side_inputs, runtime_values_input_column,
+    vm_output_value, vm_typed_batch_selected_rows_to_runtime_batch,
     vm_typed_batch_to_runtime_batch,
 };
 use wasm_checkpoint::{

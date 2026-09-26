@@ -20,22 +20,17 @@ extern crate shuttle_tokio as tokio;
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio_util as tokio_util;
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io,
-    net::SocketAddr,
-    sync::OnceLock,
-    time::Duration,
-};
+use std::{collections::BTreeMap, io, net::SocketAddr, sync::OnceLock, time::Duration};
 
 use error_stack::Report;
+use nervix_dns::{DnsLookupError, DnsLookupFailure};
 use nervix_execution::{ChargedBytes, Executor, Reservation};
 use nervix_models::{
     ClusterNodeIdentity, ClusterNodeIncarnation, ClusterNodeName, CodecName, CoordinationIdentity,
     DomainClockProgress, DomainName, EmitterName, FieldName, IngestorName, LookupName, ModelKind,
-    ModelName, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset, RelayName,
-    RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField, RemoteRuntimeRecordMetadata,
-    ResourceName, SubscriptionBinding, WasmStateResetScope,
+    ModelName, NodeEndpoint, NodeRef, OwnershipStateRecoveryOutcome, OwnershipStateReset,
+    RelayName, RemoteAckRegistration, RemoteAckResolution, RemoteRuntimeField,
+    RemoteRuntimeRecordMetadata, ResourceName, SubscriptionBinding, WasmStateResetScope,
 };
 use nervix_recovery::Discarded as _;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -68,7 +63,7 @@ pub use connection::{
     IncomingByteStream, RelayAdmission, RelayCancellationGuard,
 };
 pub use entropy::TransportEntropy;
-pub use identity::TlsConfigBundle;
+pub use identity::{TlsConfigBundle, TransportIdentity};
 pub use observation::{
     ConnectionDirection, ConnectionFailureReason, RelayAdmissionOutcome, RequestOutcome,
     StreamResetReason, TransferDirection, TransportCounters, TransportSnapshot,
@@ -89,6 +84,7 @@ pub use runtime_state::{
     StatePlacementEnvelope, StateReplicationAck, StateSchema, StateSnapshotEnvelope,
     StateSyncRequest, StateSyncResponse,
 };
+pub use socket::PeerResolver;
 pub use wasm_state::{
     CoordinateWasmStateResetRequest, CoordinateWasmStateResetResponse,
     RecoverWasmProcessorStateRequest, RecoverWasmProcessorStateResponse,
@@ -804,26 +800,40 @@ pub struct Transport {
 pub struct CoordinationIdentityAllocationError;
 
 impl Transport {
+    /// Listen on `listen_addr` as `identity`. Peers' advertised endpoints are resolved through
+    /// `resolver`, which belongs to this node for as long as the transport runs.
     pub async fn bind(
         listen_addr: SocketAddr,
-        advertised_host: impl Into<String>,
-        cluster_id: impl Into<String>,
-        node_id: ClusterNodeName,
+        identity: TransportIdentity,
         tls: TlsConfigBundle,
         options: TransportOptions,
         executor: Executor,
+        resolver: PeerResolver,
     ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
         let (inner, incoming) = connection::TransportState::bind(
             listen_addr,
-            advertised_host.into(),
-            cluster_id.into(),
-            node_id,
+            identity,
             tls,
             options,
             executor,
+            resolver,
         )
         .await?;
         Ok((Self { inner }, incoming))
+    }
+
+    /// Every target `endpoint` resolves to now through this transport's resolver, within the
+    /// connection setup timeout. A successful result holds at least one target.
+    pub async fn resolve(
+        &self,
+        endpoint: &NodeEndpoint,
+    ) -> Result<Vec<PeerTarget>, Report<DnsLookupError>> {
+        PeerTarget::resolve(
+            self.inner.resolver(),
+            endpoint,
+            self.inner.connection_setup_timeout(),
+        )
+        .await
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -876,11 +886,11 @@ impl Transport {
         RelayCancellationGuard::new(self.inner.clone(), peer_node_id, delivery)
     }
 
-    pub fn replace_outbound_targets(
-        &self,
-        targets: &BTreeMap<ClusterNodeName, BTreeSet<PeerTarget>>,
-    ) {
-        self.inner.replace_outbound_targets(targets);
+    /// Make `endpoints` the complete set of peers this node dials, each at its advertised endpoint.
+    /// Every connection attempt resolves the endpoint again, so a changed DNS answer reaches the
+    /// next connection without retiring the established ones.
+    pub fn replace_outbound_targets(&self, endpoints: &BTreeMap<ClusterNodeName, NodeEndpoint>) {
+        self.inner.replace_outbound_targets(endpoints);
     }
 
     /// Authenticate an endpoint whose node identity is not known yet, then add its pool target.
@@ -892,14 +902,15 @@ impl Transport {
         self.inner.bootstrap_target(target).await
     }
 
-    /// Add one discovered target. Every pool connection still verifies that its certificate names
-    /// `node_id` and its endpoint before the target becomes usable.
+    /// Add one discovered peer at its advertised endpoint. Every pool connection still verifies
+    /// that its certificate names `node_id` and the endpoint's host before the target becomes
+    /// usable.
     pub fn register_outbound_target(
         &self,
         node_id: ClusterNodeName,
-        target: PeerTarget,
+        endpoint: NodeEndpoint,
     ) -> Result<(), TransportError> {
-        self.inner.register_outbound_target(node_id, target)
+        self.inner.register_outbound_target(node_id, endpoint)
     }
 
     /// Reports whether every outbound pool except bulk is ready for node traffic.
@@ -980,7 +991,15 @@ pub enum TransportError {
     #[error("interconnect connection capacity is exhausted")]
     PoolExhausted,
     #[error("connection setup with {peer} timed out after {timeout:?}")]
-    ConnectionSetupTimeout { peer: SocketAddr, timeout: Duration },
+    ConnectionSetupTimeout {
+        peer: NodeEndpoint,
+        timeout: Duration,
+    },
+    #[error("resolving {endpoint} failed: {failure}")]
+    Resolution {
+        endpoint: NodeEndpoint,
+        failure: DnsLookupFailure,
+    },
     #[error("request to node '{peer}' timed out after {timeout:?}")]
     RequestTimeout {
         peer: ClusterNodeName,
@@ -991,7 +1010,7 @@ pub enum TransportError {
     #[error("transport is shutting down")]
     ShuttingDown,
     #[error("connection to {0} is closed")]
-    Closed(SocketAddr),
+    Closed(NodeEndpoint),
     #[error("peer handshake is invalid: {0}")]
     InvalidHandshake(String),
     #[error("peer returned HTTP status {status}: {message}")]
@@ -1097,6 +1116,7 @@ pub fn install_rustls_crypto_provider() {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         path::PathBuf,
         process::Command,
         sync::{
@@ -1436,7 +1456,7 @@ mod tests {
             .transport_a
             .register_outbound_target(
                 transports.node_b.clone(),
-                PeerTarget::new(transports.transport_b.local_addr(), "localhost"),
+                NodeEndpoint::new("localhost", transports.transport_b.local_addr().port()),
             )
             .expect("authenticated test target should register");
         transports
@@ -1448,24 +1468,22 @@ mod tests {
         let node_b = ClusterNodeName::parse("node-b").expect("test node name should be valid");
         let (transport_a, incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().expect("test address should be valid"),
-            "localhost",
-            "test-cluster",
-            node_a.clone(),
+            localhost_identity("test-cluster", node_a.clone()),
             authority.issue("test-cluster", &node_a),
             options.clone(),
             Executor::default(),
+            test_resolver().await,
         )
         .await
         .expect("first test transport should bind");
         let executor_b = Executor::default();
         let (transport_b, incoming_b) = Transport::bind(
             "127.0.0.1:0".parse().expect("test address should be valid"),
-            "localhost",
-            "test-cluster",
-            node_b.clone(),
+            localhost_identity("test-cluster", node_b.clone()),
             authority.issue("test-cluster", &node_b),
             options,
             executor_b.clone(),
+            test_resolver().await,
         )
         .await
         .expect("second test transport should bind");
@@ -1503,7 +1521,7 @@ mod tests {
         transport_a
             .register_outbound_target(
                 node_b.clone(),
-                PeerTarget::new(transport_b.local_addr(), "localhost"),
+                NodeEndpoint::new("localhost", transport_b.local_addr().port()),
             )
             .expect("authenticated test target should register");
 
@@ -1603,6 +1621,9 @@ mod tests {
     }
 
     mod coordination;
+    mod resolver;
+
+    use resolver::{localhost_identity, test_resolver};
 
     mod lease;
 
@@ -2072,19 +2093,18 @@ mod tests {
         let node_c = ClusterNodeName::parse("node-c").expect("test node name should be valid");
         let (transport_c, _incoming_c) = Transport::bind(
             "127.0.0.1:0".parse().expect("test address should be valid"),
-            "localhost",
-            "test-cluster",
-            node_c.clone(),
+            localhost_identity("test-cluster", node_c.clone()),
             authority.issue("test-cluster", &node_c),
             options,
             Executor::default(),
+            test_resolver().await,
         )
         .await
         .expect("third test transport should bind");
         transport_c
             .register_outbound_target(
                 node_b.clone(),
-                PeerTarget::new(transport_b.local_addr(), "localhost"),
+                NodeEndpoint::new("localhost", transport_b.local_addr().port()),
             )
             .expect("third test transport should register its authenticated target");
         let started = StdArc::new(Notify::new());
@@ -2189,7 +2209,7 @@ mod tests {
         transport_b
             .register_outbound_target(
                 node_a.clone(),
-                PeerTarget::new(transport_a.local_addr(), "localhost"),
+                NodeEndpoint::new("localhost", transport_a.local_addr().port()),
             )
             .expect("the response target should register");
         let payload = |ack_id, sequence, reply_node_id| RelayPayload {
@@ -2296,7 +2316,7 @@ mod tests {
         transport_b
             .register_outbound_target(
                 node_a.clone(),
-                PeerTarget::new(transport_a.local_addr(), "localhost"),
+                NodeEndpoint::new("localhost", transport_a.local_addr().port()),
             )
             .expect("the response target should register");
         transport_b
@@ -2731,12 +2751,11 @@ mod tests {
         drop(unresolved);
         let (replacement_b, _replacement_incoming) = Transport::bind(
             "127.0.0.1:0".parse().expect("test address should be valid"),
-            "localhost",
-            "test-cluster",
-            node_b.clone(),
+            localhost_identity("test-cluster", node_b.clone()),
             authority.issue("test-cluster", &node_b),
             TransportOptions::default(),
             Executor::default(),
+            test_resolver().await,
         )
         .await
         .expect("the replacement receiver process should bind");
@@ -2744,7 +2763,7 @@ mod tests {
         transport_a
             .register_outbound_target(
                 node_b.clone(),
-                PeerTarget::new(replacement_b.local_addr(), "localhost"),
+                NodeEndpoint::new("localhost", replacement_b.local_addr().port()),
             )
             .expect("the replacement receiver target should register");
 
@@ -2777,7 +2796,7 @@ mod tests {
         transport_b
             .register_outbound_target(
                 node_a.clone(),
-                PeerTarget::new(transport_a.local_addr(), "localhost"),
+                NodeEndpoint::new("localhost", transport_a.local_addr().port()),
             )
             .expect("the progress response target should register");
         transport_a
@@ -2833,23 +2852,21 @@ mod tests {
         let node_b = ClusterNodeName::parse("node-b").expect("test node name should be valid");
         let (transport_a, _incoming_a) = Transport::bind(
             "127.0.0.1:0".parse().expect("test address should be valid"),
-            "localhost",
-            "cluster-a",
-            node_a.clone(),
+            localhost_identity("cluster-a", node_a.clone()),
             authority.issue("cluster-a", &node_a),
             TransportOptions::default(),
             Executor::default(),
+            test_resolver().await,
         )
         .await
         .expect("first test transport should bind");
         let (transport_b, _incoming_b) = Transport::bind(
             "127.0.0.1:0".parse().expect("test address should be valid"),
-            "localhost",
-            "cluster-b",
-            node_b.clone(),
+            localhost_identity("cluster-b", node_b.clone()),
             authority.issue("cluster-b", &node_b),
             TransportOptions::default(),
             Executor::default(),
+            test_resolver().await,
         )
         .await
         .expect("second test transport should bind");

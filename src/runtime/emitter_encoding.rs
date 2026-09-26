@@ -21,8 +21,8 @@ use nervix_models::EmitterBatchPolicy;
 
 use super::{
     emitter_batch_packing::{
-        BatchEnvelope, BatchPayload, BufferedBatchPacking, PackedOutcome, PackingRow,
-        pack_buffered_batch,
+        BatchEnvelope, BatchPayload, BufferedBatchPacking, PackedOutcome, PackingCarrier,
+        PackingRow, pack_buffered_batches,
     },
     *,
 };
@@ -52,7 +52,7 @@ struct EncodedBrokerRecord {
     key: Option<String>,
     payload: Vec<u8>,
     headers: EmitterHeaders,
-    message_group: Result<Option<String>, SqsMessageGroupError>,
+    message_group: Result<Option<String>, OrderingGroupError>,
     execution_now: Timestamp,
 }
 
@@ -192,15 +192,7 @@ async fn encode_broker_records(
                 Report::new(EmitterRuntimeError::EncodeBatch)
                     .attach_printable(format!("emitter batch row {row_index} has no header entry"))
             })?;
-            let message_group = batch
-                .sqs_message_groups
-                .get(row_index)
-                .cloned()
-                .ok_or_else(|| {
-                    Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                        "emitter batch row {row_index} has no SQS FIFO group entry"
-                    ))
-                })?;
+            let message_group = batch.ordering_group(row_index)?;
             let position = SinkRecordPosition {
                 batch_index,
                 row_index,
@@ -288,7 +280,15 @@ struct PackedBatchRecords {
 /// record answers for exactly one entry here.
 #[derive(Debug, Default)]
 struct BatchMembership {
-    members: BTreeMap<SinkRecordPosition, Vec<SinkRecordPosition>>,
+    members: BTreeMap<SinkRecordPosition, Vec<BatchMemberOutcome>>,
+}
+
+/// One source row's original position and execution time, preserved across a payload assembled
+/// from several Arrow carriers so an external rejection remains attributed to that row.
+#[derive(Debug, Clone, Copy)]
+struct BatchMemberOutcome {
+    position: SinkRecordPosition,
+    occurred_at: Timestamp,
 }
 
 impl BatchMembership {
@@ -300,16 +300,26 @@ impl BatchMembership {
         let outcome = outcome.into_parts();
         let mut applied = PerRecordOutcome::with_capacity(outcome.delivered.len());
         for position in outcome.delivered {
-            for member in self.members_of(position) {
-                applied.deliver(member);
+            if let Some(members) = self.members.get(&position) {
+                for member in members {
+                    applied.deliver(member.position);
+                }
+            } else {
+                applied.deliver(position);
             }
         }
         for rejected in outcome.rejected {
-            for member in self.members_of(rejected.position) {
-                applied.reject(RejectedSinkRecord {
-                    position: member,
-                    error: rejected.error.clone(),
-                });
+            if let Some(members) = self.members.get(&rejected.position) {
+                for member in members {
+                    let mut error = rejected.error.clone();
+                    error.occurred_at = member.occurred_at;
+                    applied.reject(RejectedSinkRecord {
+                        position: member.position,
+                        error,
+                    });
+                }
+            } else {
+                applied.reject(rejected);
             }
         }
         if let Some(error) = outcome.infrastructure_error {
@@ -317,18 +327,9 @@ impl BatchMembership {
         }
         applied
     }
-
-    /// The members of the batch record published under `position`. A position the host never
-    /// published a batch under answers for itself, so an outcome is never silently dropped.
-    fn members_of(&self, position: SinkRecordPosition) -> Vec<SinkRecordPosition> {
-        match self.members.get(&position) {
-            Some(members) => members.clone(),
-            None => vec![position],
-        }
-    }
 }
 
-/// Packs the rows every batch still holds into batch payloads and pairs each payload with the key,
+/// Packs pending rows across successive Arrow carriers and pairs each payload with the key,
 /// headers and ordering group its members share.
 ///
 /// Rows whose ordering group could not be evaluated are rejected before packing, as they are when
@@ -344,122 +345,138 @@ async fn pack_batch_records(
     let mut membership = BatchMembership::default();
     let mut unpublishable = Vec::new();
     let mut rejected = Vec::new();
+    let mut carriers = Vec::with_capacity(batches.len());
     for (batch_index, batch) in batches.iter().enumerate() {
         tokio::task::consume_budget().await;
         let mut rows = Vec::new();
         for row_index in batch.pending_record_rows() {
+            let position = SinkRecordPosition {
+                batch_index,
+                row_index,
+            };
             let envelope = match batch_envelope(batch, row_index)? {
                 Ok(envelope) => envelope,
                 Err(error) => {
                     unpublishable.push(RejectedEmitterRecord {
-                        position: SinkRecordPosition {
-                            batch_index,
-                            row_index,
-                        },
+                        position,
                         reason: error.to_string(),
                         structured_error: None,
                     });
+                    rows.push(PackingRow::Seal);
                     continue;
                 }
             };
-            rows.push(PackingRow {
-                row_index,
-                envelope,
-            });
+            rows.push(PackingRow::Ready { position, envelope });
         }
         if rows.is_empty() {
             continue;
         }
-        let batch_acks = batch.merged_acks();
-        let packing = await_emitter_confirmation(
-            &batch_acks,
-            pack_pending_rows(codec.clone(), policy, context, batch, rows),
-        )
-        .await?;
-        if packing.subdivisions > 0 {
-            tracing::debug!(
-                emitter = %context.emitter,
-                subdivisions = packing.subdivisions,
-                "re-encoded batch candidates that reached MAX SIZE"
-            );
-        }
-        for outcome in packing.outcomes {
-            tokio::task::consume_budget().await;
-            match outcome {
-                PackedOutcome::Payload(BatchPayload {
-                    rows,
-                    envelope,
+        carriers.push(PackingCarrier {
+            source_relay: batch.source_relay.clone(),
+            branch_key: batch.batch.key.clone(),
+            batch: batch.batch.batch.clone(),
+            rows,
+        });
+    }
+    let acks = AckSet::merged(batches.iter().map(EmitterPublishBatch::merged_acks));
+    let packing = await_emitter_confirmation(
+        &acks,
+        pack_pending_rows(codec.clone(), policy, context, carriers),
+    )
+    .await?;
+    if packing.subdivisions > 0 {
+        tracing::debug!(
+            emitter = %context.emitter,
+            subdivisions = packing.subdivisions,
+            "re-encoded batch candidates that reached MAX SIZE"
+        );
+    }
+    for outcome in packing.outcomes {
+        tokio::task::consume_budget().await;
+        match outcome {
+            PackedOutcome::Payload(BatchPayload {
+                rows,
+                envelope,
+                payload,
+            }) => {
+                let position = *rows
+                    .first()
+                    .assured("a packed payload always carries at least one member");
+                let batch = batches
+                    .get(position.batch_index)
+                    .assured("packing positions refer to the source batches it received");
+                let record = SinkRecord::new(
+                    position,
+                    envelope.key,
                     payload,
-                }) => {
-                    let members = rows
-                        .into_iter()
-                        .map(|row_index| SinkRecordPosition {
-                            batch_index,
-                            row_index,
-                        })
-                        .collect::<Vec<_>>();
-                    let position = *members
-                        .first()
-                        .assured("a packed payload always carries at least one member");
-                    let record = SinkRecord::new(
-                        position,
-                        envelope.key,
-                        payload,
-                        envelope.headers,
+                    envelope.headers,
+                    batch.execution_now,
+                );
+                records.push(match envelope.message_group {
+                    Some(message_group) => record.with_message_group(message_group),
+                    None => record,
+                });
+                let members = rows
+                    .into_iter()
+                    .map(|position| {
+                        let batch = batches
+                            .get(position.batch_index)
+                            .assured("packing positions refer to the source batches it received");
+                        BatchMemberOutcome {
+                            position,
+                            occurred_at: batch.execution_now,
+                        }
+                    })
+                    .collect();
+                membership.members.insert(position, members);
+            }
+            PackedOutcome::MemberFailed { position, error } => {
+                rejected.push(RejectedEmitterRecord {
+                    position,
+                    reason: format!(
+                        "emitter '{}' failed to encode record: {error}",
+                        context.emitter.as_str()
+                    ),
+                    structured_error: None,
+                });
+            }
+            PackedOutcome::Oversize { position, exceeded } => {
+                let batch = batches
+                    .get(position.batch_index)
+                    .assured("packing positions refer to the source batches it received");
+                let message = format!("emitter '{}' {exceeded}", context.emitter.as_str());
+                rejected.push(RejectedEmitterRecord {
+                    position,
+                    reason: message.clone(),
+                    structured_error: Some(structured_message_error(
                         batch.execution_now,
-                    );
-                    records.push(match envelope.message_group {
-                        Some(message_group) => record.with_message_group(message_group),
-                        None => record,
-                    });
-                    membership.members.insert(position, members);
-                }
-                PackedOutcome::MemberFailed { row_index, error } => {
+                        MessageErrorCode::Validation,
+                        message,
+                        MessageErrorOperation::Encode,
+                        None,
+                        std::iter::empty(),
+                    )),
+                });
+            }
+            PackedOutcome::ContainerFailed { rows, error } => {
+                let first = rows
+                    .first()
+                    .assured("a failed container held at least one selected row");
+                let batch = batches
+                    .get(first.batch_index)
+                    .assured("packing positions refer to the source batches it received");
+                let shared = container_failure(context, &codec, batch, rows.len(), error);
+                for position in rows {
+                    let batch = batches
+                        .get(position.batch_index)
+                        .assured("packing positions refer to the source batches it received");
+                    let mut member_error = shared.clone();
+                    member_error.occurred_at = batch.execution_now;
                     rejected.push(RejectedEmitterRecord {
-                        position: SinkRecordPosition {
-                            batch_index,
-                            row_index,
-                        },
-                        reason: format!(
-                            "emitter '{}' failed to encode record: {error}",
-                            context.emitter.as_str()
-                        ),
-                        structured_error: None,
+                        position,
+                        reason: shared.message.clone(),
+                        structured_error: Some(member_error),
                     });
-                }
-                PackedOutcome::Oversize {
-                    row_index,
-                    exceeded,
-                } => {
-                    let message = format!("emitter '{}' {exceeded}", context.emitter.as_str());
-                    rejected.push(RejectedEmitterRecord {
-                        position: SinkRecordPosition {
-                            batch_index,
-                            row_index,
-                        },
-                        reason: message.clone(),
-                        structured_error: Some(structured_message_error(
-                            batch.execution_now,
-                            MessageErrorCode::Validation,
-                            message,
-                            MessageErrorOperation::Encode,
-                            None,
-                            std::iter::empty(),
-                        )),
-                    });
-                }
-                PackedOutcome::ContainerFailed { rows, error } => {
-                    let shared = container_failure(context, &codec, batch, rows.len(), error);
-                    for row_index in rows {
-                        rejected.push(RejectedEmitterRecord {
-                            position: SinkRecordPosition {
-                                batch_index,
-                                row_index,
-                            },
-                            reason: shared.message.clone(),
-                            structured_error: Some(shared.clone()),
-                        });
-                    }
                 }
             }
         }
@@ -518,7 +535,7 @@ fn container_failure(
 fn batch_envelope(
     batch: &EmitterPublishBatch,
     row_index: usize,
-) -> EmitterRuntimeResult<Result<BatchEnvelope, SqsMessageGroupError>> {
+) -> EmitterRuntimeResult<Result<BatchEnvelope, OrderingGroupError>> {
     let key = batch
         .batch
         .keys
@@ -534,14 +551,9 @@ fn batch_envelope(
         Report::new(EmitterRuntimeError::EncodeBatch)
             .attach_printable(format!("emitter batch row {row_index} has no header entry"))
     })?;
-    let message_group = batch.sqs_message_groups.get(row_index).ok_or_else(|| {
-        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-            "emitter batch row {row_index} has no SQS FIFO group entry"
-        ))
-    })?;
-    let message_group = match message_group {
-        Ok(message_group) => message_group.clone(),
-        Err(error) => return Ok(Err(error.clone())),
+    let message_group = match batch.ordering_group(row_index)? {
+        Ok(message_group) => message_group,
+        Err(failure) => return Ok(Err(failure)),
     };
     Ok(Ok(BatchEnvelope {
         key,
@@ -550,13 +562,12 @@ fn batch_envelope(
     }))
 }
 
-/// Packs `rows` of `batch`, off the reactor when the codec's transformations require it.
+/// Packs selected rows of all released carriers, off the reactor when transformations require it.
 async fn pack_pending_rows(
     codec: Arc<CompiledCodec>,
     policy: EmitterBatchPolicy,
     context: &EmitterSinkContext,
-    batch: &EmitterPublishBatch,
-    rows: Vec<PackingRow>,
+    carriers: Vec<PackingCarrier>,
 ) -> EmitterRuntimeResult<BufferedBatchPacking> {
     let initialization_failed = |error: Report<CodecError>| {
         error
@@ -567,12 +578,10 @@ async fn pack_pending_rows(
             ))
     };
     if !codec.requires_blocking_encode() {
-        return pack_buffered_batch(&codec, &batch.batch.batch, rows, policy)
-            .map_err(initialization_failed);
+        return pack_buffered_batches(&codec, carriers, policy).map_err(initialization_failed);
     }
-    let arrow_batch = batch.batch.batch.clone();
     let codec_name = codec.name.as_str().to_string();
-    tokio::task::spawn_blocking(move || pack_buffered_batch(&codec, &arrow_batch, rows, policy))
+    tokio::task::spawn_blocking(move || pack_buffered_batches(&codec, carriers, policy))
         .await
         .map_err(|error| {
             Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
@@ -597,15 +606,22 @@ mod tests {
         }
     }
 
+    fn member(batch_index: usize, row_index: usize, occurred_at: i64) -> BatchMemberOutcome {
+        BatchMemberOutcome {
+            position: position(batch_index, row_index),
+            occurred_at: Timestamp::from_unix_nanos(occurred_at),
+        }
+    }
+
     fn membership() -> BatchMembership {
         let mut membership = BatchMembership::default();
         membership.members.insert(
             position(0, 0),
-            vec![position(0, 0), position(0, 1), position(0, 3)],
+            vec![member(0, 0, 1), member(1, 1, 2), member(0, 3, 1)],
         );
         membership
             .members
-            .insert(position(1, 2), vec![position(1, 2), position(1, 4)]);
+            .insert(position(1, 2), vec![member(1, 2, 2), member(1, 4, 2)]);
         membership
     }
 
@@ -639,7 +655,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             rejected,
-            vec![position(0, 0), position(0, 1), position(0, 3)]
+            vec![position(0, 0), position(1, 1), position(0, 3)]
         );
         let references = applied
             .rejected
@@ -647,6 +663,18 @@ mod tests {
             .map(|rejected| rejected.error.reference)
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(references.len(), 1);
+        assert_eq!(
+            applied
+                .rejected
+                .iter()
+                .map(|rejected| rejected.error.occurred_at)
+                .collect::<Vec<_>>(),
+            vec![
+                Timestamp::from_unix_nanos(1),
+                Timestamp::from_unix_nanos(2),
+                Timestamp::from_unix_nanos(1),
+            ]
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@
 use std::{net::SocketAddr, sync::Arc as StdArc, time::Duration};
 
 use error_stack::Report;
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, NodeEndpoint};
 use rustls::{
     pki_types::{CertificateDer, ServerName},
     time_provider::{DefaultTimeProvider, TimeProvider},
@@ -179,7 +179,7 @@ impl TlsConfigBundle {
         let handshake = TlsAcceptor::from(StdArc::clone(&self.server_config)).accept(io);
         let Ok(accepted) = timeout(setup_timeout, handshake).await else {
             return Err(Report::new(TransportError::ConnectionSetupTimeout {
-                peer: peer_addr,
+                peer: NodeEndpoint::from(peer_addr),
                 timeout: setup_timeout,
             }));
         };

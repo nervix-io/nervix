@@ -1439,69 +1439,6 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     Ok(Some(CompiledEmitterFilterMapProgram { body, codec_route }))
 }
 
-pub(in crate::runtime) fn compile_sqs_fifo_group_program(
-    domain: &DomainName,
-    emitter: &CreateEmitter,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let EmitSink::Sqs {
-        fifo_group: Some(SqsFifoGroup::Expression(expression)),
-        ..
-    } = emitter.sink.as_ref()
-    else {
-        return Ok(None);
-    };
-    let field = FieldName::parse("fifo_group")
-        .assured("this is a constant literal that satisfies the identifier grammar");
-    let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-        field.as_str(),
-        ArrowDataType::Utf8,
-        false,
-    )]));
-    let parsed = lower_transforming_route(
-        &RouteConstruction {
-            assignments: vec![Assignment {
-                target: nervix_models::AssignmentTarget::bare(field),
-                value: expression.clone(),
-            }],
-            ..RouteConstruction::default()
-        },
-        input_schema.as_ref(),
-        output_schema.as_ref(),
-    )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "SQS FIFO GROUP expression for emitter '{}' is invalid: {reason}",
-            emitter.name.as_str()
-        ),
-    })?;
-    let error_sites = compiled_message_error_sites(&parsed, &[MessageErrorOperation::Set], None)
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("{reason:#}"),
-        })?;
-    compile_emitter_filter_map_part(
-        RuntimeCompileTarget {
-            domain,
-            identifier: &ModelName::from(&emitter.name),
-        },
-        parsed,
-        RuntimeVmSchemaPair {
-            input: input_schema,
-            input_sensitivity,
-            output: output_schema,
-            output_sensitivity: VmSchemaSensitivity::default(),
-        },
-        true,
-        error_sites,
-        context,
-    )
-    .map(Some)
-}
-
 pub(super) fn compile_emitter_filter_map_part(
     target: RuntimeCompileTarget<'_>,
     parsed: nervix_vm::program::SpannedNode<nervix_vm::program::Program>,

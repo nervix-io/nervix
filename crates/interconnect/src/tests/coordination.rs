@@ -78,12 +78,11 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
     transport_a.shutdown().await;
     let (replacement_a, _replacement_incoming) = Transport::bind(
         "127.0.0.1:0".parse().expect("test address should be valid"),
-        "localhost",
-        "test-cluster",
-        node_a.clone(),
+        localhost_identity("test-cluster", node_a.clone()),
         authority.issue("test-cluster", &node_a),
         TransportOptions::default(),
         Executor::default(),
+        test_resolver().await,
     )
     .await
     .expect("replacement coordinator transport should bind");
@@ -91,7 +90,7 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
     replacement_a
         .register_outbound_target(
             node_b.clone(),
-            PeerTarget::new(transport_b.local_addr(), "localhost"),
+            NodeEndpoint::new("localhost", transport_b.local_addr().port()),
         )
         .expect("replacement coordinator target should register");
     let replacement = replacement_a
@@ -205,15 +204,14 @@ async fn process_epoch_comes_from_the_configured_entropy() {
     });
     let (transport, _incoming) = Transport::bind(
         "127.0.0.1:0".parse().expect("test address should be valid"),
-        "localhost",
-        "test-cluster",
-        node.clone(),
+        localhost_identity("test-cluster", node.clone()),
         authority.issue("test-cluster", &node),
         TransportOptions {
             entropy,
             ..TransportOptions::default()
         },
         Executor::default(),
+        test_resolver().await,
     )
     .await
     .expect("transport with configured entropy should bind");

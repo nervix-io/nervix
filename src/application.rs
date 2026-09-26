@@ -47,6 +47,7 @@ use http_endpoint::{serve_http, serve_https};
 use interconnect_relay::InterconnectRelayPayloadLane;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_consensus::{ConsensusSettings, RaftRetentionPolicy, TransactionState};
+use nervix_dns::{DnsConfiguration, DnsResolver};
 use nervix_execution::{Executor, sync::DashMap};
 use nervix_interconnect::{
     ActivateOwnershipHandoffStateRequest as RemoteActivateOwnershipHandoffStateRequest,
@@ -72,14 +73,14 @@ use nervix_interconnect::{
     EntityGateReleaseResponse as RemoteEntityGateReleaseResponse,
     EntityGateRequest as RemoteEntityGateRequest, EntityGateResponse as RemoteEntityGateResponse,
     Envelope, LookupRequest as RemoteLookupRequest, LookupResponse as RemoteLookupResponse,
-    MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerTarget,
+    MAX_CONCURRENT_HEALTH_PROBES, OwnershipHandoffFailure, PeerResolver,
     PrepareForcedOwnershipRecoveryRequest as RemotePrepareForcedOwnershipRecoveryRequest,
     RemoteOperationFailure, RemoteOperationSubject, RuntimeErrorEvent as RemoteRuntimeErrorEvent,
     StateSyncRequest as RemoteStateSyncRequest, StateSyncResponse as RemoteStateSyncResponse,
     StreamHandlerError, StreamingResponse,
     SubscriptionInterestVisibilityRequest as RemoteSubscriptionInterestVisibilityRequest,
     SubscriptionInterestVisibilityResponse as RemoteSubscriptionInterestVisibilityResponse,
-    Transport,
+    Transport, TransportIdentity,
 };
 use nervix_models::{
     ClusterNodeName, DomainName, DomainStatus, ModelKind, NodeEndpoint, NodeServiceUrl, UserName,
@@ -409,6 +410,29 @@ pub struct Args {
     pub shutdown_timeout: Duration,
     #[arg(long, env = "NERVIX_CLUSTER_BOOTSTRAP_HOST")]
     pub cluster_bootstrap_host: Option<String>,
+    #[arg(
+        long,
+        env = "NERVIX_DNS_RESOLVER_CONFIG",
+        default_value = nervix_dns::SYSTEM_RESOLVER_CONFIGURATION,
+        help = "A resolv.conf-format file naming the name servers, search list and options peer \
+                names resolve with"
+    )]
+    pub dns_resolver_config: PathBuf,
+    #[arg(
+        long,
+        env = "NERVIX_DNS_HOSTS_FILE",
+        default_value = nervix_dns::SYSTEM_HOSTS_FILE,
+        help = "A hosts-format file consulted before DNS"
+    )]
+    pub dns_hosts_file: PathBuf,
+    #[arg(
+        long = "dns-name-server",
+        env = "NERVIX_DNS_NAME_SERVERS",
+        value_delimiter = ',',
+        help = "A name server address with its port, replacing the resolver configuration's name \
+                servers; repeatable or comma-separated"
+    )]
+    pub dns_name_servers: Vec<SocketAddr>,
     #[arg(long, env = "NERVIX_DB_PATH", default_value = "./.nervix-db")]
     pub db_path: String,
     #[arg(
@@ -569,6 +593,8 @@ pub struct Application {
     #[builder(default)]
     pub memory_pressure: Option<MemoryPressureConfig>,
     pub cluster_bootstrap_host: Option<String>,
+    #[builder(default = DnsConfiguration::system())]
+    pub dns: DnsConfiguration,
     pub db_path: PathBuf,
     #[builder(default = PathBuf::from(crate::runtime::DEFAULT_TEMP_DIR))]
     pub temp_dir: PathBuf,
@@ -792,6 +818,16 @@ impl Application {
         let interconnect_tls = interconnect_tls_material
             .tls_bundle()
             .change_context(AppError::LoadInterconnectTls)?;
+        let dns_configuration = self.dns.clone();
+        let dns = DnsResolver::load(dns_configuration.clone())
+            .await
+            .change_context(AppError::LoadDnsConfiguration)?;
+        info!(
+            resolver_configuration = %dns_configuration.resolver_configuration.display(),
+            hosts_file = %dns_configuration.hosts_file.display(),
+            name_servers = ?dns_configuration.name_servers,
+            "loaded the name resolver configuration"
+        );
 
         info!(
             grpc_mode = grpc_mode.scheme(),
@@ -892,12 +928,15 @@ impl Application {
         }
         let interconnect_result = Transport::bind(
             interconnect_listen_addr,
-            interconnect_advertise_addr.host(),
-            cluster_id.clone(),
-            node_id.clone(),
+            TransportIdentity {
+                cluster_id: cluster_id.clone(),
+                node_id: node_id.clone(),
+                advertised_host: interconnect_advertise_addr.host().to_string(),
+            },
             interconnect_tls,
             Default::default(),
             startup.runtime.executor().clone(),
+            PeerResolver::new(dns),
         )
         .await
         .change_context(AppError::StartInterconnect);
@@ -1573,43 +1612,17 @@ impl Application {
                     .map(|target| (target.node_id().clone(), target))
                     .collect::<BTreeMap<_, _>>();
 
+                // Every peer is dialled at the endpoint it advertised. The transport resolves that
+                // endpoint for each connection attempt, inside the attempt's setup deadline, so a
+                // name that does not resolve fails the probe as an unreachable peer would.
                 let mut outbound_targets = BTreeMap::new();
                 let mut scheduled_probes = Vec::new();
-                let mut topology_changed = false;
                 for peer in reachable_peers {
-                    tokio::task::consume_budget().await;
                     let Some(health_target) = health_targets.get(&peer.node_id).cloned() else {
                         continue;
                     };
-                    let resolution = tokio::select! {
-                        _ = health_shutdown.cancelled() => return,
-                        changed = health_topology.changed() => {
-                            changed.assured(
-                                "the cluster handle retains its Chitchat state sender for the server lifetime",
-                            );
-                            topology_changed = true;
-                            break;
-                        }
-                        resolution = PeerTarget::resolve(&peer.endpoint) => resolution,
-                    };
-                    let targets = match resolution {
-                        Ok(targets) => targets.into_iter().collect::<BTreeSet<_>>(),
-                        Err(_) => {
-                            cluster_for_health
-                                .record_peer_health_result(cluster::PeerHealthProbeResult::new(
-                                    health_target,
-                                    cluster::PeerHealthProbeOutcome::Unscheduled,
-                                    std::time::Instant::now(),
-                                ))
-                                .await;
-                            continue;
-                        }
-                    };
-                    outbound_targets.insert(peer.node_id, targets);
+                    outbound_targets.insert(peer.node_id, peer.endpoint);
                     scheduled_probes.push(health_target);
-                }
-                if topology_changed {
-                    continue;
                 }
                 if !outbound_targets.is_empty() {
                     awaiting_initial_bootstrap_peer = false;

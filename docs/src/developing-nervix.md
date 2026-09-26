@@ -238,6 +238,34 @@ normal verification. Use `SHUTTLE_REPORT_STEPS=1` to inspect the highest explore
 setting a check's iteration and step budgets. [Data-Plane Concurrency](./data-plane-concurrency.md)
 defines what these checks model, their limits, and the invariant held by each protocol.
 
+### Deterministic network simulation
+
+Run the interconnect's seeded Turmoil simulation, its library checks, and every scenario over its
+committed seeds with:
+
+```bash
+just test-turmoil
+```
+
+Each seed runs twice in fresh processes and both runs must record the same semantic trace. To
+iterate on one simulation test, pass its name to the simulation target alone:
+
+```bash
+just test-turmoil-simulation transport::relay::relay_reconciliation_and_cancellation_survive_lost_replies --exact
+```
+
+A failed seed leaves a JSON record below `target/turmoil-failures/` and prints the command that
+replays it in a fresh process with exactly its recorded inputs:
+
+```bash
+just test-turmoil-replay target/turmoil-failures/<test>/<case>-seed-<seed>.json
+```
+
+`just test-turmoil-sweep` runs every scenario over sixty-four seeds from 1000 in place of its
+committed seeds, and `just test-turmoil-replay-check` proves the record and replay path end to end.
+[Deterministic Interconnect Simulation](./interconnect-simulation.md) defines what the simulation
+controls, its fault model and limits, the scenario matrix, and how to investigate a failure.
+
 ### The scenario suite's execution budget
 
 The Cucumber suite bounds its own run. A step, a teardown diagnostic or a node stop that never

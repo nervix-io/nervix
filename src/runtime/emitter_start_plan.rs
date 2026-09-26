@@ -30,7 +30,8 @@ use nervix_connector_otel::{
 use nervix_connector_postgres::PostgresConflictAction;
 use nervix_connector_sqs::SqsPublishingMode;
 use nervix_models::{
-    ChannelName, CollectionName, EmitterBatchPolicy, QueueName, SubjectName, TableName, TopicName,
+    ChannelName, CollectionName, EmitterBatchPolicy, Expression, QueueName, SqsFifoGroup,
+    SubjectName, TableName, TopicName,
 };
 
 use super::*;
@@ -210,6 +211,27 @@ pub(super) struct PooledClientPlan {
     pub(super) bounds: ClientPoolBounds,
 }
 
+/// The ordering group a sink writes every record under, as the emitter declares it.
+///
+/// The host evaluates it for each record and hands the sink only the resulting group, so neither
+/// the declaration nor the reason a record has no group ever reaches the connector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum EmitterOrderingGroup {
+    /// Each record's concrete branch key.
+    FromBranch,
+    /// The `STRING` this expression produces for each record's source row.
+    Expression(Expression),
+}
+
+impl EmitterOrderingGroup {
+    fn decide(group: &SqsFifoGroup) -> Self {
+        match group {
+            SqsFifoGroup::FromBranch => Self::FromBranch,
+            SqsFifoGroup::Expression(expression) => Self::Expression(expression.clone()),
+        }
+    }
+}
+
 /// Declares the plan of a sink that connects through one client, together with the step that binds
 /// that client to the configuration the host resolved for it.
 macro_rules! single_client_sink_plan {
@@ -308,11 +330,13 @@ single_client_sink_plan! {
 }
 
 single_client_sink_plan! {
-    /// An SQS sink: the queue it sends to, and whether it batches its requests.
+    /// An SQS sink: the queue it sends to, whether it batches its requests, and the FIFO message
+    /// group every record is sent under.
     SqsSinkPlan {
         queue: String,
         mode: SqsPublishingMode,
         batch: Option<EmitterBatchPolicy>,
+        ordering_group: Option<EmitterOrderingGroup>,
     }
 }
 
@@ -606,6 +630,28 @@ impl<Config> EmitterSinkPlan<Config> {
         }
     }
 
+    /// The ordering group this sink writes every record under, absent when it declares none.
+    pub(super) fn ordering_group(&self) -> Option<&EmitterOrderingGroup> {
+        match self {
+            Self::Sqs(plan) => plan.ordering_group.as_ref(),
+            Self::Kafka(_)
+            | Self::Pulsar(_)
+            | Self::RabbitMq(_)
+            | Self::Redis(_)
+            | Self::Mqtt(_)
+            | Self::Nats(_)
+            | Self::ZeroMq(_)
+            | Self::Syslog(_)
+            | Self::Sentry(_)
+            | Self::Otel(_)
+            | Self::ClickHouse(_)
+            | Self::Postgres(_)
+            | Self::MySql(_)
+            | Self::MongoDb(_)
+            | Self::Iceberg(_) => None,
+        }
+    }
+
     /// The transport this sink publishes over, as the emitter's diagnostics name it.
     pub(super) fn label(&self) -> &'static str {
         match self {
@@ -826,7 +872,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 EmitSink::Sqs {
                     client: expected,
                     queue,
-                    ..
+                    fifo_group,
                 },
                 Model::ClientSqs(client),
             ) => EmitterSinkPlan::Sqs(SqsSinkPlan {
@@ -839,6 +885,7 @@ impl EmitterStartPlan<DeclaredClientConfig> {
                 )?,
                 queue: queue.clone(),
                 mode: decide_sqs_publishing_mode(sink, mode)?,
+                ordering_group: fifo_group.as_ref().map(EmitterOrderingGroup::decide),
             }),
             (EmitSink::Sentry { client: expected }, Model::ClientSentry(client)) => {
                 Self::require_request_ack(sink, mode)?;
@@ -1701,6 +1748,7 @@ mod tests {
             .expect("a sink with a matching client must be planned");
 
         assert_eq!(plan.sink.label(), kind.label());
+        assert_eq!(plan.sink.ordering_group(), None);
         assert_eq!(
             plan.retry_policy,
             ParsedRetryPolicy {
@@ -1708,6 +1756,39 @@ mod tests {
                 max_backoff: Duration::from_secs(1),
             }
         );
+    }
+
+    #[test]
+    fn carries_the_sqs_fifo_group_as_the_ordering_group_of_the_sink() {
+        let case = SinkKind::Sqs.case();
+        for (declared, planned) in [
+            (SqsFifoGroup::FromBranch, EmitterOrderingGroup::FromBranch),
+            (
+                SqsFifoGroup::Expression(expression("input.tenant")),
+                EmitterOrderingGroup::Expression(expression("input.tenant")),
+            ),
+        ] {
+            let mut emitter = case.emitter();
+            let EmitSink::Sqs {
+                queue, fifo_group, ..
+            } = emitter.sink.as_mut()
+            else {
+                panic!("the SQS case must declare an SQS sink");
+            };
+            *queue = "orders.fifo".to_string();
+            *fifo_group = Some(declared);
+
+            let plan = EmitterStartPlan::decide(
+                &emitter,
+                EmitterClientModels {
+                    client: Some(&case.client),
+                    catalog_client: None,
+                },
+            )
+            .expect("an SQS FIFO sink must be planned");
+
+            assert_eq!(plan.sink.ordering_group(), Some(&planned));
+        }
     }
 
     #[test]
