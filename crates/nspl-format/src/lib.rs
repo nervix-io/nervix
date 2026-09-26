@@ -16,6 +16,7 @@ pub mod diagnostics;
 pub mod document;
 
 use document::{Gap, GapItem};
+use error_stack::Report;
 use meticulous::ResultExt as _;
 use nervix_models::CanonicalNsplError;
 use nervix_nspl::{
@@ -29,11 +30,10 @@ use thiserror::Error;
 pub enum FormatError {
     #[error("the source could not be parsed")]
     Parse(#[from] ParseFromSourceError),
-    #[error("the statement at line {line} could not be rendered: {source}")]
+    #[error("the statement at line {line} could not be rendered: {error}")]
     Render {
         line: usize,
-        #[source]
-        source: CanonicalNsplError,
+        error: Report<CanonicalNsplError>,
     },
     /// The formatted output did not reparse to the statements it came from.
     ///
@@ -81,7 +81,7 @@ fn render(input: &str) -> Result<String, FormatError> {
             let rendered = parsed
                 .statement
                 .to_canonical_nspl()
-                .map_err(|source| FormatError::Render { line, source })?;
+                .map_err(|error| FormatError::Render { line, error })?;
             lines.extend(rendered.lines().map(str::to_string));
         }
 
@@ -164,13 +164,25 @@ fn line_of(input: &str, offset: usize) -> usize {
 }
 
 /// Renders a single statement, exposed so callers can format text that is not a whole file.
-pub fn render_statement(statement: &ClientStatement) -> Result<String, CanonicalNsplError> {
+pub fn render_statement(
+    statement: &ClientStatement,
+) -> error_stack::Result<String, CanonicalNsplError> {
     statement.to_canonical_nspl()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_single_statement_renders_in_canonical_form() {
+        let statement = nervix_nspl::client_statement::parse_client_statement("use    demo  ;")
+            .expect("must parse");
+        assert_eq!(
+            render_statement(&statement).expect("must render"),
+            "USE demo;"
+        );
+    }
 
     #[test]
     fn an_empty_file_formats_to_nothing() {

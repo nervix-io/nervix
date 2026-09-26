@@ -4,7 +4,7 @@
 //!
 //! - **Owns.** What a graph is when it is described rather than run: nodes, edges, roles, branch
 //!   identity, per-node and per-branch statistics, and the ASCII rendering of the whole.
-//! - **Depends on.** Serialization and rendering crates.
+//! - **Depends on.** Serialization, error-reporting and rendering crates.
 //! - **Must not know.** How a graph is validated, scheduled or executed. The registry fills this
 //!   in; the console, the CLI and the API read it.
 //!
@@ -14,6 +14,7 @@
 use std::collections::BTreeMap;
 
 use ascii_dag::{Graph, LayoutConfig, RenderMode};
+use error_stack::ResultExt as _;
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
 use thiserror::Error;
@@ -273,12 +274,16 @@ impl DataflowGraph {
         }
     }
 
-    pub fn serialize(&self) -> Result<Vec<u8>, DataflowGraphError> {
-        serde_json::to_vec(self).map_err(|_| DataflowGraphError::Serialize)
+    /// Encodes the graph as the JSON the public wire form carries. A failure keeps the JSON
+    /// encoder's error beneath the graph's own.
+    pub fn serialize(&self) -> error_stack::Result<Vec<u8>, DataflowGraphError> {
+        serde_json::to_vec(self).change_context(DataflowGraphError::Serialize)
     }
 
-    pub fn deserialize(bytes: &[u8]) -> Result<Self, DataflowGraphError> {
-        serde_json::from_slice(bytes).map_err(|_| DataflowGraphError::Deserialize)
+    /// Decodes a graph from its JSON wire form. A failure keeps the JSON decoder's error, which
+    /// locates the malformed input, beneath the graph's own.
+    pub fn deserialize(bytes: &[u8]) -> error_stack::Result<Self, DataflowGraphError> {
+        serde_json::from_slice(bytes).change_context(DataflowGraphError::Deserialize)
     }
 
     pub fn render_ascii(&self) -> String {
@@ -555,6 +560,19 @@ mod tests {
         assert_eq!(decoded.statistics.messages_total, 42);
         assert_eq!(decoded.nodes[0].statistics.messages_total, 3);
         assert_eq!(decoded.nodes[0].branches[0].branch, r#"{"tenant":"alpha"}"#);
+    }
+
+    #[test]
+    fn a_malformed_graph_reports_the_decoding_failure_beneath_the_graph_context() {
+        let error = DataflowGraph::deserialize(br#"{"domain":"prod","nodes":"#)
+            .expect_err("a truncated document is not a graph");
+
+        assert_eq!(error.current_context(), &DataflowGraphError::Deserialize);
+        assert_eq!(error.to_string(), "failed to deserialize dataflow graph");
+        let decoding = error
+            .downcast_ref::<serde_json::Error>()
+            .expect("the JSON decoder's error stays in the report");
+        assert!(decoding.is_eof(), "{decoding}");
     }
 
     #[test]

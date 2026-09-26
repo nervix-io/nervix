@@ -9,6 +9,7 @@
 
 use std::fmt;
 
+use error_stack::{Context, Report};
 use nervix_models::{BranchSelection, DomainName, FieldName, ModelKind, ModelName, RelayName};
 use thiserror::Error;
 
@@ -323,4 +324,24 @@ pub(crate) enum RegistryError {
         identifier: String,
         placements: String,
     },
+}
+
+impl RegistryError {
+    /// Refuses model `identifier` because the vocabulary rejected an operation on it, such as an
+    /// alteration the stored model cannot take.
+    ///
+    /// The rejection's report stays beneath the refusal, and its message is the refusal's reason,
+    /// which is the text a failed command shows.
+    pub(in crate::registry) fn invalid_model<C: Context>(
+        domain: &DomainName,
+        identifier: &str,
+        rejection: Report<C>,
+    ) -> Report<Self> {
+        let reason = rejection.to_string();
+        rejection.change_context(Self::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.to_string(),
+            reason,
+        })
+    }
 }
