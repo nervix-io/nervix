@@ -22,8 +22,9 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass};
 use nervix_interconnect::{
     ConnectionFailureReason, Envelope, InterconnectRequest, PeerTarget, PoolClass,
-    ReceivedEnvelope, RelayDelivery, RelayPayload, RelayPayloadKind, RequestError, RequestSubquota,
-    TlsConfigBundle, Transport, TransportClock, TransportEntropy, TransportError, TransportOptions,
+    ReceivedEnvelope, RelayDelivery, RelayPayload, RelayPayloadKind, RemoteOperationFailure,
+    RemoteOperationSubject, RequestError, RequestSubquota, TlsConfigBundle, Transport,
+    TransportClock, TransportEntropy, TransportError, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, DomainName, NodeEndpoint, RelayName, RemoteAckRegistration};
 use rcgen::{
@@ -150,6 +151,38 @@ impl InterconnectRequest for LivenessRequest {
     const CLASS: PoolClass = PoolClass::Management;
     const SUBQUOTA: RequestSubquota = RequestSubquota::Liveness;
     const TIMEOUT: Duration = Duration::from_secs(1);
+}
+
+#[derive(Clone, Copy, Debug, Archive, Serialize, Deserialize)]
+enum RemoteFailureCase {
+    Rejected,
+    Unavailable,
+    NotReady,
+    Failed,
+}
+
+impl RemoteFailureCase {
+    fn failure(self, subject: RemoteOperationSubject) -> RemoteOperationFailure {
+        match self {
+            Self::Rejected => RemoteOperationFailure::rejected(subject),
+            Self::Unavailable => RemoteOperationFailure::unavailable(subject),
+            Self::NotReady => RemoteOperationFailure::not_ready(subject),
+            Self::Failed => RemoteOperationFailure::failed(subject, "fixture operation failed"),
+        }
+    }
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+struct RemoteFailureProbe {
+    case: RemoteFailureCase,
+}
+
+impl InterconnectRequest for RemoteFailureProbe {
+    type Response = Result<(), RemoteOperationFailure>;
+
+    const NAME: &'static str = "simulation_remote_failure_class";
+    const CLASS: PoolClass = PoolClass::Management;
+    const TIMEOUT: Duration = Duration::from_secs(10);
 }
 
 fn arrow_batch() -> Vec<u8> {
@@ -436,6 +469,13 @@ async fn serve_peer(
             }
         })
         .assured("each fixture transport registers one typed handler");
+    server
+        .register_handler::<RemoteFailureProbe, _, _>(|_, request| async move {
+            let domain = DomainName::parse("simulated").assured("fixture domain is valid");
+            let subject = RemoteOperationSubject::domain(&domain);
+            Err(request.case.failure(subject))
+        })
+        .assured("each fixture transport registers the remote failure probe");
     let live = ["client", "server", "third"]
         .into_iter()
         .map(|name| ClusterNodeName::parse(name).assured("fixture node names are valid"))
@@ -452,11 +492,11 @@ async fn serve_peer(
 }
 
 #[test]
-fn multiple_peers_and_invalid_authentication_use_production_transport_contract() {
+fn multiple_peers_keep_remote_failure_classes_and_reject_invalid_authentication() {
     let scenario = Scenario {
-        name: "multiple authenticated peers",
-        fault_plan: "none; the client exchanges with two peers, then dials one under a DNS \
-                     identity its certificate does not name",
+        name: "multiple authenticated peers preserve remote failure classes",
+        fault_plan: "none; the client exchanges typed responses with two peers, then dials one \
+                     under a DNS identity its certificate does not name",
         seeds: &[57],
     };
     scenario.check(config, exchange_with_multiple_peers);
@@ -541,7 +581,47 @@ fn exchange_with_multiple_peers(run: ScenarioRun) -> Result<(), SimulationError>
                             .assured("typed Arrow exchange succeeds with each peer");
                         assert_eq!(response.rows, 3);
                         assert_eq!(response.peer, *client.node_id());
+                        for case in [
+                            RemoteFailureCase::Rejected,
+                            RemoteFailureCase::Unavailable,
+                            RemoteFailureCase::NotReady,
+                            RemoteFailureCase::Failed,
+                        ] {
+                            tokio::task::consume_budget().await;
+                            let response = client
+                                .request(&node, RemoteFailureProbe { case })
+                                .await
+                                .assured("the authenticated remote failure response arrives");
+                            let Err(failure) = response else {
+                                panic!("the probe must return a remote failure");
+                            };
+                            let subject = match (case, failure) {
+                                (
+                                    RemoteFailureCase::Rejected,
+                                    RemoteOperationFailure::Rejected { subject },
+                                )
+                                | (
+                                    RemoteFailureCase::Unavailable,
+                                    RemoteOperationFailure::Unavailable { subject },
+                                )
+                                | (
+                                    RemoteFailureCase::NotReady,
+                                    RemoteOperationFailure::NotReady { subject },
+                                )
+                                | (
+                                    RemoteFailureCase::Failed,
+                                    RemoteOperationFailure::Failed { subject, .. },
+                                ) => subject,
+                                (case, failure) => {
+                                    panic!("{name} returned {failure:?} for {case:?}")
+                                }
+                            };
+                            let domain =
+                                DomainName::parse("simulated").assured("fixture domain is valid");
+                            assert_eq!(subject, RemoteOperationSubject::domain(&domain));
+                        }
                         trace.record("client", format!("typed Arrow exchange with {name}"));
+                        trace.record("client", format!("typed failure classes from {name}"));
                     }
                     let target = PeerTarget::resolve(&NodeEndpoint::new("server", PORT))
                         .await
