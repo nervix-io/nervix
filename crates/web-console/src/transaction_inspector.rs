@@ -984,11 +984,18 @@ mod tests {
     use leptos::prelude::Owner;
     use meticulous::ResultExt as _;
     use nervix_models::{
-        ActualExecutionStepImpact, AttributedImpactNode, CanonicalImpactSet, ConfigurationImpact,
-        ConfigurationTransition, DomainName, ExecutionStepImpactReport, ImpactAttribution,
-        ImpactDiagnostic, ImpactDiagnosticKind, ImpactEffects, ImpactNodeCoverage,
+        ActivationAction, ActualExecutionStepImpact, AttributedImpactNode, CanonicalImpactSet,
+        ClusterNodeName, ConcreteBranchCoverage, ConfigurationImpact, ConfigurationTransition,
+        DomainName, ExecutionStepImpactReport, ImpactAttribution, ImpactDiagnostic,
+        ImpactDiagnosticKind, ImpactEdgeKind, ImpactEffects, ImpactNodeCoverage,
         ImpactPlanningBasis, ImpactReportCompleteness, ImpactTopology, ModelKind, ModelName,
-        NodeRef, PlannedExecutionStepImpact, TransactionImpactReport, TransactionLifecycle,
+        NodeRef, PlannedExecutionStepImpact, RebuildReason, RequestedResourceVersion,
+        ResourceCatalogAction, ResourceName, StatePurge, TransactionImpactReport,
+        TransactionLifecycle, WasmProcessorName,
+    };
+    use nervix_web_console::graph::{
+        impact::{ConfigurationChange, Contributors, Engagement, ImpactRelation},
+        layout::{EdgeTravel, LayoutEdgeKind, RoutedEdge},
     };
 
     use super::*;
@@ -1432,5 +1439,199 @@ mod tests {
             )
             .contains("Select a node")
         );
+    }
+
+    #[test]
+    fn operation_and_role_labels_name_each_inspectable_effect() {
+        let inspected = configured_inspection();
+        let domain = inspected.transaction.domain().clone();
+        let node = NodeRef::new(
+            ModelKind::Schema,
+            ModelName::parse("inspected_event").assured("the test node name is valid"),
+        );
+        let resource =
+            ResourceName::parse("inspected_bundle").assured("the test resource name is valid");
+        let processor =
+            WasmProcessorName::parse("inspected_guest").assured("the test processor name is valid");
+        let mut report = inspected.report.operations()[0].clone();
+        for (operation, expected) in [
+            (
+                TransactionOperation::CreateConfiguration {
+                    domain: domain.clone(),
+                    node: node.clone(),
+                },
+                "CREATE SCHEMA inspected_event",
+            ),
+            (
+                TransactionOperation::AlterConfiguration {
+                    domain: domain.clone(),
+                    node: node.clone(),
+                },
+                "ALTER SCHEMA inspected_event",
+            ),
+            (
+                TransactionOperation::DropConfiguration {
+                    domain: domain.clone(),
+                    node,
+                },
+                "DROP SCHEMA inspected_event",
+            ),
+            (
+                TransactionOperation::AlterDomain {
+                    domain: domain.clone(),
+                },
+                "ALTER DOMAIN inspected",
+            ),
+            (
+                TransactionOperation::StartDomain {
+                    domain: domain.clone(),
+                },
+                "START DOMAIN inspected",
+            ),
+            (
+                TransactionOperation::StopDomain {
+                    domain: domain.clone(),
+                },
+                "STOP DOMAIN inspected",
+            ),
+            (
+                TransactionOperation::CreateResource {
+                    domain: domain.clone(),
+                    resource: resource.clone(),
+                },
+                "CREATE RESOURCE inspected_bundle",
+            ),
+            (
+                TransactionOperation::RebindResource {
+                    domain: domain.clone(),
+                    resource: resource.clone(),
+                    requested: RequestedResourceVersion::Latest,
+                    version: 3,
+                },
+                "REBIND RESOURCE inspected_bundle",
+            ),
+            (
+                TransactionOperation::ResetWasmState { domain, processor },
+                "RESET WASM PROCESSOR inspected_guest",
+            ),
+        ] {
+            report.operation = operation;
+            assert_eq!(operation_label(&report), expected);
+        }
+
+        let source = ClusterNodeName::parse("node-1").assured("the test source node is valid");
+        let destination =
+            ClusterNodeName::parse("node-2").assured("the test destination node is valid");
+        for (role, expected) in [
+            (
+                ImpactRole::Configuration(ConfigurationChange::Created),
+                "CONFIGURATION",
+            ),
+            (
+                ImpactRole::Pause {
+                    branches: None,
+                    engagement: Engagement::Planned,
+                },
+                "PAUSE",
+            ),
+            (
+                ImpactRole::Gate {
+                    branches: ConcreteBranchCoverage::Unbranched,
+                    engagement: Engagement::Planned,
+                },
+                "GATE",
+            ),
+            (
+                ImpactRole::Move {
+                    branches: None,
+                    source,
+                    destination,
+                },
+                "MOVE",
+            ),
+            (
+                ImpactRole::Rebuild {
+                    branches: None,
+                    reason: RebuildReason::Configuration,
+                },
+                "REBUILD",
+            ),
+            (
+                ImpactRole::StateReset {
+                    branches: None,
+                    state: StatePurge::WasmGuestState,
+                },
+                "STATE RESET",
+            ),
+            (ImpactRole::ForceFlush { branches: None }, "FLUSH"),
+            (
+                ImpactRole::Activation {
+                    branches: None,
+                    action: ActivationAction::Activate,
+                },
+                "ACTIVATION",
+            ),
+            (
+                ImpactRole::Binding {
+                    resource,
+                    requested: RequestedResourceVersion::Latest,
+                    version: 3,
+                },
+                "BINDING",
+            ),
+            (
+                ImpactRole::Catalog(ResourceCatalogAction::Create),
+                "CATALOG",
+            ),
+        ] {
+            assert_eq!(role_label(&role), expected);
+        }
+    }
+
+    #[test]
+    fn relation_detail_preserves_route_and_endpoints() {
+        let inspected = configured_inspection();
+        let mut graph = project_impact(
+            &inspected,
+            ScopeSelection::Transaction,
+            ImpactOutcome::Planned,
+        );
+        let source = ImpactItemId::Node(NodeRef::new(
+            ModelKind::Schema,
+            ModelName::parse("inspected_event").assured("the test source name is valid"),
+        ));
+        let target = ImpactItemId::Node(NodeRef::new(
+            ModelKind::Schema,
+            ModelName::parse("inspected_audit").assured("the test target name is valid"),
+        ));
+        let id = ImpactEdgeId {
+            source: source.clone(),
+            target: target.clone(),
+            relation: ImpactRelation::Topology(ImpactEdgeKind::Dataflow),
+        };
+        let edge = ImpactEdge {
+            id: id.clone(),
+            presence: TopologyPresence::After,
+            contributors: Contributors::default(),
+            route: RoutedEdge {
+                source,
+                target,
+                kind: LayoutEdgeKind::Flow,
+                points: vec![(5, 8), (20, 8), (20, 30)],
+                badge: None,
+                travel: EdgeTravel::Forward,
+            },
+        };
+        assert_eq!(edge_path(&edge), "M5 8 L20 8 L20 30");
+        graph.edges.insert(id.clone(), edge);
+        let detail = detail_text(
+            Some(&graph),
+            Some(&DetailSelection::Edge(id)),
+            Some(&inspected),
+            ImpactOutcome::Planned,
+        );
+        assert!(detail.contains("inspected_event → inspected_audit"));
+        assert!(detail.contains("Dataflow"));
+        assert!(detail.contains("routed through 3 points"));
     }
 }
