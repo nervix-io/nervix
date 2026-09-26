@@ -127,6 +127,18 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   includes the contentionless rule, published and pre-resolved state, mutable execution state,
   bounded synchronization, review classification for new lock sites, and deterministic checks of
   data-plane concurrency protocols.
+- [VM Functions](docs/src/vm-functions.md) is the authoritative architecture reference for the
+  expression VM and its function catalog. Any change to expression lowering, the semantic catalog
+  and function registration, type or sensitivity checking, constant folding or expression sharing,
+  compiled programs and their prepared artifacts, the runtime bridge and execution context, scalar
+  operands, selected-row execution of conditional arms, row and batch errors, kernel selection and
+  SIMD use, function-family implementations, injected functions, or window aggregate and sketch
+  structures must keep that chapter current in the same change. Its scope includes ownership by
+  layer, where programs compile and how long they live, allocation and result bounds, scheduling
+  and execution bounds, branch-local accumulation, bounded sketch state, publication and recovery
+  of window state, measured performance evidence, and the checklist for adding a function.
+  [Expression Functions](docs/src/filter-map-functions.md) remains the owner of every public
+  function contract.
 - [Resource Versions And Bindings](docs/src/resource-versions.md) is the authoritative architecture
   reference for resource versions and the models that bind them. Any change to the resource
   catalog, upload installation or replication, version resolution, how a binding is validated,
@@ -155,6 +167,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   commit boundaries, durable versus volatile state, the former-owner startup fence, and
   observability. It is the single canonical shutdown chapter: work that finishes with shutdown
   documentation extends it rather than adding a competing page.
+- [Typed States And Validation Boundaries](docs/src/typed-states.md) is the authoritative
+  architecture reference for absence, distinct semantic states, owning validation boundaries,
+  state identity, private atomic representations, and external encodings. Any change to how a
+  missing value, state variant, required identity, conversion failure, or boundary representation
+  is modeled or validated must keep that chapter current in the same change. Interconnect,
+  domain-clock, and shutdown details remain in their own authoritative chapters.
 
 ## System Layers and Migration
 

@@ -72,4 +72,4 @@ Their ordered assignments may read values initialized by earlier error-record as
 not turn a partial output into a transforming working message.
 
 See [Runtime Nodes](processors.md#filters-and-construction) for route families and
-[Data Plane](data-plane.md#working-message-execution) for the implementation boundary.
+[VM Functions](vm-functions.md#typed-batches-and-registers) for the implementation boundary.

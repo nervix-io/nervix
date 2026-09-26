@@ -203,6 +203,56 @@ them, and validation checks that the production dependency graph, with or withou
 contains no Turmoil package, and that selecting both modes in either package fails with its
 diagnostic.
 
+### Qualification Matrix And Limits
+
+The committed matrix runs each seed twice in separate test processes and compares the outcome and
+the ordered, simulated-time semantic events. The wider sweep replaces every case's committed seeds
+with the same range; it does not weaken the assertions in any case. These are simulation limits,
+not elapsed test times:
+
+| Case | Committed seeds | Maximum simulated time | Main assertion |
+| --- | --- | --- | --- |
+| DNS and bounded CPU execution | 41 and 1–12 | 1 second | Simulated resolution and all CPU classes run on the host scheduler; reservations return |
+| Authenticated Arrow exchange and three-host identity rejection | 49, 57 | 30 seconds | Production TLS, HTTP/2, typed envelopes and Arrow IPC carry the exchange; the wrong identity is rejected |
+| Partition before dial, one-way partition, held exchange, partitioned exchange | 61–64 | 60 seconds | Setup and request deadlines expire; repair restores authenticated service within connection and request bounds |
+| Lost relay reply and cancellation before grant, during reply loss, and during reconnect | 71–74 | 30 seconds | Same-epoch retry reconciles admission and ACK identity; cancellation respects the grant boundary |
+| Receiver restart after body receipt, after admission, and with a delayed reply | 81, 83, 85, 1036 | 90 seconds | A new process epoch fences unresolved volatile delivery and accepts fresh work |
+| Stalled peer with a healthy peer using every traffic class | 91–93 | 120 seconds | Pool and subquota reservations remain bounded, unrelated work progresses, and teardown releases charges |
+
+The transport and relay cases allow at most 50,000 scheduler steps and 90 seconds of real time per
+attempt. The isolation case allows 120,000 steps and 120 seconds. The one-second harness cases allow
+200 steps and three seconds. The isolation fixture fills 32 shared management streams and one bulk
+worker plus eight pending jobs, checks that two additional submissions are refused, and observes
+the exact memory, stream and relay reservations during cancellation and release. Other transport
+cases check open connections, pending requests, reconnect failures and simulated sockets against
+their configured bounds. The suite-level real-time budget is eight minutes after compilation;
+the 64-seed exploratory sweep has a 25-minute bound and is run outside ordinary CI.
+
+An audit of the simulated path covers the socket and DNS alias, transport identity and certificate
+clocks, request and relay deadlines, map walks with side effects, the bounded CPU executor and the
+runner. The product path uses Turmoil's TCP and DNS, Tokio's scheduler clock, supplied UTC and
+seeded identity entropy. The harness itself uses a real thread and wall clock to detect a blocked
+scheduler; those observations decide when to fail a test, not how a simulated request proceeds.
+The execution storage class still uses a real blocking thread and is outside these cases. Default
+worker counts can reflect the host CPU count, so comparisons establish replay on the tested host
+configuration, not byte-for-byte independence from host capacity. Rustls and AWS-LC retain their
+cryptographic randomness; traces compare authenticated decisions and outcomes rather than
+ciphertext. The surrounding cluster's Raft and gossip entropy, Fjall and filesystem effects,
+cross-host attribution, domain time and external connectors remain prerequisites for a later
+whole-cluster simulation. Real-process SIGKILL and durability claims require the separate process
+recovery scenarios.
+
+Qualification runs `just test-shuttle` on the same revision as `just test-turmoil`,
+`just test-turmoil-replay-check` and the wider seed sweep. The normal feature configuration is
+checked with `just test-execution`, `just test-interconnect` and `just validate`, including the
+production dependency and scheduler-feature checks. Public `internal_tls` scenarios exercise real
+authentication on one- and three-node clusters; `interconnect_health`, `interconnect_lifetime` and
+`interconnect_observability` exercise real cluster transport and quotas. The
+`process_crash_recovery` feature starts a server process and sends SIGKILL, so its durable recovery
+evidence is kept separate from Turmoil's simulated host restart. The qualification run's revision,
+wall times, results and any failures belong with the task evidence; the matrix above names the
+contract that subsequent runs must continue to check.
+
 ## Listener And Peer Topology
 
 Each node exposes one TCP listener for all node-to-node traffic. Every accepted connection uses
@@ -392,6 +442,11 @@ Control records use bounded `rkyv` archives. The receiver validates an archive, 
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed
 archives, and values above the operation limit fail at the transport boundary.
+
+Control-operation responses preserve a typed failure class and subject across the wire. A receiver
+can distinguish a node that rejects ownership, an unavailable subject, a subject that is not ready,
+and an operation that ran and failed without parsing display text. Only the final class carries an
+operator-facing reason; callers decide retry and relocation from the class and subject.
 
 Relay metadata uses the same validated control encoding, while relay bodies remain Arrow IPC from
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let

@@ -11,7 +11,7 @@ use ahash::{HashMap, HashSet};
 use error_stack::Report;
 use nervix_models::{
     BranchName, BranchSelection, CreateSchema, DomainName, MessageErrorPolicy, Model, ModelIndex,
-    ModelKind, ModelName, NodeRef, ProcessorOutputs, RouteConstruction,
+    ModelKind, ModelName, NodeRef, ProcessorOutputs, RelayName, RouteConstruction,
 };
 use nervix_vm::{
     CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
@@ -23,7 +23,7 @@ use crate::registry::{
     error::RegistryError,
     graph::{ActiveNode, EdgeKind, expect_kind},
     validation::{
-        branching::{format_branch_name, relay_declared_branch},
+        branching::relay_declared_branch,
         materialized_state::referenced_materialized_stream_bindings,
         processor::processor_first_input_relay,
         schema::{
@@ -63,20 +63,32 @@ struct MessageErrorSchemas<'a> {
     allow_header_reads: bool,
 }
 
+#[derive(Clone, Copy)]
+struct MessageErrorValidationSite<'a> {
+    domain: &'a DomainName,
+    identifier: &'a ModelName,
+    node_kind: ModelKind,
+}
+
 pub(in crate::registry) fn validate_model_message_error_policies(
     domain: &DomainName,
     identifier: &ModelName,
     models: &ModelIndex,
     model: &Model,
 ) -> Result<(), Report<RegistryError>> {
+    let site = MessageErrorValidationSite {
+        domain,
+        identifier,
+        node_kind: model.kind(),
+    };
     let validate_outputs = |outputs: &ProcessorOutputs,
                             schemas: MessageErrorSchemas<'_>,
                             expected_branch: Option<&BranchName>| {
         for output in outputs.outputs() {
             let partial_output = schema_for_ack_model(domain, identifier, models, &output.relay)?;
             validate_message_error_policy(
-                domain,
-                identifier,
+                site,
+                &output.relay,
                 models,
                 &output.message_error_policy,
                 MessageErrorSchemas {
@@ -161,8 +173,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
             )
         }
         Model::Junction(node) => validate_transforming_processor_message_errors(
-            domain,
-            identifier,
+            site,
             models,
             &node.from,
             &node.output_routes,
@@ -170,8 +181,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
             "junction error input",
         ),
         Model::Deduplicator(node) => validate_transforming_processor_message_errors(
-            domain,
-            identifier,
+            site,
             models,
             &node.from,
             &node.output_routes,
@@ -179,8 +189,7 @@ pub(in crate::registry) fn validate_model_message_error_policies(
             "deduplicator error input",
         ),
         Model::Reorderer(node) => validate_transforming_processor_message_errors(
-            domain,
-            identifier,
+            site,
             models,
             &node.from,
             &node.output_routes,
@@ -232,8 +241,8 @@ pub(in crate::registry) fn validate_model_message_error_policies(
                 let input = schema_for_ack_model(domain, identifier, models, input_relay)?;
                 let branch = relay_declared_branch(domain, identifier, models, input_relay)?;
                 validate_message_error_policy(
-                    domain,
-                    identifier,
+                    site,
+                    input_relay,
                     models,
                     &node.error_policies.message,
                     MessageErrorSchemas {
@@ -251,20 +260,22 @@ pub(in crate::registry) fn validate_model_message_error_policies(
 }
 
 fn validate_transforming_processor_message_errors(
-    domain: &DomainName,
-    identifier: &ModelName,
+    site: MessageErrorValidationSite<'_>,
     models: &ModelIndex,
     inputs: &nervix_models::ProcessorInputs,
     outputs: &ProcessorOutputs,
     branch: &BranchSelection,
     input_label: &str,
 ) -> Result<(), Report<RegistryError>> {
+    let MessageErrorValidationSite {
+        domain, identifier, ..
+    } = site;
     let relay = processor_first_input_relay(domain, identifier, inputs, input_label)?;
     let input = schema_for_ack_model(domain, identifier, models, relay)?;
     for output in outputs.outputs() {
         validate_message_error_policy(
-            domain,
-            identifier,
+            site,
+            &output.relay,
             models,
             &output.message_error_policy,
             MessageErrorSchemas {
@@ -284,27 +295,39 @@ fn validate_transforming_processor_message_errors(
 }
 
 fn validate_message_error_policy(
-    domain: &DomainName,
-    identifier: &ModelName,
+    site: MessageErrorValidationSite<'_>,
+    route: &RelayName,
     models: &ModelIndex,
     policy: &MessageErrorPolicy,
     schemas: MessageErrorSchemas<'_>,
     expected_branch: Option<&BranchName>,
 ) -> Result<(), Report<RegistryError>> {
+    let MessageErrorValidationSite {
+        domain,
+        identifier,
+        node_kind,
+    } = site;
     let MessageErrorPolicy::Dlq { relay, assignments } = policy else {
         return Ok(());
     };
     let actual_branch = relay_declared_branch(domain, identifier, models, relay)?;
     if actual_branch != expected_branch {
-        return Err(Report::new(RegistryError::InvalidModel {
-            domain: domain.as_str().to_string(),
-            identifier: identifier.as_str().to_string(),
-            reason: format!(
-                "message-error relay '{}' uses branch {}, expected {}",
-                relay,
-                format_branch_name(actual_branch),
-                format_branch_name(expected_branch),
-            ),
+        let actual_branch = match actual_branch {
+            Some(branch) => BranchSelection::branched_by(branch.clone()),
+            None => BranchSelection::unbranched(),
+        };
+        let expected_branch = match expected_branch {
+            Some(branch) => BranchSelection::branched_by(branch.clone()),
+            None => BranchSelection::unbranched(),
+        };
+        return Err(Report::new(RegistryError::MessageErrorBranchMismatch {
+            domain: domain.clone(),
+            node_kind,
+            node: identifier.clone(),
+            route: route.clone(),
+            error_relay: relay.clone(),
+            actual_branch,
+            expected_branch,
         }));
     }
 
@@ -558,10 +581,31 @@ mod tests {
             )
             .expect_err("structurally equal but differently named branches must be rejected");
 
-        let rendered = format!("{error:?}");
-        assert!(rendered.contains("message-error relay 'correlator_errors'"));
-        assert!(rendered.contains("error_branch"));
-        assert!(rendered.contains("event_branch"));
+        let RegistryError::MessageErrorBranchMismatch {
+            domain,
+            node_kind,
+            node,
+            route,
+            error_relay,
+            actual_branch,
+            expected_branch,
+        } = error.current_context()
+        else {
+            panic!("expected a typed message error branch mismatch: {error:?}");
+        };
+        assert_eq!(domain.as_str(), "default");
+        assert_eq!(*node_kind, ModelKind::Correlator);
+        assert_eq!(node.as_str(), "match_events");
+        assert_eq!(route.as_str(), "matched_events");
+        assert_eq!(error_relay.as_str(), "correlator_errors");
+        assert_eq!(
+            actual_branch,
+            &BranchSelection::branched_by(named("error_branch"))
+        );
+        assert_eq!(
+            expected_branch,
+            &BranchSelection::branched_by(named("event_branch"))
+        );
         let _ = fs::remove_dir_all(path);
     }
 }

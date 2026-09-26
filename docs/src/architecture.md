@@ -30,6 +30,11 @@ has scheduler-selected replicas.
 
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
 
+Each boundary carries its decisions forward as types: absence stays explicit, distinct states
+carry their own data, and required identities are validated before execution or recovery. The
+[Typed States And Validation Boundaries](./typed-states.md) chapter covers these rules across the
+language, registry, runtime, connectors, and clients.
+
 Consensus access is restricted by operation. Observers can read locally applied state and watch
 changes. Proposers can also attempt replicated mutations, administrators manage membership and
 leadership transfers, and protocol receivers apply Raft messages independently of those capabilities.
@@ -56,6 +61,15 @@ intake, routing, buffering, acknowledgements, and lifecycle. The
 boundary, its source and sink families, delivery and commit points, special integrations, and
 failure semantics. The [Ingestors](./ingestors.md) and [Emitters](./emitters.md) manuals define the
 public NSPL forms.
+
+Every expression follows the same one-way conversion. Parsing produces expression Models, the
+expression VM lowers each Model once into a program and compiles it against exact types and
+sensitivity, and the data plane executes the compiled program over Arrow batches with a caller-supplied
+domain timestamp. Registry validation uses the same compiler when a statement is applied. The
+[VM Functions](./vm-functions.md) chapter defines that pipeline, columnar execution and its
+selected-row conditionals, row and batch errors, kernel and SIMD choices, every function family,
+branch-local window aggregates and sketches, and how to add a function. [Expression
+Functions](./filter-map-functions.md) owns the public function contracts.
 
 Clock ownership follows the same one-way conversion. NSPL parsing turns `PERIOD`, `SKEW`, start
 timestamps, and rates into validated vocabulary values. The control plane commits one mapping and

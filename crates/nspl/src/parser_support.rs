@@ -2321,13 +2321,17 @@ pub fn expression_error_message(error: ParseFromSourceError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use chumsky::prelude::*;
+    use chumsky::{
+        error::{RichPattern, RichReason},
+        prelude::*,
+    };
+    use meticulous::OptionExt as _;
 
     use super::{
         LexedInput, ParseError, current_word_prefix, format_parse_error, into_parse_error, kw,
         lex_input, schema_ref, suggestions_from_errors, token_span_to_source_span,
     };
-    use crate::lexer::Identifier;
+    use crate::lexer::{Identifier, Token, Word};
 
     #[test]
     fn current_word_prefix_stops_at_non_identifier_boundary() {
@@ -2370,12 +2374,31 @@ mod tests {
             .parse(tokens.as_slice());
         assert!(output.has_errors(), "parser should produce an error");
 
-        let err = into_parse_error(
-            source,
-            &spanned_tokens,
-            "create kafka".len(),
-            output.into_errors(),
-        );
+        let errors = output.into_errors();
+        let error = errors
+            .first()
+            .verified("the has_errors check above established at least one diagnostic");
+        let RichReason::ExpectedFound { expected, found } = error.reason() else {
+            panic!("a keyword mismatch must retain expected and found tokens");
+        };
+        let mut expects_json = false;
+        for pattern in expected {
+            if let RichPattern::Label(label) = pattern
+                && label.as_ref() == "JSON"
+            {
+                expects_json = true;
+            }
+        }
+        assert!(expects_json);
+        assert!(matches!(
+            found.as_deref(),
+            Some(Token::Word(Word::KnownWord {
+                iden: Identifier::Kafka,
+                ..
+            }))
+        ));
+
+        let err = into_parse_error(source, &spanned_tokens, "create kafka".len(), errors);
         let diagnostics = match err {
             super::ParseFromSourceError::Parse { diagnostics, .. } => diagnostics,
             other => panic!("expected parse error, got {other:?}"),
@@ -2383,7 +2406,6 @@ mod tests {
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span, 7..12);
-        assert_eq!(diagnostics[0].message, "expected JSON, found kafka");
     }
 
     #[test]
