@@ -52,7 +52,7 @@ struct EncodedBrokerRecord {
     key: Option<String>,
     payload: Vec<u8>,
     headers: EmitterHeaders,
-    message_group: Result<Option<String>, SqsMessageGroupError>,
+    message_group: Result<Option<String>, OrderingGroupError>,
     execution_now: Timestamp,
 }
 
@@ -192,15 +192,7 @@ async fn encode_broker_records(
                 Report::new(EmitterRuntimeError::EncodeBatch)
                     .attach_printable(format!("emitter batch row {row_index} has no header entry"))
             })?;
-            let message_group = batch
-                .sqs_message_groups
-                .get(row_index)
-                .cloned()
-                .ok_or_else(|| {
-                    Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                        "emitter batch row {row_index} has no SQS FIFO group entry"
-                    ))
-                })?;
+            let message_group = batch.ordering_group(row_index)?;
             let position = SinkRecordPosition {
                 batch_index,
                 row_index,
@@ -518,7 +510,7 @@ fn container_failure(
 fn batch_envelope(
     batch: &EmitterPublishBatch,
     row_index: usize,
-) -> EmitterRuntimeResult<Result<BatchEnvelope, SqsMessageGroupError>> {
+) -> EmitterRuntimeResult<Result<BatchEnvelope, OrderingGroupError>> {
     let key = batch
         .batch
         .keys
@@ -534,14 +526,9 @@ fn batch_envelope(
         Report::new(EmitterRuntimeError::EncodeBatch)
             .attach_printable(format!("emitter batch row {row_index} has no header entry"))
     })?;
-    let message_group = batch.sqs_message_groups.get(row_index).ok_or_else(|| {
-        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-            "emitter batch row {row_index} has no SQS FIFO group entry"
-        ))
-    })?;
-    let message_group = match message_group {
-        Ok(message_group) => message_group.clone(),
-        Err(error) => return Ok(Err(error.clone())),
+    let message_group = match batch.ordering_group(row_index)? {
+        Ok(message_group) => message_group,
+        Err(failure) => return Ok(Err(failure)),
     };
     Ok(Ok(BatchEnvelope {
         key,

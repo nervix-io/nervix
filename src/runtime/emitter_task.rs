@@ -37,12 +37,6 @@ pub(in crate::runtime) struct EmitterSinkContext {
     pub(super) clock: DomainClock,
 }
 
-#[derive(Debug, Clone)]
-enum CompiledSqsFifoGroup {
-    FromBranch,
-    Expression(CompiledProgramWithMaterializedInterest),
-}
-
 struct EmitterBatchContext<'a> {
     runtime: &'a Runtime,
     routing: &'a mut DomainRoutingCache,
@@ -56,7 +50,7 @@ struct EmitterBatchContext<'a> {
     error_policies: &'a ErrorPolicies,
     source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     filter_map: Option<&'a CompiledEmitterFilterMapProgram>,
-    sqs_fifo_group: Option<&'a CompiledSqsFifoGroup>,
+    ordering_group: Option<&'a CompiledOrderingGroup>,
     materialized_state: &'a [nervix_models::MaterializedStateDependency],
 }
 
@@ -105,11 +99,15 @@ pub(in crate::runtime) enum EmitterRuntimeError {
         header_count: usize,
         row_count: usize,
     },
-    #[error("SQS FIFO group count {group_count} does not match emitter row count {row_count}")]
-    SqsGroupCountMismatch {
+    #[error("emitter ordering group count {group_count} does not match row count {row_count}")]
+    OrderingGroupCountMismatch {
         group_count: usize,
         row_count: usize,
     },
+    #[error("emitter route kept source row {row} outside the {row_count} rows it has groups for")]
+    OrderingGroupRowOutOfBounds { row: usize, row_count: usize },
+    #[error("failed to select the ordering groups of the rows an emitter route kept")]
+    SelectOrderingGroups,
     #[error("emitter delivered row {row} is outside batch with {row_count} rows")]
     DeliveryRowOutOfBounds { row: usize, row_count: usize },
     #[error("emitter delivered row {row} is outside ack set with {row_count} rows")]
@@ -144,7 +142,9 @@ impl EmitterRuntimeError {
             Self::SinkNotInitialized | Self::PublishBatch | Self::PublishStalled => true,
             Self::FlushPolicyNotInitialized
             | Self::HeaderCountMismatch { .. }
-            | Self::SqsGroupCountMismatch { .. }
+            | Self::OrderingGroupCountMismatch { .. }
+            | Self::OrderingGroupRowOutOfBounds { .. }
+            | Self::SelectOrderingGroups
             | Self::DeliveryRowOutOfBounds { .. }
             | Self::AcknowledgementRowOutOfBounds { .. }
             | Self::RejectionRowOutOfBounds { .. }
@@ -412,28 +412,23 @@ impl EmitterTask {
                 udfs: udfs.as_ref(),
             },
         )?;
-        let sqs_fifo_group = match emitter.sink.as_ref() {
-            EmitSink::Sqs {
-                fifo_group: Some(nervix_models::SqsFifoGroup::FromBranch),
-                ..
-            } => Some(CompiledSqsFifoGroup::FromBranch),
-            EmitSink::Sqs {
-                fifo_group: Some(nervix_models::SqsFifoGroup::Expression(_)),
-                ..
-            } => compile_sqs_fifo_group_program(
+        let ordering_group = match plan.sink.ordering_group() {
+            None => None,
+            Some(declared) => Some(CompiledOrderingGroup::compile(
+                declared,
                 domain,
-                &emitter,
-                input_schema.arrow_schema(),
-                input_schema.vm_sensitivity(),
+                &emitter.name,
+                RuntimeVmSchema {
+                    schema: input_schema.arrow_schema(),
+                    sensitivity: input_schema.vm_sensitivity(),
+                },
                 RuntimeVmCompileContext {
                     available_materialized_streams: &materialized_stream_specs,
                     available_lookups: &lookups,
                     current_branching: &input_branching,
                     udfs: udfs.as_ref(),
                 },
-            )?
-            .map(CompiledSqsFifoGroup::Expression),
-            _ => None,
+            )?),
         };
         let mut source_filters = HashMap::default();
         for source_filter in emitter.from.where_clauses() {
@@ -670,7 +665,7 @@ impl EmitterTask {
                 error_policies: &task_error_policies,
                 source_filters: &source_filters,
                 filter_map: filter_map.as_ref(),
-                sqs_fifo_group: sqs_fifo_group.as_ref(),
+                ordering_group: ordering_group.as_ref(),
                 materialized_state: &task_materialized_state,
             };
             loop {
@@ -1443,34 +1438,18 @@ impl EmitterBatchContext<'_> {
             .filter_source_batch(input_relay, batch, &materialized_values, execution_now)
             .await?;
 
-        // FIFO groups are evaluated over the filtered source batch and stay indexed by source
+        // Ordering groups are evaluated over the filtered source batch and stay indexed by source
         // row, so the filter map below can hand every published row the group its own input
         // produced. A row that cannot produce one keeps its reason and is rejected at the send;
         // only a failure of the whole evaluation drops the batch here.
-        let source_sqs_message_groups = match self.sqs_fifo_group {
-            None => vec![Ok(None); batch.batch.batch().num_rows()],
-            Some(CompiledSqsFifoGroup::FromBranch) => {
-                let mut groups = Vec::with_capacity(batch.keys.len());
-                for key in &batch.keys {
-                    let group = match key.as_ref() {
-                        Some(key) => Ok(Some(key.as_str().to_string())),
-                        None => Err(SqsMessageGroupError::UnbranchedRecord),
-                    };
-                    groups.push(group);
-                }
-                groups
-            }
-            Some(CompiledSqsFifoGroup::Expression(program)) => {
-                let evaluated = evaluate_sqs_fifo_group_program(
-                    self.emitter,
-                    program,
-                    &batch,
-                    execution_now,
-                    &materialized_values,
-                )
-                .await;
+        let ordering_groups = match self.ordering_group {
+            None => None,
+            Some(ordering_group) => {
+                let evaluated = ordering_group
+                    .evaluate(self.emitter, &batch, execution_now, &materialized_values)
+                    .await;
                 match evaluated {
-                    Ok(groups) => groups,
+                    Ok(groups) => Some(groups),
                     Err(error) => {
                         let error = error.current_context();
                         self.report_general_error(error.acks.iter(), error.reason.clone());
@@ -1484,19 +1463,7 @@ impl EmitterBatchContext<'_> {
             // Without a filter map every source row publishes as it arrived, so the groups
             // already align with the batch row for row.
             let publish_batch = EmitterPublishBatch::from_batch(batch, execution_now);
-            match publish_batch.with_sqs_message_groups(source_sqs_message_groups) {
-                Ok(batch) => return Some(batch),
-                Err(error) => {
-                    self.report_general_error(
-                        std::iter::empty::<&AckSet>(),
-                        format!(
-                            "emitter '{}' failed to build SQS FIFO group batch: {error}",
-                            self.emitter.as_str()
-                        ),
-                    );
-                    return None;
-                }
-            }
+            return self.with_ordering_groups(publish_batch, ordering_groups);
         };
 
         let planned = plan_emitter_filter_map_batch(
@@ -1515,18 +1482,6 @@ impl EmitterBatchContext<'_> {
             }
         };
 
-        // The plan reports the source row of every output row in output order, so reading the
-        // source groups through it keeps each published row with the group its own input
-        // produced.
-        let mut selected_sqs_message_groups = Vec::with_capacity(plan.source_rows.len());
-        for source_row in &plan.source_rows {
-            let group = match source_sqs_message_groups.get(*source_row) {
-                Some(group) => group.clone(),
-                None => Err(SqsMessageGroupError::SourceRowOutOfBounds { row: *source_row }),
-            };
-            selected_sqs_message_groups.push(group);
-        }
-
         self.deliver_planned_message_errors(plan.message_errors)
             .await;
 
@@ -1536,29 +1491,53 @@ impl EmitterBatchContext<'_> {
         let publish_batch = match EmitterPublishBatch::new(batch, plan.headers, execution_now) {
             Ok(publish_batch) => publish_batch,
             Err(error) => {
-                self.report_filtered_batch_error(error);
+                self.report_publish_batch_error(error);
                 return None;
             }
         };
-        match publish_batch.with_sqs_message_groups(selected_sqs_message_groups) {
-            Ok(batch) => Some(batch),
+
+        // The plan reports the source row of every output row in output order, so selecting the
+        // source groups through it keeps each published row with the group its own input
+        // produced.
+        let selected_groups = match ordering_groups {
+            None => None,
+            Some(groups) => match groups.select(&plan.source_rows) {
+                Ok(selected) => Some(selected),
+                Err(error) => {
+                    self.report_publish_batch_error(error);
+                    return None;
+                }
+            },
+        };
+        self.with_ordering_groups(publish_batch, selected_groups)
+    }
+
+    /// `publish_batch` with the ordering group of each of its rows, when the emitter declares one.
+    fn with_ordering_groups(
+        &self,
+        publish_batch: EmitterPublishBatch,
+        groups: Option<OrderingGroups>,
+    ) -> Option<EmitterPublishBatch> {
+        let Some(groups) = groups else {
+            return Some(publish_batch);
+        };
+        match publish_batch.with_ordering_groups(groups) {
+            Ok(publish_batch) => Some(publish_batch),
             Err(error) => {
-                self.report_filtered_batch_error(error);
+                self.report_publish_batch_error(error);
                 None
             }
         }
     }
 
-    /// Report a filtered batch whose rows, headers, and FIFO groups stopped agreeing in count.
-    /// Both counts are checked while building the same batch, so either one failing is the same
-    /// failure to report.
-    fn report_filtered_batch_error(&self, error: Report<EmitterRuntimeError>) {
+    /// Report a batch whose rows, headers, and ordering groups stopped agreeing. They are checked
+    /// while building the same batch, so any one of them failing is the same failure to report.
+    fn report_publish_batch_error(&self, error: Report<EmitterRuntimeError>) {
         self.report_general_error(
             std::iter::empty::<&AckSet>(),
             format!(
-                "emitter '{}' failed to build filtered header batch: {}",
+                "emitter '{}' failed to build publish batch: {error:#}",
                 self.emitter.as_str(),
-                error
             ),
         );
     }

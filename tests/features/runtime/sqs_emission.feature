@@ -337,3 +337,109 @@ Feature: SQS emission
       | cluster_size |
       | 1            |
       | 3            |
+
+  @sqs_fifo_group_ordering
+  Scenario Outline: SQS FIFO rejects only the records whose ordering group cannot be evaluated
+    Given MQTT is running
+    And SQS is running
+    And runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And SQS queue "fifo_failed_{{test_id}}.fifo" is observed
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA order_event (
+        tenant STRING,
+        sequence I64
+      );
+      CREATE SCHEMA rejected_order (
+        tenant STRING,
+        sequence I64,
+        error_code STRING,
+        error_message STRING,
+        operation STRING
+      );
+      CREATE WIRE JSON SCHEMA order_wire MODE STRICT (
+        tenant string,
+        sequence integer
+      );
+      CREATE CODEC order_codec
+      FROM WIRE JSON SCHEMA order_wire
+      TO SCHEMA order_event;
+      CREATE RELAY orders SCHEMA order_event UNBRANCHED;
+      CREATE RELAY rejected_orders SCHEMA rejected_order UNBRANCHED;
+      CREATE CLIENT mqtt_ingress
+      TYPE MQTT
+      CONFIG {
+        'addr' = '{{mqtt_addr}}',
+        'client_id' = 'nervix-cucumber-sqs-fifo-failed-{{test_id}}'
+      };
+      CREATE INGESTOR mqtt_orders
+      FROM MQTT mqtt_ingress TOPIC sqs_fifo_failed_in_{{test_id}} MODE NO_ACK SEQUENTIAL
+      ON QUIESCE DROP DECODE USING order_codec
+      TIMESTAMP NOW
+      TO orders
+      INHERIT ALL
+      UNBRANCHED
+      FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR LOG
+      ON GENERAL ERROR LOG;
+      CREATE CLIENT sqs_main
+      TYPE SQS
+      CONFIG {
+        'endpoint' = '{{sqs_endpoint}}',
+        'region' = 'us-east-1'
+      };
+      CREATE EMITTER sqs_orders
+      FROM orders
+      TO SQS sqs_main QUEUE fifo_failed_{{test_id}}.fifo
+      FIFO GROUP CASE
+        WHEN input.sequence = (2 AS I64) THEN (input.sequence / (input.sequence - (2 AS I64))) AS STRING
+        ELSE input.tenant
+      END
+      MODE BATCH RETRY POLICY BACKOFF 100ms MAX 1s
+      ENCODE USING order_codec
+      INHERIT ALL
+      WHERE input.sequence != (3 AS I64)
+      FLUSH EACH 1s MAX BATCH SIZE 1MiB
+      ON MESSAGE ERROR SEND TO rejected_orders
+        SET tenant = input.tenant,
+            sequence = input.sequence,
+            error_code = error.code,
+            error_message = error.message,
+            operation = error.operation
+      ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION rejected_orders_subscription TO rejected_orders;
+      START;
+      """
+    When these MQTT messages are rapidly published to topic "sqs_fifo_failed_in_{{test_id}}"
+      """
+      {"tenant":"alpha","sequence":1}
+      {"tenant":"beta","sequence":1}
+      {"tenant":"alpha","sequence":2}
+      {"tenant":"beta","sequence":2}
+      {"tenant":"alpha","sequence":3}
+      {"tenant":"beta","sequence":3}
+      {"tenant":"alpha","sequence":4}
+      {"tenant":"beta","sequence":4}
+      """
+    Then within "10s" the observed broker receives JSON payloads preserving "tenant" group order
+      """
+      {"tenant":"alpha","sequence":1}
+      {"tenant":"beta","sequence":1}
+      {"tenant":"alpha","sequence":4}
+      {"tenant":"beta","sequence":4}
+      """
+    And within "10s" the relay subscription receives payloads containing all fragments
+      """
+      "tenant":"alpha" | "sequence":2 | "error_code":"external" | "operation":"publish" | ordering group expression failed with division_by_zero
+      "tenant":"beta" | "sequence":2 | "error_code":"external" | "operation":"publish" | ordering group expression failed with division_by_zero
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

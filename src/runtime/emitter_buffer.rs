@@ -62,7 +62,8 @@ pub(super) struct EmitterPublishBatch {
     pub(super) batch: RelayRecordBatch,
     pub(super) execution_now: Timestamp,
     headers: Option<Vec<EmitterHeaders>>,
-    pub(super) sqs_message_groups: Vec<Result<Option<String>, SqsMessageGroupError>>,
+    /// The ordering group of every row, absent when the emitter declares none.
+    ordering_groups: Option<OrderingGroups>,
     pub(super) delivered: Vec<bool>,
 }
 
@@ -79,7 +80,7 @@ impl EmitterPublishBatch {
             batch,
             execution_now,
             headers: None,
-            sqs_message_groups: vec![Ok(None); row_count],
+            ordering_groups: None,
             delivered: vec![false; row_count],
         }
     }
@@ -102,53 +103,73 @@ impl EmitterPublishBatch {
             batch,
             execution_now,
             headers,
-            sqs_message_groups: vec![Ok(None); row_count],
+            ordering_groups: None,
             delivered: vec![false; row_count],
         })
     }
 
-    pub(super) fn with_sqs_message_groups(
+    /// This batch with the ordering group of each of its rows.
+    pub(super) fn with_ordering_groups(
         mut self,
-        groups: Vec<Result<Option<String>, SqsMessageGroupError>>,
+        groups: OrderingGroups,
     ) -> EmitterRuntimeResult<Self> {
         let row_count = self.batch.batch.batch().num_rows();
-        if groups.len() != row_count {
-            return Err(Report::new(EmitterRuntimeError::SqsGroupCountMismatch {
-                group_count: groups.len(),
-                row_count,
-            }));
+        if let Some(group_count) = groups.row_count()
+            && group_count != row_count
+        {
+            return Err(Report::new(
+                EmitterRuntimeError::OrderingGroupCountMismatch {
+                    group_count,
+                    row_count,
+                },
+            ));
         }
-        self.sqs_message_groups = groups;
+        self.ordering_groups = Some(groups);
         Ok(self)
     }
 
+    /// The ordering group row `row` is published under, absent when the emitter declares none, or
+    /// why the row has none.
+    pub(super) fn ordering_group(
+        &self,
+        row: usize,
+    ) -> EmitterRuntimeResult<Result<Option<String>, OrderingGroupError>> {
+        let Some(groups) = &self.ordering_groups else {
+            return Ok(Ok(None));
+        };
+        match groups.group(row) {
+            Some(Ok(group)) => Ok(Ok(Some(group.to_string()))),
+            Some(Err(failure)) => Ok(Err(failure.clone())),
+            None => Err(
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "emitter batch row {row} has no ordering group entry"
+                )),
+            ),
+        }
+    }
+
     fn estimated_bytes(&self) -> u64 {
+        let header_bytes = self
+            .headers
+            .iter()
+            .flatten()
+            .flatten()
+            .map(|(name, value)| {
+                let name_len: u64 = name.len().arch_into();
+                let value_len: u64 = value.len().arch_into();
+                name_len.checked_add(value_len).assured(BYTES_IN_MEMORY)
+            })
+            .try_fold(0_u64, u64::checked_add)
+            .assured(BYTES_IN_MEMORY);
+        let group_bytes = match &self.ordering_groups {
+            Some(groups) => groups.estimated_bytes(),
+            None => 0,
+        };
         self.batch
             .estimated_bytes()
-            .checked_add(
-                self.headers
-                    .iter()
-                    .flatten()
-                    .flatten()
-                    .map(|(name, value)| {
-                        let name_len: u64 = name.len().arch_into();
-                        let value_len: u64 = value.len().arch_into();
-                        name_len.checked_add(value_len).assured(BYTES_IN_MEMORY)
-                    })
-                    .try_fold(0_u64, u64::checked_add)
-                    .assured(BYTES_IN_MEMORY),
-            )
+            .checked_add(header_bytes)
             .assured(BYTES_IN_MEMORY)
-            .checked_add(
-                self.sqs_message_groups
-                    .iter()
-                    .map(|group| match group {
-                        Ok(Some(group)) => group.len().arch_into(),
-                        Ok(None) | Err(_) => 0,
-                    })
-                    .try_fold(0_u64, u64::checked_add)
-                    .assured(BYTES_IN_MEMORY),
-            )
+            .checked_add(group_bytes)
             .assured(BYTES_IN_MEMORY)
     }
 
@@ -486,8 +507,9 @@ impl Drop for EmitterBatchBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::test_fixtures::{
-        input_batch, input_batch_with, input_schema, named, sink_context,
+    use crate::runtime::{
+        emitter_ordering_group::EvaluatedOrderingGroups,
+        test_fixtures::{input_batch, input_batch_with, input_schema, named, sink_context},
     };
 
     #[tokio::test]
@@ -624,14 +646,15 @@ mod tests {
     fn publish_batch_rejects_misaligned_groups_and_row_updates() {
         let groups =
             match EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100))
-                .with_sqs_message_groups(Vec::new())
-            {
-                Ok(_) => panic!("SQS groups must stay aligned with source rows"),
+                .with_ordering_groups(OrderingGroups::Evaluated(
+                    EvaluatedOrderingGroups::from_rows([]),
+                )) {
+                Ok(_) => panic!("ordering groups must stay aligned with source rows"),
                 Err(error) => error,
             };
         assert_eq!(
             *groups.current_context(),
-            EmitterRuntimeError::SqsGroupCountMismatch {
+            EmitterRuntimeError::OrderingGroupCountMismatch {
                 group_count: 0,
                 row_count: 1,
             }
@@ -676,6 +699,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn publish_batch_reads_each_row_group_only_where_the_emitter_declares_one() {
+        let undeclared =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        assert_eq!(
+            undeclared
+                .ordering_group(0)
+                .expect("an emitter without a group reads none"),
+            Ok(None)
+        );
+
+        let batch = input_batch();
+        let batch_bytes = batch.estimated_bytes();
+        let evaluated = EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(100))
+            .with_ordering_groups(OrderingGroups::Evaluated(
+                EvaluatedOrderingGroups::from_rows([Ok("tenant-a")]),
+            ))
+            .expect("one group for one row must attach");
+        assert_eq!(
+            evaluated
+                .ordering_group(0)
+                .expect("the row has a group entry"),
+            Ok(Some("tenant-a".to_string()))
+        );
+        let group_bytes: u64 = "tenant-a".len().arch_into();
+        assert_eq!(evaluated.estimated_bytes(), batch_bytes + group_bytes);
+        let error = evaluated
+            .ordering_group(1)
+            .expect_err("a row outside the batch has no group entry");
+        assert_eq!(*error.current_context(), EmitterRuntimeError::EncodeBatch);
+
+        let unavailable =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100))
+                .with_ordering_groups(OrderingGroups::Unavailable(
+                    OrderingGroupError::UnbranchedRecord,
+                ))
+                .expect("a group every row shares attaches to any batch");
+        assert_eq!(
+            unavailable
+                .ordering_group(0)
+                .expect("the row has a group entry"),
+            Err(OrderingGroupError::UnbranchedRecord)
+        );
+        assert_eq!(unavailable.estimated_bytes(), batch_bytes);
+    }
     #[tokio::test]
     async fn publish_batch_ack_helpers_preserve_and_complete_all_roots() {
         let (acks, completion) = AckSet::root();
