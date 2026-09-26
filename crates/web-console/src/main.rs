@@ -21,13 +21,13 @@ use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_wire::{
     AttachDisposition, AttachOutcome, AttachTransactionRequest, CancellationStage, ClientMessage,
     ClientRequest, ClusterObserved, CommandDisposition, CommandOutcome, CommandRequest, Diagnostic,
-    DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved, LeaderRedirect, Leadership,
-    NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView, RowSchema,
-    SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionEndReason,
-    SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
-    SubscribeRequest, SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType,
-    SuggestRequest, TransferAssembly, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome,
-    UnsubscribeRequest, VerifiedFrame,
+    DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved, InspectTransactionRequest,
+    InspectionOutcome, LeaderRedirect, Leadership, NoticeLevel, ReplyBody, RequestCancelled,
+    RequestId, RowBatchView, RowSchema, SelectDomainRequest, ServerEvent, ServerFrame,
+    ServerMessage, ServerNotice, SessionEndReason, SessionLimits, StatementDisposition,
+    StatementOutcome, SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionHandle,
+    SubscriptionOpened, SubscriptionRows, SubscriptionType, SuggestRequest, TransferAssembly,
+    TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame,
     websocket::{ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -53,6 +53,10 @@ use nervix_web_console::graph::{
 use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
+
+mod transaction_inspector;
+
+use transaction_inspector::{InspectorSignals, TransactionInspector};
 
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
 const SUGGESTION_REQUEST_DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
@@ -90,6 +94,7 @@ struct WebConsoleSignals {
     cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<DomainName>>,
     transaction_status: RwSignal<Option<TransactionStatus>>,
+    inspector: InspectorSignals,
     domains: RwSignal<Vec<DomainView>>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
@@ -105,6 +110,7 @@ impl WebConsoleSignals {
     fn clear_authenticated_view(self) {
         self.active_domain.set(None);
         self.transaction_status.set(None);
+        self.inspector.clear();
         self.domains.set(Vec::new());
         self.domain_snapshots.set(BTreeMap::new());
         self.resource_details.set(BTreeMap::new());
@@ -181,6 +187,8 @@ enum ConsoleRequest {
     Suggest(SuggestRequest),
     /// Binds the session's transaction to the connection.
     AttachTransaction(AttachTransactionRequest),
+    /// Reads an impact report without binding the inspected transaction.
+    InspectTransaction(InspectTransactionRequest),
 }
 
 /// Who reads the outcome of a command.
@@ -194,6 +202,21 @@ enum CommandPurpose {
 }
 
 impl ConsoleRequest {
+    fn inspects_transaction(&self) -> bool {
+        match self {
+            Self::InspectTransaction(_) => true,
+            Self::Command { request, .. } => {
+                matches!(parse_client_statement(&request.query), Ok(statement) if statement.inspects_transaction())
+            }
+            Self::ListDomains
+            | Self::SubscriptionStart { .. }
+            | Self::SubscriptionStop { .. }
+            | Self::SelectDomain(_)
+            | Self::Suggest(_)
+            | Self::AttachTransaction(_) => false,
+        }
+    }
+
     /// Whether the request keeps its place in the order the console issued requests: it waits
     /// until the session can serve it and outlives a connection that ended before answering it.
     ///
@@ -206,6 +229,7 @@ impl ConsoleRequest {
             | Self::ListDomains
             | Self::SubscriptionStart { .. }
             | Self::SubscriptionStop { .. } => true,
+            Self::InspectTransaction(_) => true,
             Self::SelectDomain(_) | Self::Suggest(_) | Self::AttachTransaction(_) => false,
         }
     }
@@ -220,6 +244,7 @@ impl ConsoleRequest {
             Self::SelectDomain(request) => ClientRequest::SelectDomain(request.clone()),
             Self::Suggest(request) => ClientRequest::Suggest(request.clone()),
             Self::AttachTransaction(request) => ClientRequest::AttachTransaction(request.clone()),
+            Self::InspectTransaction(request) => ClientRequest::InspectTransaction(request.clone()),
         }
     }
 }
@@ -357,6 +382,7 @@ impl SessionRequests {
             }
             ConsoleRequest::Command { .. }
             | ConsoleRequest::ListDomains
+            | ConsoleRequest::InspectTransaction(_)
             | ConsoleRequest::SubscriptionStart { .. }
             | ConsoleRequest::SubscriptionStop { .. }
             | ConsoleRequest::SelectDomain(_) => {}
@@ -653,6 +679,7 @@ fn App() -> impl IntoView {
     let input = RwSignal::new(String::new());
     let terminal_lines = RwSignal::new(TermLineHistory::default());
     let transaction_status = RwSignal::new(None::<TransactionStatus>);
+    let inspector = InspectorSignals::new();
     let subscription_tabs = RwSignal::new(Vec::<SubscriptionTabView>::new());
     let active_subscription_tab = RwSignal::new(None::<u64>);
     let next_subscription_tab_id = RwSignal::new(1_u64);
@@ -670,6 +697,7 @@ fn App() -> impl IntoView {
         cluster_counters,
         active_domain,
         transaction_status,
+        inspector,
         domains,
         resource_details,
         subscription_tabs,
@@ -829,6 +857,27 @@ fn App() -> impl IntoView {
             // without it with a failed outcome.
             let request_domain = active_domain.get_untracked();
             let transaction = transaction_status.get_untracked();
+            let parsed = parse_client_statement(&command).ok();
+            if let Some(ClientStatement::Server(Statement::DescribeTransaction(describe))) = &parsed
+            {
+                inspector.prepare_describe(describe.request.target.clone());
+            }
+            let is_commit = matches!(parsed, Some(ClientStatement::CommitTransaction));
+            let preview = if is_commit {
+                transaction
+                    .as_ref()
+                    .and_then(|status| inspector.commit_basis(status))
+            } else {
+                None
+            };
+            if is_commit && preview.is_none() {
+                terminal_lines.update(|lines| {
+                    lines.push(TermLine::error(
+                        "Inspect the attached transaction at its current position before COMMIT",
+                    ))
+                });
+                return;
+            }
             let expected_transaction_position = match &transaction {
                 Some(status) if status.lifecycle().is_active() => {
                     Some(status.accepted_operations())
@@ -840,7 +889,7 @@ fn App() -> impl IntoView {
                 domain: request_domain,
                 execution_reference: command_execution_reference(),
                 expected_transaction_position,
-                expected_preview: None,
+                expected_preview: preview,
             };
             let queued = ConsoleRequest::Command {
                 request,
@@ -976,10 +1025,18 @@ fn App() -> impl IntoView {
                     active_domain=active_domain
                     domains=domains
                     run_command=run_command
+                    transaction_status=transaction_status
+                    inspector=inspector
                 />
                 <div class="console-body">
                     <Sidebar active_domain=active_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details web_console_session=web_console_session.clone() run_command=run_command />
                     <section class="main-pane">
+                        <TransactionInspector
+                            inspector=inspector
+                            transaction_status=transaction_status
+                            request_tx=web_console_session.request_tx
+                            run_command=run_command
+                        />
                         <GraphPanel
                             active_domain=active_domain
                             domains=domains
@@ -1334,6 +1391,9 @@ async fn serve_connection(
                     return ConnectionEnd::ConsoleClosed;
                 };
                 let issued = requests.issue(request);
+                if issued.request.inspects_transaction() {
+                    signals.inspector.requested(issued.order.0);
+                }
                 if let Some(message) = requests.accept(issued)
                     && !send_message(&mut socket, &codec, signals, requests, message).await
                 {
@@ -1802,6 +1862,30 @@ fn apply_reply(
         (ConsoleRequest::AttachTransaction(_), ReplyBody::Attach(outcome)) => {
             apply_attach_outcome(signals, requests, outcome)
         }
+        (ConsoleRequest::InspectTransaction(request), ReplyBody::Inspection(outcome)) => {
+            match outcome {
+                InspectionOutcome::Inspected(inspection) => {
+                    signals.inspector.accept(
+                        *inspection,
+                        order.0,
+                        Some(&request.target),
+                        signals.transaction_status.get_untracked().as_ref(),
+                    );
+                    SessionStep::Continue
+                }
+                InspectionOutcome::Rejected { message, .. } => {
+                    signals.inspector.error.set(Some(message));
+                    SessionStep::Continue
+                }
+                InspectionOutcome::NotLeader(redirect) => {
+                    requests.hold_again(IssuedRequest {
+                        order,
+                        request: ConsoleRequest::InspectTransaction(request),
+                    });
+                    redirect_step(signals, &redirect)
+                }
+            }
+        }
         (ConsoleRequest::SubscriptionStart { tab_id, request }, ReplyBody::Subscribe(outcome)) => {
             apply_subscribe_outcome(signals, requests, tab_id, &request.statement, outcome);
             SessionStep::Continue
@@ -1859,7 +1943,7 @@ fn apply_command_outcome(
         return SessionStep::Reattach { transaction_id };
     }
     match purpose {
-        CommandPurpose::Repl => show_command_outcome(signals, &request.query, outcome),
+        CommandPurpose::Repl => show_command_outcome(signals, order, &request.query, outcome),
         CommandPurpose::ResourceDescription { resource } => {
             let detail = ResourceDetailView::from_description(outcome);
             signals.resource_details.update(|details| {
@@ -1872,7 +1956,27 @@ fn apply_command_outcome(
 
 /// Prints the outcome of a REPL command, and makes the domain a completed `CREATE DOMAIN` created
 /// the active one.
-fn show_command_outcome(signals: WebConsoleSignals, query: &str, outcome: CommandOutcome) {
+fn show_command_outcome(
+    signals: WebConsoleSignals,
+    order: IssueOrder,
+    query: &str,
+    mut outcome: CommandOutcome,
+) {
+    if let Some(inspection) = outcome.inspection.take() {
+        signals.inspector.accept(
+            *inspection,
+            order.0,
+            None,
+            signals.transaction_status.get_untracked().as_ref(),
+        );
+    }
+    if let CommandDisposition::PreviewStale { .. } = &outcome.disposition {
+        signals.inspector.requested(order.0);
+        signals.inspector.error.set(Some(
+            "Preview is stale. Refresh the inspection before committing.".to_string(),
+        ));
+        signals.inspector.stale_preview.set(true);
+    }
     if let CommandDisposition::Completed { .. } = outcome.disposition
         && let Some(domain) = first_created_domain_from_query(query)
     {
@@ -2083,6 +2187,7 @@ fn fail_request(
                 .update(|lines| lines.push(TermLine::error(reason)));
         }
         ConsoleRequest::Suggest(_) => signals.suggestions.set(Vec::new()),
+        ConsoleRequest::InspectTransaction(_) => signals.inspector.error.set(Some(reason)),
         ConsoleRequest::AttachTransaction(_) => {
             // Without its transaction attached, the session cannot serve what was held for it.
             signals.transaction_status.set(None);
@@ -2096,6 +2201,7 @@ fn fail_request(
 
 /// Takes the session's transaction as the server reports it, and makes its domain the active one.
 fn adopt_transaction(signals: WebConsoleSignals, status: TransactionStatus) {
+    signals.inspector.retain_finished(&status);
     let domain = status.domain().clone();
     let already_active = signals
         .active_domain
@@ -2637,6 +2743,8 @@ fn Header(
     active_domain: RwSignal<Option<DomainName>>,
     domains: RwSignal<Vec<DomainView>>,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
+    transaction_status: RwSignal<Option<TransactionStatus>>,
+    inspector: InspectorSignals,
 ) -> impl IntoView {
     let theme_open = RwSignal::new(false);
     let selected_domain = move || {
@@ -2657,6 +2765,11 @@ fn Header(
             <span class="crumb-separator">"/"</span>
             <span class="crumb">"console"</span>
             <div class="topbar-status">
+                <Show when=move || transaction_status.get().is_some_and(|status| status.lifecycle().is_active()) fallback=|| ()>
+                    <button class="transaction-indicator" type="button" on:click=move |_| inspector.open_attached()>
+                        "Transaction · Inspect"
+                    </button>
+                </Show>
                 <span class=move || websocket_state.get().pill_class()>
                     {move || websocket_state.get().label()}
                 </span>
@@ -6445,8 +6558,11 @@ mod tests {
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
     };
     use nervix_models::{
-        ClusterNodeName, DomainClockPeriod, DomainClockSkew, ModelName, NodeRef, ResourceName,
-        Timestamp, TransactionPosition,
+        ClusterNodeName, DomainClockPeriod, DomainClockSkew, ImpactPlanningBasis,
+        ImpactReportCompleteness, ModelName, NodeRef, ResourceName, Timestamp,
+        TransactionImpactReport, TransactionInspection, TransactionInspectionRejection,
+        TransactionInspectionTarget, TransactionLifecycle, TransactionPosition,
+        TransactionPreviewIdentity, TransactionStatus,
     };
 
     use super::*;
@@ -6461,6 +6577,7 @@ mod tests {
             cluster_counters: RwSignal::new(ClusterCounters::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
             transaction_status: RwSignal::new(None),
+            inspector: InspectorSignals::new(),
             domains: RwSignal::new(Vec::new()),
             resource_details: RwSignal::new(BTreeMap::new()),
             subscription_tabs: RwSignal::new(vec![SubscriptionTabView {
@@ -6493,6 +6610,184 @@ mod tests {
                 branch: None,
             },
         }
+    }
+
+    fn test_inspection() -> TransactionInspection {
+        let domain = DomainName::parse("tenant").assured("the test domain name is valid");
+        let report = TransactionImpactReport::new(
+            domain.clone(),
+            TransactionPosition::new(0),
+            ImpactPlanningBasis::new([4; 32]),
+            ImpactReportCompleteness::Complete,
+            Vec::new(),
+            Vec::new(),
+        )
+        .assured("an empty test report has no operation-step inconsistencies");
+        let transaction = TransactionStatus::new(
+            "attached".to_string(),
+            domain,
+            TransactionLifecycle::Open,
+            TransactionPosition::new(0),
+            0,
+        )
+        .assured("the test transaction has no applied operations");
+        TransactionInspection {
+            transaction,
+            operation: None,
+            report,
+        }
+    }
+
+    #[test]
+    fn inspection_reply_sets_the_commit_basis_and_rejection_reports_an_error() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let inspection = test_inspection();
+            signals
+                .transaction_status
+                .set(Some(inspection.transaction.clone()));
+            signals.inspector.open_attached();
+            let request = ConsoleRequest::InspectTransaction(InspectTransactionRequest {
+                target: TransactionInspectionTarget::Attached,
+                operation: None,
+            });
+            assert!(request.inspects_transaction());
+            assert!(repl_command("DESCRIBE TRANSACTION;").inspects_transaction());
+            assert!(!repl_command("SHOW DOMAINS;").inspects_transaction());
+            assert!(request.is_ordered());
+            assert!(matches!(
+                request.client_request(),
+                ClientRequest::InspectTransaction(_)
+            ));
+            let mut requests = SessionRequests::new();
+            let issued = requests.issue(request);
+            signals.inspector.requested(issued.order.0);
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: issued,
+                    body: ReplyBody::Inspection(InspectionOutcome::Inspected(Box::new(
+                        inspection.clone(),
+                    ))),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(
+                signals
+                    .inspector
+                    .commit_basis(&inspection.transaction)
+                    .is_some()
+            );
+
+            let rejected = requests.issue(ConsoleRequest::InspectTransaction(
+                InspectTransactionRequest {
+                    target: TransactionInspectionTarget::Attached,
+                    operation: None,
+                },
+            ));
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: rejected,
+                    body: ReplyBody::Inspection(InspectionOutcome::Rejected {
+                        rejection: TransactionInspectionRejection::ReportUnavailable,
+                        message: "report is unavailable".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(
+                signals.inspector.error.get_untracked().as_deref(),
+                Some("report is unavailable")
+            );
+
+            let invalid = requests.issue(ConsoleRequest::InspectTransaction(
+                InspectTransactionRequest {
+                    target: TransactionInspectionTarget::Attached,
+                    operation: None,
+                },
+            ));
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: invalid,
+                    body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                        rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                        field: None,
+                        message: "invalid inspection request".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(
+                signals.inspector.error.get_untracked().as_deref(),
+                Some("invalid inspection request")
+            );
+        });
+    }
+
+    #[test]
+    fn describe_outcome_opens_the_inspector_without_rebinding_the_session() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let inspection = test_inspection();
+            signals
+                .transaction_status
+                .set(Some(inspection.transaction.clone()));
+            signals
+                .inspector
+                .prepare_describe(TransactionInspectionTarget::Attached);
+            signals.inspector.requested(1);
+            let mut outcome = completed_outcome("transaction described");
+            outcome.inspection = Some(Box::new(inspection.clone()));
+            show_command_outcome(signals, IssueOrder(1), "DESCRIBE TRANSACTION;", outcome);
+            assert!(signals.inspector.open.get_untracked());
+            assert_eq!(
+                signals
+                    .inspector
+                    .commit_basis(&inspection.transaction)
+                    .map(|basis| basis.position),
+                Some(inspection.report.position())
+            );
+        });
+    }
+
+    #[test]
+    fn stale_preview_outcome_requests_a_fresh_inspection() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let inspection = test_inspection();
+            signals
+                .transaction_status
+                .set(Some(inspection.transaction.clone()));
+            signals.inspector.open_attached();
+            let preview = TransactionPreviewIdentity {
+                transaction_id: inspection.transaction.transaction_id().to_string(),
+                position: inspection.report.position(),
+                planning_basis: inspection.report.planning_basis(),
+            };
+            let mut outcome = completed_outcome("preview changed");
+            outcome.disposition = CommandDisposition::PreviewStale {
+                expected: preview.clone(),
+                current: preview,
+            };
+            show_command_outcome(signals, IssueOrder(1), "COMMIT;", outcome);
+            assert!(signals.inspector.stale_preview.get_untracked());
+            assert!(
+                signals
+                    .inspector
+                    .error
+                    .get_untracked()
+                    .is_some_and(|message| message.contains("Refresh"))
+            );
+            assert_eq!(
+                signals.transaction_status.get_untracked(),
+                Some(inspection.transaction)
+            );
+        });
     }
 
     #[test]

@@ -181,6 +181,34 @@ while an accepted commit continues on the leader without the browser. See
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`
 empties the scrollback.
 
+## Inspecting a transaction
+
+![The transaction inspector showing ordered operations and the affected graph](images/console-transaction-inspector.png)
+
+Select **Transaction · Inspect** in the top bar while a transaction is active. The inspector reads
+the typed impact report without attaching another transaction or changing the session domain.
+Use **Discover transactions** to list retained transactions in the REPL, then enter a transaction
+ID to inspect one. A `DESCRIBE TRANSACTION` command also opens its typed result in the inspector;
+the REPL still prints the server's text or JSON rendering.
+
+The outline groups accepted operations by their execution steps. Selecting an operation shows
+its own planned contribution; selecting its step shows the effective pause and effects of the
+atomic step. **Whole transaction** shows the union of the steps. Switch between **Before**,
+**Changes**, and **After** without moving graph items, or between **Planned** and **Actual** to
+review recorded progress. Search frames matching names and kinds; **FIT**, zoom, and drag control
+the viewport. Select a node or relation for its before/after presence, roles, and contributing
+operation numbers. The **Relations** list offers labeled buttons for keyboard selection of graph
+edges, including parallel data and materialized-state paths. Role marks and the resource card
+shape supplement the graph colors.
+
+The summary names the transaction, domain, state, accepted and applied counts, completeness,
+freshness, aggregate quiesce level, planning basis, relocations, rebuilds, and state resets.
+An incomplete report shows its diagnostics. A stale preview must be refreshed before retrying
+`COMMIT`. The console sends the inspected whole-transaction preview identity with `COMMIT`, even
+when an operation is selected. Inspecting another transaction leaves the attached transaction's
+commit basis intact. Retained reports keep their own graph geometry when the live execution graph
+changes.
+
 ## Uploading Resources
 
 ![The resource dialog after uploading a version](images/console-resource-dialog.png)

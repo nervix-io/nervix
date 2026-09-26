@@ -321,6 +321,8 @@ struct ScenarioWorld {
     formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
     browser_page: Option<playwright_rs::Page>,
+    /// Canvas positions and routes captured before changing an inspector's presentation view.
+    inspector_geometry: Option<String>,
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
@@ -12239,6 +12241,21 @@ async fn then_selector_does_not_exist(world: &mut ScenarioWorld, selector: Strin
     }
 }
 
+#[then(expr = "selector {string} exists")]
+async fn then_selector_exists(world: &mut ScenarioWorld, selector: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let script = format!(
+        r#"() => document.querySelector({selector}) ? 'OK' : 'selector is absent'"#,
+        selector = serde_json::to_string(&selector)
+            .assured("the test selector serializes as JavaScript string text")
+    );
+    assert_graph_probe(page, &script, &format!("selector '{selector}' to exist")).await;
+}
+
 #[then(expr = "selector {string} eventually disappears")]
 async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector: String) {
     let page = world
@@ -13122,6 +13139,140 @@ async fn then_graph_geometry_does_not_change(world: &mut ScenarioWorld) {
         first, second,
         "statistics updates must not move the drawing"
     );
+}
+
+const INSPECTOR_GEOMETRY_SCRIPT: &str = r#"
+    () => JSON.stringify({
+        items: Array.from(document.querySelectorAll('.transaction-inspector .inspector-item'))
+            .map((item) => [item.dataset.kind, item.dataset.name, item.style.left, item.style.top]),
+        relations: Array.from(document.querySelectorAll('.transaction-inspector .inspector-edge'))
+            .map((edge) => [edge.dataset.source, edge.dataset.target, edge.dataset.relation, edge.getAttribute('d')])
+    })
+"#;
+
+#[when("the inspector geometry is remembered")]
+async fn when_inspector_geometry_is_remembered(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    world.inspector_geometry = Some(
+        page.evaluate::<(), String>(INSPECTOR_GEOMETRY_SCRIPT, None::<&()>)
+            .await
+            .expect("inspector geometry must be readable"),
+    );
+}
+
+#[then("the inspector geometry matches the remembered drawing")]
+async fn then_inspector_geometry_matches(world: &mut ScenarioWorld) {
+    let expected = world
+        .inspector_geometry
+        .as_ref()
+        .expect("inspector geometry must be remembered first");
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let actual = page
+        .evaluate::<(), String>(INSPECTOR_GEOMETRY_SCRIPT, None::<&()>)
+        .await
+        .expect("inspector geometry must be readable");
+    assert_eq!(
+        actual, *expected,
+        "switching impact views must keep geometry stable"
+    );
+}
+
+#[then("the inspector drawing fits its viewport")]
+async fn then_inspector_drawing_fits(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let script = r#"
+        () => {
+            const stage = document.querySelector('.inspector-stage');
+            const canvas = document.querySelector('.inspector-canvas');
+            if (!stage || !canvas) return 'inspector canvas is absent';
+            const frame = stage.getBoundingClientRect();
+            const drawing = canvas.getBoundingClientRect();
+            const margin = 3;
+            if (drawing.left < frame.left - margin || drawing.top < frame.top - margin ||
+                drawing.right > frame.right + margin || drawing.bottom > frame.bottom + margin) {
+                return `canvas ${drawing.left},${drawing.top},${drawing.right},${drawing.bottom} exceeds stage ${frame.left},${frame.top},${frame.right},${frame.bottom}`;
+            }
+            return 'OK';
+        }
+    "#;
+    assert_graph_probe(
+        page,
+        script,
+        "the impact canvas including any domain outline to fit",
+    )
+    .await;
+}
+
+#[then(expr = "inspector search result {string} is visible in its viewport")]
+async fn then_inspector_search_result_is_visible(world: &mut ScenarioWorld, name: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let script = format!(
+        r#"
+        () => {{
+            const stage = document.querySelector('.inspector-stage');
+            const item = Array.from(document.querySelectorAll('.transaction-inspector .inspector-item'))
+                .find((item) => item.dataset.name === {name});
+            if (!stage || !item) return 'inspector search result is absent';
+            const frame = stage.getBoundingClientRect();
+            const result = item.getBoundingClientRect();
+            if (result.left < frame.left || result.top < frame.top ||
+                result.right > frame.right || result.bottom > frame.bottom) {{
+                return 'search result ' + [result.left, result.top, result.right, result.bottom] +
+                    ' is outside inspector viewport ' + [frame.left, frame.top, frame.right, frame.bottom];
+            }}
+            return 'OK';
+        }}
+        "#,
+        name = serde_json::to_string(&name).assured("a test name serializes as JSON text"),
+    );
+    assert_graph_probe(page, &script, "the inspector search result to be framed").await;
+}
+
+#[then(
+    expr = "inspector data and materialized-state routes from {string} to {string} are distinct"
+)]
+async fn then_inspector_parallel_relations_are_distinct(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let script = format!(
+        r#"
+        () => {{
+            const edges = Array.from(document.querySelectorAll('.transaction-inspector .inspector-edge'))
+                .filter((edge) => edge.dataset.source === {source} && edge.dataset.target === {target});
+            const data = edges.find((edge) => edge.dataset.relation === 'Topology(Dataflow)');
+            const state = edges.find((edge) => edge.dataset.relation === 'Topology(MaterializedState)');
+            if (!data || !state) return 'parallel relations are absent';
+            if (data.getAttribute('d') === state.getAttribute('d')) return 'parallel relations share a route';
+            return 'OK';
+        }}
+        "#,
+        source = serde_json::to_string(&source).assured("a test source serializes as JSON text"),
+        target = serde_json::to_string(&target).assured("a test target serializes as JSON text"),
+    );
+    assert_graph_probe(
+        page,
+        &script,
+        "parallel inspector relations to use separate routes",
+    )
+    .await;
 }
 
 /// Poll a probe that returns "OK" or a description of what is wrong.

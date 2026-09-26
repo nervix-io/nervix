@@ -73,12 +73,12 @@ Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statement
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued
 statement must select that same domain. Transactions and commit progress are replicated and
 resumable, but their content is deliberately limited to that domain's model mutations, domain
-configuration/lifecycle, and `CREATE RESOURCE`. Keep `CREATE DOMAIN`, `CREATE USER`, read-only
+configuration/lifecycle, and `CREATE RESOURCE`. Keep `CREATE DOMAIN`, `CREATE USER`, other read-only
 statements, subscriptions, `USE`, resource uploads, and node administration outside the
 transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
-`COMMIT`; it is the one read allowed while a transaction is open, is sent on its own, and neither
+`COMMIT`. These two reads are allowed while a transaction is open, are sent on their own, and neither
 queues content nor shifts operation numbers. Read `NSPL Overview` for its forms and `Control Plane`
 → `Inspecting A Transaction` for what each transaction state reports. Queue admission preflights each statement against the replicated prefix without
 applying effects. Consecutive model mutations form one atomic run and report the run's effective

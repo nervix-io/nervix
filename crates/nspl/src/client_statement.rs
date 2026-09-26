@@ -79,6 +79,12 @@ impl ClientStatement {
     pub fn inspects_transaction(&self) -> bool {
         matches!(self, Self::Server(Statement::DescribeTransaction(_)))
     }
+
+    /// Transaction catalog reads run beside an attached transaction without taking a queue
+    /// position or changing its binding.
+    pub fn reads_transaction_state(&self) -> bool {
+        self.inspects_transaction() || matches!(self, Self::Server(Statement::ShowTransactions(_)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -341,7 +341,7 @@ Feature: NSPL transactions
       """
     Then the last command error contains
       """
-      DESCRIBE TRANSACTION must be executed separately
+      DESCRIBE TRANSACTION and SHOW TRANSACTIONS must be executed separately
       """
     When client "owner" fails to execute these NSPL commands
       """
