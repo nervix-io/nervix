@@ -2494,7 +2494,10 @@ async fn next_event_calls_return_session_closed_when_channels_are_closed() {
 #[tokio::test]
 async fn suggest_returns_session_closed_when_request_channel_is_closed() {
     let client = test_client("tenant_a");
-    let error = client.suggest("CREATE ", 7).await.expect_err("must fail");
+    let error = client
+        .suggest("CREATE ", 7, 64, None)
+        .await
+        .expect_err("must fail");
     assert!(matches!(error, ClientError::SessionClosed));
 }
 
@@ -2502,7 +2505,10 @@ async fn suggest_returns_session_closed_when_request_channel_is_closed() {
 #[tokio::test]
 async fn suggest_refuses_a_cursor_inside_a_character() {
     let client = test_client("tenant_a");
-    let error = client.suggest("é", 1).await.expect_err("must fail");
+    let error = client
+        .suggest("é", 1, 64, None)
+        .await
+        .expect_err("must fail");
     assert!(matches!(
         error,
         ClientError::InvalidCursor {

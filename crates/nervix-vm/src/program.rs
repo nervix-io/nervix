@@ -15,7 +15,7 @@ use std::{
 
 use arrow_schema::DataType;
 use meticulous::OptionExt as _;
-use strum::{AsRefStr, EnumString, IntoStaticStr, VariantNames};
+use strum::{AsRefStr, EnumString, IntoEnumIterator as _, IntoStaticStr, VariantNames};
 
 pub use crate::datetime::{DatetimeFormat, DatetimeParser, Zone};
 use crate::json::JsonExtraction;
@@ -457,7 +457,7 @@ impl PartialEq for Expr {
 
 impl Eq for Expr {}
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::EnumIter)]
 pub enum FunctionName {
     Now,
     UuidV4,
@@ -578,14 +578,18 @@ pub enum FunctionName {
     RegexpReplace,
     RegexpSubstr,
     RegexpExtract,
+    #[strum(disabled)]
     Datetime(DatetimeFunction),
     LeakSensitive,
     LookupHashMap,
     ReadHeader,
     ReadHeaders,
     WriteHeader,
+    #[strum(disabled)]
     WindowAggregate(WindowAggregateInvocation),
+    #[strum(disabled)]
     Udf(String),
+    #[strum(disabled)]
     Unknown(String),
 }
 
@@ -634,7 +638,18 @@ impl DatetimeFunction {
 }
 
 /// The name of a datetime builtin, before its constant arguments are read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, IntoStaticStr, strum::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    EnumString,
+    IntoStaticStr,
+    strum::Display,
+    strum::EnumIter,
+)]
 #[strum(ascii_case_insensitive, serialize_all = "snake_case")]
 pub enum DatetimeFunctionName {
     DatePart,
@@ -993,6 +1008,20 @@ impl WindowAggregateFunction {
 }
 
 impl FunctionName {
+    /// Spellings of scalar builtins available to an ordinary route expression. Injected calls
+    /// and header writes have separate owners and are offered only by those contexts.
+    pub fn ordinary_completion_names() -> Vec<String> {
+        let mut names = Self::iter()
+            .filter(|function| !function.is_injected() && *function != Self::WriteHeader)
+            .map(|function| function.as_str().to_string())
+            .collect::<Vec<_>>();
+        names.extend(DatetimeFunctionName::iter().map(|function| function.to_string()));
+        names.extend(["ceiling", "power", "substring"].map(str::to_string));
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Whether a call to this function is answered by an injected function outside the VM rather
     /// than by a builtin kernel: a header read, a window aggregate or a UDF.
     pub const fn is_injected(&self) -> bool {
@@ -1345,4 +1374,20 @@ pub enum BinaryOp {
 
 pub(crate) fn spanned<T>(inner: T, span: Span) -> SpannedNode<T> {
     SpannedNode { inner, span }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::FunctionName;
+
+    #[test]
+    fn ordinary_builtin_catalog_excludes_injected_and_header_mutation_calls() {
+        let names = FunctionName::ordinary_completion_names();
+        assert!(names.contains(&"coalesce".to_string()));
+        assert!(names.contains(&"date_add".to_string()));
+        assert!(names.contains(&"ceiling".to_string()));
+        assert!(!names.contains(&"read_header".to_string()));
+        assert!(!names.contains(&"write_header".to_string()));
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+    }
 }

@@ -115,6 +115,8 @@ pub enum ClientError {
     NoActiveDomain,
     #[error("cursor {cursor} is not a character boundary of a {length}-byte input")]
     InvalidCursor { cursor: usize, length: usize },
+    #[error("completion page size {size} must be between 1 and 100")]
+    InvalidCompletionPageSize { size: u16 },
     #[error("'{name}' is not a valid resource name")]
     InvalidResourceName {
         name: String,

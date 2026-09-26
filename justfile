@@ -462,8 +462,8 @@ test-coverage: tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets --all-features --workspace \
         "${workspace_exclusions[@]}"
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-cli") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
@@ -506,8 +506,8 @@ test-coverage-clients: tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --bins \
         --package nervix-web-console --package nervix-cli
-    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-cli") }} \
-        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
     install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
         {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
@@ -523,6 +523,15 @@ test-coverage-clients: tests-deps
 coverage-clients-report:
     cargo llvm-cov report --package nervix-cli --package nervix-web-console \
         --package nervix-server --lcov --output-path lcov.info
+
+# Build the standalone CLI with the same coverage flags as its binary unit tests. Cargo's
+# all-targets test pass alone leaves only the test executable, which public scenarios do not run.
+coverage-cli-binary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source <(cargo llvm-cov show-env --sh 2>/dev/null)
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+        cargo build --package nervix-cli --bin nervix-cli
 
 coverage-clients-units:
     cargo llvm-cov --no-report --bins \

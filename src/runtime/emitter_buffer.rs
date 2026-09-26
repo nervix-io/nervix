@@ -1,8 +1,8 @@
 //! The batches an emitter holds between receiving and publishing them.
 //!
 //! Layer: data plane.
-//! - **Owns.** The emitter's buffer of released batches, their message and byte accounting, the
-//!   delivery state of every row they carry, and the flush cadence that releases them.
+//! - **Owns.** The emitter's buffer of released batches with their source relay and branch,
+//!   message and byte accounting, delivery state of every row, and flush cadence.
 //! - **Depends on.** Relay batches and their acknowledgements, the emitter's flush policy, and the
 //!   domain clock its cadence is resolved against.
 //! - **Must not know.** Which connector publishes the batches, how their rows are encoded or
@@ -59,6 +59,9 @@ impl Default for EmitterBufferedMessages {
 
 #[derive(Clone)]
 pub(super) struct EmitterPublishBatch {
+    /// A relay has one fixed named branch declaration, so this name and `batch.key` together
+    /// identify the exact source branch even when another relay has an equal concrete key.
+    pub(super) source_relay: RelayName,
     pub(super) batch: RelayRecordBatch,
     pub(super) execution_now: Timestamp,
     headers: Option<Vec<EmitterHeaders>>,
@@ -74,9 +77,14 @@ const BYTES_IN_MEMORY: &str =
     "every term counts bytes of a value this node already holds in memory";
 
 impl EmitterPublishBatch {
-    pub(super) fn from_batch(batch: RelayRecordBatch, execution_now: Timestamp) -> Self {
+    pub(super) fn from_input(
+        source_relay: RelayName,
+        batch: RelayRecordBatch,
+        execution_now: Timestamp,
+    ) -> Self {
         let row_count = batch.batch.batch().num_rows();
         Self {
+            source_relay,
             batch,
             execution_now,
             headers: None,
@@ -86,6 +94,7 @@ impl EmitterPublishBatch {
     }
 
     pub(super) fn new(
+        source_relay: RelayName,
         batch: RelayRecordBatch,
         headers: Option<Vec<EmitterHeaders>>,
         execution_now: Timestamp,
@@ -100,12 +109,23 @@ impl EmitterPublishBatch {
             }));
         }
         Ok(Self {
+            source_relay,
             batch,
             execution_now,
             headers,
             ordering_groups: None,
             delivered: vec![false; row_count],
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_batch(batch: RelayRecordBatch, execution_now: Timestamp) -> Self {
+        Self::from_input(
+            RelayName::parse("test_relay")
+                .assured("the fixed test relay name satisfies the name grammar"),
+            batch,
+            execution_now,
+        )
     }
 
     /// This batch with the ordering group of each of its rows.
@@ -613,6 +633,7 @@ mod tests {
 
         let headers = vec![vec![("route".to_string(), "fast".to_string())]];
         let with_headers = EmitterPublishBatch::new(
+            named("test_relay"),
             batch.clone(),
             Some(headers.clone()),
             Timestamp::from_unix_nanos(100),
@@ -626,6 +647,7 @@ mod tests {
         );
 
         let error = match EmitterPublishBatch::new(
+            named("test_relay"),
             batch,
             Some(Vec::new()),
             Timestamp::from_unix_nanos(100),
@@ -809,6 +831,7 @@ mod tests {
         )
         .expect("valid multi-row emitter input batch");
         let second = EmitterPublishBatch::new(
+            named("test_relay"),
             second_batch,
             Some(vec![
                 vec![("name".to_string(), "value".to_string())],

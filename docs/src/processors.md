@@ -591,6 +591,9 @@ deadline expiry backstop, so a failed control-plane operation cannot leave gener
 
 ## Message errors
 
+[Errors And Diagnostics](./errors-and-diagnostics.md) owns the typed failure and structured
+message-error model; this section defines the route behavior and available expressions.
+
 `ON MESSAGE ERROR` terminates each route. `SEND TO` constructs an error relay record with ordered
 `SET` assignments:
 

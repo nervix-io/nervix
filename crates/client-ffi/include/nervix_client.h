@@ -56,6 +56,7 @@ typedef struct nx_schema nx_schema;
 typedef struct nx_event nx_event;
 typedef struct nx_cancel nx_cancel;
 typedef struct nx_error nx_error;
+typedef struct nx_suggestions nx_suggestions;
 
 /* What kind of failure an `nx_error` reports. */
 typedef enum nx_error_kind {
@@ -96,6 +97,18 @@ typedef enum nx_disposition {
     NX_DISPOSITION_EXECUTION_REFERENCE_EXPIRED = 8,
     NX_DISPOSITION_PREVIEW_STALE = 9
 } nx_disposition;
+
+typedef enum nx_completion_status {
+    NX_COMPLETION_READY = 1,
+    NX_COMPLETION_MISSING_CONTEXT = 2,
+    NX_COMPLETION_STALE_CONTEXT = 3,
+    NX_COMPLETION_LOOKUP_FAILED = 4
+} nx_completion_status;
+
+typedef enum nx_completion_kind {
+    NX_COMPLETION_TEXT = 1,
+    NX_COMPLETION_LOCAL_DIRECTORY_LOOKUP = 2
+} nx_completion_kind;
 
 /* The type of a schema field. List fields report their shape; their values are read from the
    frame with a FlatBuffers reader. */
@@ -195,6 +208,25 @@ nx_error *nx_session_execute(nx_session *session, const nx_execution *execution,
 
 /* Waits for the next event of any subscription the session holds. */
 nx_error *nx_session_next_event(nx_session *session, const nx_cancel *cancel, nx_event **out);
+
+/* Reads one bounded completion page for the full input at a UTF-8 byte cursor. `page_size` is
+   1..100. Pass a returned continuation to read the next page; NULL starts a new search. */
+nx_error *nx_session_suggest(const nx_session *session, const uint8_t *input, size_t input_len,
+                             size_t cursor, uint16_t page_size, const uint8_t *continuation,
+                             size_t continuation_len, const nx_cancel *cancel,
+                             nx_suggestions **out);
+
+/* Each candidate's edit range addresses the input passed to nx_session_suggest. Borrowed text
+   pointers remain valid until nx_suggestions_free. A missing continuation returns false. */
+nx_completion_status nx_suggestions_status(const nx_suggestions *suggestions);
+size_t nx_suggestions_count(const nx_suggestions *suggestions);
+nx_error *nx_suggestions_at(const nx_suggestions *suggestions, size_t index,
+                             nx_completion_kind *kind, const uint8_t **value,
+                             size_t *value_len, uint32_t *start, uint32_t *end,
+                             const uint8_t **replacement, size_t *replacement_len);
+bool nx_suggestions_continuation(const nx_suggestions *suggestions,
+                                  const uint8_t **continuation, size_t *continuation_len);
+void nx_suggestions_free(nx_suggestions *suggestions);
 
 /* ---- Outcomes ----------------------------------------------------------------------------- */
 

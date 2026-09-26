@@ -85,6 +85,10 @@ retain their connector-specific semantics. Other source families do not offer he
 `read_header` and `read_headers` are validated against those capabilities; header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior.
+The session completion resolver uses the same vocabulary source capability before the full
+ingestor is parsed, so it offers those functions only for sources that can read headers. Its
+emitter `INVOKE` completion similarly uses the vocabulary sink capability to offer `write_header`
+only for sinks that can write headers. Runtime validation remains authoritative.
 
 The host runs three source loop families, with a listener using the broker loop:
 
@@ -146,6 +150,15 @@ operation and its completion point. A receiver-requested delay can extend, but c
 the host's retry backoff. `finish` lets a transport empty a client-side queue within the remaining
 stop deadline; Kafka uses it. A sink may keep its client after a publish failure when reopening it
 would discard staged work or a persistent session.
+
+For a record sink using the emitter `BATCH` clause, the host selects rows from successive
+Arc-backed Arrow carriers released by one flush. It retains each carrier's source relay, exact
+branch key, execution time and original batch and row position. The host prepares members in
+arrival order and seals a payload when the source relay, branch, key, ordered headers, ordering
+group or codec container metadata changes. The codec encodes each candidate under `MAX SIZE`, and
+the host subdivides a candidate that does not fit; Arrow memory accounting still belongs to
+`FLUSH`. The connector sees one encoded record per completed payload and returns its outcome under
+the first member's position. The host maps that outcome back to every member's original position.
 
 For a sink that stages writes, the lifecycle exposes a domain or physical commit deadline,
 staged-message count, pending ACKs, and a commit operation. The host includes that deadline in

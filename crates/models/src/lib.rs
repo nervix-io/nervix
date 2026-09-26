@@ -17,6 +17,7 @@
 mod canonical;
 mod cluster_node;
 mod command;
+mod completion;
 mod domain_clock;
 mod emitter_batch;
 mod expression;
@@ -51,6 +52,7 @@ pub use command::{
     CommandExecutionReference, CommandExecutionReferenceError,
     CommandExecutionReferenceTimestampError,
 };
+pub use completion::{BuiltinFunctionScope, SemanticReference};
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
     DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,
@@ -161,7 +163,7 @@ pub use statement::{
     DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
     DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
     DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint,
-    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink,
+    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink, EmitSinkKind,
     EmitterAckWindow, EmitterBatchContractError, EmitterBody, EmitterPublishingMode,
     EndpointIngestMode, EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry,
     GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, IcebergRestConfigEntry,
@@ -169,29 +171,29 @@ pub use statement::{
     InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
     InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
     InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow,
-    IngestSource, IngestTimestampSource, InputCollectPolicy, InspectionFormat, KafkaConfigEntry,
-    KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery, MaterializedRelayState,
-    MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry, MongoDbConflictAction,
-    MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos, MqttSession, MySqlConfigEntry,
-    MySqlConflictAction, MySqlValueMapping, NatsConfigEntry, NatsIngestMode,
-    OtelAggregationTemporality, OtelConfigEntry, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
-    OtelValueMapping, OwnershipStateComponent, OwnershipStateRecoveryOutcome, OwnershipStateReset,
-    OwnershipStateResetCause, OwnershipTransition, PlacementGroupSchedule, PlacementPolicy,
-    PostgresConfigEntry, PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry,
-    PulsarIngestMode, RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry,
-    RedisPubSubIngestMode, RelayBranching, Relocation, RelocationMember,
-    RelocationPreferenceOverride, RelocationPreferenceStrategy, RelocationSelection,
-    ResolvedBranching, ResolvedCodecWireFormat, RetryPolicy, S3ConfigEntry, ScheduledModel,
-    ScheduledNode, ScheduledNodes, SentryConfigEntry, ShowClusterStatus, ShowCreate,
-    ShowPlacements, ShowRelayMaterializedState, ShowTransactions, ShowUdfs,
-    SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
-    SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup, SqsIngestMode,
-    StartDomain, Statement, StopDomain, SubscriptionBinding, SubscriptionDeliveryBehavior,
-    SubscriptionLiteral, SyslogConfigEntry, UncordonNode, UniquelyKindedModel, UploadResource,
-    VhostTlsResource, WasmProcessorLimits, WasmRejectedStatePolicy, WebsocketsConfigEntry,
-    WebsocketsIngestMode, WindowBound, WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry,
-    ZeroMqIngestMode, default_relay_buffer,
+    IngestSource, IngestSourceKind, IngestTimestampSource, InputCollectPolicy, InspectionFormat,
+    KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
+    MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry,
+    MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos,
+    MqttSession, MySqlConfigEntry, MySqlConflictAction, MySqlValueMapping, NatsConfigEntry,
+    NatsIngestMode, OtelAggregationTemporality, OtelConfigEntry, OtelMetric, OtelMetricKind,
+    OtelScope, OtelSignal, OtelValueMapping, OwnershipStateComponent,
+    OwnershipStateRecoveryOutcome, OwnershipStateReset, OwnershipStateResetCause,
+    OwnershipTransition, PlacementGroupSchedule, PlacementPolicy, PostgresConfigEntry,
+    PostgresConflictAction, PostgresValueMapping, ProcessorInputWhere, ProcessorInputs,
+    ProcessorOutput, ProcessorOutputs, PrometheusConfigEntry, PulsarConfigEntry, PulsarIngestMode,
+    RabbitMqConfigEntry, RabbitMqIngestMode, RedisConfigEntry, RedisPubSubIngestMode,
+    RelayBranching, Relocation, RelocationMember, RelocationPreferenceOverride,
+    RelocationPreferenceStrategy, RelocationSelection, ResolvedBranching, ResolvedCodecWireFormat,
+    RetryPolicy, S3ConfigEntry, ScheduledModel, ScheduledNode, ScheduledNodes, SentryConfigEntry,
+    ShowClusterStatus, ShowCreate, ShowPlacements, ShowRelayMaterializedState, ShowTransactions,
+    ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
+    SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
+    SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
+    WasmRejectedStatePolicy, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
+    WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};

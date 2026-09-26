@@ -12,7 +12,7 @@ use meticulous::OptionExt as _;
 use nervix_client_wire::{
     NoticeLevel, RowConformanceError, RowSchema, ServerNotice, SubscriptionDeliveryLost,
     SubscriptionEnded, SubscriptionHandle, SubscriptionRows, SubscriptionRowsSkipped, Suggestion,
-    SuggestionKind,
+    SuggestionKind, SuggestionStatus,
 };
 use nervix_models::{RelayName, SubscriptionDeliveryBehavior};
 use triomphe::Arc;
@@ -110,6 +110,14 @@ impl ServerEvent {
 pub struct AutocompleteSuggestion {
     pub value: String,
     pub kind: SuggestionKind,
+    pub edit: crate::wire::TextEdit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutocompleteOutcome {
+    pub status: SuggestionStatus,
+    pub suggestions: Vec<AutocompleteSuggestion>,
+    pub continuation: Option<String>,
 }
 
 impl From<Suggestion> for AutocompleteSuggestion {
@@ -117,6 +125,7 @@ impl From<Suggestion> for AutocompleteSuggestion {
         Self {
             value: suggestion.value,
             kind: suggestion.kind,
+            edit: suggestion.edit,
         }
     }
 }

@@ -108,6 +108,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   discovery and topology, wire contracts and exchange forms, pool and quota isolation, limits and
   deadlines, relay delivery and acknowledgements, application health, consensus and bulk traffic,
   connection lifecycle, failure semantics, and observability.
+- [Errors And Diagnostics](docs/src/errors-and-diagnostics.md) is the authoritative architecture
+  reference for typed error ownership, propagation, ordinary outcomes versus failures, validation
+  and planning diagnostics, runtime message errors, cross-node failure classification, public
+  diagnostics, sensitivity, recovery and panic classes, and enforcement. Any change to error types,
+  error or diagnostic propagation, failure classification, or reporting at a layer or public
+  boundary must keep that chapter current in the same change.
 - [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md) is the
   authoritative architecture reference for Raft persistence and catch-up. Any change to consensus
   durability, replication pacing, log reading or retention, snapshot storage or transfer, or the

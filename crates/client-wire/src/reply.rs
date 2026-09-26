@@ -21,15 +21,81 @@ pub enum SuggestionKind {
     LocalDirectoryLookup,
 }
 
+/// An edit against the exact source of the matching suggestion request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEdit {
+    /// Start and end are UTF-8 byte offsets on character boundaries.
+    pub start: u32,
+    pub end: u32,
+    pub replacement: String,
+}
+
+impl TextEdit {
+    fn encode<'fbb>(
+        &self,
+        encoder: &mut Encoder<'fbb>,
+    ) -> Result<WIPOffset<wire::TextEdit<'fbb>>, Report<WireEncodeError>> {
+        if self.end < self.start {
+            return Err(Report::new(WireEncodeError::InvalidValue {
+                field: "TextEdit",
+                kind: "UTF-8 byte range",
+            }));
+        }
+        let replacement = encoder.text("TextEdit.replacement", &self.replacement)?;
+        Ok(wire::TextEdit::create(
+            encoder.fbb(),
+            &wire::TextEditArgs {
+                start: self.start,
+                end: self.end,
+                replacement: Some(replacement),
+            },
+        ))
+    }
+
+    fn decode(
+        decoder: Decoder<'_>,
+        edit: wire::TextEdit<'_>,
+    ) -> Result<Self, Report<WireDecodeError>> {
+        if edit.end() < edit.start() {
+            return Err(Report::new(WireDecodeError::InvalidValue {
+                field: "TextEdit",
+                kind: "UTF-8 byte range",
+            }));
+        }
+        let replacement = decoder.text("TextEdit.replacement", edit.replacement())?;
+        Ok(Self {
+            start: edit.start(),
+            end: edit.end(),
+            replacement,
+        })
+    }
+}
+
 wire_enum!(ALL_SUGGESTION_KINDS: SuggestionKind => wire::SuggestionKind {
     Text,
     LocalDirectoryLookup,
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SuggestionStatus {
+    Ready,
+    MissingContext,
+    StaleContext,
+    LookupFailed,
+}
+
+wire_enum!(ALL_SUGGESTION_STATUSES: SuggestionStatus => wire::SuggestionStatus {
+    Ready,
+    MissingContext,
+    StaleContext,
+    LookupFailed,
 });
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Suggestion {
     pub value: String,
     pub kind: SuggestionKind,
+    pub edit: TextEdit,
 }
 
 impl Suggestion {
@@ -38,11 +104,13 @@ impl Suggestion {
         encoder: &mut Encoder<'fbb>,
     ) -> Result<WIPOffset<wire::Suggestion<'fbb>>, Report<WireEncodeError>> {
         let value = encoder.text("Suggestion.value", &self.value)?;
+        let edit = self.edit.encode(encoder)?;
         Ok(wire::Suggestion::create(
             encoder.fbb(),
             &wire::SuggestionArgs {
                 value: Some(value),
                 kind: Some(self.kind.into()),
+                edit: Some(edit),
             },
         ))
     }
@@ -53,14 +121,17 @@ impl Suggestion {
     ) -> Result<Self, Report<WireDecodeError>> {
         let value = decoder.text("Suggestion.value", suggestion.value())?;
         let kind = decoder.required_enumeration("Suggestion.kind", suggestion.kind())?;
-        Ok(Self { value, kind })
+        let edit = TextEdit::decode(decoder, suggestion.edit())?;
+        Ok(Self { value, kind, edit })
     }
 }
 
 /// The completions offered at a cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuggestOutcome {
+    pub status: SuggestionStatus,
     pub suggestions: Vec<Suggestion>,
+    pub continuation: Option<String>,
 }
 
 impl SuggestOutcome {
@@ -73,10 +144,14 @@ impl SuggestOutcome {
             &self.suggestions,
             Suggestion::encode,
         )?;
+        let continuation =
+            encoder.optional_text("SuggestOutcome.continuation", self.continuation.as_deref())?;
         let outcome = wire::SuggestOutcome::create(
             encoder.fbb(),
             &wire::SuggestOutcomeArgs {
+                status: Some(self.status.into()),
                 suggestions: Some(suggestions),
+                continuation,
             },
         );
         Ok(EncodedUnion::new(wire::ReplyBody::SuggestOutcome, outcome))
@@ -91,7 +166,14 @@ impl SuggestOutcome {
             outcome.suggestions(),
             |suggestion| Suggestion::decode(decoder, suggestion),
         )?;
-        Ok(Self { suggestions })
+        let status = decoder.required_enumeration("SuggestOutcome.status", outcome.status())?;
+        let continuation =
+            decoder.optional_text("SuggestOutcome.continuation", outcome.continuation())?;
+        Ok(Self {
+            status,
+            suggestions,
+            continuation,
+        })
     }
 }
 

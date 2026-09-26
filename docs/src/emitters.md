@@ -277,14 +277,13 @@ single `batch` key for TOML, a single `batch` root element for XML, the codec's 
 protobuf and one RFC 5424 frame for `SYSLOG`, or the single value an `ON EMITTING BATCH`
 transformation built instead.
 
-The members of a payload are the records of one buffered batch — one source relay, one branch, one
-execution snapshot — in the order the emitter would have published them. A payload never spans two
-buffered batches. The emitter walks the buffered batch in row order and adds each record to the open
-payload until it holds `MAX MESSAGES` members or the next record is not batch-compatible: a
-different key, a different ordered set of written headers, a different ordering group, or, with a
-`SYSLOG` codec, a different syslog header other than the timestamp. That record then opens the next
-payload; no record is skipped over or reordered. A payload with one member keeps the container
-shape, such as a one-element array, and a buffered batch with no eligible record publishes nothing.
+The emitter walks the Arrow carriers released by one flush in arrival order, and each carrier's
+eligible rows in source order. A payload can span carriers only while their source relay, exact
+named and concrete branch, key, ordered written headers, ordering group and, with a `SYSLOG` codec,
+syslog header other than the timestamp agree. A different value seals the open payload before the
+next row is considered; no row is skipped over or reordered. A carrier retains its own execution
+snapshot and row membership for errors and acknowledgements. A payload with one member keeps the
+container shape, such as a one-element array, and a carrier with no eligible row publishes nothing.
 Batching adds no timer: `FLUSH` alone decides when records leave, and a partial payload is published
 exactly like a full one.
 
@@ -320,12 +319,13 @@ One payload is one publish. Its confirmation delivers every member, and a destin
 of it rejects every member with one shared error reference. `ACK PARALLEL MAX <n>` therefore counts
 payloads, not records. `nervix_messages_total` keeps counting source records.
 
-Member values and containers are working values that exist only while one buffered batch is
-encoded; the records themselves stay in Arrow batches. For a codec with jaq transformations, member
-preparation, batch transformations and every re-encoding run in the same job on Nervix's blocking
-worker pool that already runs `ON EMITTING`, so a slow program never stalls the emitter task. That
-work is bounded by the members one buffered batch holds and by the encodings above, not by
-`MAX SIZE`, which bounds only what is written.
+Member values and containers are working values that exist only while the released carriers are
+encoded; the records themselves stay in Arrow batches. The packer holds at most `MAX MESSAGES`
+prepared members in one candidate, even when the members come from successive carriers. For a
+codec with jaq transformations, member preparation, batch transformations and every re-encoding
+run in the same job on Nervix's blocking worker pool that already runs `ON EMITTING`, so a slow
+program never stalls the emitter task. Candidate work is bounded by `MAX MESSAGES` and the
+encodings above; `MAX SIZE` bounds what is written.
 
 ## Altering emitters
 

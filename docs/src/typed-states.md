@@ -47,6 +47,11 @@ incoming concrete branch, or the actual unbranched state, and reporting keeps th
 identity until the display boundary. The structural ASCII graph projection is domain-free; a
 serialized graph retains its real typed domain.
 
+An emitter's buffered Arrow carrier keeps its typed source relay and optional concrete branch key.
+The relay's declared branch name is fixed, so the pair identifies the exact source branch even if
+another relay uses the same key fields and values. Payload assembly compares the pair before
+combining carriers, and unbranched absence remains `None` throughout buffering and packing.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that
@@ -139,6 +144,15 @@ assigned nonzero resource version; before assignment, the version is absent. Dia
 be absent, while a present span beginning at offset zero is still present. The web console uses
 the typed outcome for domain-selection dispatch instead of matching reply message text. The
 FlatBuffers encoding preserves these optional fields and typed variants across the session edge.
+
+Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
+context and an optional continuation. The server resolves typed semantic references from one
+committed configuration read with the requesting session's ordered transaction prefix applied;
+a missing or mismatched transaction binding reports stale context instead of silently discarding
+queued changes. Each candidate carries an explicit UTF-8 byte-range edit. The CLI and web console
+apply the edit after checking the cursor boundary, and the web console converts browser UTF-16
+selection offsets at its edge. A continuation is bound to the input, domain, revision, and
+candidate set, so a changed context cannot silently reuse a page.
 
 ## Validation And Failure Boundaries
 

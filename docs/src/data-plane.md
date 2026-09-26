@@ -19,6 +19,9 @@ It is responsible for:
 
 The data plane is intentionally non-transactional.
 
+[Errors And Diagnostics](./errors-and-diagnostics.md) defines how branch-local failures,
+materialized-state outcomes, message errors, and recovery classes reach their reporting boundary.
+
 Decoded rows are processed in memory and are usually carried between runtime nodes as Apache Arrow batches rather than as individually serialized documents. That gives the runtime a columnar format suitable for fast vectorized processing and cheap batch serialization/deserialization.
 
 Nervix has three separate persistence boundaries:
