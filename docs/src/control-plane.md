@@ -38,6 +38,10 @@ its final log position, membership, transaction progress, and revision. Recovery
 complete applied range or replays its committed entries; it never reconstructs an acknowledged
 command from a partial state-machine update.
 
+[Errors And Diagnostics](./errors-and-diagnostics.md) owns how validation and planning failures
+accumulate context and become client diagnostics. This chapter owns the command's durability and
+transaction outcome.
+
 Consensus uses a dedicated database and journal under `<db-path>/consensus`. Registry and runtime
 state remain in the node database at `<db-path>`, so consensus synchronization does not flush or
 wait behind data-plane journal writes. The full durability boundary, append-stream pacing, log

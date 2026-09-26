@@ -12,6 +12,10 @@ In particular, a transport response is not automatically a statement that runtim
 Relay delivery exposes separate receipt, admission, and downstream-completion boundaries so callers
 can distinguish those outcomes.
 
+[Errors And Diagnostics](./errors-and-diagnostics.md) explains how local typed reports and remote
+failure classes reach their callers and public edges. This chapter owns their wire representation
+and transport failure semantics.
+
 ## Simulation Boundary
 
 The transport also runs, unchanged, inside a seeded Turmoil network simulation. That simulation is a
