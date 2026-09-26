@@ -35,6 +35,9 @@ carry their own data, and required identities are validated before execution or 
 [Typed States And Validation Boundaries](./typed-states.md) chapter covers these rules across the
 language, registry, runtime, connectors, and clients.
 
+The [Errors And Diagnostics](./errors-and-diagnostics.md) chapter explains which layer owns each
+failure, how typed reports cross boundaries, and how runtime and public edges report them.
+
 Consensus access is restricted by operation. Observers can read locally applied state and watch
 changes. Proposers can also attempt replicated mutations, administrators manage membership and
 leadership transfers, and protocol receivers apply Raft messages independently of those capabilities.

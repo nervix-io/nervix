@@ -616,6 +616,9 @@ Generator-specific rules:
 
 ## Runtime Node Error Policies
 
+The [Errors And Diagnostics](./errors-and-diagnostics.md) chapter explains how failures are
+classified before these policies receive them.
+
 Every `TO` route on an ingestor or relay-consuming processor must declare its message error policy after that route's construction clauses:
 
 ```nspl,ignore

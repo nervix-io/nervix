@@ -11,6 +11,9 @@ aggregation. `DESCRIBE` reads Nervix runtime state and includes derived values s
 recent percentiles. Relay descriptions are routed to the scheduled relay owner; nonowners do not
 maintain relay metrics.
 
+[Errors And Diagnostics](./errors-and-diagnostics.md) defines the error information that may be
+reported and its sensitivity and log-level rules. This chapter defines metric surfaces and labels.
+
 ## Observability Server
 
 The observability listener exposes:
