@@ -41,9 +41,10 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
 
 `tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
-client coverage recipes place those executables beside their instrumented server binary, where the
-scenario runner resolves child processes. The child processes exercise the public interfaces; the
-focused recipe measures their changed lines with instrumented binary unit tests.
+client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
+and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
+`NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
+report as the CLI's binary unit tests and the server's public scenarios.
 
 The number of scenarios that run at once is the number of CPUs times the concurrency factor, set by
 `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default. Cucumber's

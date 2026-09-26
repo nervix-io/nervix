@@ -6562,6 +6562,157 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn completion_edits_preserve_unicode_suffixes_and_ignore_invalid_byte_ranges() {
+        let input = "SHOW CLUST;😊";
+        assert_eq!(
+            apply_completion(
+                input,
+                &TextEdit {
+                    start: 5,
+                    end: 10,
+                    replacement: "CLUSTER".to_string(),
+                },
+            ),
+            "SHOW CLUSTER;😊"
+        );
+        let unicode_input = "éclair";
+        for (start, end) in [(1, 2), (3, 2), (0, 99)] {
+            assert_eq!(
+                apply_completion(
+                    unicode_input,
+                    &TextEdit {
+                        start,
+                        end,
+                        replacement: "changed".to_string(),
+                    },
+                ),
+                unicode_input
+            );
+        }
+    }
+
+    #[test]
+    fn completion_replies_filter_local_paths_append_pages_and_ignore_stale_queries() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            let query = SuggestionQuery {
+                input: "SH".to_string(),
+                cursor: 2,
+                domain: Some(domain.clone()),
+            };
+            signals.suggestion_query.set(Some(query));
+            let mut requests = SessionRequests::new();
+            let suggestion = |value: &str, kind| WireSuggestion {
+                value: value.to_string(),
+                kind,
+                edit: TextEdit {
+                    start: 0,
+                    end: 2,
+                    replacement: value.to_string(),
+                },
+            };
+            let first = SuggestRequest::new("SH".to_string(), 2, Some(domain.clone()))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let first = requests.issue(ConsoleRequest::Suggest(first));
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: first,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: Some("page-two".to_string()),
+                        suggestions: vec![
+                            suggestion("SHOW", SuggestionKind::Text),
+                            suggestion("./local", SuggestionKind::LocalDirectoryLookup),
+                        ],
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(signals.suggestions.get_untracked().len(), 1);
+            assert_eq!(signals.suggestions.get_untracked()[0].value, "SHOW");
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::Ready)
+            );
+            assert_eq!(
+                signals.suggestion_continuation.get_untracked().as_deref(),
+                Some("page-two")
+            );
+
+            let next = SuggestRequest::new("SH".to_string(), 2, Some(domain.clone()))
+                .assured("the test cursor ends at a UTF-8 boundary")
+                .with_page(64, Some("page-two".to_string()))
+                .assured("the test page size is valid");
+            let next = requests.issue(ConsoleRequest::Suggest(next));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: next,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: None,
+                        suggestions: vec![suggestion("SHUTDOWN", SuggestionKind::Text)],
+                    }),
+                },
+            );
+            let values = signals
+                .suggestions
+                .get_untracked()
+                .into_iter()
+                .map(|item| item.value)
+                .collect::<Vec<_>>();
+            assert_eq!(values, ["SHOW", "SHUTDOWN"]);
+            assert_eq!(signals.suggestion_continuation.get_untracked(), None);
+
+            let stale = SuggestRequest::new("S".to_string(), 1, Some(domain))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let stale = requests.issue(ConsoleRequest::Suggest(stale));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: stale,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::LookupFailed,
+                        continuation: None,
+                        suggestions: Vec::new(),
+                    }),
+                },
+            );
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::Ready)
+            );
+            assert_eq!(signals.suggestions.get_untracked().len(), 2);
+
+            let failed = SuggestRequest::new("SH".to_string(), 2, Some(domain_name("tenant")))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let failed = requests.issue(ConsoleRequest::Suggest(failed));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: failed,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::LookupFailed,
+                        continuation: None,
+                        suggestions: Vec::new(),
+                    }),
+                },
+            );
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::LookupFailed)
+            );
+            assert!(signals.suggestions.get_untracked().is_empty());
+        });
+    }
+
     fn subscription_signals(state: SubscriptionTabState) -> WebConsoleSignals {
         let name = SubscriptionName::parse("live").assured("the test subscription name is valid");
         let domain = DomainName::parse("tenant").assured("the test domain name is valid");
