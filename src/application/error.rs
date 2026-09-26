@@ -78,6 +78,8 @@ pub enum AppError {
     OpenRuntimeState,
     #[error("failed to load interconnect tls configuration")]
     LoadInterconnectTls,
+    #[error("failed to load the name resolver configuration")]
+    LoadDnsConfiguration,
     #[error("failed to load gRPC tls configuration")]
     LoadGrpcTls,
     #[error("failed to load web console tls configuration")]

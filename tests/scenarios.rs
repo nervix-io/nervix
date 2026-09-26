@@ -113,6 +113,7 @@ use crate::common::{
         ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET, ReceiverFault,
         ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
     },
+    peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
     scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
@@ -5418,6 +5419,56 @@ async fn given_production_sticky_scheduler_is_configured(world: &mut ScenarioWor
         "the scheduler must be configured before cluster startup"
     );
     world.cluster_config.scheduler_mode = Some(SchedulerMode::Sticky);
+}
+
+#[given(expr = "cluster peers are addressed by {string}")]
+async fn given_cluster_peers_are_addressed_by(world: &mut ScenarioWorld, addressing: String) {
+    assert!(
+        world.cluster.is_none(),
+        "peer addressing must be configured before cluster startup"
+    );
+    world.cluster_config.peer_addressing = addressing
+        .parse::<PeerAddressing>()
+        .unwrap_or_else(|_| panic!("unknown peer addressing '{addressing}'"));
+}
+
+#[when(expr = "node {string} moves to another address behind its name")]
+async fn when_node_moves_behind_its_name(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .move_behind_its_name(&node_id)
+        .unwrap_or_else(|error| panic!("node '{node_id}' could not move behind its name: {error}"));
+}
+
+#[when(expr = "the DNS fixture answers the name of node {string} with {string}")]
+async fn when_the_dns_fixture_answers_node_name_with(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    answer: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let answer = answer
+        .parse::<FixtureAnswer>()
+        .unwrap_or_else(|_| panic!("unknown DNS fixture answer '{answer}'"));
+    world
+        .cluster()
+        .answer_node_name(&node_id, answer)
+        .unwrap_or_else(|error| {
+            panic!("the DNS fixture could not answer for '{node_id}': {error}")
+        });
+}
+
+#[then("the DNS fixture received no questions for node names")]
+async fn then_the_dns_fixture_received_no_questions_for_node_names(world: &mut ScenarioWorld) {
+    let questions = world
+        .cluster()
+        .dns_questions_for_node_names()
+        .expect("the cluster is addressed by names");
+    assert_eq!(
+        questions, 0,
+        "nodes asked the DNS fixture for names the hosts file lists"
+    );
 }
 
 #[given("temporary files use a custom temp directory")]

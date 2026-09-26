@@ -21,10 +21,10 @@ use arrow_schema::{DataType, Field, Schema};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_execution::{Executor, MemoryClass};
 use nervix_interconnect::{
-    ConnectionFailureReason, Envelope, InterconnectRequest, PeerTarget, PoolClass,
+    ConnectionFailureReason, Envelope, InterconnectRequest, PeerResolver, PeerTarget, PoolClass,
     ReceivedEnvelope, RelayDelivery, RelayPayload, RelayPayloadKind, RemoteOperationFailure,
     RemoteOperationSubject, RequestError, RequestSubquota, TlsConfigBundle, Transport,
-    TransportClock, TransportEntropy, TransportError, TransportOptions,
+    TransportClock, TransportEntropy, TransportError, TransportIdentity, TransportOptions,
 };
 use nervix_models::{ClusterNodeName, DomainName, NodeEndpoint, RelayName, RemoteAckRegistration};
 use rcgen::{
@@ -248,12 +248,15 @@ async fn bind_with_incoming(
     options.entropy = TransportEntropy::from_source(move || entropy.next_u64());
     Transport::bind(
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)),
-        name,
-        CLUSTER,
-        ClusterNodeName::parse(name).assured("fixture node name is valid"),
+        TransportIdentity {
+            cluster_id: CLUSTER.to_string(),
+            node_id: ClusterNodeName::parse(name).assured("fixture node name is valid"),
+            advertised_host: name.to_string(),
+        },
         credentials.bundle(),
         options,
         Executor::default(),
+        PeerResolver::simulated(),
     )
     .await
     .assured("fixture transport binds on its simulated host")
@@ -284,19 +287,15 @@ async fn wait_for_count(signal: &mut watch::Receiver<usize>, expected: usize) {
     .assured("fixture hosts finish within the simulated deadline");
 }
 
+/// Register `name` at its advertised endpoint, so every connection attempt resolves the simulated
+/// host name again, as production resolves a peer's advertised host.
 async fn register_peer(transport: &Transport, name: &str) {
-    let endpoint = NodeEndpoint::new(name, PORT);
-    let targets = PeerTarget::resolve(&endpoint)
-        .await
-        .assured("simulated DNS resolves the peer");
-    for target in targets {
-        transport
-            .register_outbound_target(
-                ClusterNodeName::parse(name).assured("fixture node name is valid"),
-                target,
-            )
-            .assured("fixture target registration succeeds");
-    }
+    transport
+        .register_outbound_target(
+            ClusterNodeName::parse(name).assured("fixture node name is valid"),
+            NodeEndpoint::new(name, PORT),
+        )
+        .assured("fixture target registration succeeds");
 }
 
 #[test]
@@ -623,7 +622,8 @@ fn exchange_with_multiple_peers(run: ScenarioRun) -> Result<(), SimulationError>
                         trace.record("client", format!("typed Arrow exchange with {name}"));
                         trace.record("client", format!("typed failure classes from {name}"));
                     }
-                    let target = PeerTarget::resolve(&NodeEndpoint::new("server", PORT))
+                    let target = client
+                        .resolve(&NodeEndpoint::new("server", PORT))
                         .await
                         .assured("simulated DNS resolves the server")
                         .into_iter()

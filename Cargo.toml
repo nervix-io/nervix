@@ -128,6 +128,7 @@ nervix-connector-websockets = { workspace = true }
 nervix-connector-zeromq = { workspace = true }
 nervix-consensus = { workspace = true }
 nervix-dataflow-graph = { workspace = true }
+nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-expiry-map = { workspace = true }
 nervix-interconnect = { workspace = true }
@@ -295,6 +296,7 @@ members = [
   "crates/connectors/zeromq",
   "crates/consensus",
   "crates/dataflow-graph",
+  "crates/dns",
   "crates/execution",
   "crates/expiry-map",
   "crates/interconnect",
@@ -402,6 +404,15 @@ gloo-net = "0.7"
 governor = "0.10.4"
 h2 = "0.4"
 hdrhistogram = "7.5.4"
+# Hickory's Tokio runtime only. DNS over TLS, HTTPS and QUIC stay disabled, so name resolution adds
+# no second TLS provider beside AWS-LC, and the resolver reads the host's configuration through the
+# `resolv-conf` grammar that nervix-dns applies itself.
+hickory-proto = { version = "0.26.3", default-features = false, features = [
+  "std",
+] }
+hickory-resolver = { version = "0.26.3", default-features = false, features = [
+  "tokio",
+] }
 http = "1"
 http-body-util = "0.1"
 httparse = "1"
@@ -472,6 +483,7 @@ nervix-connector-websockets = { package = "nervix-connector-websockets", path = 
 nervix-connector-zeromq = { package = "nervix-connector-zeromq", path = "crates/connectors/zeromq" }
 nervix-consensus = { package = "nervix-consensus", path = "crates/consensus" }
 nervix-dataflow-graph = { package = "nervix-dataflow-graph", path = "crates/dataflow-graph" }
+nervix-dns = { package = "nervix-dns", path = "crates/dns" }
 nervix-execution = { package = "nervix-execution", path = "crates/execution" }
 nervix-expiry-map = { package = "nervix-expiry-map", path = "crates/expiry-map" }
 nervix-interconnect = { package = "nervix-interconnect", path = "crates/interconnect" }
@@ -544,6 +556,7 @@ reedline = "0.36"
 regex = "1"
 regex-automata = "0.4"
 reqwest = "0.13"
+resolv-conf = "0.7.6"
 rkyv = { version = "0.8", features = ["indexmap-2"] }
 # The fork raises Roto's Cranelift floor from 0.127 to 0.136, which carries the x86_64 JIT fixes
 # the workspace previously supplied by patching Cranelift itself.
