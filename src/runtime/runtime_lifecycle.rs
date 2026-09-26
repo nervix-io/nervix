@@ -12,6 +12,7 @@ impl Runtime {
     ) -> Result<Self, RuntimePersistenceError> {
         Self::with_persistence_and_temp_dir(
             Executor::default(),
+            None,
             db,
             state_snapshot_interval,
             ConfiguredFaultInjection::default(),
@@ -21,6 +22,7 @@ impl Runtime {
 
     pub(crate) fn with_persistence_and_temp_dir(
         executor: Executor,
+        dns: Option<DnsResolver>,
         db: Option<Database>,
         state_snapshot_interval: Duration,
         fault_injection: ConfiguredFaultInjection,
@@ -77,6 +79,7 @@ impl Runtime {
             .unwrap_or(DEFAULT_DOMAIN_DRAIN_TIMEOUT);
         Ok(Self {
             inner: Arc::new(RuntimeInner {
+                dns,
                 ingestors: Arc::new(DashMap::default()),
                 ingestor_quiescence: Arc::new(DashMap::default()),
                 ingestors_paused_for_memory_pressure: AtomicBool::new(false),
@@ -175,6 +178,10 @@ impl Runtime {
     /// The node's bounded execution and transient-memory admission.
     pub(crate) fn executor(&self) -> &Executor {
         &self.inner.executor
+    }
+
+    pub(crate) fn dns(&self) -> Option<&DnsResolver> {
+        self.inner.dns.as_ref()
     }
 
     /// The directory connectors stage local files in before they publish them.

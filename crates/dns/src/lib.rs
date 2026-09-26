@@ -5,7 +5,8 @@
 //! - **Owns.** One node's resolver: reading the resolver configuration and hosts file it is given,
 //!   the answer cache and its TTL bounds, the bound on concurrent lookups, and the typed outcome of
 //!   every lookup.
-//! - **Depends on.** Hickory's Tokio resolver and the `resolv.conf` grammar.
+//! - **Depends on.** Hickory's Tokio resolver, the `resolv.conf` grammar, and both Reqwest DNS
+//!   extension traits.
 //! - **Must not know.** Models, peers, connectors, graphs, or any protocol's retry policy.
 //!
 //! # Resolution order
@@ -47,6 +48,7 @@ use triomphe::Arc;
 mod configuration;
 mod hosts;
 mod lookup;
+mod reqwest;
 
 pub use configuration::{
     DnsConfiguration, DnsConfigurationError, NameServers, SYSTEM_HOSTS_FILE,

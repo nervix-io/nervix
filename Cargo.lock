@@ -720,7 +720,7 @@ dependencies = [
  "async-trait",
  "futures-core",
  "futures-io",
- "hickory-resolver",
+ "hickory-resolver 0.26.3",
  "tokio",
  "tokio-stream",
 ]
@@ -3617,6 +3617,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c34f04666d835ff5d62e058c3995147c06f42fe86ff053337632bca83e42702d"
 
 [[package]]
+name = "enum-as-inner"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1e6a265c649f3f5979b601d26f1d05ada116434c87741c9493cb56218f76cbc"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "enum_dispatch"
 version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4422,11 +4434,36 @@ dependencies = [
  "futures-channel",
  "futures-io",
  "futures-util",
- "hickory-proto",
+ "hickory-proto 0.26.3",
  "idna",
  "ipnet",
  "jni",
  "rand 0.10.3",
+ "thiserror 2.0.21",
+ "tinyvec",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "hickory-proto"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8a6fe56c0038198998a6f217ca4e7ef3a5e51f46163bd6dd60b5c71ca6c6502"
+dependencies = [
+ "async-trait",
+ "cfg-if",
+ "data-encoding",
+ "enum-as-inner",
+ "futures-channel",
+ "futures-io",
+ "futures-util",
+ "idna",
+ "ipnet",
+ "once_cell",
+ "rand 0.9.5",
+ "ring",
  "thiserror 2.0.21",
  "tinyvec",
  "tokio",
@@ -4456,6 +4493,27 @@ dependencies = [
 
 [[package]]
 name = "hickory-resolver"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc62a9a99b0bfb44d2ab95a7208ac952d31060efc16241c87eaf36406fecf87a"
+dependencies = [
+ "cfg-if",
+ "futures-util",
+ "hickory-proto 0.25.2",
+ "ipconfig",
+ "moka",
+ "once_cell",
+ "parking_lot",
+ "rand 0.9.5",
+ "resolv-conf",
+ "smallvec",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hickory-resolver"
 version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3da5255c95d5a716857d54b5b8f4e8d67c3484d3beaaaae2ce25063b3ba981"
@@ -4463,7 +4521,7 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "hickory-net",
- "hickory-proto",
+ "hickory-proto 0.26.3",
  "ipconfig",
  "ipnet",
  "jni",
@@ -4652,6 +4710,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -6156,8 +6215,8 @@ dependencies = [
  "futures-util",
  "hex",
  "hickory-net",
- "hickory-proto",
- "hickory-resolver",
+ "hickory-proto 0.26.3",
+ "hickory-resolver 0.26.3",
  "hmac 0.13.0",
  "macro_magic",
  "md-5",
@@ -6504,6 +6563,7 @@ dependencies = [
  "arrow-array",
  "async-trait",
  "error-stack",
+ "nervix-dns",
  "nervix-models",
  "nervix-recovery",
  "reqwest 0.13.5",
@@ -6553,6 +6613,7 @@ dependencies = [
  "async-trait",
  "error-stack",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
  "reqwest 0.13.5",
  "thiserror 2.0.21",
@@ -6569,22 +6630,34 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "async-trait",
+ "bytes",
  "error-stack",
  "fastrand",
+ "futures-util",
+ "http",
  "iceberg",
  "iceberg-catalog-rest",
- "iceberg-storage-opendal",
  "meticulous",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
+ "nervix-test-environment",
+ "opendal",
  "parquet",
+ "reqsign-core",
+ "reqwest 0.12.28",
+ "reqwest 0.13.5",
+ "rustls",
+ "serde",
  "serde_json",
  "shuttle-tokio",
  "tempfile",
  "tokio",
  "tracing",
+ "typetag",
  "url",
  "uuid",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -6700,6 +6773,7 @@ dependencies = [
  "meticulous",
  "nervix-approx-into",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
  "opentelemetry-proto",
  "prost 0.14.4",
@@ -6745,6 +6819,7 @@ dependencies = [
  "meticulous",
  "nervix-approx-into",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
  "reqwest 0.13.5",
  "serde",
@@ -6816,6 +6891,7 @@ dependencies = [
  "chrono",
  "error-stack",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
  "reqwest 0.13.5",
  "sentry-types",
@@ -6954,17 +7030,21 @@ version = "0.1.0-dev"
 dependencies = [
  "arch-into",
  "error-stack",
- "hickory-resolver",
+ "hickory-resolver 0.26.3",
  "indexmap 2.14.2",
  "meticulous",
  "nervix-test-environment",
+ "reqwest 0.12.28",
+ "reqwest 0.13.5",
  "resolv-conf",
+ "rustls",
  "strum 0.26.3",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
  "triomphe",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -7341,7 +7421,7 @@ dependencies = [
  "blake3",
  "clap",
  "error-stack",
- "hickory-proto",
+ "hickory-proto 0.26.3",
  "meticulous",
  "nervix-recovery",
  "parking_lot",
@@ -9747,20 +9827,26 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "futures-core",
+ "hickory-resolver 0.25.2",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "js-sys",
  "log",
+ "once_cell",
  "percent-encoding",
  "pin-project-lite",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http",
  "tower-service",
@@ -9768,6 +9854,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -9782,7 +9869,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "h2",
- "hickory-resolver",
+ "hickory-resolver 0.26.3",
  "http",
  "http-body",
  "http-body-util",

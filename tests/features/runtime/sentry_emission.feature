@@ -3,7 +3,9 @@ Feature: Sentry emission
   Scenario Outline: Sentry emitter publishes codec JSON as authenticated event envelopes
     Given Sentry is running
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
+    And the Sentry endpoint is published under fixture DNS
     And the leader node is configured with these NSPL commands
       """
       CREATE PACED DOMAIN {{domain}} WITH PERIOD 100ms SKEW 100ms;
@@ -42,7 +44,7 @@ Feature: Sentry emission
       CREATE CLIENT sentry_main
       TYPE SENTRY
       CONFIG {
-        'dsn' = '{{sentry_dsn}}',
+        'dsn' = '{{sentry_dns_dsn}}',
         'timeout_ms' = 5000
       };
       CREATE EMITTER sentry_errors
@@ -67,6 +69,7 @@ Feature: Sentry emission
       {"message":"database unavailable","level":"error","environment":"{{test_id}}"}
       """
     And the Sentry event timestamp is before "2001-01-01T00:00:00Z"
+    And the DNS fixture eventually receives a question for "sentry.nervix.test"
 
     Examples:
       | cluster_size | replica_count |

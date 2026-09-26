@@ -988,6 +988,7 @@ async fn relay_owner_expires_branch_presence_by_ttl() {
     let runtime = Runtime::with_persistence_and_temp_dir(
         nervix_execution::Executor::default(),
         None,
+        None,
         Duration::from_secs(60),
         fault_injection,
         PathBuf::from(DEFAULT_TEMP_DIR),

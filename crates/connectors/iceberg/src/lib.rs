@@ -6,8 +6,8 @@
 //!   through, the local Arrow IPC staging of every mapped batch, the `COMMIT EACH` cadence and
 //!   maximum commit size that release the staged files, the Parquet data files one commit writes,
 //!   and the acknowledgements it retains until that commit succeeds.
-//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
-//!   and the `iceberg` crates.
+//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio,
+//!   `nervix-dns`, Reqwest, OpenDAL, and the `iceberg` crates.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 //!
@@ -18,10 +18,13 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
+mod storage;
+
 use std::{fs::File, path::PathBuf, sync::Arc as StdArc, time::Duration};
 
 use ::iceberg::{
-    Catalog, CatalogBuilder, NamespaceIdent, Result as IcebergResult, TableIdent,
+    Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent,
+    Result as IcebergResult, TableIdent,
     arrow::FieldMatchMode,
     io::{
         ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
@@ -55,15 +58,16 @@ use arrow_schema::{DataType, TimeUnit};
 use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array};
 use error_stack::{Report, ResultExt as _};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
-use iceberg_storage_opendal::OpenDalStorageFactory;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
     SinkCommitReport, SinkDeadline, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
     SinkRecordPosition, SinkStartError, SinkStartResult, physical_time::actual_utc_now,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
 use parquet::file::properties::WriterProperties;
+use storage::DnsStorageFactory;
 use tempfile::TempDir;
 use tracing::{debug, trace};
 use url::Url;
@@ -85,6 +89,7 @@ pub struct IcebergCommitPolicy {
 /// What one Iceberg emitter stages and commits through, from its typed sink plan.
 pub struct IcebergSinkConfig {
     pub backend: IcebergStorageBackend,
+    pub dns: DnsResolver,
     pub storage_config: Vec<ClientConfigEntry>,
     pub catalog_name: String,
     pub catalog_config: Vec<ClientConfigEntry>,
@@ -289,7 +294,6 @@ struct IcebergObjectStoreProperties {
 
 trait IcebergStorageBackendExt {
     fn accepts_location_scheme(self, scheme: &str) -> bool;
-    fn storage_factory(self) -> StdArc<dyn ::iceberg::io::StorageFactory>;
 }
 
 impl IcebergStorageBackendExt for IcebergStorageBackend {
@@ -300,22 +304,13 @@ impl IcebergStorageBackendExt for IcebergStorageBackend {
             Self::AzureBlob => scheme == "wasb" || scheme == "wasbs",
         }
     }
-
-    fn storage_factory(self) -> StdArc<dyn ::iceberg::io::StorageFactory> {
-        match self {
-            Self::S3 => StdArc::new(OpenDalStorageFactory::S3 {
-                customized_credential_load: None,
-            }),
-            Self::Gcs => StdArc::new(OpenDalStorageFactory::Gcs),
-            Self::AzureBlob => StdArc::new(OpenDalStorageFactory::Azdls),
-        }
-    }
 }
 
 impl IcebergSink {
     pub async fn new(config: IcebergSinkConfig, host: SinkHost) -> SinkStartResult<Self> {
         let IcebergSinkConfig {
             backend,
+            dns,
             storage_config,
             catalog_name,
             catalog_config,
@@ -332,7 +327,7 @@ impl IcebergSink {
         let properties = IcebergObjectStoreProperties::from_entries(backend, &storage_config);
         let catalog = StdArc::new(
             properties
-                .rest_catalog(&catalog_name, &catalog_config)
+                .rest_catalog(&catalog_name, &catalog_config, &dns)
                 .await
                 .map_err(|error| {
                     Report::new(SinkStartError::Initialize { sink: ICEBERG }).attach_printable(
@@ -1056,6 +1051,7 @@ impl IcebergObjectStoreProperties {
         &self,
         name: &str,
         catalog_config: &[ClientConfigEntry],
+        dns: &DnsResolver,
     ) -> IcebergResult<RestCatalog> {
         let props = self
             .props
@@ -1066,8 +1062,35 @@ impl IcebergObjectStoreProperties {
                     .iter()
                     .map(|entry| (entry.key.clone(), entry.value.clone())),
             );
+        let tls = rustls::ClientConfig::builder_with_provider(StdArc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "failed to configure Iceberg REST TLS",
+            )
+            .with_source(error)
+        })?
+        .with_root_certificates(rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        })
+        .with_no_client_auth();
+        let client = reqwest_iceberg::Client::builder()
+            .dns_resolver(StdArc::new(dns.clone()))
+            .use_preconfigured_tls(tls)
+            .build()
+            .map_err(|error| {
+                IcebergError::new(
+                    IcebergErrorKind::Unexpected,
+                    format!("failed to build the Iceberg REST client: {error}"),
+                )
+            })?;
+        let storage_factory = DnsStorageFactory::new(self.backend, dns)?;
         RestCatalogBuilder::default()
-            .with_storage_factory(self.backend.storage_factory())
+            .with_client(client)
+            .with_storage_factory(StdArc::new(storage_factory))
             .load(name, props.collect())
             .await
     }

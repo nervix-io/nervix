@@ -5459,6 +5459,177 @@ async fn when_the_dns_fixture_answers_node_name_with(
         });
 }
 
+#[given("the HTTP mock endpoint is published under fixture DNS")]
+async fn given_http_mock_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    const NAME: &str = "http-source.nervix.test";
+    let endpoint = world
+        .placeholders
+        .get("mock_http_addr")
+        .expect("the HTTP mock server was started");
+    let mut url = url::Url::parse(endpoint).expect("the HTTP mock address is a URL");
+    let address = url
+        .host_str()
+        .expect("the HTTP mock address has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the HTTP mock listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service(NAME, address)
+        .expect("the cluster has a DNS fixture");
+    url.set_host(Some(NAME))
+        .expect("the fixture name is a valid URL host");
+    world.placeholders.insert(
+        "mock_http_dns_addr".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+}
+
+#[then("the DNS fixture eventually receives a question for the HTTP mock")]
+async fn then_dns_fixture_queried_http_mock(world: &mut ScenarioWorld) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name("http-source.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+}
+
+#[given("the Iceberg endpoints are published under fixture DNS")]
+async fn given_iceberg_endpoints_have_fixture_dns(world: &mut ScenarioWorld) {
+    for (source, name, target) in [
+        (
+            "iceberg_rest_addr",
+            "iceberg-catalog.nervix.test",
+            "iceberg_rest_dns_addr",
+        ),
+        (
+            "rustfs_addr",
+            "iceberg-objects.nervix.test",
+            "rustfs_dns_addr",
+        ),
+    ] {
+        let endpoint = world
+            .placeholders
+            .get(source)
+            .expect("the Iceberg dependency was started");
+        let mut url = url::Url::parse(endpoint).expect("the Iceberg endpoint is a URL");
+        let address = url
+            .host_str()
+            .expect("the Iceberg endpoint has a host")
+            .parse::<std::net::IpAddr>()
+            .expect("the dependency listens on a literal address");
+        world
+            .cluster()
+            .publish_dns_service(name, address)
+            .expect("the cluster has a DNS fixture");
+        url.set_host(Some(name))
+            .expect("the fixture name is a valid URL host");
+        world.placeholders.insert(
+            target.to_string(),
+            url.to_string().trim_end_matches('/').to_string(),
+        );
+    }
+}
+
+#[then("the DNS fixture eventually receives Iceberg catalog and object-store questions")]
+async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let catalog = world
+                .cluster()
+                .dns_questions_for_name("iceberg-catalog.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            let objects = world
+                .cluster()
+                .dns_questions_for_name("iceberg-objects.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            if catalog > 0 && objects > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the Iceberg clients did not ask the configured DNS fixture within 30 seconds");
+}
+
+fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
+    let endpoint = world
+        .placeholders
+        .get(source)
+        .expect("the HTTP dependency was started");
+    let mut url = url::Url::parse(endpoint).expect("the HTTP endpoint is a URL");
+    let address = url
+        .host_str()
+        .expect("the HTTP endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the dependency listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service(name, address)
+        .expect("the cluster has a DNS fixture");
+    url.set_host(Some(name))
+        .expect("the fixture name is a valid URL host");
+    world.placeholders.insert(
+        target.to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+}
+
+#[given("the Prometheus endpoint is published under fixture DNS")]
+async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(
+        world,
+        "prometheus_addr",
+        "prometheus.nervix.test",
+        "prometheus_dns_addr",
+    );
+}
+
+#[given("the Sentry endpoint is published under fixture DNS")]
+async fn given_sentry_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
+}
+
+#[given("the OTEL HTTP endpoint is published under fixture DNS")]
+async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(
+        world,
+        "otel_collector_http_addr",
+        "otel-http.nervix.test",
+        "otel_collector_dns_addr",
+    );
+}
+
+#[then(expr = "the DNS fixture eventually receives a question for {string}")]
+async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name(&name)
+                .expect("the cluster has a DNS fixture");
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+}
+
 #[then("the DNS fixture received no questions for node names")]
 async fn then_the_dns_fixture_received_no_questions_for_node_names(world: &mut ScenarioWorld) {
     let questions = world

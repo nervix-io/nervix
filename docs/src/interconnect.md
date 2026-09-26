@@ -181,9 +181,10 @@ applies only as far as the name server the configuration names applies it, for e
 `systemd-resolved` stub at `127.0.0.53`. Docker's embedded DNS and Kubernetes cluster DNS, with
 their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
 
-The node resolver serves the interconnect. Connectors, client libraries, and exporters still resolve
-through their own drivers; the ledger in `tests/dns-resolution-ledger.md` records each of those
-boundaries and which delivery moves it.
+The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP, and Iceberg REST and
+object-store clients. Other connectors and client libraries still resolve through their own
+drivers. The ledger in `tests/dns-resolution-ledger.md` records each boundary and its current
+owner.
 
 ## Peer Identity And Authentication
 
