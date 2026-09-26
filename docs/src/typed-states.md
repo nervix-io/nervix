@@ -47,6 +47,11 @@ incoming concrete branch, or the actual unbranched state, and reporting keeps th
 identity until the display boundary. The structural ASCII graph projection is domain-free; a
 serialized graph retains its real typed domain.
 
+An emitter's buffered Arrow carrier keeps its typed source relay and optional concrete branch key.
+The relay's declared branch name is fixed, so the pair identifies the exact source branch even if
+another relay uses the same key fields and values. Payload assembly compares the pair before
+combining carriers, and unbranched absence remains `None` throughout buffering and packing.
+
 **Expression scopes and errors.** The VM frontend receives a scope policy that says whether a
 bare field may be read, written, both, or neither. A generated or set-only route reports an
 unavailable `message` or `input` scope during lowering, rather than inventing a namespace that

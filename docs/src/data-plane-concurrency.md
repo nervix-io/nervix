@@ -73,6 +73,16 @@ Per-row mutation is kept close to the lane that orders it. A global concurrent m
 those lanes, not the owner of their inner state. Once a task has found its lane, later mutation does
 not repeatedly acquire the registry guard.
 
+### Emitter payload assembly
+
+One emitter task owns the released carriers and their flush order. Its batch packer borrows each
+carrier's source relay, concrete branch key and ordered metadata while it prepares selected Arrow
+rows. It clones the Arc-backed Arrow batch once per carrier passed to the packer; no row
+acquires a lock or increments an Arc reference count for source identity. The open candidate holds
+at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or source changes, a failed
+member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
+`MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
+
 ### Branch processor state
 
 Each concrete branch has one dispatch lane and one mutable processor runtime. The lane admits one
