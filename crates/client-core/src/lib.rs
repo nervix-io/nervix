@@ -28,8 +28,8 @@ pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectOptions, TlsRequirement};
 pub use error::{ClientError, EventStreamKind, RequestKind};
 pub use events::{
-    AutocompleteSuggestion, ServerEvent, SubscriptionEvent, SubscriptionRequest,
-    SubscriptionRowsEvent,
+    AutocompleteOutcome, AutocompleteSuggestion, ServerEvent, SubscriptionEvent,
+    SubscriptionRequest, SubscriptionRowsEvent,
 };
 pub use nervix_client_wire as wire;
 pub use nervix_client_wire::{
@@ -37,7 +37,8 @@ pub use nervix_client_wire::{
     LeaderRedirect, Leadership, NoticeLevel, OutcomeOrigin, RowConformanceError, RowSchema,
     SourceSpan, StatementDisposition, StatementOutcome, SubscriptionDeliveryLost,
     SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRows,
-    SubscriptionRowsSkipped, SuggestionKind, UnknownOutcomeCause, UploadFailure,
+    SubscriptionRowsSkipped, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause,
+    UploadFailure,
 };
 pub use nervix_models::{
     CommandExecutionReference, DomainName, ImpactPlanningBasis, ResourceUploadIdentity,

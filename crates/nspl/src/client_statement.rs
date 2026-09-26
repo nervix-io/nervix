@@ -3,15 +3,17 @@ use std::ops::Range;
 use chumsky::prelude::*;
 use meticulous::OptionExt as _;
 use nervix_models::{
-    CanonicalNsplError, CreateSubscription, DeleteSubscription, DomainName, Statement,
-    UploadResource,
+    BuiltinFunctionScope, CanonicalNsplError, CreateSubscription, DeleteSubscription, DomainName,
+    EmitSinkKind, IngestSourceKind, ModelKind, RelayName, SchemaName, SemanticReference, Statement,
+    UploadResource, WireSchemaName,
 };
 
 use crate::{
     lexer::{Identifier as Keyword, Token, Word},
     parser_support::{
-        LexedInput, ParseError, ParseFromSourceError, completion_context, completion_tokens,
-        domain_name, into_parse_error, kw, lex_input, suggestions_from_errors, tok,
+        LexedInput, ParseError, ParseFromSourceError, ack_mode, completion_context,
+        completion_tokens, domain_ref, if_not_exists_clause, into_parse_error, junction_name, kw,
+        lex_input, relay_ref, schema_name, suggestions_from_errors, tok, wire_schema_name,
     },
 };
 
@@ -104,7 +106,7 @@ impl ParsedClientStatement {
 pub fn use_domain_parser<'src>()
 -> impl Parser<'src, &'src [Token], DomainName, extra::Err<ParseError<'src>>> + Clone {
     kw(Keyword::Use)
-        .ignore_then(domain_name())
+        .ignore_then(domain_ref())
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
@@ -151,6 +153,315 @@ pub fn client_command_parser<'src>()
     ))
 }
 
+/// The one grammar the public client uses for both local commands and server statements.
+pub fn client_statement_parser<'src>()
+-> impl Parser<'src, &'src [Token], ClientStatement, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        client_command_parser(),
+        crate::statement::statement_parser().map(ClientStatement::Server),
+    ))
+}
+
+/// A grammar expectation that a semantic candidate owner can resolve without reading labels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompletionExpectation {
+    Literal(String),
+    Semantic(SemanticReference),
+}
+
+impl CompletionExpectation {
+    fn from_label(label: String, schema: Option<&SchemaFieldContext>) -> Option<Self> {
+        if let Some(kind) = ModelKind::from_completion_label(&label) {
+            return Some(Self::Semantic(SemanticReference::Model(kind)));
+        }
+        let expectation = match label.as_str() {
+            "ref:resource" => Self::Semantic(SemanticReference::Resource),
+            "resource_version" => Self::Semantic(SemanticReference::ResourceVersion),
+            "completed_resource_version" => {
+                Self::Semantic(SemanticReference::CompletedResourceVersion)
+            }
+            "ref:session_subscription" => Self::Semantic(SemanticReference::SessionSubscription),
+            "ref:runtime_node" => Self::Semantic(SemanticReference::RuntimeNode),
+            "ref:domain" => Self::Semantic(SemanticReference::Domain),
+            "ref:schema_field" => {
+                return match schema {
+                    Some(SchemaFieldContext::Schema(name)) => {
+                        Some(Self::Semantic(SemanticReference::SchemaField(name.clone())))
+                    }
+                    Some(SchemaFieldContext::Wire(kind, name)) => Some(Self::Semantic(
+                        SemanticReference::WireSchemaField(*kind, name.clone()),
+                    )),
+                    None => None,
+                };
+            }
+            _ if label
+                .chars()
+                .next()
+                .is_some_and(|first| !first.is_ascii_lowercase()) =>
+            {
+                Self::Literal(label)
+            }
+            _ => return None,
+        };
+        Some(expectation)
+    }
+}
+
+pub fn suggest_client_expectations(input: &str, cursor: usize) -> Vec<CompletionExpectation> {
+    let (labels, tokens) = client_completion(input, cursor);
+    let schema = alter_schema_context(&tokens);
+    let route_references = route_expression_references(&tokens);
+    if !route_references.is_empty() {
+        return route_references
+            .into_iter()
+            .map(CompletionExpectation::Semantic)
+            .collect();
+    }
+    let mut expectations = Vec::new();
+    for label in labels {
+        if let Some(expectation) = CompletionExpectation::from_label(label, schema.as_ref()) {
+            expectations.push(expectation);
+        }
+    }
+    expectations
+}
+
+fn route_expression_references(tokens: &[Token]) -> Vec<SemanticReference> {
+    let output_route_start = tokens.iter().rposition(|token| {
+        matches!(
+            token,
+            Token::Word(Word::KnownWord {
+                iden: Keyword::To,
+                ..
+            })
+        )
+    });
+    let Some(output_route_start) = output_route_start else {
+        return Vec::new();
+    };
+    let has_construction = tokens[output_route_start..].iter().any(|token| {
+        matches!(
+            token,
+            Token::Word(Word::KnownWord {
+                iden: Keyword::Set | Keyword::Where | Keyword::Invoke | Keyword::Inherit,
+                ..
+            })
+        )
+    });
+    if !has_construction {
+        return Vec::new();
+    }
+    match tokens.last() {
+        Some(Token::Word(Word::KnownWord {
+            iden: Keyword::Set, ..
+        })) if junction_input_relay(tokens).is_some() => junction_output_relay(tokens)
+            .map(SemanticReference::RelayField)
+            .into_iter()
+            .collect(),
+        Some(Token::Dot) => {
+            let Some(previous_index) = tokens.len().checked_sub(2) else {
+                return Vec::new();
+            };
+            if matches!(
+                tokens.get(previous_index),
+                Some(Token::Word(crate::lexer::Word::KnownWord {
+                    iden: Keyword::Input,
+                    ..
+                }))
+            ) {
+                junction_input_relay(tokens)
+                    .map(SemanticReference::RelayField)
+                    .into_iter()
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
+        Some(Token::DoubleColon) => {
+            let Some(previous_index) = tokens.len().checked_sub(2) else {
+                return Vec::new();
+            };
+            if matches!(
+                tokens.get(previous_index),
+                Some(Token::Word(crate::lexer::Word::KnownWord {
+                    iden: Keyword::Udf,
+                    ..
+                }))
+            ) {
+                vec![SemanticReference::Model(ModelKind::Udf)]
+            } else {
+                Vec::new()
+            }
+        }
+        Some(Token::Word(Word::KnownWord {
+            iden: Keyword::Invoke,
+            ..
+        })) => {
+            let scope = match emitter_sink_kind(tokens) {
+                Some(kind) => BuiltinFunctionScope::EmitterInvocation(kind),
+                None => BuiltinFunctionScope::Ordinary,
+            };
+            vec![SemanticReference::BuiltinFunction(scope)]
+        }
+        Some(Token::Eq | Token::LParen | Token::Comma | Token::Plus | Token::Star) => {
+            let invocation =
+                tokens[output_route_start..]
+                    .iter()
+                    .rev()
+                    .find_map(|token| match token {
+                        Token::Word(Word::KnownWord {
+                            iden: Keyword::Set | Keyword::Where,
+                            ..
+                        }) => Some(false),
+                        Token::Word(Word::KnownWord {
+                            iden: Keyword::Invoke,
+                            ..
+                        }) => Some(true),
+                        _ => None,
+                    });
+            let scope = if invocation == Some(true) {
+                match emitter_sink_kind(tokens) {
+                    Some(kind) => BuiltinFunctionScope::EmitterInvocation(kind),
+                    None => BuiltinFunctionScope::Ordinary,
+                }
+            } else {
+                match ingestor_source_kind(tokens) {
+                    Some(kind) => BuiltinFunctionScope::IngestSource(kind),
+                    None => BuiltinFunctionScope::Ordinary,
+                }
+            };
+            vec![SemanticReference::BuiltinFunction(scope)]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn junction_input_relay(tokens: &[Token]) -> Option<RelayName> {
+    kw(Keyword::Create)
+        .ignore_then(if_not_exists_clause())
+        .then(ack_mode().or_not())
+        .then_ignore(kw(Keyword::Junction))
+        .then_ignore(junction_name())
+        .then_ignore(kw(Keyword::From))
+        .ignore_then(relay_ref())
+        .then_ignore(any().repeated())
+        .then_ignore(end())
+        .parse(tokens)
+        .into_output()
+}
+
+fn junction_output_relay(tokens: &[Token]) -> Option<RelayName> {
+    let to_index = tokens.iter().rposition(|token| {
+        matches!(
+            token,
+            Token::Word(Word::KnownWord {
+                iden: Keyword::To,
+                ..
+            })
+        )
+    })?;
+    let relay_index = to_index.checked_add(1)?;
+    let relay = tokens.get(relay_index)?;
+    relay_ref()
+        .then_ignore(end())
+        .parse(std::slice::from_ref(relay))
+        .into_output()
+}
+
+fn known_keyword(token: &Token) -> Option<Keyword> {
+    match token {
+        Token::Word(Word::KnownWord { iden, .. }) => Some(*iden),
+        _ => None,
+    }
+}
+
+fn ingestor_source_kind(tokens: &[Token]) -> Option<IngestSourceKind> {
+    let from = tokens
+        .iter()
+        .position(|token| known_keyword(token) == Some(Keyword::From))?;
+    let ingestor = tokens[..from]
+        .iter()
+        .any(|token| known_keyword(token) == Some(Keyword::Ingestor));
+    if !ingestor {
+        return None;
+    }
+    match known_keyword(tokens.get(from.checked_add(1)?)?)? {
+        Keyword::Http => Some(IngestSourceKind::Http),
+        Keyword::Kafka => Some(IngestSourceKind::Kafka),
+        Keyword::Pulsar => Some(IngestSourceKind::Pulsar),
+        Keyword::Mqtt => Some(IngestSourceKind::Mqtt),
+        Keyword::Nats => Some(IngestSourceKind::Nats),
+        Keyword::Rabbitmq => Some(IngestSourceKind::RabbitMq),
+        Keyword::Redis => Some(IngestSourceKind::RedisPubSub),
+        Keyword::Prometheus => Some(IngestSourceKind::Prometheus),
+        Keyword::Zeromq => Some(IngestSourceKind::ZeroMq),
+        Keyword::Sqs => Some(IngestSourceKind::Sqs),
+        Keyword::Endpoint => Some(IngestSourceKind::Endpoint),
+        Keyword::Websockets => Some(IngestSourceKind::Websockets),
+        Keyword::Syslog => Some(IngestSourceKind::Syslog),
+        _ => None,
+    }
+}
+
+fn emitter_sink_kind(tokens: &[Token]) -> Option<EmitSinkKind> {
+    let to = tokens
+        .iter()
+        .position(|token| known_keyword(token) == Some(Keyword::To))?;
+    let emitter = tokens[..to]
+        .iter()
+        .any(|token| known_keyword(token) == Some(Keyword::Emitter));
+    if !emitter {
+        return None;
+    }
+    match known_keyword(tokens.get(to.checked_add(1)?)?)? {
+        Keyword::Http => Some(EmitSinkKind::Http),
+        Keyword::Kafka => Some(EmitSinkKind::Kafka),
+        Keyword::Pulsar => Some(EmitSinkKind::Pulsar),
+        Keyword::Rabbitmq => Some(EmitSinkKind::RabbitMq),
+        Keyword::Redis => Some(EmitSinkKind::Redis),
+        Keyword::Mqtt => Some(EmitSinkKind::Mqtt),
+        Keyword::Nats => Some(EmitSinkKind::Nats),
+        Keyword::Zeromq => Some(EmitSinkKind::ZeroMq),
+        Keyword::Sqs => Some(EmitSinkKind::Sqs),
+        Keyword::Sentry => Some(EmitSinkKind::Sentry),
+        Keyword::Syslog => Some(EmitSinkKind::Syslog),
+        Keyword::Otel => Some(EmitSinkKind::Otel),
+        Keyword::Clickhouse => Some(EmitSinkKind::ClickHouse),
+        Keyword::Postgres => Some(EmitSinkKind::Postgres),
+        Keyword::Mysql => Some(EmitSinkKind::MySql),
+        Keyword::Mongodb => Some(EmitSinkKind::MongoDb),
+        Keyword::Iceberg => Some(EmitSinkKind::Iceberg),
+        _ => None,
+    }
+}
+
+enum SchemaFieldContext {
+    Schema(SchemaName),
+    Wire(ModelKind, WireSchemaName),
+}
+
+fn alter_schema_context(tokens: &[Token]) -> Option<SchemaFieldContext> {
+    let internal = kw(Keyword::Schema)
+        .ignore_then(schema_name())
+        .map(SchemaFieldContext::Schema);
+    let wire_kind = choice((
+        kw(Keyword::Json).to(ModelKind::WireJsonSchema),
+        kw(Keyword::Cbor).to(ModelKind::WireCborSchema),
+        kw(Keyword::Avro).to(ModelKind::WireAvroSchema),
+    ));
+    let wire = kw(Keyword::Wire)
+        .ignore_then(wire_kind)
+        .then_ignore(kw(Keyword::Schema))
+        .then(wire_schema_name())
+        .map(|(kind, name)| SchemaFieldContext::Wire(kind, name));
+    kw(Keyword::Alter)
+        .ignore_then(choice((internal, wire)))
+        .then_ignore(any().repeated())
+        .then_ignore(end())
+        .parse(tokens)
+        .into_output()
+}
+
 pub fn parse_use_domain(input: &str) -> Result<DomainName, ParseFromSourceError> {
     let LexedInput {
         source,
@@ -183,26 +494,20 @@ pub fn parse_client_statement(input: &str) -> Result<ClientStatement, ParseFromS
         spanned_tokens,
         tokens,
     } = lex_input(input)?;
-    let out = client_command_parser()
+    let out = client_statement_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
-    if !out.has_errors() {
-        return Ok(out
-            .into_output()
-            .verified("has_errors returned false above, so this parse produced output"));
-    }
-    let client_errors = out.into_errors();
-    if starts_with_client_command_keyword(&tokens) {
+    if out.has_errors() {
         return Err(into_parse_error(
             source,
             &spanned_tokens,
             input.len(),
-            client_errors,
+            out.into_errors(),
         ));
     }
-    crate::statement::parse_statement_tokens(&tokens)
-        .map(ClientStatement::Server)
-        .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
+    Ok(out
+        .into_output()
+        .verified("has_errors returned false above, so this parse produced output"))
 }
 
 pub fn parse_client_statements(input: &str) -> Result<Vec<ClientStatement>, ParseFromSourceError> {
@@ -250,84 +555,31 @@ pub fn parse_client_statement_sources(
     Ok(statements)
 }
 
-fn starts_with_client_command_keyword(tokens: &[Token]) -> bool {
-    let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.first() else {
-        return false;
-    };
-    if *iden == Keyword::Create || *iden == Keyword::Delete {
-        let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.get(1) else {
-            return false;
-        };
-        return *iden == Keyword::Subscription;
-    }
-    if *iden == Keyword::Use {
-        return true;
-    }
-    if *iden == Keyword::List {
-        return true;
-    }
-    if *iden == Keyword::Begin {
-        return true;
-    }
-    if *iden == Keyword::Commit {
-        return true;
-    }
-    if *iden == Keyword::Revert {
-        return true;
-    }
-    if *iden == Keyword::Upload {
-        return true;
-    }
-    false
-}
-
-fn starts_with_server_command_keyword(tokens: &[Token]) -> bool {
-    let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.first() else {
-        return false;
-    };
-    if *iden == Keyword::Create || *iden == Keyword::Delete {
-        return if let Some(Token::Word(Word::KnownWord { iden, .. })) = tokens.get(1) {
-            *iden != Keyword::Subscription
-        } else {
-            !matches!(
-                tokens.get(1),
-                Some(Token::Word(Word::UnknownWord(_))) | None
-            )
-        };
-    }
-    !starts_with_client_command_keyword(tokens)
-}
-
 pub fn suggest_client_statement(input: &str, cursor: usize) -> Vec<String> {
+    client_completion(input, cursor).0
+}
+
+fn client_completion(input: &str, cursor: usize) -> (Vec<String>, Vec<Token>) {
     let (source, prefix) = completion_context(input, cursor);
 
     let Some(tokens) = completion_tokens(&source) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
 
-    if starts_with_server_command_keyword(&tokens) {
-        return crate::statement::suggest_statement(input, cursor);
-    }
-
-    let out = client_command_parser()
+    let out = client_statement_parser()
         .then_ignore(end())
         .parse(tokens.as_slice());
-    let mut suggestions = if out.has_errors() {
+    let labels = if out.has_errors() {
         suggestions_from_errors(out.into_errors(), &prefix)
     } else {
-        Vec::new()
-    };
-
-    if !starts_with_client_command_keyword(&tokens) {
-        for suggestion in crate::statement::suggest_statement(input, cursor) {
-            if !suggestions.contains(&suggestion) {
-                suggestions.push(suggestion);
+        match out.into_output() {
+            Some(ClientStatement::Server(statement)) => {
+                crate::statement::statement_tail(&statement, &tokens, &source, &prefix)
             }
+            _ => Vec::new(),
         }
-    }
-
-    suggestions.sort();
-    suggestions
+    };
+    (labels, tokens)
 }
 
 pub fn upload_resource_path_fragment(input: &str, cursor: usize) -> Option<&str> {
@@ -351,12 +603,109 @@ pub fn upload_resource_path_fragment(input: &str, cursor: usize) -> Option<&str>
     if quote != '\'' && quote != '"' {
         return Some("");
     }
-    Some(&after_version[quote.len_utf8()..])
+    let fragment = &after_version[quote.len_utf8()..];
+    if fragment.contains(quote) || fragment.contains('\n') {
+        return None;
+    }
+    Some(fragment)
+}
+
+/// Source bytes replaced when accepting a local upload path candidate.
+pub fn upload_resource_path_range(input: &str, cursor: usize) -> Option<Range<usize>> {
+    let fragment = upload_resource_path_fragment(input, cursor)?;
+    let start = cursor.checked_sub(fragment.len())?;
+    let quote = input.get(..start)?.chars().last();
+    let end = match quote {
+        Some(quote @ ('\'' | '"')) => {
+            let suffix = input.get(cursor..)?;
+            let after_path = suffix.find(quote).unwrap_or(suffix.len());
+            cursor.checked_add(after_path)?
+        }
+        _ => cursor,
+    };
+    Some(start..end)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_expression_expectations_keep_their_semantic_scope() {
+        let prefix = "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET value = ";
+        let source = format!("{prefix}co");
+        let functions = suggest_client_expectations(&source, source.len());
+        assert!(functions.contains(&CompletionExpectation::Semantic(
+            SemanticReference::BuiltinFunction(BuiltinFunctionScope::Ordinary),
+        )));
+
+        let source = format!("{prefix}input.va");
+        let fields = suggest_client_expectations(&source, source.len());
+        assert!(fields.iter().any(|expectation| matches!(
+            expectation,
+            CompletionExpectation::Semantic(SemanticReference::RelayField(relay))
+                if relay.as_str() == "incoming"
+        )));
+
+        let source = "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET va";
+        let output_fields = suggest_client_expectations(source, source.len());
+        assert!(output_fields.iter().any(|expectation| matches!(
+            expectation,
+            CompletionExpectation::Semantic(SemanticReference::RelayField(relay))
+                if relay.as_str() == "outgoing"
+        )));
+
+        let source = format!("{prefix}udf::plus");
+        let udfs = suggest_client_expectations(&source, source.len());
+        assert!(
+            udfs.contains(&CompletionExpectation::Semantic(SemanticReference::Model(
+                ModelKind::Udf
+            ),))
+        );
+
+        let required = "ALTER GENERATOR source ADD ROUTE TO outgoing ";
+        assert!(
+            suggest_client_expectations(required, required.len())
+                .contains(&CompletionExpectation::Literal("SET".to_string()))
+        );
+    }
+
+    #[test]
+    fn header_function_expectations_carry_the_transport_kind() {
+        let endpoint = "CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON \
+                        QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_";
+        assert!(
+            suggest_client_expectations(endpoint, endpoint.len()).contains(
+                &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
+                    BuiltinFunctionScope::IngestSource(IngestSourceKind::Endpoint),
+                ))
+            )
+        );
+
+        let mqtt = "CREATE INGESTOR source FROM MQTT broker TOPIC events MODE NO_ACK SEQUENTIAL \
+                    ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_";
+        assert!(suggest_client_expectations(mqtt, mqtt.len()).contains(
+            &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
+                BuiltinFunctionScope::IngestSource(IngestSourceKind::Mqtt),
+            ))
+        ));
+
+        let kafka = "CREATE EMITTER sink FROM incoming TO KAFKA broker TOPIC events MODE NO_ACK \
+                     RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
+        assert!(suggest_client_expectations(kafka, kafka.len()).contains(
+            &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
+                BuiltinFunctionScope::EmitterInvocation(EmitSinkKind::Kafka),
+            ))
+        ));
+
+        let sentry = "CREATE EMITTER sink FROM incoming TO SENTRY client MODE ACK RETRY POLICY \
+                      BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_";
+        assert!(suggest_client_expectations(sentry, sentry.len()).contains(
+            &CompletionExpectation::Semantic(SemanticReference::BuiltinFunction(
+                BuiltinFunctionScope::EmitterInvocation(EmitSinkKind::Sentry),
+            ))
+        ));
+    }
 
     #[test]
     fn parses_use_domain() {
@@ -652,7 +1001,84 @@ mod tests {
     }
 
     #[test]
+    fn composed_client_expectations_preserve_semantic_reference_kinds() {
+        let source = "CREATE RELAY output SCHEMA ";
+        let suggestions = suggest_client_expectations(source, source.len());
+        assert!(
+            suggestions.contains(&CompletionExpectation::Semantic(SemanticReference::Model(
+                ModelKind::Schema
+            )))
+        );
+        assert!(
+            !suggestions.contains(&CompletionExpectation::Semantic(SemanticReference::Model(
+                ModelKind::Relay
+            )))
+        );
+
+        let source = "DROP RELAY ";
+        let suggestions = suggest_client_expectations(source, source.len());
+        assert!(
+            suggestions.contains(&CompletionExpectation::Semantic(SemanticReference::Model(
+                ModelKind::Relay
+            )))
+        );
+        assert!(
+            !suggestions.contains(&CompletionExpectation::Semantic(SemanticReference::Model(
+                ModelKind::Schema
+            )))
+        );
+
+        let source = "USE ";
+        let suggestions = suggest_client_expectations(source, source.len());
+        assert!(suggestions.contains(&CompletionExpectation::Semantic(SemanticReference::Domain)));
+
+        let source = "CREATE DOMAIN ";
+        let suggestions = suggest_client_expectations(source, source.len());
+        assert!(!suggestions.contains(&CompletionExpectation::Semantic(SemanticReference::Domain)));
+    }
+
+    #[test]
+    fn schema_field_expectation_carries_its_schema() {
+        let source = "ALTER SCHEMA order_event DROP FIELD val";
+        let suggestions = suggest_client_expectations(source, source.len());
+        assert!(suggestions.iter().any(|suggestion| matches!(
+            suggestion,
+            CompletionExpectation::Semantic(SemanticReference::SchemaField(schema))
+                if schema.as_str() == "order_event"
+        )));
+
+        let source = "ALTER WIRE JSON SCHEMA event_wire RENAME FIELD val";
+        let suggestions = suggest_client_expectations(source, source.len());
+        assert!(suggestions.iter().any(|suggestion| matches!(
+            suggestion,
+            CompletionExpectation::Semantic(SemanticReference::WireSchemaField(
+                ModelKind::WireJsonSchema,
+                schema,
+            )) if schema.as_str() == "event_wire"
+        )));
+    }
+
+    #[test]
+    fn grammar_placeholders_do_not_become_text_candidates() {
+        let source = "CREATE SCHEMA ";
+        assert!(!suggest_client_expectations(source, source.len())
+            .iter()
+            .any(|candidate| matches!(candidate, CompletionExpectation::Literal(value) if value == "schema_name")));
+    }
+
+    #[test]
     fn detects_upload_resource_path_fragment() {
+        let input = "UPLOAD RESOURCE proto VERSION '/tmp/pro|to';";
+        let cursor = input
+            .find('|')
+            .assured("the test input contains a cursor marker");
+        let input = input.replace('|', "");
+        assert_eq!(
+            upload_resource_path_range(&input, cursor),
+            Some("UPLOAD RESOURCE proto VERSION '".len()..input.len() - 2)
+        );
+        let closed = "UPLOAD RESOURCE proto VERSION '/tmp/pro';";
+        assert_eq!(upload_resource_path_fragment(closed, closed.len()), None);
         assert_eq!(
             upload_resource_path_fragment(
                 "UPLOAD RESOURCE proto VERSION '/tmp/pro",

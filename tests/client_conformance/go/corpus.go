@@ -185,6 +185,33 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 				handle.Name(), handle.Generation(), opened.Domain(), opened.Relay(),
 				session.EnumNamesSubscriptionType[*kind])
 			return append([]string{head}, lines...), nil
+		case session.ReplyBodySuggestOutcome:
+			outcome := new(session.SuggestOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			status := outcome.Status()
+			if status == nil {
+				return nil, errors.New("a suggestion reply has no status")
+			}
+			lines := []string{fmt.Sprintf("REPLY %d SUGGEST status=%s continuation=%s", id,
+				session.EnumNamesSuggestionStatus[*status], orNone(outcome.Continuation()))}
+			for index := 0; index < outcome.SuggestionsLength(); index++ {
+				suggestion := new(session.Suggestion)
+				if !outcome.Suggestions(suggestion, index) {
+					return nil, errors.New("a suggestion is missing")
+				}
+				kind := suggestion.Kind()
+				edit := suggestion.Edit(nil)
+				if kind == nil || edit == nil {
+					return nil, errors.New("a suggestion has no kind or edit")
+				}
+				lines = append(lines, fmt.Sprintf(
+					"SUGGESTION kind=%s value=%s edit=%d..%d replacement=%s",
+					session.EnumNamesSuggestionKind[*kind], text(suggestion.Value()),
+					edit.Start(), edit.End(), text(edit.Replacement())))
+			}
+			return lines, nil
 		}
 		return nil, fmt.Errorf("the corpus holds no %s reply", value.BodyType())
 	case session.ServerBodySubscriptionRows:
@@ -273,6 +300,13 @@ func clientLines(frame []byte) ([]string, error) {
 		}
 		return []string{fmt.Sprintf("REQUEST %d SUBSCRIBE domain=%s statement=%s type=%s", id,
 			subscribe.Domain(), text(subscribe.Statement()), session.EnumNamesSubscriptionType[*kind])}, nil
+	case session.ClientRequestSuggestRequest:
+		suggest := new(session.SuggestRequest)
+		suggest.Init(table.Bytes, table.Pos)
+		return []string{fmt.Sprintf(
+			"REQUEST %d SUGGEST input=%s cursor=%d domain=%s page_size=%d continuation=%s",
+			id, text(suggest.Input()), suggest.Cursor(), orNone(suggest.Domain()),
+			suggest.PageSize(), orNone(suggest.Continuation()))}, nil
 	case session.ClientRequestCancelRequest:
 		cancel := new(session.CancelRequest)
 		cancel.Init(table.Bytes, table.Pos)

@@ -1,4 +1,43 @@
 Feature: CLI public session dispatch
+  Scenario Outline: CLI applies semantic completion edits at the real cursor
+    Given a <cluster_size> node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event ( value I64, secret STRING );
+      CREATE SCHEMA unrelated ( unrelated_field I64 );
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI suggests for "ALTER SCHEMA order_event DROP FIELD val|x" on node "{{leader}}"
+    Then the CLI suggestion "value" applied to "ALTER SCHEMA order_event DROP FIELD val|x" yields "ALTER SCHEMA order_event DROP FIELD value"
+    And the CLI output does not contain "unrelated_field"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario: CLI completion uses UTF-8 byte edits after Unicode text
+    Given a 1 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event ( value I64 );
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI suggests for "// 😊\nALTER SCHEMA order_event DROP FIELD val|x" on node "{{leader}}"
+    Then the CLI suggestion "value" applied to "// 😊\nALTER SCHEMA order_event DROP FIELD val|x" yields "// 😊\nALTER SCHEMA order_event DROP FIELD value"
+
+  Scenario: CLI completion searches local upload paths
+    Given a 1 node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI suggests for "UPLOAD RESOURCE bundle VERSION 'Cargo.t|ml'" on node "{{leader}}"
+    Then the CLI suggestion "Cargo.toml" applied to "UPLOAD RESOURCE bundle VERSION 'Cargo.t|ml'" yields "UPLOAD RESOURCE bundle VERSION 'Cargo.toml'"
+
   Scenario Outline: CLI dispatches a command through a public session
     Given a <cluster_size> node nervix cluster is started
     When these NSPL commands are executed on the leader node

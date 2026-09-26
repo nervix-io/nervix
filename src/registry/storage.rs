@@ -7,7 +7,7 @@
 //! - **Depends on.** `fjall` for storage and the domain state for validation.
 //! - **Must not know.** How a runtime change is applied.
 
-use std::{collections::BTreeSet, path::Path, str::FromStr};
+use std::{path::Path, str::FromStr};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt};
@@ -1197,38 +1197,6 @@ impl Registry {
         self.storage
             .list_identifiers(domain, kind, prefix)
             .change_context(RegistryError::LoadStoredModels)
-    }
-
-    /// Identifiers of `kind` in the configuration `queued` produces when applied to `domain` in
-    /// written order. Only the create and drop sequence decides a name, so an intermediate
-    /// configuration that does not yet resolve still reports the names it defines.
-    pub(crate) fn resulting_identifiers(
-        &self,
-        domain: &DomainName,
-        kind: ModelKind,
-        prefix: &str,
-        queued: &[RegistryMutation<RequestedResourceVersion>],
-    ) -> Result<Vec<ModelName>, Report<RegistryError>> {
-        let committed = self.list_identifiers(domain, kind, prefix)?;
-        if queued.is_empty() {
-            return Ok(committed);
-        }
-
-        let prefix = prefix.to_ascii_lowercase();
-        let mut identifiers = committed.into_iter().collect::<BTreeSet<_>>();
-        for mutation in queued {
-            let target = mutation.target_key();
-            if target.kind == kind {
-                identifiers.remove(&target.identifier);
-            }
-            if let Some(resulting) = mutation.resulting_key()
-                && resulting.kind == kind
-                && resulting.identifier.as_str().starts_with(&prefix)
-            {
-                identifiers.insert(resulting.identifier);
-            }
-        }
-        Ok(identifiers.into_iter().collect())
     }
 
     /// The models of `domain` as `queued` leaves them, applied in written order and without

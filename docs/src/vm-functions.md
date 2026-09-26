@@ -41,12 +41,20 @@ Five rules hold throughout:
 | Layer | Owner | What it owns |
 | --- | --- | --- |
 | Vocabulary | Expression Models in `nervix-models` | `Expression`, `RouteConstruction`, `Assignment`, `Invocation`, and `JsonPath`. A builtin name is a validated `BuiltinFunctionName` identifier, not a closed set, and a UDF name is a `UdfName`. |
-| Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion offers an identifier at a call position. |
+| Language | `nervix-nspl` | Parsing a call as a generic `name(args)` or `udf::name(args)` into those Models. The grammar has no function-name table; completion emits a typed builtin or UDF expectation at a call position. |
 | Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, and window aggregate lowering and route compilation. |
 | Engines and infrastructure | `nervix-roto` | Compiling a `CREATE UDF`, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
 | Decisions | Registry validation | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, so a statement is rejected with exactly the error execution would report. |
 | Data plane | Runtime bindings and hosts | Compiling runtime programs against runtime schemas, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
+
+For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
+builtin spellings, including datetime names and accepted aliases. That list excludes injected
+calls and `write_header`; it is a candidate catalog, while VM lowering and registry validation
+still decide whether a call is valid for its arguments. The parser carries the source or sink kind
+with header-function expectations. The resolver adds `read_header` and `read_headers` only for a
+source that can read headers, and `write_header` only for a sink that can write them. UDF candidates
+come from the selected domain's Models after the session's queued transaction changes.
 
 The data plane does not yet receive compiled plans. It compiles its programs from the Models its
 active graph carries, as the header of `src/runtime/vm_compile.rs` states. That contradicts the

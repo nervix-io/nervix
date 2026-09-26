@@ -14,7 +14,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     ClientMessage, ClientRequest, DomainList, NoticeLevel, Reply, ReplyBody, ReplyDelivery,
     RequestId, ServerEvent, ServerMessage, ServerNotice, SessionLimitSettings, SessionLimits,
-    SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind,
+    SuggestOutcome, SuggestRequest, Suggestion, SuggestionKind, SuggestionStatus, TextEdit,
     websocket::{ClientWebSocketCodec, ServerWebSocketCodec, WebSocketData, WebSocketError},
 };
 use tokio::net::{TcpListener, TcpStream};
@@ -102,9 +102,16 @@ async fn serve_one(listener: TcpListener, limits: SessionLimits) {
                 domains: Vec::new(),
             }),
             ClientRequest::Suggest(suggest) => ReplyBody::Suggest(SuggestOutcome {
+                status: SuggestionStatus::Ready,
+                continuation: None,
                 suggestions: vec![Suggestion {
                     value: suggest.input()[..suggest.cursor()].to_string(),
                     kind: SuggestionKind::Text,
+                    edit: TextEdit {
+                        start: 0,
+                        end: 0,
+                        replacement: String::new(),
+                    },
                 }],
             }),
             other => panic!("the test client does not send {other:?}"),
@@ -209,9 +216,16 @@ async fn a_browser_session_exchanges_one_frame_per_binary_message() {
     assert_eq!(
         suggested.body,
         ReplyBody::Suggest(SuggestOutcome {
+            status: SuggestionStatus::Ready,
+            continuation: None,
             suggestions: vec![Suggestion {
                 value: "CREATE ".to_string(),
                 kind: SuggestionKind::Text,
+                edit: TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new()
+                },
             }],
         })
     );
