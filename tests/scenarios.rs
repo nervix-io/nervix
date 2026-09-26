@@ -13263,6 +13263,98 @@ async fn then_inspector_drawing_fits(world: &mut ScenarioWorld) {
     .await;
 }
 
+#[then("inspector item labels and role marks do not overlap")]
+async fn then_inspector_item_labels_do_not_overlap(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let script = r#"
+        () => {
+            const items = document.querySelectorAll('.transaction-inspector .inspector-item');
+            if (!items.length) return 'inspector items are absent';
+            for (const item of items) {
+                const kind = item.querySelector('.inspector-kind');
+                const name = item.querySelector('.inspector-name');
+                const marks = item.querySelector('.inspector-marks');
+                if (!kind || !name || !marks || !kind.textContent.trim() || !name.textContent.trim()) {
+                    return `missing label for ${item.dataset.name}`;
+                }
+                if (kind.getBoundingClientRect().bottom > name.getBoundingClientRect().top + 1) {
+                    return `kind overlaps name for ${item.dataset.name}`;
+                }
+                if (marks.textContent.trim() && name.getBoundingClientRect().bottom > marks.getBoundingClientRect().top + 1) {
+                    return `name overlaps role marks for ${item.dataset.name}`;
+                }
+            }
+            return 'OK';
+        }
+    "#;
+    assert_graph_probe(
+        page,
+        script,
+        "inspector labels and role marks to remain separate",
+    )
+    .await;
+}
+
+#[then(expr = "inspector branch group {string} contains item {string}")]
+async fn then_inspector_branch_group_contains_item(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+) {
+    then_inspector_branch_group_containment(world, branch, item, true).await;
+}
+
+#[then(expr = "inspector branch group {string} does not contain item {string}")]
+async fn then_inspector_branch_group_does_not_contain_item(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+) {
+    then_inspector_branch_group_containment(world, branch, item, false).await;
+}
+
+async fn then_inspector_branch_group_containment(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+    expected: bool,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let branch = expand_placeholders(world, &branch);
+    let item = expand_placeholders(world, &item);
+    let script = format!(
+        r#"
+        () => {{
+            const group = document.querySelector(`.transaction-inspector .inspector-branch[data-branch=${{JSON.stringify({branch})}}]`);
+            const item = Array.from(document.querySelectorAll('.transaction-inspector .inspector-item'))
+                .find((candidate) => candidate.dataset.name === {item});
+            if (!group || !item) return `missing group=${{Boolean(group)}} item=${{Boolean(item)}}`;
+            const outline = group.getBoundingClientRect();
+            const box = item.getBoundingClientRect();
+            const centerX = (box.left + box.right) / 2;
+            const centerY = (box.top + box.bottom) / 2;
+            const contained = outline.left <= centerX && centerX <= outline.right &&
+                outline.top <= centerY && centerY <= outline.bottom;
+            return contained === {expected} ? 'OK' : `containment is ${{contained}}`;
+        }}
+        "#,
+        branch = serde_json::to_string(&branch).assured("a test branch serializes as JSON text"),
+        item = serde_json::to_string(&item).assured("a test item serializes as JSON text"),
+    );
+    assert_graph_probe(
+        page,
+        &script,
+        "an inspector branch group to hold exactly its members",
+    )
+    .await;
+}
+
 #[then(expr = "inspector search result {string} is visible in its viewport")]
 async fn then_inspector_search_result_is_visible(world: &mut ScenarioWorld, name: String) {
     let page = world

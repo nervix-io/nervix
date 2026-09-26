@@ -249,6 +249,15 @@ enum DetailSelection {
     Edge(ImpactEdgeId),
 }
 
+/// The CSS canvas transform is published as one value so framing cannot render new zoom with
+/// earlier pan coordinates.
+#[derive(Clone, Copy)]
+struct CanvasTransform {
+    zoom: f64,
+    x: f64,
+    y: f64,
+}
+
 #[component]
 pub(super) fn TransactionInspector(
     inspector: InspectorSignals,
@@ -263,9 +272,11 @@ pub(super) fn TransactionInspector(
     let search = RwSignal::new(String::new());
     let drawing = RwSignal::new(None::<ImpactGraph>);
     let detail = RwSignal::new(None::<DetailSelection>);
-    let zoom = RwSignal::new(1.0_f64);
-    let pan_x = RwSignal::new(0.0_f64);
-    let pan_y = RwSignal::new(0.0_f64);
+    let transform = RwSignal::new(CanvasTransform {
+        zoom: 1.0,
+        x: 0.0,
+        y: 0.0,
+    });
     let drag = RwSignal::new(None::<(i32, i32, f64, f64)>);
     let stage = NodeRef::<leptos::html::Div>::new();
     // Command replies can repeat an unchanged status. Only a changed position, lifecycle, or
@@ -332,7 +343,7 @@ pub(super) fn TransactionInspector(
             width: f64::from(stage.client_width()),
             height: f64::from(stage.client_height()),
         };
-        let Some(viewport) = Viewport::framing(
+        let Some(framed) = Viewport::framing(
             stage_extent,
             Extent {
                 width: f64::from(graph.width),
@@ -346,9 +357,11 @@ pub(super) fn TransactionInspector(
         let (center_x, center_y) = bounds.center();
         // This canvas has a fixed top-left origin. The translation therefore depends only on
         // the region being framed, even when the canvas is larger than its clipped stage.
-        zoom.set(viewport.zoom);
-        pan_x.set(stage_extent.width / 2.0 - viewport.zoom * center_x);
-        pan_y.set(stage_extent.height / 2.0 - viewport.zoom * center_y);
+        transform.set(CanvasTransform {
+            zoom: framed.zoom,
+            x: stage_extent.width / 2.0 - framed.zoom * center_x,
+            y: stage_extent.height / 2.0 - framed.zoom * center_y,
+        });
     };
     let fit = move || {
         let Some(graph) = drawing.get_untracked() else {
@@ -412,22 +425,38 @@ pub(super) fn TransactionInspector(
                                 {move || inspection_summary(inspector.inspection.get().as_ref(), transaction_status.get().as_ref(), inspector.stale_preview.get())}
                             </div>
                             <button type="button" class="scope-select" on:click=move |_| selection.set(ScopeSelection::Transaction)>"Whole transaction · scoped union"</button>
-                            <For each=move || inspector.inspection.get().map(|value| value.report.execution_steps().to_vec()).unwrap_or_default()
+                            <For each=move || match inspector.inspection.get() {
+                                Some(value) => value.report.execution_steps().to_vec(),
+                                None => Vec::new(),
+                            }
                                 key=|step| step.operations()
                                 children=move |step| {
                                     let range = step.operations();
                                     view! {
                                         <button type="button" class="step-select" on:click=move |_| selection.set(ScopeSelection::Step(range))>
-                                            {move || inspector.inspection.get().and_then(|value| value.report.execution_steps().iter().find(|current| current.operations() == range).cloned()).map(|current| format!("Execution step {}–{} · {}", range.first(), range.last(), current.actual().outcome.as_ref())).unwrap_or_default()}
+                                            {move || match inspector.inspection.get() {
+                                                Some(value) => match value.report.execution_steps().iter().find(|current| current.operations() == range) {
+                                                    Some(current) => format!("Execution step {}–{} · {}", range.first(), range.last(), current.actual().outcome.as_ref()),
+                                                    None => String::new(),
+                                                },
+                                                None => String::new(),
+                                            }}
                                         </button>
-                                        <For each=move || inspector.inspection.get().map(|value| {
-                                            range.operations().filter_map(|number| value.report.operations().get(number.index()).cloned()).collect::<Vec<_>>()
-                                        }).unwrap_or_default()
+                                        <For each=move || match inspector.inspection.get() {
+                                            Some(value) => range.operations().filter_map(|number| value.report.operations().get(number.index()).cloned()).collect::<Vec<_>>(),
+                                            None => Vec::new(),
+                                        }
                                             key=|operation| operation.number
                                             children=move |operation| {
                                                 let number = operation.number;
                                                 view! { <button type="button" class="operation-select" on:click=move |_| selection.set(ScopeSelection::Operation(number))>
-                                                    {move || inspector.inspection.get().and_then(|value| value.report.operations().get(number.index()).cloned()).map(|current| format!("Operation {} · {}", number, operation_label(&current))).unwrap_or_default()}
+                                                    {move || match inspector.inspection.get() {
+                                                        Some(value) => match value.report.operations().get(number.index()) {
+                                                            Some(current) => format!("Operation {} · {}", number, operation_label(current)),
+                                                            None => String::new(),
+                                                        },
+                                                        None => String::new(),
+                                                    }}
                                                 </button> }
                                             }
                                         />
@@ -437,8 +466,11 @@ pub(super) fn TransactionInspector(
                             <p class="inspector-scope">{move || scope_summary(inspector.inspection.get().as_ref(), selection.get(), outcome.get())}</p>
                             <details class="inspector-relation-list">
                                 <summary>"Relations"</summary>
-                                <For each=move || drawing.get().map(|graph| graph.edges.into_values().collect::<Vec<_>>()).unwrap_or_default()
-                                    key=|edge| edge.id.clone()
+                                <For each=move || match drawing.get() {
+                                    Some(graph) => graph.edges.into_values().collect::<Vec<_>>(),
+                                    None => Vec::new(),
+                                }
+                                    key=|edge| (edge.id.clone(), edge.presence)
                                     children=move |edge| {
                                         let id = edge.id;
                                         let selected = id.clone();
@@ -467,16 +499,21 @@ pub(super) fn TransactionInspector(
                                 <button type="button" class:active=move || outcome.get() == ImpactOutcome::Planned on:click=move |_| outcome.set(ImpactOutcome::Planned)>"Planned"</button>
                                 <button type="button" class:active=move || outcome.get() == ImpactOutcome::Actual on:click=move |_| outcome.set(ImpactOutcome::Actual)>"Actual"</button>
                                 <label>"Search" <input type="search" prop:value=move || search.get() on:input=move |event| search.set(event_target_input(&event).value()) /></label>
-                                <button type="button" aria-label="Zoom out" on:click=move |_| zoom.update(|value| *value = (*value - Viewport::ZOOM_STEP).max(Viewport::MIN_ZOOM))>"−"</button>
-                                <button type="button" aria-label="Zoom in" on:click=move |_| zoom.update(|value| *value = (*value + Viewport::ZOOM_STEP).min(Viewport::MAX_ZOOM))>"+"</button>
+                                <button type="button" aria-label="Zoom out" on:click=move |_| transform.update(|value| value.zoom = (value.zoom - Viewport::ZOOM_STEP).max(Viewport::MIN_ZOOM))>"−"</button>
+                                <button type="button" aria-label="Zoom in" on:click=move |_| transform.update(|value| value.zoom = (value.zoom + Viewport::ZOOM_STEP).min(Viewport::MAX_ZOOM))>"+"</button>
                                 <button type="button" class="inspector-fit" on:click=move |_| fit()>"FIT"</button>
                             </div>
                             <div class="inspector-stage" node_ref=stage
-                                on:mousedown=move |event: ev::MouseEvent| drag.set(Some((event.client_x(), event.client_y(), pan_x.get_untracked(), pan_y.get_untracked())))
+                                on:mousedown=move |event: ev::MouseEvent| {
+                                    let current = transform.get_untracked();
+                                    drag.set(Some((event.client_x(), event.client_y(), current.x, current.y)));
+                                }
                                 on:mousemove=move |event: ev::MouseEvent| {
                                     if let Some((x, y, start_x, start_y)) = drag.get_untracked() {
-                                        pan_x.set(start_x + f64::from(event.client_x() - x));
-                                        pan_y.set(start_y + f64::from(event.client_y() - y));
+                                        transform.update(|value| {
+                                            value.x = start_x + f64::from(event.client_x() - x);
+                                            value.y = start_y + f64::from(event.client_y() - y);
+                                        });
                                     }
                                 }
                                 on:mouseup=move |_| drag.set(None)
@@ -484,21 +521,25 @@ pub(super) fn TransactionInspector(
                                 on:wheel=move |event: ev::WheelEvent| {
                                     if event.ctrl_key() || event.meta_key() {
                                         event.prevent_default();
-                                        zoom.update(|value| *value = (*value - event.delta_y() * 0.001).clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM));
+                                        transform.update(|value| value.zoom = (value.zoom - event.delta_y() * 0.001).clamp(Viewport::MIN_ZOOM, Viewport::MAX_ZOOM));
                                     }
                                 }
                             >
                                 <Show when=move || drawing.get().is_some() fallback=|| ()>
                                     <div class="inspector-canvas" style=move || {
                                         let graph = drawing.get().verified("a mounted inspector canvas retains its graph until unmount");
-                                        format!("width:{}px;height:{}px;transform:translate({}px, {}px) scale({})", graph.width, graph.height, pan_x.get(), pan_y.get(), zoom.get())
+                                        let transform = transform.get();
+                                        format!("width:{}px;height:{}px;transform:translate({}px, {}px) scale({})", graph.width, graph.height, transform.x, transform.y, transform.zoom)
                                     }>
                                         <svg class="inspector-relations" viewBox=move || {
                                             let graph = drawing.get().verified("a mounted inspector canvas retains its graph until unmount");
                                             format!("0 0 {} {}", graph.width, graph.height)
                                         }>
-                                            <For each=move || drawing.get().map(|graph| graph.groups).unwrap_or_default()
-                                                key=|group| group.branch.clone()
+                                            <For each=move || match drawing.get() {
+                                                Some(graph) => graph.groups,
+                                                None => Vec::new(),
+                                            }
+                                                key=|group| (group.branch.clone(), group.bands.clone())
                                                 children=move |group| {
                                                     let name = group.branch.to_string();
                                                     view! {
@@ -506,8 +547,11 @@ pub(super) fn TransactionInspector(
                                                     }
                                                 }
                                             />
-                                            <For each=move || drawing.get().map(|graph| graph.edges.into_values().collect::<Vec<_>>()).unwrap_or_default()
-                                                key=|edge| edge.id.clone()
+                                            <For each=move || match drawing.get() {
+                                                Some(graph) => graph.edges.into_values().collect::<Vec<_>>(),
+                                                None => Vec::new(),
+                                            }
+                                                key=|edge| (edge.id.clone(), edge.presence, edge.route.points.clone())
                                                 children=move |edge| {
                                                     let edge_id = edge.id.clone();
                                                     let relation = format!("{:?}", edge_id.relation);
@@ -533,8 +577,11 @@ pub(super) fn TransactionInspector(
                                                 }
                                             />
                                         </svg>
-                                        <For each=move || drawing.get().map(|graph| graph.groups).unwrap_or_default()
-                                            key=|group| group.branch.clone()
+                                        <For each=move || match drawing.get() {
+                                            Some(graph) => graph.groups,
+                                            None => Vec::new(),
+                                        }
+                                            key=|group| (group.branch.clone(), group.bands.clone())
                                             children=move |group| {
                                                 let Some(header) = group.header_anchor() else {
                                                     return ().into_any();
@@ -546,10 +593,12 @@ pub(super) fn TransactionInspector(
                                                 }.into_any()
                                             }
                                         />
-                                        {move || drawing.get().and_then(|graph| graph.domain.outline).map(|outline| {
+                                        {move || {
+                                            let graph = drawing.get()?;
+                                            let outline = graph.domain.outline?;
                                             let frame = outline.frame;
                                             let label = outline.label;
-                                            view! {
+                                            Some(view! {
                                                 <div class="inspector-domain-outline" style=format!(
                                                     "left:{}px;top:{}px;width:{}px;height:{}px",
                                                     frame.x, frame.y, frame.width, frame.height,
@@ -559,10 +608,18 @@ pub(super) fn TransactionInspector(
                                                         label.x - frame.x, label.y - frame.y,
                                                     )>"Whole domain pause"</span>
                                                 </div>
-                                            }
-                                        })}
-                                        <For each=move || drawing.get().map(|graph| graph.items.into_values().collect::<Vec<_>>()).unwrap_or_default()
-                                            key=|item| item.id.clone()
+                                            })
+                                        }}
+                                        <For each=move || match drawing.get() {
+                                            Some(graph) => graph.items.into_values().collect::<Vec<_>>(),
+                                            None => Vec::new(),
+                                        }
+                                            key=|item| (
+                                                item.id.clone(),
+                                                item.rect,
+                                                item.presence,
+                                                item.roles.keys().map(role_label).collect::<Vec<_>>().join(" · "),
+                                            )
                                             children=move |item| {
                                                 let id = item.id.clone();
                                                 let name = id.name().to_string();
@@ -616,26 +673,30 @@ fn project_impact(
     let report = &inspection.report;
     match selection {
         ScopeSelection::Transaction => ImpactGraph::transaction(report, outcome),
-        ScopeSelection::Step(range) => report
-            .execution_steps()
-            .iter()
-            .find(|step| step.operations() == range)
-            .map_or_else(
-                || ImpactGraph::transaction(report, outcome),
-                |step| ImpactGraph::execution_step(step, outcome),
-            ),
+        ScopeSelection::Step(range) => {
+            match report
+                .execution_steps()
+                .iter()
+                .find(|step| step.operations() == range)
+            {
+                Some(step) => ImpactGraph::execution_step(step, outcome),
+                None => ImpactGraph::transaction(report, outcome),
+            }
+        }
         ScopeSelection::Operation(number) => match report.operations().get(number.index()) {
             Some(operation) if outcome == ImpactOutcome::Planned => {
                 ImpactGraph::operation(operation)
             }
-            Some(operation) => report
-                .execution_steps()
-                .iter()
-                .find(|step| step.operations() == operation.execution_step)
-                .map_or_else(
-                    || ImpactGraph::transaction(report, outcome),
-                    |step| ImpactGraph::execution_step(step, outcome),
-                ),
+            Some(operation) => {
+                match report
+                    .execution_steps()
+                    .iter()
+                    .find(|step| step.operations() == operation.execution_step)
+                {
+                    Some(step) => ImpactGraph::execution_step(step, outcome),
+                    None => ImpactGraph::transaction(report, outcome),
+                }
+            }
             None => ImpactGraph::transaction(report, outcome),
         },
     }
@@ -865,13 +926,15 @@ fn impact_explanation(
                 .map(|reason| format!("{reason:?}"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let actual = inspection
+            let actual = match inspection
                 .report
                 .execution_steps()
                 .iter()
                 .find(|step| step.operations() == operation.execution_step)
-                .map(|step| step.actual().outcome.as_ref())
-                .unwrap_or("UNAVAILABLE");
+            {
+                Some(step) => step.actual().outcome.as_ref(),
+                None => "UNAVAILABLE",
+            };
             Some(format!(
                 "operation {number}: {} · step actual {actual}",
                 if reasons.is_empty() {

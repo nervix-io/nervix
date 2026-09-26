@@ -27,6 +27,7 @@ Feature: Web console transaction inspector
     And selector ".transaction-inspector" contains "DYNAMIC"
     And selector ".transaction-inspector .inspector-item[data-name='inspected_event']" contains "SCHEMA"
     And selector ".transaction-inspector .inspector-item[data-name='inspected_audit']" contains "SCHEMA"
+    And inspector item labels and role marks do not overlap
     When the inspector geometry is remembered
     And selector ".transaction-inspector .inspector-controls button:has-text('Before')" is pressed with "Enter"
     Then the inspector geometry matches the remembered drawing
@@ -316,20 +317,51 @@ Feature: Web console transaction inspector
       CREATE SCHEMA branch_event (value I64);
       CREATE SCHEMA branch_key (tenant STRING);
       CREATE BRANCH by_tenant SCHEMA branch_key TTL 5m;
-      CREATE RELAY branch_events SCHEMA branch_event BRANCHED BY by_tenant;
+      CREATE BRANCH by_user SCHEMA branch_key TTL 5m;
+      CREATE RELAY a_tenant SCHEMA branch_event BRANCHED BY by_tenant;
+      CREATE RELAY b_user SCHEMA branch_event BRANCHED BY by_user;
+      CREATE RELAY c_tenant SCHEMA branch_event BRANCHED BY by_tenant;
+      CREATE RELAY d_user SCHEMA branch_event BRANCHED BY by_user;
       """
     And the web console is opened on the leader node
     Then selector ".topbar-status .pill.ok" contains "CONNECTED"
     When selector ".prompt-row input" is filled with "BEGIN;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".transaction-indicator" contains "Inspect"
-    When selector ".prompt-row input" is filled with "DROP RELAY branch_events;"
+    When selector ".prompt-row input" is filled with "DROP RELAY a_tenant;"
     And selector ".prompt-row input" is pressed with "Enter"
-    Then selector ".terminal" contains "DROP RELAY branch_events"
+    Then selector ".terminal" contains "DROP RELAY a_tenant"
     When selector ".transaction-indicator" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-summary" contains "1 accepted"
+    When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
+    When selector ".prompt-row input" is filled with "DROP RELAY b_user;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "DROP RELAY b_user"
+    When selector ".transaction-indicator" is pressed with "Enter"
+    Then selector ".transaction-inspector .inspector-summary" contains "2 accepted"
+    When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
+    When selector ".prompt-row input" is filled with "DROP RELAY c_tenant;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "DROP RELAY c_tenant"
+    When selector ".transaction-indicator" is pressed with "Enter"
+    Then selector ".transaction-inspector .inspector-summary" contains "3 accepted"
+    When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
+    When selector ".prompt-row input" is filled with "DROP RELAY d_user;"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "DROP RELAY d_user"
+    When selector ".transaction-indicator" is pressed with "Enter"
+    Then selector ".transaction-inspector .inspector-summary" contains "4 accepted"
     And selector ".transaction-inspector .inspector-branch[data-branch='by_tenant']" exists
     And selector ".transaction-inspector .inspector-branch-label" contains "by_tenant"
+    And selector ".transaction-inspector .inspector-branch[data-branch='by_user']" exists
+    And inspector branch group "by_tenant" contains item "a_tenant"
+    And inspector branch group "by_tenant" contains item "c_tenant"
+    And inspector branch group "by_tenant" does not contain item "b_user"
+    And inspector branch group "by_tenant" does not contain item "d_user"
+    And inspector branch group "by_user" contains item "b_user"
+    And inspector branch group "by_user" contains item "d_user"
+    And inspector branch group "by_user" does not contain item "a_tenant"
+    And inspector branch group "by_user" does not contain item "c_tenant"
 
   Scenario: A retained inspection shows an applying prefix and final actual outcomes
     Given a 1 node nervix cluster is started
@@ -351,6 +383,7 @@ Feature: Web console transaction inspector
     When selector ".prompt-row input" is filled with "DESCRIBE TRANSACTION '{{partial_transaction_id}}';"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".transaction-inspector .inspector-summary" contains "2 accepted"
+    And selector ".transaction-inspector .inspector-item[data-kind='RESOURCE'][data-name='prefix_bundle']" contains "prefix_bundle"
     Given transaction commit on node "node-1" pauses after 2 statement
     When client "owner" begins executing these NSPL commands in the background
       """
