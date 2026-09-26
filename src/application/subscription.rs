@@ -101,8 +101,8 @@ pub(in crate::application) enum SessionCommandPlanError {
     #[error("REVERT requires an active transaction")]
     RevertWithoutTransaction,
     #[error(
-        "DESCRIBE TRANSACTION must be executed separately; it reads a transaction and never joins \
-         a multi-statement request"
+        "DESCRIBE TRANSACTION and SHOW TRANSACTIONS must be executed separately; they read \
+         transaction state and never join a multi-statement request"
     )]
     MixedTransactionInspection,
     #[error("transaction command is missing its expected queue position")]
@@ -470,7 +470,7 @@ impl SessionSubscriptions {
                     operations.push(SessionCommandOperation::Revert);
                 }
                 statement => {
-                    let inspects_transaction = statement.inspects_transaction();
+                    let reads_transaction_state = statement.reads_transaction_state();
                     let request_reference = execution_reference.derive_step(statement_index);
                     let command = PendingSessionCommand {
                         request_reference,
@@ -479,12 +479,11 @@ impl SessionSubscriptions {
                         statement,
                         domain: request_domain.cloned(),
                     };
-                    if inspects_transaction {
-                        // An inspection reads the transaction instead of joining it, so it is
-                        // dispatched before queueing: it never becomes transaction content and
-                        // never takes the queue position the next append expects. Sharing a
-                        // request with other statements would make it part of their durable
-                        // admission and replay, so it is always sent on its own.
+                    if reads_transaction_state {
+                        // Transaction inspection and discovery read beside the attached queue.
+                        // Neither becomes transaction content or takes the next append position.
+                        // A multi-statement request would make a read part of durable admission
+                        // and replay, so each read is sent alone.
                         if multi_statement {
                             return Err(Report::new(
                                 SessionCommandPlanError::MixedTransactionInspection,

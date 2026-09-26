@@ -361,7 +361,9 @@ Feature: Relocating runtime nodes onto a named cluster node
     Then the ownership handoff preparation pause for domain "{{domain}}" is reached
     When node "node-2" is stopped
     And node "node-2" is started
-    And the ownership handoff preparation pause for domain "{{domain}}" is released
+    Then node "node-1" eventually reports interconnect to "node-2" as "connected"
+    And node "node-2" eventually reports interconnect to "node-1" as "connected"
+    When the ownership handoff preparation pause for domain "{{domain}}" is released
     Then the background NSPL execution fails with "destination node 'node-2' changed process incarnation during ownership handoff"
     When these NSPL commands are executed on the leader node
       """

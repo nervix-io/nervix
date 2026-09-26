@@ -282,6 +282,8 @@ attach reports the exact outcome and aggregate commit output; after removal the 
 `SHOW TRANSACTIONS;`
 can be served by any node from locally applied replicated state and lists the id, owner, domain,
 state, pending count, progress, age, and idle time for live transactions and retained tombstones.
+It also runs on its own beside an attached transaction without entering its queue or changing its
+session binding.
 
 An unbound `OPEN` transaction expires after its idle timeout; a bound transaction does not, and a
 `COMMITTING` transaction never expires. Defaults and server settings are:

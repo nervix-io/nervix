@@ -262,9 +262,11 @@ and every queued statement must select that same domain. `BEGIN` inside an
 active transaction is an error. `COMMIT` and `REVERT` also require an active
 transaction. Queueable content is limited to that domain's model mutations,
 including `REBIND RESOURCE`, domain configuration and lifecycle, and `CREATE RESOURCE`. `CREATE DOMAIN`,
-`CREATE USER`, read-only statements, subscriptions, resource uploads, and node
+`CREATE USER`, most read-only statements, subscriptions, resource uploads, and node
 administration are not valid inside a transaction and must be sent separately.
-Use `SHOW TRANSACTIONS;` to inspect live transactions and retained outcomes. See
+`SHOW TRANSACTIONS;` and `DESCRIBE TRANSACTION` run separately beside an attached
+transaction without entering its queue or changing its binding. Use `SHOW TRANSACTIONS;`
+to inspect live transactions and retained outcomes. See
 [Control Plane](control-plane.md#replicated-nspl-transactions) for attach,
 failover, commit-step, expiry, and limit semantics.
 

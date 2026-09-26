@@ -152,7 +152,12 @@ sequenceDiagram
 
 At the public edge, the session maps a typed validation or execution result to a command
 disposition, message, and diagnostics; a transaction's admitted and retained outcomes stay
-distinct from a new execution. Parse diagnostics retain precise expected and found tokens and
+distinct from a new execution. `DESCRIBE TRANSACTION` and `SHOW TRANSACTIONS` read beside an
+attached transaction only as separate requests; combining either read with another statement
+returns a session planning diagnostic before anything enters the queue. An incomplete impact
+report carries its planning diagnostics and cannot supply a commit preview. A stale preview is a
+recoverable command disposition that applies no effects and tells the client to refresh its
+inspection before retrying `COMMIT`. Parse diagnostics retain precise expected and found tokens and
 source byte spans for a client to underline. Validation diagnostics attach a source span when the
 relevant identifier is present in the submitted text; failures without a source location have an
 unlocated diagnostic. HTTP endpoints choose their response status at the boundary according to
