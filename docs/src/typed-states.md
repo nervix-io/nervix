@@ -140,6 +140,15 @@ be absent, while a present span beginning at offset zero is still present. The w
 the typed outcome for domain-selection dispatch instead of matching reply message text. The
 FlatBuffers encoding preserves these optional fields and typed variants across the session edge.
 
+Completion replies likewise carry a `SuggestionStatus` variant for ready, missing, stale, or failed
+context and an optional continuation. The server resolves typed semantic references from one
+committed configuration read with the requesting session's ordered transaction prefix applied;
+a missing or mismatched transaction binding reports stale context instead of silently discarding
+queued changes. Each candidate carries an explicit UTF-8 byte-range edit. The CLI and web console
+apply the edit after checking the cursor boundary, and the web console converts browser UTF-16
+selection offsets at its edge. A continuation is bound to the input, domain, revision, and
+candidate set, so a changed context cannot silently reuse a page.
+
 ## Validation And Failure Boundaries
 
 The registry rejects unresolved or contradictory contracts before a graph becomes active. It
