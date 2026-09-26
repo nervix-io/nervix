@@ -260,6 +260,115 @@ Feature: Web console NSPL REPL
     When selector ".prompt-row input" is pressed with "Tab"
     Then selector ".prompt-row input" has value "SHOW CREATE"
 
+  Scenario: Web console completion replaces the word at the cursor and keeps the suffix
+    Given a 1 node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "SHOW CLUST;"
+    And selector ".prompt-row input" is pressed with "ArrowLeft"
+    And selector ".prompt-row input" is pressed with "E"
+    Then selector ".suggestions" contains "CLUSTER"
+    When selector ".prompt-row input" is pressed with "Tab"
+    Then selector ".prompt-row input" has value "SHOW CLUSTER;"
+
+  Scenario: Web console completion preserves a Unicode suffix
+    Given a 1 node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "SHOW CLUST;😊"
+    And selector ".prompt-row input" is pressed with "ArrowLeft"
+    And selector ".prompt-row input" is pressed with "ArrowLeft"
+    And selector ".prompt-row input" is pressed with "E"
+    Then selector ".suggestions" contains "CLUSTER"
+    When selector ".prompt-row input" is pressed with "Tab"
+    Then selector ".prompt-row input" has value "SHOW CLUSTER;😊"
+
+  Scenario: Web console reports when a semantic reference has no domain context
+    Given a 1 node nervix cluster is started
+    When the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "DROP RELAY "
+    Then selector ".completion-status" contains "Select an existing domain"
+
+  Scenario: Web console completion follows the selected domain
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA local_only ( value I64 );
+      CREATE UNPACED DOMAIN {{domain}}_other;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "DROP SCHEMA "
+    Then selector ".suggestions" contains "local_only"
+    When selector ".domain-select" is clicked
+    And selector ".domain-menu [data-domain='{{domain}}_other']" is clicked
+    Then selector ".domain-select" contains "{{domain}}_other"
+    When selector ".prompt-row input" is filled with "CREATE SCHEMA remote_only ( value I64 );"
+    And selector ".prompt-row input" is pressed with "Enter"
+    Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    When selector ".prompt-row input" is filled with "DROP SCHEMA "
+    Then selector ".suggestions" contains "remote_only"
+    And selector ".suggestions" does not contain "local_only"
+
+  Scenario: Web console completes a field from the named schema
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event ( value I64, secret STRING );
+      CREATE SCHEMA unrelated ( unrelated_field I64 );
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "ALTER SCHEMA order_event DROP FIELD val"
+    Then selector ".suggestions" contains "value"
+    And selector ".suggestions" does not contain "unrelated_field"
+
+  Scenario: Web console completes functions and scoped fields inside a route expression
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA event ( value I64, other STRING );
+      CREATE SCHEMA unrelated ( other_schema_field I64 );
+      CREATE RELAY incoming SCHEMA event UNBRANCHED;
+      CREATE RELAY outgoing SCHEMA event UNBRANCHED;
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET value = co"
+    Then selector ".suggestions" contains "coalesce"
+    When selector ".prompt-row input" is filled with "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET value = input.va"
+    Then selector ".suggestions" contains "value"
+    And selector ".suggestions" does not contain "other_schema_field"
+    When selector ".prompt-row input" is filled with "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET va"
+    Then selector ".suggestions" contains "value"
+    And selector ".suggestions" does not contain "other_schema_field"
+
+  Scenario: Web console offers header functions only where the transport supports headers
+    Given a 1 node nervix cluster is started
+    And the active domain is "{{domain}}"
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And the web console is opened on the leader node
+    Then selector ".topbar-status .pill.ok" contains "CONNECTED"
+    When selector ".prompt-row input" is filled with "CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
+    Then selector ".suggestions" contains "read_header"
+    And selector ".suggestions" contains "read_headers"
+    When selector ".prompt-row input" is filled with "CREATE INGESTOR source FROM MQTT broker TOPIC events MODE NO_ACK SEQUENTIAL ON QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_"
+    Then selector ".suggestions" does not contain "read_header"
+    When selector ".prompt-row input" is filled with "CREATE EMITTER sink FROM incoming TO KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
+    Then selector ".suggestions" contains "write_header"
+    When selector ".prompt-row input" is filled with "CREATE EMITTER sink FROM incoming TO SENTRY client MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_"
+    Then selector ".suggestions" does not contain "write_header"
+
   Scenario: Web console autocompletes entities queued in an open transaction
     Given a 3 node nervix cluster is started
     When the web console is opened on the leader node

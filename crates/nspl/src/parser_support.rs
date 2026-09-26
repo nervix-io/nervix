@@ -564,6 +564,11 @@ pub fn domain_name<'src>()
     parse_name("domain_name", DomainName::parse)
 }
 
+pub fn domain_ref<'src>()
+-> impl Parser<'src, &'src [Token], DomainName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:domain", DomainName::parse)
+}
+
 pub fn user_name<'src>()
 -> impl Parser<'src, &'src [Token], UserName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("user_name", UserName::parse)
@@ -607,6 +612,11 @@ pub fn codec_name<'src>()
 pub fn field_ref<'src>()
 -> impl Parser<'src, &'src [Token], FieldName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("field_name", FieldName::parse)
+}
+
+pub fn schema_field_ref<'src>()
+-> impl Parser<'src, &'src [Token], FieldName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:schema_field", FieldName::parse)
 }
 
 pub fn relay_ref<'src>()
@@ -2117,8 +2127,8 @@ pub fn suggestions_from_errors(mut errors: Vec<ParseError<'_>>, prefix: &str) ->
 
 /// Keep only the suggestions the partial word could still grow into.
 ///
-/// Semantic references survive regardless: the server expands them into concrete object names and
-/// filters those by the same prefix itself.
+/// Semantic references and assignment bodies survive regardless: the server expands them into
+/// concrete object names and filters those by the same prefix itself.
 pub fn filter_by_prefix(suggestions: Vec<String>, prefix: &str) -> Vec<String> {
     if prefix.is_empty() {
         return suggestions;
@@ -2127,7 +2137,12 @@ pub fn filter_by_prefix(suggestions: Vec<String>, prefix: &str) -> Vec<String> {
     suggestions
         .into_iter()
         .filter(|suggestion| {
-            suggestion.starts_with("ref:") || suggestion.to_ascii_lowercase().starts_with(&prefix)
+            suggestion.starts_with("ref:")
+                || matches!(
+                    suggestion.as_str(),
+                    "resource_version" | "completed_resource_version" | "set_assignments"
+                )
+                || suggestion.to_ascii_lowercase().starts_with(&prefix)
         })
         .collect()
 }

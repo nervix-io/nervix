@@ -11,6 +11,11 @@ Turn a user's streaming requirements into an explicit, deployable Nervix graph. 
 needed for the request. Treat that versioned documentation as the authority; never reconstruct
 clause order or connector options from memory.
 
+For interactive authoring, the [CLI](https://docs.nervix.io/client-tools-cli.html) and
+[web console](https://docs.nervix.io/client-tools-web-console.html) use the same server completion
+contract. Refer users to those chapters for cursor edits, transaction-aware candidates, and
+completion status messages.
+
 ## Gather the configuration contract
 
 Establish these inputs before finalizing NSPL. Ask only for missing details that materially change

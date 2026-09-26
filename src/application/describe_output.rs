@@ -19,13 +19,12 @@ use nervix_interconnect::{
 use nervix_models::{
     BranchSelection, CanonicalNsplError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
     CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
-    CreateReorderer, CreateWindowProcessor, DomainName, EmitSink, EmitterBody, IcebergCatalog,
-    IngestSource, IngestTimestampSource, KafkaOffsetMode, Model, ModelKind, ModelName,
-    MongoDbConflictAction, MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy,
-    PostgresConflictAction, ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion,
-    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
-    ResourceVersionEntries, ScheduledNode, WasmStateInspection, expression_to_nspl,
-    ingest_quiesce_to_nspl,
+    CreateReorderer, CreateWindowProcessor, EmitSink, EmitterBody, IcebergCatalog, IngestSource,
+    IngestTimestampSource, KafkaOffsetMode, Model, ModelKind, ModelName, MongoDbConflictAction,
+    MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
+    ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ResourceDescription,
+    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionEntries,
+    ScheduledNode, WasmStateInspection, expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use tokio::time::Duration;
@@ -33,7 +32,6 @@ use tokio::time::Duration;
 use crate::{
     registry::{
         PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
-        Registry, RegistryMutation,
     },
     runtime::IngestorDescribe as RuntimeIngestorDescribe,
 };
@@ -1431,15 +1429,9 @@ pub(in crate::application) fn placement_rule_coverage_status(
 }
 
 pub(in crate::application) fn placement_runtime_node_ref_suggestions(
-    registry: &Registry,
-    domain: &DomainName,
+    models: &[Model<RequestedResourceVersion>],
     prefix: &str,
-    queued: &[RegistryMutation<RequestedResourceVersion>],
 ) -> Vec<String> {
-    let Ok(models) = registry.resulting_models(domain, queued) else {
-        return Vec::new();
-    };
-
     let prefix = prefix.to_ascii_lowercase();
     let eligible = models
         .iter()

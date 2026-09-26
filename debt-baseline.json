@@ -2,7 +2,7 @@
   "as_casts": 3,
   "bare_error_signatures": 777,
   "bare_unwrap_and_expect": 0,
-  "clamped_arithmetic": 10,
+  "clamped_arithmetic": 9,
   "combinator_control_flow": 0,
   "data_plane_cluster_awaits": 0,
   "data_plane_lock_acquisitions": 169,

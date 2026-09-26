@@ -1058,6 +1058,9 @@ table SuggestRequest {
   cursor: uint;
   /// The selected domain. Absent when none is selected.
   domain: string;
+  /// Between 1 and 100 inclusive.
+  page_size: ushort;
+  continuation: string;
 }
 
 table ListDomainsRequest {}
@@ -1254,14 +1257,32 @@ enum SuggestionKind : ubyte {
   LocalDirectoryLookup
 }
 
+table TextEdit {
+  /// UTF-8 byte offsets into the source carried by the matching SuggestRequest.
+  start: uint;
+  end: uint;
+  replacement: string (required);
+}
+
 table Suggestion {
   value: string (required);
   /// Required.
   kind: SuggestionKind = null;
+  edit: TextEdit (required);
+}
+
+enum SuggestionStatus : ubyte {
+  Ready,
+  MissingContext,
+  StaleContext,
+  LookupFailed
 }
 
 table SuggestOutcome {
+  /// Required. Ready with no suggestions is a valid empty match.
+  status: SuggestionStatus = null;
   suggestions: [Suggestion] (required);
+  continuation: string;
 }
 
 enum DomainStatus : ubyte {

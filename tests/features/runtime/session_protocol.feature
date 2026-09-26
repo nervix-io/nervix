@@ -1,5 +1,28 @@
 Feature: Session protocol
 
+  Scenario Outline: Semantic completion pages reach every domain once
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE UNPACED DOMAIN completion_alpha;
+      CREATE UNPACED DOMAIN completion_bravo;
+      CREATE UNPACED DOMAIN completion_charlie;
+      CREATE UNPACED DOMAIN completion_delta;
+      """
+    When the active session collects completion pages for "USE " at byte 4 with page size 2
+    Then the collected completion pages contain "completion_alpha" exactly once
+    And the collected completion pages contain "completion_bravo" exactly once
+    And the collected completion pages contain "completion_charlie" exactly once
+    And the collected completion pages contain "completion_delta" exactly once
+    And the completion search used at least 3 pages without duplicate candidates
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: A long command leaves the session responsive and a waiter cancelled before admission admits nothing
     Given a <cluster_size> node nervix cluster is started
     And the active domain is "{{domain}}"

@@ -180,59 +180,66 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
         // A statement that already parses has no expectations left to derive suggestions from,
         // because end of input is not representable as one. These few continuations are optional
         // tails of an otherwise complete statement, so they are named here.
-        let trimmed = source.trim_end();
-        let normalized = trimmed.to_ascii_uppercase();
-        // Nothing may follow a terminated statement, so a trailing `;` ends the offers.
-        let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
-        let optional_tail = if open && normalized == "START" {
-            vec![";".to_string(), "AT".to_string()]
-        } else if open && normalized.starts_with("START AT ") && !normalized.contains(" TIME RATE ")
-        {
-            vec![";".to_string(), "TIME RATE".to_string()]
-        } else if open
-            && normalized.starts_with("DESCRIBE RESOURCE ")
-            && !normalized.contains(" VERSION ")
-        {
-            vec!["VERSION".to_string()]
-        } else if open && let Statement::DescribeTransaction(describe) = &statement {
-            crate::describe_transaction::describe_transaction_tail(describe, &tokens)
-        } else if open && matches!(&statement, Statement::DescribeWasmProcessor(_)) {
-            crate::describe_wasm_processor::describe_wasm_processor_tail(&tokens)
-        } else if open && let Statement::RebindResource(rebind) = &statement {
-            if matches!(
-                rebind.selection,
-                nervix_models::RebindResourceSelection::Members(_)
-            ) {
-                vec![",".to_string(), ";".to_string()]
-            } else {
-                vec![";".to_string(), "FOR".to_string()]
-            }
-        } else if open
-            && normalized.starts_with("CREATE ")
-            && normalized.contains(" DOMAIN ")
-            && !normalized.contains(" PLACEMENT ")
-        {
-            vec![";".to_string(), "PLACEMENT".to_string()]
-        } else if open
-            && normalized.starts_with("CREATE ")
-            && normalized.contains(" PLACEMENT ")
-            && !normalized.contains(" DOMAIN ")
-            && !normalized.contains(" RANK ")
-        {
-            vec![";".to_string(), "RANK".to_string()]
-        } else if open
-            && (normalized.starts_with("RELOCATE ")
-                || normalized.starts_with("DESCRIBE RELOCATION "))
-            && normalized.ends_with(" PREFERENCES")
-        {
-            vec![";".to_string(), "FOR".to_string()]
-        } else {
-            Vec::new()
-        };
-        return filter_by_prefix(optional_tail, &prefix);
+        return statement_tail(&statement, &tokens, &source, &prefix);
     }
 
     suggestions_from_errors(out.into_errors(), &prefix)
+}
+
+pub(crate) fn statement_tail(
+    statement: &Statement,
+    tokens: &[Token],
+    source: &str,
+    prefix: &str,
+) -> Vec<String> {
+    let trimmed = source.trim_end();
+    let normalized = trimmed.to_ascii_uppercase();
+    // Nothing may follow a terminated statement, so a trailing `;` ends the offers.
+    let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
+    let optional_tail = if open && normalized == "START" {
+        vec![";".to_string(), "AT".to_string()]
+    } else if open && normalized.starts_with("START AT ") && !normalized.contains(" TIME RATE ") {
+        vec![";".to_string(), "TIME RATE".to_string()]
+    } else if open
+        && normalized.starts_with("DESCRIBE RESOURCE ")
+        && !normalized.contains(" VERSION ")
+    {
+        vec!["VERSION".to_string()]
+    } else if open && let Statement::DescribeTransaction(describe) = &statement {
+        crate::describe_transaction::describe_transaction_tail(describe, tokens)
+    } else if open && matches!(&statement, Statement::DescribeWasmProcessor(_)) {
+        crate::describe_wasm_processor::describe_wasm_processor_tail(tokens)
+    } else if open && let Statement::RebindResource(rebind) = &statement {
+        if matches!(
+            rebind.selection,
+            nervix_models::RebindResourceSelection::Members(_)
+        ) {
+            vec![",".to_string(), ";".to_string()]
+        } else {
+            vec![";".to_string(), "FOR".to_string()]
+        }
+    } else if open
+        && normalized.starts_with("CREATE ")
+        && normalized.contains(" DOMAIN ")
+        && !normalized.contains(" PLACEMENT ")
+    {
+        vec![";".to_string(), "PLACEMENT".to_string()]
+    } else if open
+        && normalized.starts_with("CREATE ")
+        && normalized.contains(" PLACEMENT ")
+        && !normalized.contains(" DOMAIN ")
+        && !normalized.contains(" RANK ")
+    {
+        vec![";".to_string(), "RANK".to_string()]
+    } else if open
+        && (normalized.starts_with("RELOCATE ") || normalized.starts_with("DESCRIBE RELOCATION "))
+        && normalized.ends_with(" PREFERENCES")
+    {
+        vec![";".to_string(), "FOR".to_string()]
+    } else {
+        Vec::new()
+    };
+    filter_by_prefix(optional_tail, prefix)
 }
 
 #[cfg(test)]

@@ -61,6 +61,10 @@ retain their connector-specific semantics. Other source families do not offer he
 `read_header` and `read_headers` are validated against those capabilities; header values do not
 travel through relays unless an ingestor writes them into schema-backed fields. See
 [Header Context](./ingestors.md#header-context) for the exact expression behavior.
+The session completion resolver uses the same vocabulary source capability before the full
+ingestor is parsed, so it offers those functions only for sources that can read headers. Its
+emitter `INVOKE` completion similarly uses the vocabulary sink capability to offer `write_header`
+only for sinks that can write headers. Runtime validation remains authoritative.
 
 The host runs three source loop families, with a listener using the broker loop:
 

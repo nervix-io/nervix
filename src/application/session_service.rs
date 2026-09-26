@@ -13,28 +13,30 @@ use std::sync::Arc as StdArc;
 
 use ahash::RandomState;
 use futures_util::future::BoxFuture;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     CommandRequest, NoticeLevel, ServerNotice, SuggestOutcome, SuggestRequest, Suggestion,
-    SuggestionKind,
+    SuggestionKind, SuggestionStatus, TextEdit,
 };
 use nervix_consensus::{Administrator, CommandExecutionTransactionTarget, Observer, Proposer};
 use nervix_execution::sync::DashMap;
 use nervix_interconnect::Transport;
 use nervix_models::{
-    CommandExecutionReference, DomainName, ModelKind, ModelName, ResourceId, ResourceName,
-    ResourceUploadKey, TransactionPosition,
+    BuiltinFunctionScope, CommandExecutionReference, DomainName, Model, ModelName,
+    RequestedResourceVersion, ResourceId, ResourceName, ResourceUploadKey, ResourceVersionStatus,
+    SemanticReference, TransactionPosition,
 };
 use nervix_nspl::{
     Token, Word,
     client_statement::{
-        ClientStatement, parse_client_statement_sources, suggest_client_statement,
-        upload_resource_path_fragment,
+        ClientStatement, CompletionExpectation, parse_client_statement_sources,
+        suggest_client_expectations, upload_resource_path_fragment, upload_resource_path_range,
     },
     lex,
     schema::{Diagnostic as ParseDiagnostic, ParseFromSourceError},
 };
 use nervix_recovery::Discarded;
-use sorted_vec::SortedSet;
+use nervix_vm::program::FunctionName;
 use tokio::{
     sync::{Mutex as AsyncMutex, broadcast},
     time::Duration,
@@ -542,21 +544,328 @@ struct CompletionContext {
     grammar_input: String,
     grammar_cursor: usize,
     prefix: String,
+    replacement: std::ops::Range<usize>,
+}
+
+impl CompletionContext {
+    fn literal_range(&self, input: &str, candidate: &str) -> Option<std::ops::Range<usize>> {
+        let words = candidate.split_ascii_whitespace().collect::<Vec<_>>();
+        for current in (0..words.len()).rev() {
+            if !words[current]
+                .to_ascii_lowercase()
+                .starts_with(&self.prefix)
+            {
+                continue;
+            }
+            let mut start = self.replacement.start;
+            let mut preceding_matches = true;
+            for expected in words[..current].iter().rev() {
+                let head = input.get(..start)?;
+                let trimmed = head.trim_end_matches(char::is_whitespace);
+                if trimmed.len() == head.len() {
+                    preceding_matches = false;
+                    break;
+                }
+                let previous_start = word_start(trimmed, trimmed.len());
+                if !trimmed[previous_start..].eq_ignore_ascii_case(expected) {
+                    preceding_matches = false;
+                    break;
+                }
+                start = previous_start;
+            }
+            if !preceding_matches {
+                continue;
+            }
+            let mut end = self.replacement.end;
+            for expected in &words[current + 1..] {
+                let suffix = input.get(end..)?;
+                let trimmed = suffix.trim_start_matches(char::is_whitespace);
+                if trimmed.len() == suffix.len() {
+                    break;
+                }
+                let following_start = end
+                    .checked_add(suffix.len() - trimmed.len())
+                    .assured("the skipped whitespace is within the completion input");
+                let following_end = word_end(input, following_start);
+                if !input[following_start..following_end].eq_ignore_ascii_case(expected) {
+                    break;
+                }
+                end = following_end;
+            }
+            return Some(start..end);
+        }
+        None
+    }
+}
+
+/// One captured basis for every semantic question in a completion request.
+struct CompletionSnapshot<'a> {
+    domain: Option<&'a DomainName>,
+    models: &'a [Model<RequestedResourceVersion>],
+    resources: &'a ResourceVersionStatus,
+    domains: &'a [DomainName],
+    queued_resources: &'a [String],
+    subscriptions: &'a [String],
+}
+
+impl CompletionSnapshot<'_> {
+    fn resolve(
+        &self,
+        reference: SemanticReference,
+        prefix: &str,
+        selected_resource: Option<&ResourceName>,
+        rebound_resource: Option<&ResourceName>,
+    ) -> Vec<String> {
+        let prefix = prefix.to_ascii_lowercase();
+        if reference == SemanticReference::Domain {
+            return self
+                .domains
+                .iter()
+                .filter(|domain| domain.as_str().starts_with(&prefix))
+                .map(ToString::to_string)
+                .collect();
+        }
+        if reference == SemanticReference::SessionSubscription {
+            return self
+                .subscriptions
+                .iter()
+                .filter(|name| name.starts_with(&prefix))
+                .cloned()
+                .collect();
+        }
+        let Some(domain) = self.domain else {
+            return Vec::new();
+        };
+        match reference {
+            SemanticReference::Model(kind) => self
+                .models
+                .iter()
+                .filter(|model| {
+                    model.kind() == kind
+                        && model.name().as_str().starts_with(&prefix)
+                        && rebound_resource.is_none_or(|resource| model.binds_resource(resource))
+                })
+                .map(|model| model.name().to_string())
+                .collect(),
+            SemanticReference::SchemaField(schema_name) => self
+                .models
+                .iter()
+                .filter_map(|model| match model {
+                    Model::Schema(schema) if schema.name == schema_name => Some(schema),
+                    _ => None,
+                })
+                .flat_map(|schema| &schema.fields)
+                .filter(|field| field.name.as_str().starts_with(&prefix))
+                .map(|field| field.name.to_string())
+                .collect(),
+            SemanticReference::WireSchemaField(kind, schema_name) => self
+                .models
+                .iter()
+                .filter(|model| model.kind() == kind)
+                .flat_map(|model| match model {
+                    Model::WireJsonSchema(schema) if schema.name == schema_name => schema
+                        .fields
+                        .iter()
+                        .map(|field| field.name.to_string())
+                        .collect::<Vec<_>>(),
+                    Model::WireCborSchema(schema) if schema.name == schema_name => schema
+                        .fields
+                        .iter()
+                        .map(|field| field.name.to_string())
+                        .collect::<Vec<_>>(),
+                    Model::WireAvroSchema(schema) if schema.name == schema_name => schema
+                        .fields
+                        .iter()
+                        .map(|field| field.name.to_string())
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+                .filter(|name| name.starts_with(&prefix))
+                .collect(),
+            SemanticReference::RelayField(relay_name) => {
+                let Some(schema_name) = self.models.iter().find_map(|model| match model {
+                    Model::Relay(relay) if relay.name == relay_name => Some(&relay.schema),
+                    _ => None,
+                }) else {
+                    return Vec::new();
+                };
+                self.models
+                    .iter()
+                    .filter_map(|model| match model {
+                        Model::Schema(schema) if &schema.name == schema_name => Some(schema),
+                        _ => None,
+                    })
+                    .flat_map(|schema| &schema.fields)
+                    .filter(|field| field.name.as_str().starts_with(&prefix))
+                    .map(|field| field.name.to_string())
+                    .collect()
+            }
+            SemanticReference::BuiltinFunction(scope) => {
+                let mut names = FunctionName::ordinary_completion_names();
+                match scope {
+                    BuiltinFunctionScope::Ordinary => {}
+                    BuiltinFunctionScope::IngestSource(kind) if kind.reads_headers() => {
+                        names.push(FunctionName::ReadHeader.as_str().to_string());
+                        names.push(FunctionName::ReadHeaders.as_str().to_string());
+                    }
+                    BuiltinFunctionScope::EmitterInvocation(kind)
+                        if kind.capabilities().writes_headers() =>
+                    {
+                        names.push(FunctionName::WriteHeader.as_str().to_string());
+                    }
+                    BuiltinFunctionScope::IngestSource(_)
+                    | BuiltinFunctionScope::EmitterInvocation(_) => {}
+                }
+                names
+                    .into_iter()
+                    .filter(|name| name.starts_with(&prefix))
+                    .collect()
+            }
+            SemanticReference::Resource => {
+                let mut candidates = resource_ref_suggestions(self.resources, domain, &prefix);
+                candidates.extend(
+                    self.queued_resources
+                        .iter()
+                        .filter(|name| name.starts_with(&prefix))
+                        .cloned(),
+                );
+                candidates
+            }
+            SemanticReference::ResourceVersion => {
+                let Some(resource) = selected_resource else {
+                    return Vec::new();
+                };
+                resource_version_suggestions(self.resources, domain, resource, &prefix)
+            }
+            SemanticReference::CompletedResourceVersion => {
+                let Some(resource) = selected_resource else {
+                    return Vec::new();
+                };
+                completed_resource_version_suggestions(self.resources, domain, resource, &prefix)
+            }
+            SemanticReference::RuntimeNode => {
+                placement_runtime_node_ref_suggestions(self.models, &prefix)
+            }
+            SemanticReference::Domain | SemanticReference::SessionSubscription => Vec::new(),
+        }
+    }
+}
+
+struct CompletionPageBasis {
+    revision: u64,
+    query_digest: String,
+}
+
+impl CompletionPageBasis {
+    fn new(request: &SuggestRequest, revision: u64) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(request.input().as_bytes());
+        let cursor = u64::try_from(request.cursor())
+            .assured("a session completion input fits the wire's u32 cursor range");
+        hasher.update(&cursor.to_le_bytes());
+        if let Some(domain) = request.domain() {
+            hasher.update(domain.as_str().as_bytes());
+        }
+        let query_digest = hasher.finalize().to_hex().to_string();
+        Self {
+            revision,
+            query_digest,
+        }
+    }
+
+    fn page(&self, request: &SuggestRequest, candidates: Vec<Suggestion>) -> SuggestOutcome {
+        let mut candidate_hasher = blake3::Hasher::new();
+        for candidate in &candidates {
+            let bytes = candidate.value.as_bytes();
+            let length = u64::try_from(bytes.len())
+                .assured("a candidate value fits the bounded session frame");
+            candidate_hasher.update(&length.to_le_bytes());
+            candidate_hasher.update(bytes);
+            candidate_hasher.update(&candidate.edit.start.to_le_bytes());
+            candidate_hasher.update(&candidate.edit.end.to_le_bytes());
+            let replacement = candidate.edit.replacement.as_bytes();
+            let replacement_length = u64::try_from(replacement.len())
+                .assured("an edit replacement fits the bounded session frame");
+            candidate_hasher.update(&replacement_length.to_le_bytes());
+            candidate_hasher.update(replacement);
+            candidate_hasher.update(&[match candidate.kind {
+                SuggestionKind::Text => 0,
+                SuggestionKind::LocalDirectoryLookup => 1,
+            }]);
+        }
+        let candidate_digest = candidate_hasher.finalize().to_hex().to_string();
+        let offset = match request.continuation() {
+            Some(continuation) => {
+                let mut parts = continuation.split(':');
+                let revision = parts.next().and_then(|value| value.parse::<u64>().ok());
+                let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
+                let digest = parts.next();
+                let candidates = parts.next();
+                if parts.next().is_some()
+                    || revision != Some(self.revision)
+                    || digest != Some(self.query_digest.as_str())
+                    || candidates != Some(candidate_digest.as_str())
+                {
+                    return SuggestOutcome {
+                        status: SuggestionStatus::StaleContext,
+                        suggestions: Vec::new(),
+                        continuation: None,
+                    };
+                }
+                let Some(offset) = offset else {
+                    return SuggestOutcome {
+                        status: SuggestionStatus::StaleContext,
+                        suggestions: Vec::new(),
+                        continuation: None,
+                    };
+                };
+                offset
+            }
+            None => 0,
+        };
+        if offset > candidates.len() {
+            return SuggestOutcome {
+                status: SuggestionStatus::StaleContext,
+                suggestions: Vec::new(),
+                continuation: None,
+            };
+        }
+        let available = candidates.len() - offset;
+        let take = request.page_size().min(available);
+        let end = offset
+            .checked_add(take)
+            .assured("the page take cannot exceed the candidates after its offset");
+        let continuation = if end < candidates.len() {
+            Some(format!(
+                "{}:{end}:{}:{candidate_digest}",
+                self.revision, self.query_digest
+            ))
+        } else {
+            None
+        };
+        SuggestOutcome {
+            status: SuggestionStatus::Ready,
+            suggestions: candidates[offset..end].to_vec(),
+            continuation,
+        }
+    }
 }
 
 fn completion_context(input: &str, cursor: usize) -> CompletionContext {
     let safe_cursor = cursor.min(input.len());
     let start = word_start(input, safe_cursor);
+    let end = word_end(input, safe_cursor);
     let prefix = current_word_prefix(input, safe_cursor);
 
-    let mut grammar_input = String::with_capacity(input.len() - (safe_cursor - start));
+    let mut grammar_input = String::with_capacity(input.len() - (end - start));
     grammar_input.push_str(&input[..start]);
-    grammar_input.push_str(&input[safe_cursor..]);
+    grammar_input.push_str(&input[end..]);
 
     CompletionContext {
         grammar_input,
         grammar_cursor: start,
         prefix,
+        replacement: start..end,
     }
 }
 
@@ -570,6 +879,16 @@ pub(in crate::application) fn word_start(input: &str, cursor: usize) -> usize {
         Some((index, character)) => index + character.len_utf8(),
         None => 0,
     }
+}
+
+fn word_end(input: &str, cursor: usize) -> usize {
+    let suffix = &input[cursor..];
+    let within = suffix
+        .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .unwrap_or(suffix.len());
+    cursor
+        .checked_add(within)
+        .assured("the suffix offset is within the completion input")
 }
 
 fn rebind_resource_before_for(input: &str, cursor: usize) -> Option<ResourceName> {
@@ -623,156 +942,165 @@ impl SessionServiceImpl {
         req: SuggestRequest,
         session: &SessionView,
     ) -> SuggestOutcome {
+        let revision_before = self.inner.consensus.current_revision().await;
+        let page_basis = CompletionPageBasis::new(&req, revision_before);
         let cursor = req.cursor();
         let domain = req.domain().cloned();
-        let queued = self
+        let queued = match self
             .queued_configuration(session.binding(), domain.as_ref())
-            .await;
+            .await
+        {
+            Ok(queued) => queued,
+            Err(_) => {
+                return SuggestOutcome {
+                    status: SuggestionStatus::StaleContext,
+                    continuation: None,
+                    suggestions: Vec::new(),
+                };
+            }
+        };
 
-        let CompletionContext {
-            grammar_input,
-            grammar_cursor,
-            prefix,
-        } = completion_context(req.input(), cursor);
-        let grammar = suggest_client_statement(&grammar_input, grammar_cursor);
+        let context = completion_context(req.input(), cursor);
+        let grammar = suggest_client_expectations(&context.grammar_input, context.grammar_cursor);
 
         let mut suggestions = Vec::new();
-        let mut semantic_kinds = Vec::new();
-        let mut expects_resource_ref = false;
-        let mut expects_session_subscription_ref = false;
-        let mut expects_runtime_node_ref = false;
-        // `DESCRIBE RESOURCE` may name any published version, while a binding may name only a
-        // completed one.
-        let mut expects_resource_version = false;
-        let mut expects_completed_resource_version = false;
-        for item in &grammar {
-            if let Some(kind) = ModelKind::from_completion_label(item) {
-                semantic_kinds.push(kind);
-            } else if item == "ref:resource" {
-                expects_resource_ref = true;
-            } else if item == "ref:session_subscription" {
-                expects_session_subscription_ref = true;
-            } else if item == "ref:runtime_node" {
-                expects_runtime_node_ref = true;
-            } else {
-                if item == "resource_version" {
-                    expects_resource_version = true;
-                } else if item == "completed_resource_version" {
-                    expects_completed_resource_version = true;
-                }
-                if prefix.is_empty()
-                    || item
-                        .to_ascii_lowercase()
-                        .starts_with(&prefix.to_ascii_lowercase())
-                {
-                    suggestions.push(item.clone());
-                }
-            }
-        }
-        let expects_version = expects_resource_version || expects_completed_resource_version;
-        let rebind_resource = rebind_resource_before_for(&grammar_input, grammar_cursor);
-
-        for kind in &semantic_kinds {
-            if let Some(domain) = &domain
-                && self.inner.consensus.current_domain(domain).await.is_some()
-            {
-                if let Some(resource) = &rebind_resource {
-                    if let Ok(models) = self.inner.registry.resulting_models(domain, &queued.models)
-                    {
-                        suggestions.extend(models.into_iter().filter_map(|model| {
-                            if model.kind() == *kind
-                                && model.binds_resource(resource)
-                                && model.name().as_str().starts_with(&prefix)
-                            {
-                                Some(model.name().to_string())
-                            } else {
-                                None
-                            }
-                        }));
+        let mut references = Vec::new();
+        for item in grammar {
+            match item {
+                CompletionExpectation::Semantic(reference) => references.push(reference),
+                CompletionExpectation::Literal(item) => {
+                    if let Some(range) = context.literal_range(req.input(), &item) {
+                        suggestions.push((item, range));
                     }
-                } else if let Ok(ids) = self.inner.registry.resulting_identifiers(
-                    domain,
-                    *kind,
-                    &prefix,
-                    &queued.models,
-                ) {
-                    suggestions.extend(ids.into_iter().map(|id| id.to_string()));
                 }
             }
         }
-
-        if expects_session_subscription_ref {
-            suggestions.extend(session.matching_subscription_names(&prefix));
-        }
-
-        if expects_runtime_node_ref
-            && let Some(domain) = &domain
-            && self.inner.consensus.current_domain(domain).await.is_some()
-        {
-            suggestions.extend(placement_runtime_node_ref_suggestions(
-                &self.inner.registry,
-                domain,
-                &prefix,
-                &queued.models,
-            ));
-        }
-
-        if let Some(domain) = &domain
-            && (expects_resource_ref || expects_version)
-        {
-            let resources = self.inner.consensus.current_resources().await;
-            if expects_resource_ref {
-                suggestions.extend(resource_ref_suggestions(&resources, domain, &prefix));
-                suggestions.extend(queued.resource_suggestions(&prefix));
-            }
-            if let Some(resource) = resource_named_before_version(&grammar_input, grammar_cursor) {
-                if expects_resource_version {
-                    suggestions.extend(resource_version_suggestions(
-                        &resources, domain, &resource, &prefix,
-                    ));
-                }
-                if expects_completed_resource_version {
-                    suggestions.extend(completed_resource_version_suggestions(
-                        &resources, domain, &resource, &prefix,
-                    ));
-                }
-            }
-        }
-
-        if grammar_input.contains("DOMAIN")
-            || (semantic_kinds.is_empty()
-                && !expects_resource_ref
-                && !expects_session_subscription_ref
-                && !expects_runtime_node_ref
-                && !expects_version)
-        {
+        if !references.is_empty() {
             let domains = self.inner.consensus.current_domains().await;
-            for id in domains.into_keys() {
-                if prefix.is_empty() || id.as_str().starts_with(&prefix) {
-                    suggestions.push(id.to_string());
+            let selected_exists = domain
+                .as_ref()
+                .is_some_and(|selected| domains.contains_key(selected));
+            if !selected_exists
+                && references.iter().any(|reference| {
+                    !matches!(
+                        reference,
+                        SemanticReference::Domain | SemanticReference::SessionSubscription
+                    )
+                })
+            {
+                return SuggestOutcome {
+                    status: SuggestionStatus::MissingContext,
+                    continuation: None,
+                    suggestions: Vec::new(),
+                };
+            }
+            let models = if selected_exists {
+                match domain.as_ref() {
+                    Some(selected) => match self
+                        .inner
+                        .registry
+                        .resulting_models(selected, &queued.models)
+                    {
+                        Ok(models) => models,
+                        Err(_) => {
+                            return SuggestOutcome {
+                                status: SuggestionStatus::LookupFailed,
+                                continuation: None,
+                                suggestions: Vec::new(),
+                            };
+                        }
+                    },
+                    None => Vec::new(),
                 }
+            } else {
+                Vec::new()
+            };
+            let resources = self.inner.consensus.current_resources().await;
+            let domain_names = domains.into_keys().collect::<Vec<_>>();
+            let queued_resources = queued.resource_suggestions("");
+            let subscriptions = session.matching_subscription_names("");
+            let snapshot = CompletionSnapshot {
+                domain: if selected_exists {
+                    domain.as_ref()
+                } else {
+                    None
+                },
+                models: &models,
+                resources: &resources,
+                domains: &domain_names,
+                queued_resources: &queued_resources,
+                subscriptions: &subscriptions,
+            };
+            let selected_resource =
+                resource_named_before_version(&context.grammar_input, context.grammar_cursor);
+            let rebound_resource =
+                rebind_resource_before_for(&context.grammar_input, context.grammar_cursor);
+            for reference in references {
+                let values = snapshot.resolve(
+                    reference,
+                    &context.prefix,
+                    selected_resource.as_ref(),
+                    rebound_resource.as_ref(),
+                );
+                suggestions.extend(
+                    values
+                        .into_iter()
+                        .map(|value| (value, context.replacement.clone())),
+                );
             }
         }
 
-        let mut response_suggestions = SortedSet::from_unsorted(suggestions)
-            .into_vec()
+        suggestions.sort_by(|left, right| left.0.cmp(&right.0));
+        suggestions.dedup_by(|left, right| left.0 == right.0);
+        let mut response_suggestions = suggestions
             .into_iter()
-            .map(|value| Suggestion {
+            .map(|(value, range)| Suggestion {
+                edit: TextEdit {
+                    start: u32::try_from(range.start).assured(
+                        "a completion source fits the session frame limit below 2^32 bytes",
+                    ),
+                    end: u32::try_from(range.end).assured(
+                        "a completion source fits the session frame limit below 2^32 bytes",
+                    ),
+                    replacement: value.clone(),
+                },
                 value,
                 kind: SuggestionKind::Text,
             })
             .collect::<Vec<_>>();
 
         if let Some(fragment) = upload_resource_path_fragment(req.input(), cursor) {
+            let range = upload_resource_path_range(req.input(), cursor)
+                .assured("a detected upload path has a source range");
             response_suggestions.push(Suggestion {
                 value: fragment.to_string(),
                 kind: SuggestionKind::LocalDirectoryLookup,
+                edit: TextEdit {
+                    start: u32::try_from(range.start)
+                        .assured("the local path fragment is a slice of the bounded request"),
+                    end: u32::try_from(range.end).assured(
+                        "a completion source fits the session frame limit below 2^32 bytes",
+                    ),
+                    replacement: fragment.to_string(),
+                },
             });
         }
 
-        SuggestOutcome {
-            suggestions: response_suggestions,
+        response_suggestions.sort_by(|left, right| {
+            left.value.cmp(&right.value).then_with(|| {
+                let left_path = left.kind == SuggestionKind::LocalDirectoryLookup;
+                let right_path = right.kind == SuggestionKind::LocalDirectoryLookup;
+                left_path.cmp(&right_path)
+            })
+        });
+        if self.inner.consensus.current_revision().await != revision_before {
+            return SuggestOutcome {
+                status: SuggestionStatus::StaleContext,
+                continuation: None,
+                suggestions: Vec::new(),
+            };
         }
+        page_basis.page(&req, response_suggestions)
     }
 
     /// Serves one command request of a session, from its text to its typed result.
@@ -1098,8 +1426,6 @@ pub(in crate::application) fn conflicting_reference(
 
 #[cfg(test)]
 mod tests {
-    use meticulous::ResultExt as _;
-
     use super::{
         super::{
             subscription::SessionSubscriptions,
@@ -1113,38 +1439,110 @@ mod tests {
     };
 
     #[test]
+    fn completion_pages_cover_candidates_and_reject_a_changed_basis() {
+        let request = SuggestRequest::new("SHOW ".to_string(), 5, None)
+            .assured("the test cursor is at a character boundary")
+            .with_page(2, None)
+            .assured("two suggestions fit the bounded page size");
+        let basis = CompletionPageBasis::new(&request, 42);
+        let candidates = ["ALPHA", "BETA", "GAMMA"]
+            .into_iter()
+            .map(|value| Suggestion {
+                value: value.to_string(),
+                kind: SuggestionKind::Text,
+                edit: TextEdit {
+                    start: 5,
+                    end: 5,
+                    replacement: value.to_string(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let first = basis.page(&request, candidates.clone());
+        assert_eq!(first.status, SuggestionStatus::Ready);
+        assert_eq!(first.suggestions.len(), 2);
+        let next = first.continuation.assured("a third candidate remains");
+        let next_request = request
+            .with_page(2, Some(next))
+            .assured("the second page uses the same bounded size");
+        let second = basis.page(&next_request, candidates.clone());
+        assert_eq!(second.suggestions.len(), 1);
+        assert_eq!(second.suggestions[0].value, "GAMMA");
+        assert!(second.continuation.is_none());
+
+        let mut changed_candidates = candidates.clone();
+        changed_candidates[2].value = "DELTA".to_string();
+        assert_eq!(
+            basis.page(&next_request, changed_candidates).status,
+            SuggestionStatus::StaleContext
+        );
+
+        let changed = CompletionPageBasis::new(&next_request, 43);
+        assert_eq!(
+            changed.page(&next_request, candidates).status,
+            SuggestionStatus::StaleContext
+        );
+    }
+
+    #[test]
     fn completion_context_preserves_prefix_for_post_filtering() {
         let input = "CREATE SCHE";
         let CompletionContext {
             grammar_input,
             grammar_cursor,
             prefix,
+            ..
         } = completion_context(input, input.len());
 
         assert_eq!(grammar_input, "CREATE ");
         assert_eq!(grammar_cursor, "CREATE ".len());
         assert_eq!(prefix, "sche");
+
+        let input = "SHOW CLUSTR;";
+        let CompletionContext {
+            grammar_input,
+            grammar_cursor,
+            prefix,
+            ..
+        } = completion_context(input, "SHOW CLU".len());
+        assert_eq!(grammar_input, "SHOW ;");
+        assert_eq!(grammar_cursor, "SHOW ".len());
+        assert_eq!(prefix, "clu");
+        assert_eq!(word_end(input, "SHOW CLU".len()), "SHOW CLUSTR".len());
     }
 
     #[test]
     fn keyword_completion_is_filtered_by_original_prefix() {
         let input = "CREATE SCHE";
-        let CompletionContext {
-            grammar_input,
-            grammar_cursor,
-            prefix,
-        } = completion_context(input, input.len());
-        let filtered = suggest_client_statement(&grammar_input, grammar_cursor)
+        let context = completion_context(input, input.len());
+        let filtered = suggest_client_expectations(&context.grammar_input, context.grammar_cursor)
             .into_iter()
-            .filter(|item| {
-                prefix.is_empty()
-                    || item
-                        .to_ascii_lowercase()
-                        .starts_with(&prefix.to_ascii_lowercase())
+            .filter_map(|item| {
+                let CompletionExpectation::Literal(item) = item else {
+                    return None;
+                };
+                context.literal_range(input, &item).map(|_| item)
             })
             .collect::<Vec<_>>();
 
         assert_eq!(filtered, vec!["SCHEMA".to_string()]);
+    }
+
+    #[test]
+    fn phrase_completion_replaces_matching_words_around_the_cursor() {
+        let input = "TIME RA";
+        let context = completion_context(input, input.len());
+        assert_eq!(
+            context.literal_range(input, "TIME RATE"),
+            Some(0..input.len())
+        );
+
+        let input = "TIME RATE;";
+        let context = completion_context(input, 2);
+        assert_eq!(context.literal_range(input, "TIME RATE"), Some(0..9));
+
+        let input = "OTHER RA";
+        let context = completion_context(input, input.len());
+        assert_eq!(context.literal_range(input, "TIME RATE"), None);
     }
 
     #[test]
@@ -1293,6 +1691,188 @@ mod tests {
 
         subscriptions.stop_all().await;
         let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[tokio::test]
+    async fn schema_field_completion_uses_ordered_queued_alterations() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let mut subscriptions = SessionSubscriptions::new();
+
+        queue_in_transaction(&service, &mut subscriptions, "BEGIN;").await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "CREATE SCHEMA queued_order ( first I64, secret STRING );",
+        )
+        .await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "ALTER SCHEMA queued_order DROP FIELD first, ADD FIELD current I64;",
+        )
+        .await;
+
+        let values = suggestion_values(
+            &service,
+            &subscriptions,
+            "ALTER SCHEMA queued_order DROP FIELD ",
+        )
+        .await;
+        assert_eq!(values, vec!["current", "secret"]);
+
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "CREATE WIRE JSON SCHEMA queued_wire MODE STRICT ( value integer, secret string );",
+        )
+        .await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "ALTER WIRE JSON SCHEMA queued_wire RENAME FIELD value TO current;",
+        )
+        .await;
+        let wire_values = suggestion_values(
+            &service,
+            &subscriptions,
+            "ALTER WIRE JSON SCHEMA queued_wire DROP FIELD ",
+        )
+        .await;
+        assert_eq!(wire_values, vec!["current", "secret"]);
+
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "CREATE WIRE CBOR SCHEMA queued_cbor MODE STRICT ( value integer );",
+        )
+        .await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "CREATE WIRE AVRO SCHEMA queued_avro MODE STRICT ( value long );",
+        )
+        .await;
+        let cbor_values = suggestion_values(
+            &service,
+            &subscriptions,
+            "ALTER WIRE CBOR SCHEMA queued_cbor DROP FIELD ",
+        )
+        .await;
+        assert_eq!(cbor_values, vec!["value"]);
+        let avro_values = suggestion_values(
+            &service,
+            &subscriptions,
+            "ALTER WIRE AVRO SCHEMA queued_avro DROP FIELD ",
+        )
+        .await;
+        assert_eq!(avro_values, vec!["value"]);
+
+        subscriptions.stop_all().await;
+        std::fs::remove_dir_all(&path)
+            .discarded("the temporary test fixture is already isolated from the next test");
+    }
+
+    #[tokio::test]
+    async fn route_expression_completion_resolves_queued_relay_fields_and_vm_builtins() {
+        let TestService {
+            service,
+            registry: _registry,
+            path,
+        } = build_test_service(true).await;
+        let mut subscriptions = SessionSubscriptions::new();
+
+        queue_in_transaction(&service, &mut subscriptions, "BEGIN;").await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "CREATE SCHEMA event ( value I64, other STRING );",
+        )
+        .await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "CREATE RELAY incoming SCHEMA event UNBRANCHED;",
+        )
+        .await;
+        queue_in_transaction(
+            &service,
+            &mut subscriptions,
+            "CREATE RELAY outgoing SCHEMA event UNBRANCHED;",
+        )
+        .await;
+
+        let prefix = "CREATE JUNCTION normalizer FROM incoming UNBRANCHED TO outgoing SET value = ";
+        let functions = suggestion_values(&service, &subscriptions, &format!("{prefix}co")).await;
+        assert!(functions.contains(&"coalesce".to_string()), "{functions:?}");
+        assert!(!functions.contains(&"write_header".to_string()));
+
+        let fields =
+            suggestion_values(&service, &subscriptions, &format!("{prefix}input.va")).await;
+        assert_eq!(fields, vec!["value"]);
+
+        let endpoint = suggestion_values(
+            &service,
+            &subscriptions,
+            "CREATE INGESTOR source FROM ENDPOINT ingress MODE NO_ACK SEQUENTIAL ON QUIESCE \
+             SUSPEND DECODE USING codec TO outgoing SET value = read_",
+        )
+        .await;
+        assert_eq!(endpoint, vec!["read_header", "read_headers"]);
+        let mqtt = suggestion_values(
+            &service,
+            &subscriptions,
+            "CREATE INGESTOR source FROM MQTT broker TOPIC events MODE NO_ACK SEQUENTIAL ON \
+             QUIESCE SUSPEND DECODE USING codec TO outgoing SET value = read_",
+        )
+        .await;
+        assert!(mqtt.is_empty(), "{mqtt:?}");
+
+        let kafka = suggestion_values(
+            &service,
+            &subscriptions,
+            "CREATE EMITTER sink FROM incoming TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s ENCODE USING codec INVOKE write_",
+        )
+        .await;
+        assert_eq!(kafka, vec!["write_header"]);
+        let sentry = suggestion_values(
+            &service,
+            &subscriptions,
+            "CREATE EMITTER sink FROM incoming TO SENTRY client MODE ACK RETRY POLICY BACKOFF \
+             250ms MAX 30s ENCODE USING codec INVOKE write_",
+        )
+        .await;
+        assert!(sentry.is_empty(), "{sentry:?}");
+
+        subscriptions.stop_all().await;
+        std::fs::remove_dir_all(&path)
+            .discarded("the temporary test fixture is already isolated from the next test");
+    }
+
+    #[tokio::test]
+    async fn completion_reports_stale_context_when_an_attached_transaction_loses_its_domain() {
+        let TestService { service, path, .. } = build_test_service(true).await;
+        let mut subscriptions = SessionSubscriptions::new();
+        queue_in_transaction(&service, &mut subscriptions, "BEGIN;").await;
+
+        let input = "DROP SCHEMA ";
+        for domain in [None, Some(named("another_domain"))] {
+            let request = SuggestRequest::new(input.to_string(), input.len(), domain)
+                .assured("the test cursor is at the end of the input");
+            let outcome = service
+                .process_suggest(request, &subscriptions.view())
+                .await;
+            assert_eq!(outcome.status, SuggestionStatus::StaleContext);
+            assert!(outcome.suggestions.is_empty());
+        }
+
+        subscriptions.stop_all().await;
+        std::fs::remove_dir_all(&path)
+            .discarded("the temporary test fixture is already isolated from the next test");
     }
 
     #[tokio::test]
