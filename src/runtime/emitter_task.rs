@@ -1595,6 +1595,23 @@ mod tests {
     use crate::runtime::test_fixtures::sink_context;
 
     #[test]
+    fn sink_context_reports_missing_node_dns_as_initialization_failure() {
+        let context = sink_context();
+        let error = context
+            .dns()
+            .err()
+            .assured("the fixture runtime has no DNS resolver");
+        assert!(matches!(
+            error.current_context(),
+            EmitterRuntimeError::InitializeSink
+        ));
+        assert_eq!(
+            emitter_error_message(&error),
+            "the node DNS resolver is not installed"
+        );
+    }
+
+    #[test]
     fn emitter_error_classification_is_explicit_for_every_context() {
         for retryable in [
             EmitterRuntimeError::SinkNotInitialized,
