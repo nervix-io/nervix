@@ -213,6 +213,8 @@ fn suggest_frame(input: &str, cursor: u32) -> bytes::Bytes {
             input: Some(input),
             cursor,
             domain: None,
+            page_size: 64,
+            continuation: None,
         },
     );
     let root = raw_message(
@@ -263,6 +265,27 @@ fn a_suggestion_cursor_must_fall_on_a_character_boundary() {
             }
         );
     }
+}
+
+#[test]
+fn suggestion_pages_round_trip_with_a_bounded_size_and_continuation() {
+    let request_value = SuggestRequest::new("DROP RELAY ".to_string(), 11, None)
+        .assured("the cursor ends at a character boundary")
+        .with_page(3, Some("42:3:digest".to_string()))
+        .assured("three is a valid page size");
+    let message = ClientMessage {
+        request_id: request(1),
+        request: ClientRequest::Suggest(request_value),
+    };
+    assert_eq!(round_trip_client(&message), message);
+    let invalid = SuggestRequest::new(String::new(), 0, None)
+        .assured("an empty source has a valid cursor")
+        .with_page(101, None)
+        .expect_err("page sizes above the bound fail");
+    assert_eq!(
+        invalid.current_context(),
+        &WireValueError::InvalidCompletionPageSize { size: 101 }
+    );
 }
 
 fn subscribe_frame(subscription_type: Option<wire::SubscriptionType>) -> bytes::Bytes {

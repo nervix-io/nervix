@@ -2298,27 +2298,74 @@ pub enum EmitSink {
     },
 }
 
-impl EmitSink {
-    pub const fn capabilities(&self) -> SinkCapabilities {
+/// The sink transport class used by capability decisions before an emitter is fully parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EmitSinkKind {
+    Http,
+    Kafka,
+    Pulsar,
+    RabbitMq,
+    Redis,
+    Mqtt,
+    Nats,
+    ZeroMq,
+    Sqs,
+    Sentry,
+    Syslog,
+    Otel,
+    ClickHouse,
+    Postgres,
+    MySql,
+    MongoDb,
+    Iceberg,
+}
+
+impl EmitSinkKind {
+    pub const fn capabilities(self) -> SinkCapabilities {
         match self {
-            Self::Http { .. }
-            | Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Nats { .. }
-            | Self::Sqs { .. } => SinkCapabilities::with_headers(),
-            Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. }
-            | Self::ClickHouse { .. }
-            | Self::Postgres { .. }
-            | Self::MySql { .. }
-            | Self::MongoDb { .. }
-            | Self::Iceberg { .. } => SinkCapabilities::without_headers(),
+            Self::Http | Self::Kafka | Self::Pulsar | Self::RabbitMq | Self::Nats | Self::Sqs => {
+                SinkCapabilities::with_headers()
+            }
+            Self::Redis
+            | Self::Mqtt
+            | Self::ZeroMq
+            | Self::Sentry
+            | Self::Syslog
+            | Self::Otel
+            | Self::ClickHouse
+            | Self::Postgres
+            | Self::MySql
+            | Self::MongoDb
+            | Self::Iceberg => SinkCapabilities::without_headers(),
         }
+    }
+}
+
+impl EmitSink {
+    pub const fn transport_kind(&self) -> EmitSinkKind {
+        match self {
+            Self::Http { .. } => EmitSinkKind::Http,
+            Self::Kafka { .. } => EmitSinkKind::Kafka,
+            Self::Pulsar { .. } => EmitSinkKind::Pulsar,
+            Self::RabbitMq { .. } => EmitSinkKind::RabbitMq,
+            Self::Redis { .. } => EmitSinkKind::Redis,
+            Self::Mqtt { .. } => EmitSinkKind::Mqtt,
+            Self::Nats { .. } => EmitSinkKind::Nats,
+            Self::ZeroMq { .. } => EmitSinkKind::ZeroMq,
+            Self::Sqs { .. } => EmitSinkKind::Sqs,
+            Self::Sentry { .. } => EmitSinkKind::Sentry,
+            Self::Syslog { .. } => EmitSinkKind::Syslog,
+            Self::Otel { .. } => EmitSinkKind::Otel,
+            Self::ClickHouse { .. } => EmitSinkKind::ClickHouse,
+            Self::Postgres { .. } => EmitSinkKind::Postgres,
+            Self::MySql { .. } => EmitSinkKind::MySql,
+            Self::MongoDb { .. } => EmitSinkKind::MongoDb,
+            Self::Iceberg { .. } => EmitSinkKind::Iceberg,
+        }
+    }
+
+    pub const fn capabilities(&self) -> SinkCapabilities {
+        self.transport_kind().capabilities()
     }
 
     pub fn transport_label(&self) -> &'static str {
@@ -4010,7 +4057,62 @@ pub enum IngestSource {
     },
 }
 
+/// The source transport class used by capability decisions before an ingestor is fully parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IngestSourceKind {
+    Http,
+    Kafka,
+    Pulsar,
+    Mqtt,
+    Nats,
+    RabbitMq,
+    RedisPubSub,
+    Prometheus,
+    ZeroMq,
+    Sqs,
+    Endpoint,
+    Websockets,
+    Syslog,
+}
+
+impl IngestSourceKind {
+    pub const fn reads_headers(self) -> bool {
+        match self {
+            Self::Endpoint
+            | Self::Http
+            | Self::Kafka
+            | Self::Nats
+            | Self::Pulsar
+            | Self::RabbitMq
+            | Self::Sqs => true,
+            Self::Mqtt
+            | Self::RedisPubSub
+            | Self::Prometheus
+            | Self::ZeroMq
+            | Self::Websockets
+            | Self::Syslog => false,
+        }
+    }
+}
+
 impl IngestSource {
+    pub const fn transport_kind(&self) -> IngestSourceKind {
+        match self {
+            Self::Http { .. } => IngestSourceKind::Http,
+            Self::Kafka { .. } => IngestSourceKind::Kafka,
+            Self::Pulsar { .. } => IngestSourceKind::Pulsar,
+            Self::Mqtt { .. } => IngestSourceKind::Mqtt,
+            Self::Nats { .. } => IngestSourceKind::Nats,
+            Self::RabbitMq { .. } => IngestSourceKind::RabbitMq,
+            Self::RedisPubSub { .. } => IngestSourceKind::RedisPubSub,
+            Self::Prometheus { .. } => IngestSourceKind::Prometheus,
+            Self::ZeroMq { .. } => IngestSourceKind::ZeroMq,
+            Self::Sqs { .. } => IngestSourceKind::Sqs,
+            Self::Endpoint { .. } => IngestSourceKind::Endpoint,
+            Self::Websockets { .. } => IngestSourceKind::Websockets,
+            Self::Syslog { .. } => IngestSourceKind::Syslog,
+        }
+    }
     pub fn executes_on_every_cluster_node(&self) -> bool {
         match self {
             Self::Endpoint { .. } | Self::Syslog { .. } => true,
@@ -4063,21 +4165,7 @@ impl IngestSource {
     /// This lives in the vocabulary so the registry can validate header reads without naming the
     /// runtime that hosts the source.
     pub const fn reads_headers(&self) -> bool {
-        match self {
-            Self::Endpoint { .. }
-            | Self::Http { .. }
-            | Self::Kafka { .. }
-            | Self::Nats { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Sqs { .. } => true,
-            Self::Mqtt { .. }
-            | Self::RedisPubSub { .. }
-            | Self::Prometheus { .. }
-            | Self::ZeroMq { .. }
-            | Self::Websockets { .. }
-            | Self::Syslog { .. } => false,
-        }
+        self.transport_kind().reads_headers()
     }
 
     /// The acknowledgement this source's delivery mode declares. A source whose statement declares

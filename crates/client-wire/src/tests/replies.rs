@@ -284,24 +284,72 @@ fn every_attach_disposition_round_trips() {
 #[test]
 fn suggestions_round_trip() {
     assert_round_trips(ReplyBody::Suggest(SuggestOutcome {
+        status: crate::SuggestionStatus::Ready,
+        continuation: None,
         suggestions: vec![
             Suggestion {
                 value: "SCHEMA".to_string(),
                 kind: SuggestionKind::Text,
+                edit: crate::TextEdit {
+                    start: 7,
+                    end: 7,
+                    replacement: "SCHEMA".to_string(),
+                },
             },
             Suggestion {
                 value: "~/models/".to_string(),
                 kind: SuggestionKind::LocalDirectoryLookup,
+                edit: crate::TextEdit {
+                    start: 9,
+                    end: 18,
+                    replacement: "~/models/".to_string(),
+                },
             },
             Suggestion {
                 value: String::new(),
                 kind: SuggestionKind::Text,
+                edit: crate::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             },
         ],
     }));
-    assert_round_trips(ReplyBody::Suggest(SuggestOutcome {
-        suggestions: Vec::new(),
-    }));
+    for status in crate::reply::ALL_SUGGESTION_STATUSES {
+        assert_round_trips(ReplyBody::Suggest(SuggestOutcome {
+            status: *status,
+            continuation: None,
+            suggestions: Vec::new(),
+        }));
+    }
+}
+
+#[test]
+fn suggestion_text_edits_require_an_ordered_range() {
+    let outcome = SuggestOutcome {
+        status: crate::SuggestionStatus::Ready,
+        continuation: None,
+        suggestions: vec![Suggestion {
+            value: "SCHEMA".to_string(),
+            kind: SuggestionKind::Text,
+            edit: crate::TextEdit {
+                start: 8,
+                end: 7,
+                replacement: "SCHEMA".to_string(),
+            },
+        }],
+    };
+    let error = reply(ReplyBody::Suggest(outcome))
+        .encode(&limits())
+        .expect_err("a reversed edit cannot be encoded");
+    assert_eq!(
+        error.current_context(),
+        &crate::WireEncodeError::InvalidValue {
+            field: "TextEdit",
+            kind: "UTF-8 byte range",
+        }
+    );
 }
 
 #[test]
@@ -526,17 +574,29 @@ fn replies_refuse_missing_and_undeclared_enums() {
 
     let mut builder = FlatBufferBuilder::new();
     let value = builder.create_string("SCHEMA");
+    let replacement = builder.create_string("SCHEMA");
+    let edit = wire::TextEdit::create(
+        &mut builder,
+        &wire::TextEditArgs {
+            start: 0,
+            end: 0,
+            replacement: Some(replacement),
+        },
+    );
     let suggestion = wire::Suggestion::create(
         &mut builder,
         &wire::SuggestionArgs {
             value: Some(value),
             kind: Some(wire::SuggestionKind(2)),
+            edit: Some(edit),
         },
     );
     let suggestions = builder.create_vector(&[suggestion]);
     let outcome = wire::SuggestOutcome::create(
         &mut builder,
         &wire::SuggestOutcomeArgs {
+            status: Some(wire::SuggestionStatus::Ready),
+            continuation: None,
             suggestions: Some(suggestions),
         },
     );

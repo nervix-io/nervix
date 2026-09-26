@@ -700,6 +700,20 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
             ...read.lines,
           ];
         }
+        case wire.ReplyBody.SuggestOutcome: {
+          const outcome = member(reply.body(new wire.SuggestOutcome()) as wire.SuggestOutcome | null);
+          const lines = [
+            `REPLY ${id} SUGGEST status=${wire.SuggestionStatus[member(outcome.status())]} continuation=${outcome.continuation() ?? 'none'}`,
+          ];
+          for (let index = 0; index < outcome.suggestionsLength(); index += 1) {
+            const suggestion = member(outcome.suggestions(index));
+            const edit = member(suggestion.edit());
+            lines.push(
+              `SUGGESTION kind=${wire.SuggestionKind[member(suggestion.kind())]} value=${text(bytesOf((encoding) => suggestion.value(encoding)))} edit=${edit.start()}..${edit.end()} replacement=${text(bytesOf((encoding) => edit.replacement(encoding)))}`,
+            );
+          }
+          return lines;
+        }
         default:
           throw new Error(`the corpus holds no ${wire.ReplyBody[reply.bodyType()]} reply`);
       }
@@ -756,6 +770,12 @@ function clientLines(frame: Uint8Array): string[] {
       const subscribe = member(message.request(new wire.SubscribeRequest()) as wire.SubscribeRequest | null);
       return [
         `REQUEST ${id} SUBSCRIBE domain=${subscribe.domain()} statement=${text(bytesOf((encoding) => subscribe.statement(encoding)))} type=${wire.SubscriptionType[member(subscribe.subscriptionType())]}`,
+      ];
+    }
+    case wire.ClientRequest.SuggestRequest: {
+      const suggest = member(message.request(new wire.SuggestRequest()) as wire.SuggestRequest | null);
+      return [
+        `REQUEST ${id} SUGGEST input=${text(bytesOf((encoding) => suggest.input(encoding)))} cursor=${suggest.cursor()} domain=${suggest.domain() ?? 'none'} page_size=${suggest.pageSize()} continuation=${suggest.continuation() ?? 'none'}`,
       ];
     }
     case wire.ClientRequest.CancelRequest: {

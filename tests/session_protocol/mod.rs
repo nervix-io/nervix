@@ -12,8 +12,8 @@ use cucumber::{then, when};
 use nervix_client_wire::{
     CancelState, CancellationStage, ClientMessage, ClientRequest, CommandDisposition,
     CommandRequest, DomainList, InspectTransactionRequest, InspectionOutcome, ReplyBody, RequestId,
-    RequestRejection, SessionEndReason, SubscriptionEndReason, SuggestRequest, UnknownOutcomeCause,
-    UnsubscribeDisposition, UploadDisposition,
+    RequestRejection, SessionEndReason, SubscriptionEndReason, SuggestRequest, SuggestionStatus,
+    UnknownOutcomeCause, UnsubscribeDisposition, UploadDisposition,
 };
 use nervix_models::{
     CommandExecutionReference, ResourceUploadIdentity, SubscriptionName,
@@ -140,6 +140,87 @@ async fn then_request_suggests(world: &mut ScenarioWorld, name: String, expected
         "request '{name}' did not suggest '{expected}': {:?}",
         outcome.suggestions
     );
+}
+
+#[when(
+    expr = "the active session collects completion pages for {string} at byte {int} with page \
+            size {int}"
+)]
+async fn when_active_session_collects_completion_pages(
+    world: &mut ScenarioWorld,
+    input: String,
+    cursor: usize,
+    page_size: usize,
+) {
+    let domain = active_session(world).domain().cloned();
+    let page_size = u16::try_from(page_size).assured("scenario page size fits u16");
+    let mut continuation = None;
+    let mut seen_tokens = std::collections::BTreeSet::new();
+    let mut values = Vec::new();
+    let mut page_count = 0_usize;
+    loop {
+        tokio::task::consume_budget().await;
+        let request = SuggestRequest::new(input.clone(), cursor, domain.clone())
+            .assured("scenario cursor is a character boundary")
+            .with_page(page_size, continuation.take())
+            .assured("scenario page size is valid");
+        let (request_id, _) = active_session(world)
+            .send_request(ClientRequest::Suggest(request))
+            .await
+            .assured("the connected scenario session sends the completion page");
+        let body = active_session(world)
+            .reply_to(request_id)
+            .await
+            .assured("the connected scenario session receives the completion page");
+        let ReplyBody::Suggest(outcome) = body else {
+            panic!("completion page request received {body:?}");
+        };
+        assert_eq!(outcome.status, SuggestionStatus::Ready);
+        page_count = page_count
+            .checked_add(1)
+            .assured("the scenario cannot request usize::MAX completion pages");
+        values.extend(
+            outcome
+                .suggestions
+                .into_iter()
+                .map(|suggestion| suggestion.value),
+        );
+        let Some(next) = outcome.continuation else {
+            break;
+        };
+        assert!(
+            seen_tokens.insert(next.clone()),
+            "completion page token repeated"
+        );
+        continuation = Some(next);
+    }
+    world.last_completion_values = values;
+    world.last_completion_page_count = page_count;
+}
+
+#[then(expr = "the collected completion pages contain {string} exactly once")]
+async fn then_collected_completion_pages_contain_once(world: &mut ScenarioWorld, expected: String) {
+    assert_eq!(
+        world
+            .last_completion_values
+            .iter()
+            .filter(|value| *value == &expected)
+            .count(),
+        1,
+        "completion pages: {:?}",
+        world.last_completion_values
+    );
+}
+
+#[then(expr = "the completion search used at least {int} pages without duplicate candidates")]
+async fn then_completion_search_used_pages_without_duplicates(
+    world: &mut ScenarioWorld,
+    minimum: usize,
+) {
+    assert!(world.last_completion_page_count >= minimum);
+    let values = &world.last_completion_values;
+    let unique = values.iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), values.len(), "completion pages: {values:?}");
 }
 
 #[when(expr = "the active session cancels request {string}")]

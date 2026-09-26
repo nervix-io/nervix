@@ -42,6 +42,8 @@ pub struct SuggestRequest {
     input: String,
     cursor: usize,
     domain: Option<DomainName>,
+    page_size: u16,
+    continuation: Option<String>,
 }
 
 impl SuggestRequest {
@@ -62,7 +64,32 @@ impl SuggestRequest {
             input,
             cursor,
             domain,
+            page_size: 64,
+            continuation: None,
         })
+    }
+
+    pub fn with_page(
+        mut self,
+        page_size: u16,
+        continuation: Option<String>,
+    ) -> Result<Self, Report<WireValueError>> {
+        if !(1..=100).contains(&page_size) {
+            return Err(Report::new(WireValueError::InvalidCompletionPageSize {
+                size: page_size,
+            }));
+        }
+        self.page_size = page_size;
+        self.continuation = continuation;
+        Ok(self)
+    }
+
+    pub fn page_size(&self) -> usize {
+        usize::from(self.page_size)
+    }
+
+    pub fn continuation(&self) -> Option<&str> {
+        self.continuation.as_deref()
     }
 
     pub fn input(&self) -> &str {
@@ -199,6 +226,10 @@ impl ClientRequest {
                 let input = encoder.text("SuggestRequest.input", &suggest.input)?;
                 let domain = suggest.domain.as_ref().map(DomainName::as_str);
                 let domain = encoder.optional_text("SuggestRequest.domain", domain)?;
+                let continuation = encoder.optional_text(
+                    "SuggestRequest.continuation",
+                    suggest.continuation.as_deref(),
+                )?;
                 let cursor = u32::try_from(suggest.cursor).verified(
                     "the cursor lies within the input, which passed a string limit of at most \
                      MAX_FRAME_BYTES above",
@@ -209,6 +240,8 @@ impl ClientRequest {
                         input: Some(input),
                         cursor,
                         domain,
+                        page_size: suggest.page_size,
+                        continuation,
                     },
                 );
                 EncodedUnion::new(wire::ClientRequest::SuggestRequest, request)
@@ -305,16 +338,24 @@ impl ClientRequest {
                 let suggest = request_member(message.request_as_suggest_request());
                 let input = decoder.text("SuggestRequest.input", suggest.input())?;
                 let domain = decoder.optional_name("SuggestRequest.domain", suggest.domain())?;
+                let continuation =
+                    decoder.optional_text("SuggestRequest.continuation", suggest.continuation())?;
                 let cursor = decoder.size("SuggestRequest.cursor", u64::from(suggest.cursor()))?;
-                match SuggestRequest::new(input, cursor, domain) {
-                    Ok(request) => Self::Suggest(request),
-                    Err(error) => {
-                        return Err(error.change_context(WireDecodeError::InvalidValue {
-                            field: "SuggestRequest.cursor",
-                            kind: "character boundary of the input",
-                        }));
-                    }
-                }
+                let request = SuggestRequest::new(input, cursor, domain).map_err(|error| {
+                    error.change_context(WireDecodeError::InvalidValue {
+                        field: "SuggestRequest.cursor",
+                        kind: "character boundary of the input",
+                    })
+                })?;
+                let request = request
+                    .with_page(suggest.page_size(), continuation)
+                    .map_err(|error| {
+                        error.change_context(WireDecodeError::InvalidValue {
+                            field: "SuggestRequest.page_size",
+                            kind: "page size between 1 and 100",
+                        })
+                    })?;
+                Self::Suggest(request)
             }
             wire::ClientRequest::ListDomainsRequest => Self::ListDomains,
             wire::ClientRequest::SelectDomainRequest => {

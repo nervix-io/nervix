@@ -31,7 +31,7 @@ use triomphe::Arc;
 use url::Url;
 
 #[cfg(feature = "autocomplete")]
-use crate::events::AutocompleteSuggestion;
+use crate::events::{AutocompleteOutcome, AutocompleteSuggestion};
 use crate::{
     connection::{ConnectOptions, GrpcConnector, ServerDirectory, TlsRequirement},
     error::{ClientError, EventStreamKind, RequestKind},
@@ -1139,18 +1139,27 @@ impl Client {
         &self,
         input: impl Into<String>,
         cursor: usize,
-    ) -> Result<Vec<AutocompleteSuggestion>, ClientError> {
+        page_size: u16,
+        continuation: Option<String>,
+    ) -> Result<AutocompleteOutcome, ClientError> {
         let input = input.into();
         let length = input.len();
         let domain = self.domain().await;
         let request = nervix_client_wire::SuggestRequest::new(input, cursor, domain)
             .map_err(|_| ClientError::InvalidCursor { cursor, length })?;
+        let request = request
+            .with_page(page_size, continuation)
+            .map_err(|_| ClientError::InvalidCompletionPageSize { size: page_size })?;
         match self.request(ClientRequest::Suggest(request), None).await? {
-            ReplyBody::Suggest(outcome) => Ok(outcome
-                .suggestions
-                .into_iter()
-                .map(AutocompleteSuggestion::from)
-                .collect()),
+            ReplyBody::Suggest(outcome) => Ok(AutocompleteOutcome {
+                status: outcome.status,
+                continuation: outcome.continuation,
+                suggestions: outcome
+                    .suggestions
+                    .into_iter()
+                    .map(AutocompleteSuggestion::from)
+                    .collect(),
+            }),
             other => Err(ClientError::unexpected_reply(RequestKind::Suggest, other)),
         }
     }

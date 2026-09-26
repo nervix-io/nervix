@@ -131,6 +131,7 @@ pub enum Identifier {
     On,
     Connect,
     Message,
+    Input,
     Branch,
     Branches,
     General,

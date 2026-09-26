@@ -74,6 +74,11 @@ pub enum WireDecodeError {
 /// Why a value could not be encoded as a frame.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WireEncodeError {
+    #[error("`{field}` is not a valid {kind}")]
+    InvalidValue {
+        field: &'static str,
+        kind: &'static str,
+    },
     #[error("`{field}` holds {actual} bytes, above the limit of {limit}")]
     StringTooLong {
         field: &'static str,

@@ -108,7 +108,9 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
                 13,
                 Some(name("tenant")),
             )
-            .assured("byte 13 starts a character"),
+            .assured("byte 13 starts a character")
+            .with_page(2, Some("page-two".to_string()))
+            .assured("two candidates fit a bounded page"),
         ),
         ClientRequest::Suggest(
             SuggestRequest::new("ü".to_string(), 2, None).assured("the end is a boundary"),

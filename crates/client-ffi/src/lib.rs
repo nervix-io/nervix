@@ -24,6 +24,7 @@ mod failure;
 mod outcome;
 mod schema;
 mod session;
+mod suggestions;
 
 pub use cancel::{
     Cancel, nx_cancel_free, nx_cancel_new, nx_cancel_trigger, nx_cancel_with_deadline,
@@ -49,6 +50,10 @@ pub use schema::{
 pub use session::{
     Execution, Session, nx_execution_free, nx_execution_reference, nx_session_connect,
     nx_session_execute, nx_session_free, nx_session_next_event, nx_session_prepare,
+};
+pub use suggestions::{
+    CompletionKind, CompletionStatus, Suggestions, nx_session_suggest, nx_suggestions_at,
+    nx_suggestions_continuation, nx_suggestions_count, nx_suggestions_free, nx_suggestions_status,
 };
 
 #[cfg(test)]

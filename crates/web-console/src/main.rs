@@ -26,8 +26,9 @@ use nervix_client_wire::{
     SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionEndReason,
     SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
     SubscribeRequest, SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType,
-    SuggestRequest, TransferAssembly, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome,
-    UnsubscribeRequest, VerifiedFrame,
+    SuggestRequest, Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    TransferAssembly, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest,
+    VerifiedFrame,
     websocket::{ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -85,7 +86,10 @@ struct WebConsoleSession {
 #[derive(Clone, Copy)]
 struct WebConsoleSignals {
     terminal_lines: RwSignal<TermLineHistory>,
-    suggestions: RwSignal<Vec<String>>,
+    suggestions: RwSignal<Vec<WireSuggestion>>,
+    suggestion_status: RwSignal<Option<SuggestionStatus>>,
+    suggestion_query: RwSignal<Option<SuggestionQuery>>,
+    suggestion_continuation: RwSignal<Option<String>>,
     domain_snapshots: RwSignal<BTreeMap<DomainName, DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<DomainName>>,
@@ -113,6 +117,9 @@ impl WebConsoleSignals {
         self.subscription_tabs.set(Vec::new());
         self.active_subscription_tab.set(None);
         self.suggestions.set(Vec::new());
+        self.suggestion_status.set(None);
+        self.suggestion_query.set(None);
+        self.suggestion_continuation.set(None);
         self.terminal_lines.set(TermLineHistory::default());
     }
 
@@ -153,6 +160,13 @@ impl WebConsoleSignals {
             subscription: tab.name,
         })
     }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SuggestionQuery {
+    input: String,
+    cursor: usize,
+    domain: Option<DomainName>,
 }
 
 /// A request the console sends over its session, together with what its reply is for.
@@ -656,7 +670,10 @@ fn App() -> impl IntoView {
     let subscription_tabs = RwSignal::new(Vec::<SubscriptionTabView>::new());
     let active_subscription_tab = RwSignal::new(None::<u64>);
     let next_subscription_tab_id = RwSignal::new(1_u64);
-    let suggestions = RwSignal::new(Vec::<String>::new());
+    let suggestions = RwSignal::new(Vec::<WireSuggestion>::new());
+    let suggestion_status = RwSignal::new(None::<SuggestionStatus>);
+    let suggestion_query = RwSignal::new(None::<SuggestionQuery>);
+    let suggestion_continuation = RwSignal::new(None::<String>);
     let domain_snapshots = RwSignal::new(BTreeMap::<DomainName, DomainSnapshotView>::new());
     let cluster_counters = RwSignal::new(ClusterCounters::default());
     let resource_details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
@@ -666,6 +683,9 @@ fn App() -> impl IntoView {
     let signals = WebConsoleSignals {
         terminal_lines,
         suggestions,
+        suggestion_status,
+        suggestion_query,
+        suggestion_continuation,
         domain_snapshots,
         cluster_counters,
         active_domain,
@@ -720,29 +740,44 @@ fn App() -> impl IntoView {
     });
     let suggestion_request_sequence = RwSignal::new(0_u64);
     let suggestion_session = web_console_session.clone();
-    let request_suggestions = move |value: String| {
+    let request_suggestions = move |value: String, cursor: usize, continuation: Option<String>| {
         suggestion_request_sequence.update(|sequence| {
             *sequence = sequence
                 .checked_add(1)
                 .assured("a console session cannot request 2^64 suggestions");
         });
         let request_sequence = suggestion_request_sequence.get_untracked();
+        if continuation.is_none() {
+            suggestions.set(Vec::new());
+            suggestion_status.set(None);
+            suggestion_query.set(None);
+            suggestion_continuation.set(None);
+        }
         if !domains_loaded.get_untracked() {
             suggestions.set(Vec::new());
             return;
         }
         let domain = active_domain.get_untracked();
+        suggestion_query.set(Some(SuggestionQuery {
+            input: value.clone(),
+            cursor,
+            domain: domain.clone(),
+        }));
         let auth_at_schedule = suggestion_session.auth_token.get_untracked();
         spawn_local(async move {
             wait_for_browser_delay(SUGGESTION_REQUEST_DEBOUNCE_DELAY).await;
             if suggestion_request_sequence.get_untracked() != request_sequence
                 || suggestion_session.auth_token.get_untracked() != auth_at_schedule
+                || (continuation.is_some()
+                    && suggestion_continuation.get_untracked() != continuation)
             {
                 return;
             }
-            let cursor = value.len();
             let request = SuggestRequest::new(value, cursor, domain)
-                .assured("the end of the input is always a character boundary");
+                .assured("the browser cursor is converted to a UTF-8 character boundary");
+            let request = request
+                .with_page(64, continuation)
+                .assured("the console page size is within the protocol bound");
             let queued = ConsoleRequest::Suggest(request);
             if let Some(request_tx) = suggestion_session.request_tx.get_untracked()
                 && request_tx.unbounded_send(queued).is_err()
@@ -758,6 +793,9 @@ fn App() -> impl IntoView {
                 .checked_add(1)
                 .assured("a console session cannot request 2^64 suggestions");
         });
+        suggestion_query.set(None);
+        suggestion_status.set(None);
+        suggestion_continuation.set(None);
         let command = next_command
             .unwrap_or_else(|| input.get())
             .trim()
@@ -997,6 +1035,8 @@ fn App() -> impl IntoView {
                             active_subscription_tab=active_subscription_tab
                             stop_subscription=stop_subscription
                             suggestions=move || suggestions.get()
+                            suggestion_status=move || suggestion_status.get()
+                            suggestion_continuation=move || suggestion_continuation.get()
                             request_suggestions=request_suggestions
                             input_enabled=move || domains_loaded.get()
                             run_command=run_command
@@ -1790,13 +1830,31 @@ fn apply_reply(
             signals.terminal_lines.update(|lines| lines.push(line));
             SessionStep::Continue
         }
-        (ConsoleRequest::Suggest(_), ReplyBody::Suggest(outcome)) => {
-            let values = outcome
+        (ConsoleRequest::Suggest(request), ReplyBody::Suggest(outcome)) => {
+            let Some(query) = signals.suggestion_query.get_untracked() else {
+                return SessionStep::Continue;
+            };
+            if query.input != request.input()
+                || query.cursor != request.cursor()
+                || query.domain.as_ref() != request.domain()
+                || query.domain != signals.active_domain.get_untracked()
+            {
+                return SessionStep::Continue;
+            }
+            signals.suggestion_status.set(Some(outcome.status));
+            signals.suggestion_continuation.set(outcome.continuation);
+            let text_suggestions = outcome
                 .suggestions
                 .into_iter()
-                .map(|suggestion| suggestion.value)
-                .collect();
-            signals.suggestions.set(values);
+                .filter(|suggestion| suggestion.kind == SuggestionKind::Text)
+                .collect::<Vec<_>>();
+            if request.continuation().is_some() && outcome.status == SuggestionStatus::Ready {
+                signals
+                    .suggestions
+                    .update(|suggestions| suggestions.extend(text_suggestions));
+            } else {
+                signals.suggestions.set(text_suggestions);
+            }
             SessionStep::Continue
         }
         (ConsoleRequest::AttachTransaction(_), ReplyBody::Attach(outcome)) => {
@@ -4622,8 +4680,10 @@ fn ReplPanel(
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
     active_subscription_tab: RwSignal<Option<u64>>,
     stop_subscription: impl Fn(u64) + Copy + Send + 'static,
-    suggestions: impl Fn() -> Vec<String> + Copy + Send + 'static,
-    request_suggestions: impl Fn(String) + Copy + Send + 'static,
+    suggestions: impl Fn() -> Vec<WireSuggestion> + Copy + Send + 'static,
+    suggestion_status: impl Fn() -> Option<SuggestionStatus> + Copy + Send + 'static,
+    suggestion_continuation: impl Fn() -> Option<String> + Copy + Send + 'static,
+    request_suggestions: impl Fn(String, usize, Option<String>) + Copy + Send + 'static,
     input_enabled: impl Fn() -> bool + Copy + Send + 'static,
     run_command: impl Fn(Option<String>) + Copy + Send + 'static,
 ) -> impl IntoView {
@@ -4753,22 +4813,46 @@ fn ReplPanel(
             <div class="suggestions" class:hidden=move || !repl_active() || suggestions().is_empty()>
                 <For
                     each=suggestions
-                    key=|suggestion| suggestion.clone()
+                    key=|suggestion| suggestion.value.clone()
                     children={move |suggestion| {
-                        let value = suggestion.clone();
+                        let edit = suggestion.edit.clone();
                         view! {
                             <button
                                 type="button"
                                 on:click=move |_| {
                                     completion_cycle.set(None);
-                                    input.set(apply_completion(&input.get_untracked(), &value));
+                                    input.set(apply_completion(&input.get_untracked(), &edit));
                                 }
                             >
-                                {suggestion}
+                                {suggestion.value}
                             </button>
                         }
                     }}
                 />
+            </div>
+            <button
+                type="button"
+                class="completion-more"
+                class:hidden=move || !repl_active() || suggestion_continuation().is_none()
+                on:click=move |_| {
+                    let Some(next) = suggestion_continuation() else {
+                        return;
+                    };
+                    let value = input.get_untracked();
+                    let cursor = match input_ref.get_untracked() {
+                        Some(element) => browser_cursor_byte_offset(&value, &element),
+                        None => value.len(),
+                    };
+                    request_suggestions(value, cursor, Some(next));
+                }
+            >"MORE SUGGESTIONS"</button>
+            <div class="completion-status" class:hidden=move || !repl_active() || matches!(suggestion_status(), None | Some(SuggestionStatus::Ready))>
+                {move || match suggestion_status() {
+                    Some(SuggestionStatus::MissingContext) => "Select an existing domain for this reference.",
+                    Some(SuggestionStatus::StaleContext) => "Transaction context changed; reconnect or reattach it.",
+                    Some(SuggestionStatus::LookupFailed) => "Completion lookup failed; try again.",
+                    Some(SuggestionStatus::Ready) | None => "",
+                }}
             </div>
             <form class="prompt-row" class:hidden=move || !repl_active() on:submit=move |event| {
                 event.prevent_default();
@@ -4801,7 +4885,11 @@ fn ReplPanel(
                         completion_cycle.set(None);
                         command_history.update(CommandHistory::reset_navigation);
                         input.set(value.clone());
-                        request_suggestions(value);
+                        let cursor = match input_ref.get_untracked() {
+                            Some(element) => browser_cursor_byte_offset(&value, &element),
+                            None => value.len(),
+                        };
+                        request_suggestions(value, cursor, None);
                     }
                     on:keydown=move |event: ev::KeyboardEvent| {
                         if event.key() == "Tab" {
@@ -4816,13 +4904,18 @@ fn ReplPanel(
                                     Some(cycle) => cycle.next_index % suggestion_items.len(),
                                     None => 0,
                                 };
-                                input.set(apply_completion(&source, &suggestion_items[index]));
+                                input.set(apply_completion(&source, &suggestion_items[index].edit));
                                 completion_cycle.set(Some(CompletionCycle {
                                     source,
                                     next_index: (index + 1) % suggestion_items.len(),
                                 }));
                             } else {
-                                request_suggestions(input.get_untracked());
+                                let value = input.get_untracked();
+                                let cursor = match input_ref.get_untracked() {
+                                    Some(element) => browser_cursor_byte_offset(&value, &element),
+                                    None => value.len(),
+                                };
+                                request_suggestions(value, cursor, None);
                             }
                         } else if event.key() == "ArrowUp" {
                             event.prevent_default();
@@ -4837,7 +4930,7 @@ fn ReplPanel(
                             });
                             if let Some(command) = command {
                                 input.set(command.clone());
-                                request_suggestions(command);
+                                request_suggestions(command.clone(), command.len(), None);
                             }
                         } else if event.key() == "ArrowDown" {
                             event.prevent_default();
@@ -4848,7 +4941,7 @@ fn ReplPanel(
                             });
                             if let Some(command) = command {
                                 input.set(command.clone());
-                                request_suggestions(command);
+                                request_suggestions(command.clone(), command.len(), None);
                             }
                         } else if event.key() == "Enter" && (event.meta_key() || event.ctrl_key()) {
                             event.prevent_default();
@@ -4927,19 +5020,37 @@ impl CommandHistory {
     }
 }
 
-fn apply_completion(input: &str, suggestion: &str) -> String {
-    let prefix_start = input
-        .char_indices()
-        .rev()
-        .find_map(|(index, character)| {
-            character
-                .is_whitespace()
-                .then_some(index + character.len_utf8())
-        })
-        .unwrap_or(0);
-    let mut completed = String::with_capacity(prefix_start + suggestion.len());
-    completed.push_str(&input[..prefix_start]);
-    completed.push_str(suggestion);
+fn browser_cursor_byte_offset(value: &str, element: &web_sys::HtmlInputElement) -> usize {
+    let Some(cursor) = element.selection_start().ok().flatten() else {
+        return value.len();
+    };
+    let target =
+        usize::try_from(cursor).assured("browser UTF-16 offsets fit the target pointer width");
+    let mut utf16_offset = 0;
+    for (byte_offset, character) in value.char_indices() {
+        if utf16_offset >= target {
+            return byte_offset;
+        }
+        utf16_offset = utf16_offset
+            .checked_add(character.len_utf16())
+            .assured("the browser cursor cannot exceed a string already held in memory");
+        if utf16_offset > target {
+            return byte_offset;
+        }
+    }
+    value.len()
+}
+
+fn apply_completion(input: &str, edit: &TextEdit) -> String {
+    let start = usize::try_from(edit.start).assured("wire offsets fit the target pointer width");
+    let end = usize::try_from(edit.end).assured("wire offsets fit the target pointer width");
+    if start > end || input.get(start..end).is_none() {
+        return input.to_string();
+    }
+    let mut completed = String::with_capacity(input.len());
+    completed.push_str(&input[..start]);
+    completed.push_str(&edit.replacement);
+    completed.push_str(&input[end..]);
     completed
 }
 
@@ -6451,12 +6562,166 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn completion_edits_preserve_unicode_suffixes_and_ignore_invalid_byte_ranges() {
+        let input = "SHOW CLUST;😊";
+        assert_eq!(
+            apply_completion(
+                input,
+                &TextEdit {
+                    start: 5,
+                    end: 10,
+                    replacement: "CLUSTER".to_string(),
+                },
+            ),
+            "SHOW CLUSTER;😊"
+        );
+        let unicode_input = "éclair";
+        for (start, end) in [(1, 2), (3, 2), (0, 99)] {
+            assert_eq!(
+                apply_completion(
+                    unicode_input,
+                    &TextEdit {
+                        start,
+                        end,
+                        replacement: "changed".to_string(),
+                    },
+                ),
+                unicode_input
+            );
+        }
+    }
+
+    #[test]
+    fn completion_replies_filter_local_paths_append_pages_and_ignore_stale_queries() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            let query = SuggestionQuery {
+                input: "SH".to_string(),
+                cursor: 2,
+                domain: Some(domain.clone()),
+            };
+            signals.suggestion_query.set(Some(query));
+            let mut requests = SessionRequests::new();
+            let suggestion = |value: &str, kind| WireSuggestion {
+                value: value.to_string(),
+                kind,
+                edit: TextEdit {
+                    start: 0,
+                    end: 2,
+                    replacement: value.to_string(),
+                },
+            };
+            let first = SuggestRequest::new("SH".to_string(), 2, Some(domain.clone()))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let first = requests.issue(ConsoleRequest::Suggest(first));
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: first,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: Some("page-two".to_string()),
+                        suggestions: vec![
+                            suggestion("SHOW", SuggestionKind::Text),
+                            suggestion("./local", SuggestionKind::LocalDirectoryLookup),
+                        ],
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(signals.suggestions.get_untracked().len(), 1);
+            assert_eq!(signals.suggestions.get_untracked()[0].value, "SHOW");
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::Ready)
+            );
+            assert_eq!(
+                signals.suggestion_continuation.get_untracked().as_deref(),
+                Some("page-two")
+            );
+
+            let next = SuggestRequest::new("SH".to_string(), 2, Some(domain.clone()))
+                .assured("the test cursor ends at a UTF-8 boundary")
+                .with_page(64, Some("page-two".to_string()))
+                .assured("the test page size is valid");
+            let next = requests.issue(ConsoleRequest::Suggest(next));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: next,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: None,
+                        suggestions: vec![suggestion("SHUTDOWN", SuggestionKind::Text)],
+                    }),
+                },
+            );
+            let values = signals
+                .suggestions
+                .get_untracked()
+                .into_iter()
+                .map(|item| item.value)
+                .collect::<Vec<_>>();
+            assert_eq!(values, ["SHOW", "SHUTDOWN"]);
+            assert_eq!(signals.suggestion_continuation.get_untracked(), None);
+
+            let stale = SuggestRequest::new("S".to_string(), 1, Some(domain))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let stale = requests.issue(ConsoleRequest::Suggest(stale));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: stale,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::LookupFailed,
+                        continuation: None,
+                        suggestions: Vec::new(),
+                    }),
+                },
+            );
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::Ready)
+            );
+            assert_eq!(signals.suggestions.get_untracked().len(), 2);
+
+            let failed = SuggestRequest::new("SH".to_string(), 2, Some(domain_name("tenant")))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let failed = requests.issue(ConsoleRequest::Suggest(failed));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: failed,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::LookupFailed,
+                        continuation: None,
+                        suggestions: Vec::new(),
+                    }),
+                },
+            );
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::LookupFailed)
+            );
+            assert!(signals.suggestions.get_untracked().is_empty());
+        });
+    }
+
     fn subscription_signals(state: SubscriptionTabState) -> WebConsoleSignals {
         let name = SubscriptionName::parse("live").assured("the test subscription name is valid");
         let domain = DomainName::parse("tenant").assured("the test domain name is valid");
         WebConsoleSignals {
             terminal_lines: RwSignal::new(TermLineHistory::default()),
             suggestions: RwSignal::new(Vec::new()),
+            suggestion_status: RwSignal::new(None),
+            suggestion_query: RwSignal::new(None),
+            suggestion_continuation: RwSignal::new(None),
             domain_snapshots: RwSignal::new(BTreeMap::new()),
             cluster_counters: RwSignal::new(ClusterCounters::default()),
             active_domain: RwSignal::new(Some(domain.clone())),
@@ -6499,9 +6764,15 @@ mod tests {
     fn changing_credentials_clears_the_previous_users_private_view() {
         Owner::new().with(|| {
             let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
-            signals
-                .suggestions
-                .set(vec!["private completion".to_string()]);
+            signals.suggestions.set(vec![WireSuggestion {
+                value: "private completion".to_string(),
+                kind: nervix_client_wire::SuggestionKind::Text,
+                edit: TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: "private completion".to_string(),
+                },
+            }]);
             signals
                 .terminal_lines
                 .update(|lines| lines.push(TermLine::output("private output")));
@@ -7392,6 +7663,8 @@ mod tests {
             .assured("a completion request is sent at once");
         let suggestions = || {
             ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                status: nervix_client_wire::SuggestionStatus::Ready,
+                continuation: None,
                 suggestions: Vec::new(),
             })
         };

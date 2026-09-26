@@ -352,6 +352,13 @@ pub(in crate::application) enum SessionTransactionBindingError {
     TakenOver { id: String },
     #[error("transaction '{id}' is not attached to this leader; attach it before continuing")]
     Detached { id: String },
+    #[error("transaction '{id}' is attached but no domain is selected")]
+    MissingSelectedDomain { id: String },
+    #[error("transaction domain '{transaction}' differs from selected domain '{selected}'")]
+    DomainMismatch {
+        selected: DomainName,
+        transaction: DomainName,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -376,7 +383,7 @@ impl SessionTransactionBindingError {
     pub(in crate::application) fn into_command_result(self) -> CommandResult {
         let mut result = command_error(self.to_string());
         match self {
-            Self::Unbound => {}
+            Self::Unbound | Self::DomainMismatch { .. } | Self::MissingSelectedDomain { .. } => {}
             Self::TakenOver { id } => {
                 result.disposition =
                     CommandDisposition::TransactionTakenOver { transaction_id: id };
@@ -704,25 +711,34 @@ impl SessionServiceImpl {
     }
 
     /// The configuration this session's bound transaction has queued for `domain`. Queued
-    /// configuration follows the binding, so a session that holds no transaction, one displaced by
-    /// a takeover, one whose transaction this node does not hold, and one whose transaction
-    /// configures another domain all fall back to committed configuration alone.
+    /// configuration follows the binding; a stale or mismatched binding is a reported failure.
     pub(in crate::application) async fn queued_configuration(
         &self,
         binding: SessionBinding<'_>,
         domain: Option<&DomainName>,
-    ) -> QueuedConfiguration {
-        let (Some(domain), Some(id)) = (domain, binding.transaction_id) else {
-            return QueuedConfiguration::default();
+    ) -> error_stack::Result<QueuedConfiguration, SessionTransactionBindingError> {
+        let Some(id) = binding.transaction_id else {
+            return Ok(QueuedConfiguration::default());
         };
-        if self.validate_session_transaction_binding(binding).is_err() {
-            return QueuedConfiguration::default();
-        }
+        self.validate_session_transaction_binding(binding)
+            .map_err(Report::new)?;
+        let Some(domain) = domain else {
+            return Err(Report::new(
+                SessionTransactionBindingError::MissingSelectedDomain { id: id.to_string() },
+            ));
+        };
         let Some(transaction) = self.inner.consensus.current_transaction(id).await else {
-            return QueuedConfiguration::default();
+            return Err(Report::new(SessionTransactionBindingError::Detached {
+                id: id.to_string(),
+            }));
         };
         if &transaction.domain != domain {
-            return QueuedConfiguration::default();
+            return Err(Report::new(
+                SessionTransactionBindingError::DomainMismatch {
+                    selected: domain.clone(),
+                    transaction: transaction.domain.clone(),
+                },
+            ));
         }
 
         let mut queued = QueuedConfiguration::default();
@@ -741,7 +757,7 @@ impl SessionServiceImpl {
                 queued.resources.insert(create.identifier.clone());
             }
         }
-        queued
+        Ok(queued)
     }
 
     pub(in crate::application) async fn transaction_consensus_error_response(

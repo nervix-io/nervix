@@ -10,6 +10,7 @@
 //!   else.
 
 use std::{
+    collections::BTreeSet,
     io::{self, Write},
     ops::Range,
     path::{Path, PathBuf},
@@ -26,17 +27,17 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_client_core::{
-    AutocompleteSuggestion, Client, ClientError as CoreClientError, CommandDisposition,
-    CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic, DomainName,
-    LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition, StatementOutcome,
-    SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
+    AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
+    CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic,
+    DomainName, LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition,
+    StatementOutcome, SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
     TransactionStatus,
 };
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statements, parse_upload_resource_query,
-    upload_resource_path_fragment,
+    upload_resource_path_fragment, upload_resource_path_range,
 };
 use nervix_recovery::{Discarded as _, Reported as _};
 use reedline::{
@@ -80,8 +81,14 @@ struct Args {
     #[arg(long, env = "NERVIX_PASSWORD")]
     password: Option<String>,
     /// Run NSPL statements once and exit instead of starting the interactive REPL
-    #[arg(long)]
+    #[arg(long, conflicts_with = "suggest")]
     command: Option<String>,
+    /// Print completion candidates for NSPL input as JSON and exit
+    #[arg(long, conflicts_with = "command")]
+    suggest: Option<String>,
+    /// UTF-8 byte cursor in --suggest input; defaults to the end
+    #[arg(long, requires = "suggest")]
+    cursor: Option<usize>,
     #[command(subcommand)]
     subcommand: Option<Command>,
 }
@@ -162,6 +169,40 @@ enum ClientError {
     InvalidSubscriptionWhere,
     #[error("transaction inspection failed: {message}")]
     InspectionFailed { message: String },
+    #[error("completion pagination repeated a continuation")]
+    RepeatedSuggestionPage,
+}
+
+async fn collect_suggestions(
+    client: &Client,
+    input: String,
+    cursor: usize,
+) -> Result<AutocompleteOutcome, StackReport<ClientError>> {
+    let mut continuation = None;
+    let mut seen = BTreeSet::new();
+    let mut suggestions = Vec::new();
+    loop {
+        tokio::task::consume_budget().await;
+        let page = client
+            .suggest(input.clone(), cursor, 100, continuation.take())
+            .await
+            .map_err(|error| StackReport::new(ClientError::from(error)))?;
+        if page.status != nervix_client_core::SuggestionStatus::Ready {
+            return Ok(page);
+        }
+        suggestions.extend(page.suggestions);
+        let Some(next) = page.continuation else {
+            return Ok(AutocompleteOutcome {
+                status: nervix_client_core::SuggestionStatus::Ready,
+                suggestions,
+                continuation: None,
+            });
+        };
+        if !seen.insert(next.clone()) {
+            return Err(StackReport::new(ClientError::RepeatedSuggestionPage));
+        }
+        continuation = Some(next);
+    }
 }
 
 impl Completer for GrpcCompleter {
@@ -170,17 +211,24 @@ impl Completer for GrpcCompleter {
             Ok(prefix) => prefix.clone(),
             Err(_) => String::new(),
         };
-        let combined = format!("{}{}", prefix, &line[..pos.min(line.len())]);
-        let cursor = combined.len();
+        let pos = line.floor_char_boundary(pos.min(line.len()));
+        let Some(cursor) = prefix.len().checked_add(pos) else {
+            return Vec::new();
+        };
+        let combined = format!("{prefix}{line}");
         let client = self.client.clone();
         let runtime = self.runtime.clone();
 
-        let suggestions = block_in_place(|| {
-            runtime.block_on(async move { client.suggest(combined, cursor).await.ok() })
-        })
-        .unwrap_or_default();
+        let outcome =
+            block_in_place(|| runtime.block_on(collect_suggestions(&client, combined, cursor)));
+        let Ok(outcome) = outcome else {
+            return Vec::new();
+        };
+        if outcome.status != nervix_client_core::SuggestionStatus::Ready {
+            return Vec::new();
+        }
+        let suggestions = outcome.suggestions;
 
-        let start = word_start(line, pos);
         if suggestions
             .iter()
             .any(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup)
@@ -188,33 +236,61 @@ impl Completer for GrpcCompleter {
             let lookup_hint = suggestions
                 .iter()
                 .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
-            if let Some(local) = complete_local_upload_paths(line, pos, lookup_hint) {
+            if let Some(local) = complete_local_upload_paths(line, pos, prefix.len(), lookup_hint) {
                 return local;
             }
         }
 
-        suggestions
-            .into_iter()
-            .filter(|suggestion| suggestion.kind == ClientSuggestionKind::Text)
-            .map(|suggestion| Suggestion {
-                value: suggestion.value,
-                description: None,
-                style: None,
-                extra: None,
-                span: reedline::Span::new(start, pos),
-                append_whitespace: true,
-            })
-            .collect()
+        Self::text_suggestions(line, prefix.len(), suggestions)
     }
 }
 
-fn word_start(line: &str, pos: usize) -> usize {
-    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let pos = line.floor_char_boundary(pos.min(line.len()));
-    let boundary = line[..pos].char_indices().rev().find(|(_, c)| !is_word(*c));
-    match boundary {
-        Some((index, character)) => index + character.len_utf8(),
-        None => 0,
+impl GrpcCompleter {
+    fn text_suggestions(
+        line: &str,
+        buffer_prefix_len: usize,
+        suggestions: Vec<AutocompleteSuggestion>,
+    ) -> Vec<Suggestion> {
+        suggestions
+            .into_iter()
+            .filter(|suggestion| suggestion.kind == ClientSuggestionKind::Text)
+            .filter_map(|suggestion| {
+                let start = usize::try_from(suggestion.edit.start).ok()?;
+                let end = usize::try_from(suggestion.edit.end).ok()?;
+                let start = start.checked_sub(buffer_prefix_len)?;
+                let end = end.checked_sub(buffer_prefix_len)?;
+                if start > end || line.get(start..end).is_none() {
+                    return None;
+                }
+                Some(Suggestion {
+                    value: suggestion.edit.replacement,
+                    description: Some(suggestion.value),
+                    style: None,
+                    extra: None,
+                    span: reedline::Span::new(start, end),
+                    append_whitespace: end == line.len(),
+                })
+            })
+            .collect()
+    }
+
+    fn local_path_range(
+        line: &str,
+        pos: usize,
+        buffer_prefix_len: usize,
+        hint: &AutocompleteSuggestion,
+    ) -> Option<std::ops::Range<usize>> {
+        let start = usize::try_from(hint.edit.start)
+            .ok()?
+            .checked_sub(buffer_prefix_len)?;
+        let end = usize::try_from(hint.edit.end)
+            .ok()?
+            .checked_sub(buffer_prefix_len)?;
+        line.get(start..end)?;
+        if end < pos || line.get(start..pos)? != hint.value {
+            return None;
+        }
+        Some(start..end)
     }
 }
 
@@ -313,6 +389,55 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
             .await
             .map_err(|err| StackReport::new(ClientError::from(err)))?;
+    if let Some(input) = args.suggest.as_deref() {
+        let cursor = args.cursor.unwrap_or(input.len());
+        let outcome = collect_suggestions(&client, input.to_string(), cursor).await?;
+        let local_hint = outcome
+            .suggestions
+            .iter()
+            .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
+        let suggestions = if let Some(hint) = local_hint {
+            complete_local_upload_paths(input, cursor, 0, Some(hint))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|suggestion| {
+                    serde_json::json!({
+                        "value": suggestion.value,
+                        "kind": "LocalDirectoryLookup",
+                        "edit": {
+                            "start": suggestion.span.start,
+                            "end": suggestion.span.end,
+                            "replacement": suggestion.value,
+                        },
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            outcome
+                .suggestions
+                .iter()
+                .map(|suggestion| {
+                    serde_json::json!({
+                        "value": suggestion.value,
+                        "kind": format!("{:?}", suggestion.kind),
+                        "edit": {
+                            "start": suggestion.edit.start,
+                            "end": suggestion.edit.end,
+                            "replacement": suggestion.edit.replacement,
+                        },
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": format!("{:?}", outcome.status),
+                "suggestions": suggestions,
+            })
+        );
+        return Ok(());
+    }
     let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
     let event_sender = EventLineSender::new(event_sender);
     spawn_event_collectors(client.clone(), event_sender.clone());
@@ -490,12 +615,11 @@ fn create_line_editor(completer: GrpcCompleter) -> Result<Reedline, StackReport<
 fn complete_local_upload_paths(
     line: &str,
     pos: usize,
+    buffer_prefix_len: usize,
     lookup_hint: Option<&AutocompleteSuggestion>,
 ) -> Option<Vec<Suggestion>> {
     let hinted = match lookup_hint {
-        Some(hint)
-            if !hint.value.is_empty() || line[..pos.min(line.len())].contains(" VERSION '") =>
-        {
+        Some(hint) if !hint.value.is_empty() || line.get(..pos)?.contains(" VERSION '") => {
             Some(hint.value.as_str())
         }
         _ => None,
@@ -504,9 +628,12 @@ fn complete_local_upload_paths(
         Some(path_fragment) => path_fragment,
         None => upload_resource_path_fragment(line, pos)?,
     };
-    // The suggested fragment may be longer than the text typed so far, in which case the
-    // replacement span starts at the beginning of the line.
-    let span_start = pos.saturating_sub(path_fragment.len());
+    let hinted_range = match lookup_hint {
+        Some(hint) => GrpcCompleter::local_path_range(line, pos, buffer_prefix_len, hint),
+        None => None,
+    };
+    let local_range = upload_resource_path_range(line, pos);
+    let replacement_range = hinted_range.or(local_range).unwrap_or(0..pos);
     let path = Path::new(path_fragment);
     let (base_dir, partial_name) = if path_fragment.is_empty() {
         (PathBuf::from("."), String::new())
@@ -514,8 +641,8 @@ fn complete_local_upload_paths(
         (expand_user_path(path), String::new())
     } else {
         let parent = match path.parent() {
-            Some(parent) => parent.to_path_buf(),
-            None => PathBuf::from("."),
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            Some(_) | None => PathBuf::from("."),
         };
         let file_name = match path.file_name() {
             Some(name) => name.to_string_lossy().to_string(),
@@ -561,7 +688,7 @@ fn complete_local_upload_paths(
             description: None,
             style: None,
             extra: None,
-            span: reedline::Span::new(span_start, pos),
+            span: reedline::Span::new(replacement_range.start, replacement_range.end),
             append_whitespace: false,
         });
     }
@@ -1437,16 +1564,6 @@ mod tests {
     }
 
     #[test]
-    fn word_start_tracks_identifier_boundaries() {
-        assert_eq!(word_start("CREATE SCHE", "CREATE SCHE".len()), 7);
-        assert_eq!(word_start("tenant_id", "tenant_id".len()), 0);
-        assert_eq!(word_start("WHERE (tenant", "WHERE (tenant".len()), 7);
-        assert_eq!(word_start("tenant", usize::MAX), 0);
-        assert_eq!(word_start("évalue", 1), 0);
-        assert_eq!(word_start("évalue", "évalue".len()), "é".len());
-    }
-
-    #[test]
     fn use_domain_parser_accepts_repl_command() {
         use nervix_nspl::client_statement::parse_use_domain;
 
@@ -1499,6 +1616,35 @@ mod tests {
     }
 
     #[test]
+    fn typed_completion_edit_replaces_a_word_before_a_unicode_suffix() {
+        let line = "SHOW CLUSTR;😊";
+        let suggestions = GrpcCompleter::text_suggestions(
+            line,
+            0,
+            vec![AutocompleteSuggestion {
+                value: "CLUSTER".to_string(),
+                kind: ClientSuggestionKind::Text,
+                edit: nervix_client_core::TextEdit {
+                    start: 5,
+                    end: 11,
+                    replacement: "CLUSTER".to_string(),
+                },
+            }],
+        );
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].span, reedline::Span::new(5, 11));
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                &line[..suggestions[0].span.start],
+                suggestions[0].value,
+                &line[suggestions[0].span.end..]
+            ),
+            "SHOW CLUSTER;😊"
+        );
+    }
+
+    #[test]
     fn local_upload_path_completion_lists_matching_directories() {
         let temp =
             std::env::temp_dir().join(format!("nervix-cli-upload-complete-{}", std::process::id()));
@@ -1511,9 +1657,15 @@ mod tests {
         let suggestions = complete_local_upload_paths(
             &line,
             line.len(),
+            0,
             Some(&AutocompleteSuggestion {
                 value: format!("{}/pro", temp.display()),
                 kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             }),
         )
         .expect("local path completion should be available");
@@ -1525,7 +1677,43 @@ mod tests {
                 .iter()
                 .any(|suggestion| suggestion.value.contains("other-dir"))
         );
+        let path_prefix = format!("{}/pro", temp.display());
+        let source_start = "UPLOAD RESOURCE proto VERSION '".len();
+        let cursor = source_start + path_prefix.len();
+        let mid_line = format!("UPLOAD RESOURCE proto VERSION '{path_prefix}to';");
+        let mid_suggestions = complete_local_upload_paths(
+            &mid_line,
+            cursor,
+            0,
+            Some(&AutocompleteSuggestion {
+                value: path_prefix,
+                kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: u32::try_from(source_start).assured("the test source fits u32"),
+                    end: u32::try_from(cursor + 2).assured("the test source fits u32"),
+                    replacement: String::new(),
+                },
+            }),
+        )
+        .assured("local path completion is available in the middle of a path");
+        assert!(mid_suggestions.iter().any(|suggestion| {
+            suggestion.span == reedline::Span::new(source_start, cursor + 2)
+                && suggestion.value.ends_with("/proto-dir/")
+        }));
         std::fs::remove_dir_all(&temp).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn local_upload_path_completion_reads_a_bare_relative_filename() {
+        let line = "UPLOAD RESOURCE bundle VERSION 'Cargo.tml'";
+        let cursor = line.find("ml'").assured("the test input marks its cursor");
+        let suggestions = complete_local_upload_paths(line, cursor, 0, None)
+            .assured("the package directory can be read for local completion");
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "Cargo.toml")
+        );
     }
 
     #[test]
@@ -1541,9 +1729,15 @@ mod tests {
         let suggestions = complete_local_upload_paths(
             "",
             0,
+            0,
             Some(&AutocompleteSuggestion {
                 value: format!("{}/", temp.display()),
                 kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             }),
         )
         .expect("local path completion should be available");
@@ -1573,9 +1767,15 @@ mod tests {
         let suggestions = complete_local_upload_paths(
             "",
             0,
+            0,
             Some(&AutocompleteSuggestion {
                 value: format!("~/{basename}"),
                 kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             }),
         )
         .expect("local path completion should be available");
@@ -1587,9 +1787,15 @@ mod tests {
         let nested_suggestions = complete_local_upload_paths(
             "",
             0,
+            0,
             Some(&AutocompleteSuggestion {
                 value: format!("~/{basename}/"),
                 kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             }),
         )
         .expect("nested local path completion should be available");
