@@ -9,7 +9,7 @@ Feature: Emitter batch containers
   its batch with one shared error reference.
 
   @emitter_batch_containers
-  Scenario Outline: Every format publishes one batch container per buffered batch
+  Scenario Outline: Every format publishes one batch container for a compatible run
     Given Kafka is running
     And runtime replication is configured with replica count 0 and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

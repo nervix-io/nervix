@@ -171,7 +171,8 @@ relay. Do not use them to scan across branches.
   whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
   emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec. A batching Kafka,
   Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry or Syslog emitter publishes each run of
-  compatible records from one buffered batch as one container (array, TOML `batch` key, XML `batch`
+  compatible records from successive Arrow carriers in one flush, one source relay and one exact
+  branch (or unbranched source) as one container (array, TOML `batch` key, XML `batch`
   root, protobuf `BATCH MESSAGE`, one syslog frame) or as its codec's `ON EMITTING BATCH` value, so
   consumers must read that container. `MAX SIZE` is the exact encoded payload length, including
   escaping, the container and any transformation expansion; an oversize candidate is halved, and a

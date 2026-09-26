@@ -1462,7 +1462,8 @@ impl EmitterBatchContext<'_> {
         let Some(filter_map) = self.filter_map else {
             // Without a filter map every source row publishes as it arrived, so the groups
             // already align with the batch row for row.
-            let publish_batch = EmitterPublishBatch::from_batch(batch, execution_now);
+            let publish_batch =
+                EmitterPublishBatch::from_input(input_relay.clone(), batch, execution_now);
             return self.with_ordering_groups(publish_batch, ordering_groups);
         };
 
@@ -1488,13 +1489,15 @@ impl EmitterBatchContext<'_> {
         // A plan that kept no row has no batch to publish, and the rows it rejected have just
         // been reported.
         let batch = plan.batch?;
-        let publish_batch = match EmitterPublishBatch::new(batch, plan.headers, execution_now) {
-            Ok(publish_batch) => publish_batch,
-            Err(error) => {
-                self.report_publish_batch_error(error);
-                return None;
-            }
-        };
+        let publish_batch =
+            match EmitterPublishBatch::new(input_relay.clone(), batch, plan.headers, execution_now)
+            {
+                Ok(publish_batch) => publish_batch,
+                Err(error) => {
+                    self.report_publish_batch_error(error);
+                    return None;
+                }
+            };
 
         // The plan reports the source row of every output row in output order, so selecting the
         // source groups through it keeps each published row with the group its own input
