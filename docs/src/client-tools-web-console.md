@@ -181,6 +181,12 @@ while an accepted commit continues on the leader without the browser. See
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`
 empties the scrollback.
 
+Accepting a candidate replaces its exact source range, including the rest of a word after the
+cursor, while preserving surrounding text. The list shows one bounded page at a time; use **MORE
+SUGGESTIONS** to fetch the next page. The console shows a message when the selected domain or
+transaction context is missing or stale, or when the candidate lookup fails. An empty list with
+no message means there are no matches.
+
 ## Uploading Resources
 
 ![The resource dialog after uploading a version](images/console-resource-dialog.png)

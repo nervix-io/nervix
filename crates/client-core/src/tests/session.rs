@@ -39,7 +39,7 @@ use triomphe::Arc;
 use url::Url;
 
 #[cfg(feature = "autocomplete")]
-use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind};
+use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit};
 use crate::{
     Client, ClientError, CommandDisposition, ConnectOptions, DomainName, Leadership, OutcomeOrigin,
     ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent, SubscriptionRequest,
@@ -939,7 +939,8 @@ async fn a_suggestion_recovers_after_its_session_closes() {
     .assured("the primary accepts the session");
     let mut first_exchange = primary.next_exchange().await;
     let suggestion_client = client.clone();
-    let suggestion = tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7).await });
+    let suggestion =
+        tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
     let first = first_exchange.next_request().await;
     assert!(matches!(first.request, ClientRequest::Suggest(_)));
     drop(first_exchange);
@@ -951,9 +952,16 @@ async fn a_suggestion_recovers_after_its_session_closes() {
         .reply(
             retried.request_id,
             ReplyBody::Suggest(SuggestOutcome {
+                status: SuggestionStatus::Ready,
+                continuation: None,
                 suggestions: vec![Suggestion {
                     value: "SCHEMA".to_string(),
                     kind: SuggestionKind::Text,
+                    edit: TextEdit {
+                        start: 7,
+                        end: 7,
+                        replacement: "SCHEMA".to_string(),
+                    },
                 }],
             }),
             &limits(),
@@ -963,7 +971,8 @@ async fn a_suggestion_recovers_after_its_session_closes() {
         .await
         .assured("the suggestion task finishes")
         .assured("the recovered suggestion succeeds");
-    assert_eq!(suggestions[0].value, "SCHEMA");
+    assert_eq!(suggestions.status, SuggestionStatus::Ready);
+    assert_eq!(suggestions.suggestions[0].value, "SCHEMA");
 }
 
 #[cfg(feature = "autocomplete")]
@@ -975,7 +984,8 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
 
     for order in [[2, 0, 1], [1, 2, 0], [0, 1, 2]] {
         let suggestion_client = client.clone();
-        let suggestion = tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7).await });
+        let suggestion =
+            tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
         let listing_client = client.clone();
         let listing = tokio::spawn(async move { listing_client.list_domains().await });
         let command_client = client.clone();
@@ -993,9 +1003,16 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
                 ClientRequest::Suggest(suggest) => {
                     assert_eq!(suggest.input(), "CREATE ");
                     ReplyBody::Suggest(SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: None,
                         suggestions: vec![Suggestion {
                             value: "SCHEMA".to_string(),
                             kind: SuggestionKind::Text,
+                            edit: TextEdit {
+                                start: 7,
+                                end: 7,
+                                replacement: "SCHEMA".to_string(),
+                            },
                         }],
                     })
                 }
@@ -1015,8 +1032,9 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
             .await
             .assured("the suggestion task finishes")
             .assured("the suggestion request succeeds");
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].value, "SCHEMA");
+        assert_eq!(suggestions.status, SuggestionStatus::Ready);
+        assert_eq!(suggestions.suggestions.len(), 1);
+        assert_eq!(suggestions.suggestions[0].value, "SCHEMA");
         assert_eq!(
             within_deadline(listing)
                 .await
@@ -1032,6 +1050,68 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
                 .succeeded()
         );
     }
+}
+
+#[cfg(feature = "autocomplete")]
+#[tokio::test]
+async fn suggestion_finishes_while_a_command_reply_is_pending() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    let command_client = client.clone();
+    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let command_request = exchange.next_request().await;
+    let ClientRequest::Command(command_body) = &command_request.request else {
+        panic!("the first request is the pending command");
+    };
+    let execution_reference = command_body.execution_reference.clone();
+
+    let suggestion_client = client.clone();
+    let suggestion =
+        tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
+    let suggestion_request = exchange.next_request().await;
+    assert!(matches!(
+        suggestion_request.request,
+        ClientRequest::Suggest(_)
+    ));
+    exchange
+        .reply(
+            suggestion_request.request_id,
+            ReplyBody::Suggest(SuggestOutcome {
+                status: SuggestionStatus::Ready,
+                continuation: None,
+                suggestions: vec![Suggestion {
+                    value: "SCHEMA".to_string(),
+                    kind: SuggestionKind::Text,
+                    edit: TextEdit {
+                        start: 7,
+                        end: 7,
+                        replacement: "SCHEMA".to_string(),
+                    },
+                }],
+            }),
+            &limits(),
+        )
+        .await;
+    let response = within_deadline(suggestion)
+        .await
+        .assured("the suggestion completes before the command replies")
+        .assured("the suggestion succeeds");
+    assert_eq!(response.suggestions[0].value, "SCHEMA");
+    assert!(!command.is_finished());
+
+    exchange
+        .reply(
+            command_request.request_id,
+            command_outcome(&execution_reference, completed(), "cluster is healthy"),
+            &limits(),
+        )
+        .await;
+    within_deadline(command)
+        .await
+        .assured("the command completes after its reply")
+        .assured("the command succeeds");
 }
 
 #[tokio::test]

@@ -67,7 +67,8 @@ pub use limits::{LimitsError, SessionLimitSettings, SessionLimits};
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
     RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
-    SuggestOutcome, Suggestion, SuggestionKind, UnsubscribeDisposition, UnsubscribeOutcome,
+    SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnsubscribeDisposition,
+    UnsubscribeOutcome,
 };
 pub use request::{
     AttachTransactionRequest, CancelRequest, ClientMessage, ClientRequest, CommandRequest,

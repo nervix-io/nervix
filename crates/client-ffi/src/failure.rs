@@ -94,6 +94,7 @@ impl Failure {
             | ClientError::TooManySeedServers { .. }
             | ClientError::NoActiveDomain
             | ClientError::InvalidCursor { .. }
+            | ClientError::InvalidCompletionPageSize { .. }
             | ClientError::InvalidResourceName { .. }
             | ClientError::EncodeRequest { .. }
             | ClientError::BuildUploadArchive => FailureKind::InvalidArgument,

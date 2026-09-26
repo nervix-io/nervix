@@ -15,7 +15,7 @@ use nervix_models::{
 use crate::{
     lexer::{Identifier, Token},
     parser_support::{
-        ParseError, domain_name, field_ref, kw, kw_phrase2, string_lit, tok, wasm_processor_ref,
+        ParseError, domain_ref, field_ref, kw, kw_phrase2, string_lit, tok, wasm_processor_ref,
     },
 };
 
@@ -98,7 +98,7 @@ pub fn reset_wasm_state_parser<'src>()
         .then_ignore(kw(Identifier::State))
         .then_ignore(kw(Identifier::In))
         .then_ignore(kw(Identifier::Domain))
-        .then(domain_name())
+        .then(domain_ref())
         .then(scope)
         .map(|((processor, domain), scope)| ResetWasmState {
             domain,

@@ -95,6 +95,15 @@ resource names and versions, session subscription names, and domain names. Insid
 `UPLOAD RESOURCE ... VERSION '<path>'` the client completes local filesystem paths instead,
 expanding `~` to your home directory.
 
+The replacement covers the current word even when the cursor is inside it, and keeps the text
+after that word. The CLI reads successive bounded pages when the server has more matches. A
+missing or stale domain or transaction context does not produce candidates from a different
+configuration.
+
+Scripts can request the same candidates with `--suggest 'DROP SCHEMA ord' --cursor 15`.
+The cursor is a UTF-8 byte offset; omitting it selects the end of the input. The CLI prints JSON
+containing a status and each candidate's display value, kind, and exact text edit.
+
 While a transaction is open, completion describes the configuration that transaction is building:
 models and resources its queued statements create are suggested before `COMMIT`, and a model whose
 `DROP` is queued stops being suggested until a later statement recreates it. Only the session bound

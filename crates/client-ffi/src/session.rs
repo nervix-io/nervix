@@ -11,7 +11,9 @@
 
 use std::future::Future;
 
-use nervix_client_core::{Client, ConnectOptions, DomainName, ExecutionHandle};
+use nervix_client_core::{
+    AutocompleteOutcome, Client, ConnectOptions, DomainName, ExecutionHandle,
+};
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -153,6 +155,29 @@ impl Session {
             }
         };
         self.block_on(cancel, waiting)
+    }
+
+    /// Reads one bounded completion page from the current session context.
+    pub fn suggest_page(
+        &self,
+        input: &str,
+        cursor: usize,
+        page_size: u16,
+        continuation: Option<&str>,
+        cancel: Option<&Cancel>,
+    ) -> Result<AutocompleteOutcome, Failure> {
+        let suggesting = async {
+            self.client
+                .suggest(
+                    input.to_string(),
+                    cursor,
+                    page_size,
+                    continuation.map(str::to_string),
+                )
+                .await
+                .map_err(Failure::from)
+        };
+        self.block_on(cancel, suggesting)
     }
 
     /// Ends the session without blocking the calling thread, which may be a host's finalizer.

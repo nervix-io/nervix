@@ -22,8 +22,8 @@ use crate::{
     CellView, CellsView, ClientFrame, ClientMessage, ClientRequest, CommandDisposition,
     LeaderRedirect, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
     ServerEvent, ServerFrame, ServerMessage, SubscribeDisposition, SubscribeOutcome,
-    SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType,
-    UnknownOutcomeCause, VerifiedFrame,
+    SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome,
+    Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnknownOutcomeCause, VerifiedFrame,
 };
 
 const UPDATE_ENV: &str = "NERVIX_UPDATE_CLIENT_WIRE_CORPUS";
@@ -80,6 +80,7 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
         ("client_command_bare.nxcm", client(2)),
         ("client_commit.nxcm", client(1)),
         ("client_subscribe.nxcm", client(11)),
+        ("client_suggest.nxcm", client(3)),
         (
             "server_command_failed.nxsm",
             command(1, CommandDisposition::Failed),
@@ -128,6 +129,25 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                     disposition: SubscribeDisposition::Opened(Box::new(opened)),
                     message: "created subscription 'live'".to_string(),
                     diagnostics: Vec::new(),
+                }),
+            ),
+        ),
+        (
+            "server_suggest.nxsm",
+            reply(
+                8,
+                ReplyBody::Suggest(SuggestOutcome {
+                    status: SuggestionStatus::Ready,
+                    suggestions: vec![Suggestion {
+                        value: "CLUSTER".to_string(),
+                        kind: SuggestionKind::Text,
+                        edit: TextEdit {
+                            start: 5,
+                            end: 10,
+                            replacement: "CLUSTER".to_string(),
+                        },
+                    }],
+                    continuation: Some("next-page".to_string()),
                 }),
             ),
         ),
@@ -288,6 +308,23 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                         text(&rejected.message)
                     ));
                 }
+                ReplyBody::Suggest(outcome) => {
+                    lines.push(format!(
+                        "REPLY {id} SUGGEST status={:?} continuation={}",
+                        outcome.status,
+                        outcome.continuation.as_deref().unwrap_or("none")
+                    ));
+                    for suggestion in &outcome.suggestions {
+                        lines.push(format!(
+                            "SUGGESTION kind={:?} value={} edit={}..{} replacement={}",
+                            suggestion.kind,
+                            text(&suggestion.value),
+                            suggestion.edit.start,
+                            suggestion.edit.end,
+                            text(&suggestion.edit.replacement)
+                        ));
+                    }
+                }
                 ReplyBody::Subscribe(SubscribeOutcome {
                     disposition: SubscribeDisposition::Opened(opened),
                     ..
@@ -379,6 +416,17 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
             subscribe.domain.as_str(),
             text(&subscribe.statement),
             subscribe.subscription_type
+        )),
+        ClientRequest::Suggest(suggest) => lines.push(format!(
+            "REQUEST {id} SUGGEST input={} cursor={} domain={} page_size={} continuation={}",
+            text(suggest.input()),
+            suggest.cursor(),
+            suggest
+                .domain()
+                .map(|domain| domain.as_str())
+                .unwrap_or("none"),
+            suggest.page_size(),
+            suggest.continuation().unwrap_or("none")
         )),
         ClientRequest::Cancel(cancel) => {
             lines.push(format!(

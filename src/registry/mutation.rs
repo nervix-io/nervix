@@ -10,10 +10,9 @@
 use ahash::{HashMap, HashSet};
 use nervix_models::{
     AlterDeduplicator, AlterEmitter, AlterGenerator, AlterIngestor, AlterJunction, AlterPlacement,
-    AlterPlacementOperation, AlterReingestor, AlterRelay, AlterReorderer, AlterSchema,
-    AlterWireSchema, AvroType, CborType, DomainName, DropModel, JsonType, Model, ModelChangeAspect,
-    ModelIndex, ModelKind, NodeRef, QuiesceLevel, RequestedResourceVersion, ResourceName,
-    StatePurge, Statement,
+    AlterReingestor, AlterRelay, AlterReorderer, AlterSchema, AlterWireSchema, AvroType, CborType,
+    DomainName, DropModel, JsonType, Model, ModelChangeAspect, ModelIndex, ModelKind, NodeRef,
+    QuiesceLevel, RequestedResourceVersion, ResourceName, StatePurge, Statement,
 };
 use nervix_recovery::Discarded;
 use thiserror::Error;
@@ -142,28 +141,6 @@ impl<Version: Clone> RegistryMutation<Version> {
                 NodeRef::new(ModelKind::Placement, alter.placement.clone())
             }
             Self::Drop(drop) => NodeRef::new(drop.kind, drop.name.clone()),
-        }
-    }
-
-    pub(in crate::registry) fn resulting_key(&self) -> Option<NodeRef> {
-        match self {
-            Self::Drop(_) => None,
-            Self::AlterPlacement(alter) => {
-                let identifier = alter
-                    .operations
-                    .iter()
-                    .filter_map(|operation| match operation {
-                        AlterPlacementOperation::RenameTo { name } => Some(name),
-                        AlterPlacementOperation::SetPolicy { .. }
-                        | AlterPlacementOperation::SetRank { .. }
-                        | AlterPlacementOperation::DropRank
-                        | AlterPlacementOperation::SetMembers { .. } => None,
-                    })
-                    .next_back()
-                    .unwrap_or(&alter.placement);
-                Some(NodeRef::new(ModelKind::Placement, identifier.clone()))
-            }
-            _ => Some(self.target_key()),
         }
     }
 

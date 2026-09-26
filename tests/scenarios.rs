@@ -252,6 +252,9 @@ struct ScenarioWorld {
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
     session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// Candidates collected by a public session completion paging scenario.
+    last_completion_values: Vec<String>,
+    last_completion_page_count: usize,
     /// The reply to the last upload stream a scenario shaped itself.
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
@@ -2451,8 +2454,11 @@ fn nspl_format_binary() -> PathBuf {
     candidate
 }
 
-/// Resolves the public CLI built by `tests-deps` beside the server binary.
+/// Resolves the public CLI, including the instrumented binary used by process coverage.
 fn scenario_cli_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("NERVIX_TEST_CLI_PATH") {
+        return PathBuf::from(path);
+    }
     let candidate = Path::new(env!("CARGO_BIN_EXE_nervix-server"))
         .parent()
         .assured("the server binary has a parent directory")
@@ -2524,6 +2530,108 @@ fn then_cli_output_contains(world: &mut ScenarioWorld, expected: String) {
         output.status.success() && stdout.contains(&expected),
         "CLI status: {}; stdout: {stdout}; stderr: {stderr}",
         output.status
+    );
+}
+
+#[when(expr = "the CLI suggests for {string} on node {string}")]
+async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: String) {
+    let mut input = expand_placeholders(world, &input).replace("\\n", "\n");
+    let cursor = input
+        .find('|')
+        .assured("the scenario input marks its completion cursor");
+    input.remove(cursor);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(scenario_cli_binary())
+            .args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &world.domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+                "--suggest",
+                &input,
+                "--cursor",
+                &cursor.to_string(),
+            ])
+            .output(),
+    )
+    .await
+    .assured("the CLI suggestion request completes within one minute")
+    .assured("the CLI suggestion process starts");
+    world.last_cli_output = Some(output);
+}
+
+#[then(expr = "the CLI suggestion {string} applied to {string} yields {string}")]
+fn then_cli_suggestion_applies(
+    world: &mut ScenarioWorld,
+    value: String,
+    input: String,
+    expected: String,
+) {
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .assured("the successful CLI suggestion mode prints JSON");
+    assert_eq!(response["status"], "Ready");
+    let suggestion = response["suggestions"]
+        .as_array()
+        .assured("the CLI suggestion response has an array")
+        .iter()
+        .find(|candidate| candidate["value"] == value)
+        .assured("the expected candidate appears in the CLI response");
+    let start = usize::try_from(
+        suggestion["edit"]["start"]
+            .as_u64()
+            .assured("the edit start is an unsigned offset"),
+    )
+    .assured("the edit start fits the test process address space");
+    let end = usize::try_from(
+        suggestion["edit"]["end"]
+            .as_u64()
+            .assured("the edit end is an unsigned offset"),
+    )
+    .assured("the edit end fits the test process address space");
+    let replacement = suggestion["edit"]["replacement"]
+        .as_str()
+        .assured("the edit replacement is a string");
+    let source = expand_placeholders(world, &input)
+        .replace("\\n", "\n")
+        .replace('|', "");
+    let mut actual = source.clone();
+    actual.replace_range(start..end, replacement);
+    assert_eq!(
+        actual,
+        expand_placeholders(world, &expected).replace("\\n", "\n")
+    );
+}
+
+#[then(expr = "the CLI output does not contain {string}")]
+fn then_cli_output_does_not_contain(world: &mut ScenarioWorld, unexpected: String) {
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(&unexpected),
+        "CLI output contained {unexpected:?}: {stdout}"
     );
 }
 

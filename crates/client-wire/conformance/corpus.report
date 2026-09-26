@@ -8,6 +8,8 @@ FRAME client_commit.nxcm
 REQUEST 2 COMMAND query=str:434f4d4d49543b domain=none reference=rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr expected_position=18446744073709551615 expected_preview=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44/18446744073709551615/a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5
 FRAME client_subscribe.nxcm
 REQUEST 12 SUBSCRIBE domain=tenant statement=str:43524541544520535542534352495054494f4e206c6976652046524f4d206f72646572733b type=Row
+FRAME client_suggest.nxcm
+REQUEST 4 SUGGEST input=str:53484f572052454c415920c2abc3bc6ec3af636f6465c2bb20 cursor=13 domain=tenant page_size=2 continuation=page-two
 FRAME server_command_failed.nxsm
 REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927
@@ -63,3 +65,6 @@ BRANCH tenants
 KEY tenant STRING required public
 KEY region U16 nullable public
 KEY token STRING required sensitive
+FRAME server_suggest.nxsm
+REPLY 8 SUGGEST status=Ready continuation=next-page
+SUGGESTION kind=Text value=str:434c5553544552 edit=5..10 replacement=str:434c5553544552
