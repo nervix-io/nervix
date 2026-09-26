@@ -591,26 +591,6 @@ pub(super) fn vm_typed_batch_selected_rows_to_runtime_batch(
     RuntimeRecordBatch::from_record_batch(batch.schema().clone(), record_batch)
 }
 
-pub(super) fn runtime_value_type_name(value: &RuntimeValue) -> &'static str {
-    match value {
-        RuntimeValue::U8(_) => "U8",
-        RuntimeValue::I8(_) => "I8",
-        RuntimeValue::U16(_) => "U16",
-        RuntimeValue::I16(_) => "I16",
-        RuntimeValue::U32(_) => "U32",
-        RuntimeValue::I32(_) => "I32",
-        RuntimeValue::U64(_) => "U64",
-        RuntimeValue::I64(_) => "I64",
-        RuntimeValue::Bool(_) => "BOOL",
-        RuntimeValue::String(_) => "STRING",
-        RuntimeValue::Datetime(_) => "DATETIME",
-        RuntimeValue::F32(_) => "F32",
-        RuntimeValue::F64(_) => "F64",
-        RuntimeValue::Array(_) => "ARRAY",
-        RuntimeValue::Vec(_) => "VEC",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

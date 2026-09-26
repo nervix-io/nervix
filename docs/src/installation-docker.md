@@ -153,6 +153,12 @@ SHOW CLUSTER STATUS;
 The cluster status should show one local node, two live peer nodes, and all three nodes in the Raft
 membership. The CLI follows leader redirects through the three published gRPC ports.
 
+Each node advertises its container name, such as `nervix-1:47395`, and finds its peers by those
+names through Docker's embedded DNS, which Docker names in the container's `/etc/resolv.conf`. A
+node resolves peer names with its own asynchronous resolver from that file and `/etc/hosts`, read
+once at startup; [Peer Name Resolution](interconnect.md#peer-name-resolution) describes the options
+that point it at other files or name servers, and what it does not support.
+
 `docker stop` sends each node `SIGTERM`, which starts graceful shutdown, and kills a container only
 if its node is still running when the stop timeout ends. A node ends its own shutdown within its
 shutdown timeout, 50 seconds by default, which covers the 30-second default drain timeout and the

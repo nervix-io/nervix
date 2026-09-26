@@ -644,6 +644,16 @@ build and the existing tests, and nothing in it changes behavior.
   diagnostics, cluster teardown and forced cleanup, scenario-driven stops, the port pool, server
   processes and test dependencies, the suite watchdog and its CI reserve, exit statuses, and how
   failure reaches CI output.
+- [Deterministic Interconnect Simulation](docs/src/interconnect-simulation.md) is the authoritative
+  architecture reference for the Turmoil simulation of the interconnect. Any change to the `turmoil`
+  build mode or its dependency and scheduler-conflict checks, the socket, certificate-clock,
+  entropy, or CPU-execution seams the simulation plugs into, the runner, the scenario driver,
+  failure records and replay, a simulation scenario or its committed seeds and bounds, the Turmoil
+  recipes, or the CI job that runs them must keep that chapter current in the same change. Its scope
+  includes code ownership and the feature matrix, the simulated host and its time and entropy, host
+  supervision, the fault model, semantic traces and replay rules, seed selection, commands and
+  budgets, the scenario matrix, simulated restart versus real-process evidence, findings and
+  retained regressions, qualification evidence, and the prerequisites for whole-cluster simulation.
 - Unit tests support but do not replace cucumber coverage for behavior observable through an NSPL
   command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
   executable statement with application or runtime handling is not parser-only. Do not substitute

@@ -657,6 +657,14 @@ normal external-sensitivity leakage rules. Nervix relies on content-based dedupl
 operator must enable while provisioning the FIFO queue. Sends to a FIFO queue without it fail as
 publish errors; Nervix never creates or reconfigures the queue.
 
+`FIFO GROUP` is the emitter's ordering group. Nervix evaluates it against each record's input
+row after any `FROM ... WHERE` filter, and every record the emitter sends carries the group its own
+input row produced, whatever the emitter's `WHERE` and construction keep or build. A record whose
+group expression fails for its row, or that reaches `FROM BRANCH` without a branch key, is not sent.
+It follows `ON MESSAGE ERROR` as an `external` error of the `publish` operation whose message begins
+`ordering group`, and the emitter's other records are still sent under their own groups. A record
+the emitter's `WHERE` drops is never sent, so a failure of its group is never reported.
+
 ### Sentry
 
 Sentry emission uses a `TYPE SENTRY` client whose required `dsn` contains the project endpoint and

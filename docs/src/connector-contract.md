@@ -109,6 +109,15 @@ once per batch and excludes rows with mapping errors before calling a row sink. 
 by position, so no runtime ACK map enters the connector. Each publish is one call per batch,
 never a virtual call per row.
 
+An ordering group exists only where the sink plan declares one; today that is the SQS
+`FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
+carries the result beside the batch: the batch's branch key for `FROM BRANCH`, or a string column
+for an expression, whose null rows keep the reason they have no group. It selects that column
+through the rows the emitter's route keeps, so each record keeps the group of its own input row. A
+record without a group is rejected by the host under the emitter's message error policy and never
+reaches the connector, which receives each remaining record's group already evaluated. An emitter
+whose plan declares no group carries nothing beside its batches.
+
 Each connector classifies definite delivery and rejection per record, and may report one
 infrastructure failure for the attempt. The host applies those outcomes to the corresponding ACK
 roots and error policy. The emitter task owns its buffer, maximum batch size, flush cadence,

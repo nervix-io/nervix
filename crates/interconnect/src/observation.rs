@@ -37,6 +37,8 @@ pub enum ConnectionFailureReason {
     Capacity,
     /// An established connection ended and the pool slot has to dial again.
     Closed,
+    /// The peer's advertised host did not resolve to an address in time.
+    Resolution,
 }
 
 /// Why one HTTP/2 stream ended without delivering its result.
@@ -118,6 +120,7 @@ impl ConnectionFailureReason {
             Self::Handshake => 1,
             Self::Capacity => 2,
             Self::Closed => 3,
+            Self::Resolution => 4,
         }
     }
 
@@ -125,6 +128,7 @@ impl ConnectionFailureReason {
     /// many distinct messages the underlying error carries.
     pub(crate) fn of(error: &TransportError) -> Self {
         match error {
+            TransportError::Resolution { .. } => Self::Resolution,
             TransportError::ConnectionSetupTimeout { .. }
             | TransportError::Io(_)
             | TransportError::Tls(_)
@@ -182,6 +186,7 @@ impl StreamResetReason {
             | TransportError::Tls(_)
             | TransportError::Http2(_)
             | TransportError::Closed(_)
+            | TransportError::Resolution { .. }
             | TransportError::RemoteRejected { .. }
             | TransportError::RelayCancelled
             | TransportError::RelayIndeterminate

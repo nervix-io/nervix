@@ -13,8 +13,10 @@ arch-into = { workspace = true }
 blake3 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 error-stack = { workspace = true }
+hickory-proto = { workspace = true }
 meticulous = { workspace = true }
 nervix-recovery = { workspace = true }
+parking_lot = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
@@ -22,6 +24,7 @@ testcontainers = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = [
   "io-util",
+  "macros",
   "net",
   "rt",
   "sync",

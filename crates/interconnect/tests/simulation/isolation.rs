@@ -164,12 +164,15 @@ async fn bind_host(
     options.entropy = TransportEntropy::from_source(move || entropy.next_u64());
     Transport::bind(
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, PORT)),
-        name,
-        CLUSTER,
-        node(name),
+        TransportIdentity {
+            cluster_id: CLUSTER.to_string(),
+            node_id: node(name),
+            advertised_host: name.to_string(),
+        },
         credentials.bundle(),
         options,
         executor,
+        PeerResolver::simulated(),
     )
     .await
     .assured("fixture transport binds on its simulated host")

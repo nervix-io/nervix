@@ -281,7 +281,7 @@ impl TransportState {
             RelayGrantDisposition::BodyReceived => return Ok(()),
             RelayGrantDisposition::Admitted => {
                 self.deliver_terminal_incoming(
-                    management.connection.key.target.addr,
+                    management.connection.peer_addr,
                     node_id.clone(),
                     Envelope::Ack(nervix_models::RemoteAckResolution {
                         ack_id: admission.ack_id,

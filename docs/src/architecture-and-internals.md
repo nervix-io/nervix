@@ -14,6 +14,8 @@ Use it for:
 - [WASM guest state: checkpoints, generations, resets, rejected-state recovery, and replay](./wasm-state.md)
 - shutdown phases, drain guarantees, and crash recovery
 - [integration-test lifecycle: harness deadlines, node startup, teardown, and the suite watchdog](./integration-test-lifecycle.md)
+- [deterministic interconnect simulation: the Turmoil build mode, fault model, seeded replay,
+  failure records, scenario matrix, and CI budget](./interconnect-simulation.md)
 - [the expression VM: compilation, columnar execution, kernels and SIMD, function families, window
   aggregates and sketches, and adding a function](./vm-functions.md)
 - runtime semantics that are easier to understand from the implementation side
