@@ -121,6 +121,7 @@ use crate::common::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
+    server_process_cluster::ServerProcessCluster,
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
     suite_watchdog::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
@@ -360,6 +361,7 @@ struct ScenarioWorld {
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
+    server_process_cluster: Option<ServerProcessCluster>,
     server_process_http_load: Option<ServerProcessHttpLoad>,
     held_resource_upload: Option<HeldResourceUpload>,
     /// When the last signal was sent to the server process, taken before the signal is delivered
@@ -1717,6 +1719,242 @@ fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
 #[given("a nervix-server process is started")]
 async fn given_nervix_server_process_is_started(world: &mut ScenarioWorld) {
     start_ready_server_process(world, &[]).await;
+}
+
+#[given(
+    expr = "a 3 node nervix-server process cluster is started with transaction idle timeout \
+            {string} and tombstone retention {string}"
+)]
+async fn given_server_process_cluster_is_started(
+    world: &mut ScenarioWorld,
+    idle_timeout: String,
+    tombstone_retention: String,
+) {
+    assert!(
+        world.server_process_cluster.is_none(),
+        "a scenario starts at most one real-process cluster"
+    );
+    initialize_scenario_identity(world);
+    let options = [
+        ServerProcessOption::TransactionIdleTimeout(
+            humantime::parse_duration(&idle_timeout)
+                .assured("the scenario's transaction idle timeout is a valid duration literal"),
+        ),
+        ServerProcessOption::TransactionTombstoneRetention(
+            humantime::parse_duration(&tombstone_retention)
+                .assured("the scenario's tombstone retention is a valid duration literal"),
+        ),
+    ];
+    world.server_process_cluster = Some(
+        ServerProcessCluster::start(&options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
+    );
+}
+
+#[given("the server process cluster is configured with these NSPL commands")]
+async fn given_server_process_cluster_is_configured(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let commands = expand_placeholders(world, docstring(step));
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    for statement in nspl_statements(&commands) {
+        tokio::task::consume_budget().await;
+        let output = cluster
+            .run_commands(&world.domain, &statement)
+            .await
+            .unwrap_or_else(|error| panic!("real-process cluster rejected {statement:?}: {error}"));
+        world.last_command_output = Some(output);
+    }
+}
+
+#[when(
+    expr = "this NSPL command request with execution reference {string} is executed on the server \
+            process cluster"
+)]
+async fn when_exact_command_is_executed_on_server_process_cluster(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    let command = expand_placeholders(world, docstring(step));
+    let execution_reference = command_execution_reference(world, &execution_reference);
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let mut session = cluster
+        .open_session(&world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open a real-process cluster session: {error}"));
+    let result = session
+        .run_command_result_with_reference(&command, &execution_reference)
+        .await
+        .unwrap_or_else(|error| panic!("the exact command received no result: {error}"));
+    assert!(
+        result.succeeded(),
+        "the exact command failed: {}",
+        result.message
+    );
+    world.last_command_output = Some(result.message);
+}
+
+#[when(expr = "an open transaction is held on the server process cluster as placeholder {string}")]
+async fn when_open_transaction_is_held_on_server_process_cluster(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let mut session = cluster
+        .open_session(&world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the real-process cluster session: {error}"));
+    let result = session
+        .run_command_result("BEGIN;")
+        .await
+        .unwrap_or_else(|error| panic!("failed to begin the retained transaction: {error}"));
+    assert!(
+        result.succeeded(),
+        "the retained transaction must open: {}",
+        result.message
+    );
+    let transaction = result
+        .transaction
+        .verified("a successful BEGIN returns its transaction identity");
+    world
+        .placeholders
+        .insert(placeholder, transaction.transaction_id().to_string());
+    world.active_session = Some(session);
+}
+
+#[when("the held server process cluster transaction queues these NSPL commands")]
+async fn when_held_server_process_cluster_transaction_queues(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let commands = expand_placeholders(world, docstring(step));
+    let session = world
+        .active_session
+        .as_mut()
+        .verified("the preceding step held a transaction session");
+    for statement in nspl_statements(&commands) {
+        tokio::task::consume_budget().await;
+        let result = session
+            .run_command_result(&statement)
+            .await
+            .unwrap_or_else(|error| panic!("failed to queue {statement:?}: {error}"));
+        assert!(
+            result.succeeded(),
+            "failed to queue {statement:?}: {}",
+            result.message
+        );
+    }
+}
+
+#[when("all server processes receive SIGKILL")]
+async fn when_all_server_processes_receive_sigkill(world: &mut ScenarioWorld) {
+    world
+        .server_process_cluster
+        .as_mut()
+        .verified("the preceding step started a real-process cluster")
+        .kill_all()
+        .await
+        .unwrap_or_else(|error| panic!("the process cluster did not all exit by SIGKILL: {error}"));
+    world.active_session = None;
+}
+
+#[when("all server processes restart from their existing databases")]
+async fn when_all_server_processes_restart(world: &mut ScenarioWorld) {
+    world
+        .server_process_cluster
+        .as_mut()
+        .verified("the preceding step started a real-process cluster")
+        .restart_all()
+        .await
+        .unwrap_or_else(|error| panic!("the process cluster did not recover: {error}"));
+}
+
+#[then(expr = "server process cluster transaction {string} eventually has state {string}")]
+async fn then_server_process_cluster_transaction_eventually_has_state(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    expected_state: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let expected_id = format!("id={transaction_id}");
+    let expected_state = format!("state={}", expected_state.to_ascii_uppercase());
+    let deadline = PhaseDeadline::after(Duration::from_secs(60));
+    let mut last_output = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            !deadline.has_passed(),
+            "real-process cluster transaction '{transaction_id}' did not reach {expected_state}; \
+             last output: {last_output}"
+        );
+        let cluster = world
+            .server_process_cluster
+            .as_ref()
+            .verified("the preceding step started a real-process cluster");
+        match cluster
+            .run_commands(&world.domain, "SHOW TRANSACTIONS;")
+            .await
+        {
+            Ok(output)
+                if output
+                    .lines()
+                    .any(|line| line.contains(&expected_id) && line.contains(&expected_state)) =>
+            {
+                world.last_command_output = Some(output);
+                return;
+            }
+            Ok(output) => last_output = output,
+            Err(error) => last_output = error.to_string(),
+        }
+        deadline.pause(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "the server process cluster has no schema {string}")]
+async fn then_server_process_cluster_has_no_schema(world: &mut ScenarioWorld, schema: String) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let command = format!("SHOW CREATE SCHEMA {schema};");
+    let failure = match cluster.run_commands(&world.domain, &command).await {
+        Ok(output) => panic!("the expired transaction installed a queued schema: {output}"),
+        Err(failure) => failure,
+    };
+    assert!(
+        failure.to_string().contains("does not exist"),
+        "the schema query failed unexpectedly: {failure}"
+    );
+}
+
+#[then(expr = "the server process cluster has schema {string}")]
+async fn then_server_process_cluster_has_schema(world: &mut ScenarioWorld, schema: String) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let command = format!("SHOW CREATE SCHEMA {schema};");
+    let output = cluster
+        .run_commands(&world.domain, &command)
+        .await
+        .unwrap_or_else(|error| panic!("the retained schema is unavailable: {error}"));
+    assert!(
+        output.contains(&format!("CREATE SCHEMA {schema}")),
+        "the recovered schema has the wrong identity: {output}"
+    );
+    world.last_command_output = Some(output);
 }
 
 #[given("a release nervix-server process is started for the client-wire baseline")]
@@ -4374,8 +4612,9 @@ async fn then_follower_held_append_batches_inside_its_commands_budget(
         "follower '{node_id}' must charge the append batches it holds while catching up, but its \
          commands class never reported a reservation against its {capacity} byte budget"
     );
+    // A full reservation is valid; admission must prevent the class from exceeding capacity.
     assert!(
-        peak < capacity,
+        peak <= capacity,
         "follower '{node_id}' must hold its queued append batches inside its commands budget: the \
          class peaked at {peak} bytes against a {capacity} byte budget while it caught up"
     );
@@ -23410,6 +23649,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;
+                world.server_process_cluster = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
                 stop_http_receivers(world).await;
