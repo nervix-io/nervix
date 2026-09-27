@@ -12,6 +12,11 @@ In particular, a transport response is not automatically a statement that runtim
 Relay delivery exposes separate receipt, admission, and downstream-completion boundaries so callers
 can distinguish those outcomes.
 
+For a transaction, a timed-out remote gate response may mean that engagement happened. The
+control plane retains that uncertainty and any later recovery scope in the impact report;
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines those
+outcomes. This chapter owns the transport deadline and failure signal.
+
 [Errors And Diagnostics](./errors-and-diagnostics.md) explains how local typed reports and remote
 failure classes reach their callers and public edges. This chapter owns their wire representation
 and transport failure semantics.

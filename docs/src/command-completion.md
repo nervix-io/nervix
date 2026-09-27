@@ -160,6 +160,10 @@ recovery and application owners perform repair before declaring readiness.
 
 ## Transactions
 
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines the frozen
+step plan, required and actual pause scopes, applying progress, and historical report. This chapter
+defines when each authoritative effect and its runtime application finish.
+
 `BEGIN` creates an `OPEN` transaction for one existing selected domain. A queueable statement is
 validated by planning the ordered candidate formed by the existing prefix, then durably appended
 with its request reference, expected position, admitted result, stable operation metadata, and

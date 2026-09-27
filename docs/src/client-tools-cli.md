@@ -171,6 +171,8 @@ large text or JSON report to a file or downstream process when terminal output i
 After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.
+See [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) for the report's
+planned and actual scopes, historical topology, and diagnostic meanings.
 
 `BEGIN` requires an existing active domain and binds the transaction to it; attaching a transaction
 switches the active domain to the transaction's domain. An upload targets the active domain,

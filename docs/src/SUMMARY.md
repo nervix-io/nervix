@@ -61,6 +61,7 @@
   - [Domain Clock](./domain-clock.md)
   - [Cluster Interconnect](./interconnect.md)
   - [Control Plane](./control-plane.md)
+  - [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)
   - [Consensus Storage And Replication](./consensus-storage-and-replication.md)
   - [Command Completion](./command-completion.md)
   - [Resource Versions And Bindings](./resource-versions.md)
