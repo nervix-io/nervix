@@ -56,6 +56,13 @@ resolver's own lookup error. The sink changes it into a configuration failure fo
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
+A RabbitMQ publish that ends with the broker closing the sink's channel is classified by the
+broker's own reason, which the sink reads from its connection. A refusal of a message body larger
+than `max_message_size` is a record rejection of that message: code `external`, operation
+`publish`, and a message naming the body size and the limit, which reaches every member of a batch
+message. Any other close, a lost connection, and a close whose reason never arrives fail the
+attempt as an infrastructure failure, which the emitter retries on its backoff.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in

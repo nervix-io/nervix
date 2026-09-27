@@ -224,8 +224,13 @@ message error policy instead of failing the transport: the MQTT sink measures th
 against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
 express, the SQS sink counts attributes and the FIFO group against 256 KiB, and the Kafka producer
 and the NATS client check `message.max.bytes` and `max_payload` with the key and headers they
-write. A limit the connector cannot learn stays with the destination, and whatever the destination
-reports when a message exceeds it is classified like any other publish failure.
+write. A limit the connector cannot learn stays with the destination, and the destination's own
+answer decides the outcome. RabbitMQ never tells a client its `max_message_size`, but its refusal
+of a larger body closes the channel with the limit named, so the RabbitMQ sink rejects the first
+message of the write the broker had not answered whose body exceeds that limit, with the same kind
+of reason, and writes the messages the broker discarded behind it again on a new channel. Anything
+else a destination reports when a message exceeds its limit is classified like any other publish
+failure.
 
 The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
 key, headers, ordering group and member positions, in the emitter buffer beside the batches the
@@ -282,6 +287,16 @@ sequenceDiagram
   successful catalog commit does. The sink retains ACKs and its client while a failed commit is
   retried. [Iceberg emission](./emitters.md#iceberg) defines the external commit and duplicate
   limits.
+- **RabbitMQ sink.** The broker answers no `NO_ACK` message itself, so the sink ends a `NO_ACK`
+  write with one round trip on its channel, which the broker answers only after it has taken every
+  message written before it, and the answer delivers the write; a write costs that one round trip,
+  not one per message. A broker that closes the channel names its reason, and Lapin hands it only
+  to what was waiting on the channel at that moment, so the sink reads the reason from its
+  connection's events, once for every channel it loses. The size refusal leaves the connection
+  open, and the sink opens its next channel on it; a message the broker had not confirmed ahead of
+  the refused one may be in its queue, so the attempt then fails for the host's retry. Any other
+  loss is an infrastructure failure, and the host reopens the sink. [RabbitMQ
+  emission](./emitters.md#rabbitmq) defines the public behavior.
 - **Pooled sinks.** The connector owns the driver's pool and borrowed connection. The host owns
   the lease on the node's named client and the runtime wait while no connection is available.
   [Database client pools](./database-client-pools.md) defines the bounds.
