@@ -335,7 +335,6 @@ pub(super) async fn flush_branch_wasm_processor(
     state_reset: &mut WasmGuestStateResetFence,
 ) {
     let WasmFlushContext {
-        graph,
         branch,
         node_kind,
         processor,
@@ -546,13 +545,11 @@ pub(super) async fn flush_branch_wasm_processor(
             let output_branch_key = branch.key.clone();
             let dispatch = dispatch_wasm_output_envelopes(
                 WasmOutputContext {
-                    graph,
                     branch,
                     node_kind,
                     processor,
                     error_policies,
                     output_routes,
-                    input_relays,
                     input_schema: &input_schema,
                     output_schemas: &output_schemas,
                     key: &output_branch_key,

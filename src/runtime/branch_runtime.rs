@@ -98,16 +98,6 @@ impl Drop for PendingMaterializedBatch {
     }
 }
 
-pub(super) fn output_error_policies(
-    policy: &MessageErrorPolicy,
-    general: GeneralErrorPolicy,
-) -> ErrorPolicies {
-    ErrorPolicies {
-        message: policy.clone(),
-        general,
-    }
-}
-
 pub(super) fn internal_processor_error_policies(general: GeneralErrorPolicy) -> ErrorPolicies {
     ErrorPolicies {
         message: MessageErrorPolicy::Log,
@@ -154,7 +144,6 @@ pub(super) struct BranchExecutionDispatchContext<'a> {
     pub(super) runtime_handle: &'a Runtime,
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) template: &'a BranchInstanceTemplate,
     pub(super) domain_clock: &'a DomainClock,
 }
@@ -438,11 +427,7 @@ impl BranchRuntime {
         result
     }
 
-    pub(super) async fn retry_processor_pending_materialized(
-        &mut self,
-        graph: &SharedActiveGraph,
-        processor_id: &ModelName,
-    ) {
+    pub(super) async fn retry_processor_pending_materialized(&mut self, processor_id: &ModelName) {
         if let Err(error) = self.refresh_domain_routing() {
             warn!(error = %error, "failed to refresh routing for pending processor work");
             return;
@@ -456,16 +441,12 @@ impl BranchRuntime {
                 break;
             };
             let (incoming_relay, batch) = pending.into_parts();
-            processor.execute(graph, self, &incoming_relay, batch).await;
+            processor.execute(self, &incoming_relay, batch).await;
         }
         self.processors.insert(processor_id.clone(), processor);
     }
 
-    pub(super) async fn retry_materialized_waiters(
-        &mut self,
-        graph: &SharedActiveGraph,
-        updated_relay: &RelayName,
-    ) {
+    pub(super) async fn retry_materialized_waiters(&mut self, updated_relay: &RelayName) {
         if let Err(error) = self.refresh_domain_routing() {
             warn!(error = %error, "failed to refresh routing for materialized-state waiters");
             return;
@@ -492,13 +473,13 @@ impl BranchRuntime {
                     break;
                 };
                 let (incoming_relay, batch) = pending.into_parts();
-                processor.execute(graph, self, &incoming_relay, batch).await;
+                processor.execute(self, &incoming_relay, batch).await;
             }
             self.processors.insert(processor_id, processor);
         }
     }
 
-    pub(super) async fn dispatch(&mut self, graph: &SharedActiveGraph, batch: RelayRecordBatch) {
+    pub(super) async fn dispatch(&mut self, batch: RelayRecordBatch) {
         if let Err(error) = self.refresh_domain_routing() {
             for ack in &batch.acks {
                 ack.no_ack(error.to_string());
@@ -523,11 +504,7 @@ impl BranchRuntime {
             self.source_kind,
             &self.source,
         );
-        if self
-            .dispatch_stream(graph, &root_relay, &batch)
-            .await
-            .is_err()
-        {
+        if self.dispatch_stream(&root_relay, &batch).await.is_err() {
             let reason = "branched root relay dispatch failed".to_string();
             if self.source_kind == ModelKind::Ingestor {
                 self.runtime.handle_general_error_for_acks(
@@ -557,7 +534,6 @@ impl BranchRuntime {
 
     pub(super) fn dispatch_stream<'a>(
         &'a mut self,
-        graph: &'a SharedActiveGraph,
         relay: &'a RelayName,
         batch: &'a RelayRecordBatch,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = RelayDispatchResult> + Send + 'a>> {
@@ -567,7 +543,7 @@ impl BranchRuntime {
             };
             runtime_stream.dispatch_boundary(batch).await?;
             self.materialize_stream_batch(relay, batch).await;
-            self.retry_materialized_waiters(graph, relay).await;
+            self.retry_materialized_waiters(relay).await;
 
             Ok(())
         })
@@ -575,7 +551,6 @@ impl BranchRuntime {
 
     pub(super) async fn execute_processor_input(
         &mut self,
-        graph: &SharedActiveGraph,
         processor_id: &ModelName,
         incoming_relay: &RelayName,
         batch: RelayRecordBatch,
@@ -636,26 +611,21 @@ impl BranchRuntime {
             input_metrics.observe_delivery_latency(seconds, delivery_observation.domain_timestamp);
         }
         processor
-            .accept_input(graph, self, incoming_relay, batch, &snapshot)
+            .accept_input(self, incoming_relay, batch, &snapshot)
             .await;
         self.processors.insert(processor_id.clone(), processor);
     }
 
-    pub(super) async fn flush_processor_collected_inputs(
-        &mut self,
-        graph: &SharedActiveGraph,
-        processor_id: &ModelName,
-    ) {
+    pub(super) async fn flush_processor_collected_inputs(&mut self, processor_id: &ModelName) {
         let Some(mut processor) = self.processors.remove(processor_id) else {
             return;
         };
-        processor.flush_all_collected_inputs(graph, self).await;
+        processor.flush_all_collected_inputs(self).await;
         self.processors.insert(processor_id.clone(), processor);
     }
 
     pub(super) async fn dispatch_output(
         &mut self,
-        graph: &SharedActiveGraph,
         output: &RelayProcessorOutputNode,
         source_kind: ModelKind,
         source: &ModelName,
@@ -674,14 +644,10 @@ impl BranchRuntime {
         );
         self.runtime
             .mark_branch_aggregated_metrics_updated(&self.domain, source_kind, source);
-        self.dispatch_stream(graph, &output.relay, batch).await
+        self.dispatch_stream(&output.relay, batch).await
     }
 
-    pub(super) async fn tick(
-        &mut self,
-        graph: &SharedActiveGraph,
-        snapshot: &DomainExecutionSnapshot,
-    ) {
+    pub(super) async fn tick(&mut self, snapshot: &DomainExecutionSnapshot) {
         if let Err(error) = self.refresh_domain_routing() {
             warn!(error = %error, "failed to refresh routing for processor tick");
             return;
@@ -691,16 +657,12 @@ impl BranchRuntime {
             let Some(mut processor) = self.processors.remove(&processor_id) else {
                 continue;
             };
-            processor.tick(graph, self, snapshot).await;
+            processor.tick(self, snapshot).await;
             self.processors.insert(processor_id, processor);
         }
     }
 
-    pub(super) async fn force_flush(
-        &mut self,
-        graph: &SharedActiveGraph,
-        snapshot: &DomainExecutionSnapshot,
-    ) {
+    pub(super) async fn force_flush(&mut self, snapshot: &DomainExecutionSnapshot) {
         if let Err(error) = self.refresh_domain_routing() {
             warn!(error = %error, "failed to refresh routing for processor flush");
             return;
@@ -716,12 +678,11 @@ impl BranchRuntime {
             let Some(mut processor) = self.processors.remove(&processor_id) else {
                 continue;
             };
-            processor.flush_all_collected_inputs(graph, self).await;
-            processor.flush_guest_buffers(graph, self, now).await;
-            let current = graph.load_full();
-            processor.refresh(&routing, current.as_ref().map(StdArc::clone));
-            processor.flush_route_buffers(graph, self, now).await;
-            processor.tick(graph, self, snapshot).await;
+            processor.flush_all_collected_inputs(self).await;
+            processor.flush_guest_buffers(self, now).await;
+            processor.refresh(&routing);
+            processor.flush_route_buffers(self, now).await;
+            processor.tick(self, snapshot).await;
             self.processors.insert(processor_id, processor);
         }
     }
@@ -1132,7 +1093,6 @@ impl IngestorRouteRuntime {
         runtime_handle: Runtime,
         domain: DomainName,
         ingestor: IngestorName,
-        graph: SharedActiveGraph,
         template: IngestorRouteTemplate,
         expiration_scan_interval: Duration,
     ) -> Arc<Self> {
@@ -1140,7 +1100,6 @@ impl IngestorRouteRuntime {
             runtime_handle.clone(),
             domain.clone(),
             ingestor.clone(),
-            graph,
             template.branch.clone(),
             expiration_scan_interval,
         );
@@ -1203,7 +1162,6 @@ impl BranchExecutionRuntime {
             runtime_handle,
             domain,
             ingestor,
-            graph,
             template,
             domain_clock,
         } = context;
@@ -1308,7 +1266,6 @@ impl BranchExecutionRuntime {
                 continue;
             }
             let state = instance.state.clone();
-            let graph = graph.clone();
             let dispatch_key = key.clone();
             let dispatch_acks = message.acks.clone();
             let (started, started_rx) = oneshot::channel();
@@ -1317,7 +1274,7 @@ impl BranchExecutionRuntime {
                 started
                     .send(())
                     .means_shutdown("branch lifecycle dispatch scheduler");
-                branch.dispatch(&graph, message).await;
+                branch.dispatch(message).await;
                 branch.next_deadline()
             }));
             started_rx
@@ -1344,7 +1301,6 @@ impl BranchExecutionRuntime {
             runtime_handle,
             domain,
             ingestor,
-            graph,
             template,
             domain_clock,
         } = context;
@@ -1367,7 +1323,6 @@ impl BranchExecutionRuntime {
                 runtime_handle,
                 domain,
                 ingestor,
-                graph,
                 template,
                 domain_clock,
             },
@@ -1450,7 +1405,6 @@ impl BranchExecutionRuntime {
             runtime_handle,
             domain,
             ingestor,
-            graph,
             template,
             domain_clock,
         } = context;
@@ -1460,7 +1414,6 @@ impl BranchExecutionRuntime {
                 runtime_handle,
                 domain,
                 ingestor,
-                graph,
                 template,
                 domain_clock,
             },
@@ -1477,7 +1430,6 @@ impl BranchExecutionRuntime {
                     runtime_handle,
                     domain,
                     ingestor,
-                    graph,
                     template,
                     domain_clock,
                 },
@@ -1495,7 +1447,6 @@ impl BranchExecutionRuntime {
         runtime_handle: Runtime,
         domain: DomainName,
         ingestor: IngestorName,
-        graph: SharedActiveGraph,
         template: BranchInstanceTemplate,
         expiration_scan_interval: Duration,
     ) -> Arc<Self> {
@@ -1574,7 +1525,7 @@ impl BranchExecutionRuntime {
                 }
             };
             let mut next_branch_deadline =
-                tick_due_branch_instance_branches(&graph, &restored_snapshot, &instances).await;
+                tick_due_branch_instance_branches(&restored_snapshot, &instances).await;
             let ownership_entity = DomainNodeRef::node_in(
                 domain.clone(),
                 template.source_kind,
@@ -1648,7 +1599,7 @@ impl BranchExecutionRuntime {
                     && next_branch_deadline.is_some_and(|deadline| deadline <= now)
                 {
                     next_branch_deadline =
-                        tick_due_branch_instance_branches(&graph, &snapshot, &instances).await;
+                        tick_due_branch_instance_branches(&snapshot, &instances).await;
                     did_scheduled_work = true;
                 }
                 if did_scheduled_work {
@@ -1703,7 +1654,6 @@ impl BranchExecutionRuntime {
                                 runtime_handle: &runtime_handle,
                                 domain: &domain,
                                 ingestor: &ingestor,
-                                graph: &graph,
                                 template: &template,
                                 domain_clock: &domain_clock,
                             },
@@ -1723,7 +1673,6 @@ impl BranchExecutionRuntime {
                                         runtime_handle: &runtime_handle,
                                         domain: &domain,
                                         ingestor: &ingestor,
-                                        graph: &graph,
                                         template: &template,
                                         domain_clock: &domain_clock,
                                     },
@@ -1741,7 +1690,6 @@ impl BranchExecutionRuntime {
                                 runtime_handle: &runtime_handle,
                                 domain: &domain,
                                 ingestor: &ingestor,
-                                graph: &graph,
                                 template: &template,
                                 domain_clock: &domain_clock,
                             },
@@ -1761,7 +1709,6 @@ impl BranchExecutionRuntime {
                                         runtime_handle: &runtime_handle,
                                         domain: &domain,
                                         ingestor: &ingestor,
-                                        graph: &graph,
                                         template: &template,
                                         domain_clock: &domain_clock,
                                     },
@@ -1778,7 +1725,6 @@ impl BranchExecutionRuntime {
                                         runtime_handle: &runtime_handle,
                                         domain: &domain,
                                         ingestor: &ingestor,
-                                        graph: &graph,
                                         template: &template,
                                         domain_clock: &domain_clock,
                                     },
@@ -2105,7 +2051,6 @@ pub(super) fn publish_branch_instance_lru_snapshot<V>(
 }
 
 pub(super) async fn tick_due_branch_instance_branches(
-    graph: &SharedActiveGraph,
     snapshot: &DomainExecutionSnapshot,
     instances: &BranchInstanceRegistry<Option<BranchKey>, Mutex<BranchRuntime>>,
 ) -> Option<Timestamp> {
@@ -2116,7 +2061,7 @@ pub(super) async fn tick_due_branch_instance_branches(
             .next_deadline()
             .is_some_and(|deadline| deadline <= snapshot.now())
         {
-            branch.tick(graph, snapshot).await;
+            branch.tick(snapshot).await;
         }
         record_next_branch_instance_branch_deadline(&mut next, branch.next_deadline());
     }
@@ -2140,26 +2085,21 @@ pub(super) async fn flush_branch_junction(
     forwarded: RelayRecordBatch,
 ) {
     let JunctionFlushContext {
-        graph,
         branch,
         node_kind,
         processor,
         error_policies,
-        input_relays,
         output_routes,
         materialized_values,
         execution_now,
     } = context;
     if let Some(acks) = dispatch_processor_outputs(
         ProcessorOutputDispatchContext {
-            graph,
             branch,
             node_kind,
             source_kind: ModelKind::Junction,
             processor,
             error_policies,
-            input_relays,
-            filter_source: ProcessorOutputFilterSource::InputRelays,
             materialized_state: ProcessorMaterializedState::Admitted(materialized_values),
             execution_now,
         },
@@ -2365,6 +2305,7 @@ mod tests {
             ingestor: ingestor.clone(),
             template: IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
+                    revision: ProcessorPlanRevision::new(),
                     source_kind: ModelKind::Ingestor,
                     source: named("orders_source"),
                     root_relay: relay.clone(),

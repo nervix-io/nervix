@@ -1455,10 +1455,7 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc as StdArc;
-
     use ahash::HashMap;
-    use nervix_execution::sync::ArcSwapOption;
     use nervix_models::{
         AckMode, CreateReingestor, DomainSchedule, ErrorPolicies, ModelKind, NodeRef, ParseAsType,
         ProcessorInputs, ProcessorOutputs, ReingestorName, RelayName,
@@ -1499,6 +1496,7 @@ mod tests {
         );
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
+            revision: ProcessorPlanRevision::new(),
             source_kind: ModelKind::Reingestor,
             source: named("tenant_partition"),
             root_relay: root_relay.clone(),
@@ -1563,7 +1561,6 @@ mod tests {
             runtime,
             domain,
             named("tenant_partition"),
-            StdArc::new(ArcSwapOption::from(None)),
             IngestorRouteTemplate {
                 branch: template,
                 ack_boundary: BranchInstanceAckBoundary::Reingestor(AckMode::Attached),
@@ -1658,6 +1655,7 @@ mod tests {
         );
         let schema = test_schema(&[("tenant", ParseAsType::String), ("value", ParseAsType::U32)]);
         let template = BranchInstanceTemplate {
+            revision: ProcessorPlanRevision::new(),
             source_kind: ModelKind::Reingestor,
             source: named("tenant_partition"),
             root_relay: root_relay.clone(),
@@ -1677,7 +1675,6 @@ mod tests {
             processors: HashMap::default(),
             wasm_state_reset: None,
         };
-        let graph = StdArc::new(ArcSwapOption::from(None));
         let mut instances =
             BranchInstanceRegistry::<Option<BranchKey>, Mutex<BranchRuntime>>::new();
         let (branch_sender, _) = mpsc::channel(1);
@@ -1727,7 +1724,6 @@ mod tests {
                     runtime_handle: &runtime,
                     domain: &domain,
                     ingestor: &named("tenant_partition"),
-                    graph: &graph,
                     template: &template,
                     domain_clock: &domain_clock,
                 },
@@ -1773,7 +1769,6 @@ mod tests {
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
-                graph: StdArc::new(ArcSwapOption::empty()),
                 routing: runtime.stage_domain_routing(
                     &domain,
                     DomainRoutingSnapshot {
@@ -1810,9 +1805,9 @@ mod tests {
             runtime.clone(),
             domain.clone(),
             named("tenant_partition"),
-            StdArc::new(ArcSwapOption::from(None)),
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
+                    revision: ProcessorPlanRevision::new(),
                     source_kind: ModelKind::Reingestor,
                     source: named("tenant_partition"),
                     root_relay: relay.clone(),
@@ -2011,7 +2006,6 @@ mod tests {
                 start_version: 0,
                 domain_clock: test_domain_clock(&domain),
                 shutdown: execution_shutdown,
-                graph: StdArc::new(ArcSwapOption::empty()),
                 routing: runtime.stage_domain_routing(
                     &domain,
                     DomainRoutingSnapshot {
