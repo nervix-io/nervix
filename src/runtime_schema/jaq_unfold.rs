@@ -84,7 +84,7 @@ impl UnfoldedPayload {
             for (output_index, output) in program.outputs(input).enumerate() {
                 let output = match output {
                     Ok(output) => output,
-                    Err(error) => return Err(codec.evaluation_failure(input_index, &error)),
+                    Err(error) => return Err(codec.evaluation_failure(input_index, error)),
                 };
                 if messages.len() == PAYLOAD_UNFOLD_LIMIT {
                     return Err(CodecError::UnfoldLimit {
@@ -98,6 +98,7 @@ impl UnfoldedPayload {
                         let cause = CodecError::JaqTransform {
                             codec: codec.name.as_str().to_string(),
                             reason: error.to_string(),
+                            report: error,
                         };
                         return Err(cause.at(UnfoldPosition::Output {
                             input: input_index,
@@ -191,9 +192,10 @@ impl CompiledCodec {
                 // A protobuf payload holds exactly one message, which is its one input value.
                 let input = match decode_protobuf_payload(&protobuf.message, &payload) {
                     Ok(value) => {
-                        JaqInput::try_from(value).map_err(|error| CodecError::ProtobufDecode {
+                        JaqInput::try_from(value).map_err(|error| CodecError::ProtobufJaqInput {
                             codec: self.name.as_str().to_string(),
                             reason: error.to_string(),
+                            report: error,
                         })
                     }
                     Err(error) => Err(CodecError::ProtobufDecode {
@@ -218,7 +220,11 @@ impl CompiledCodec {
     /// The evaluator's own message quotes the values it failed on, so the diagnostic names only the
     /// codec and the position, and the message is recorded at trace level with the rest of the
     /// payload-bearing detail.
-    fn evaluation_failure(&self, input: usize, error: &JaqProgramError) -> CodecError {
+    fn evaluation_failure(
+        &self,
+        input: usize,
+        error: error_stack::Report<JaqProgramError>,
+    ) -> CodecError {
         trace!(
             codec = self.name.as_str(),
             input,
@@ -227,17 +233,23 @@ impl CompiledCodec {
         );
         let cause = CodecError::JaqIngestionEvaluation {
             codec: self.name.as_str().to_string(),
+            report: error,
         };
         cause.at(UnfoldPosition::Input { input })
     }
 }
 
 impl CompiledJaqNativeCodec {
-    fn read_failure(&self, codec: &CompiledCodec, error: JaqFormatError) -> CodecError {
+    fn read_failure(
+        &self,
+        codec: &CompiledCodec,
+        error: error_stack::Report<JaqFormatError>,
+    ) -> CodecError {
         CodecError::JaqNativeDecode {
             codec: codec.name.as_str().to_string(),
             format: self.format.name(),
             reason: error.to_string(),
+            report: error,
         }
     }
 }

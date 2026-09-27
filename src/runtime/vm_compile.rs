@@ -81,56 +81,32 @@ pub(in crate::runtime) enum RuntimeVmCompileError {
     RewriteMessageErrorLookups { node: ModelName },
     #[error("failed to compile LOOKUP_HASH_MAP calls in message-error SET for '{node}'")]
     CompileMessageErrorLookups { node: ModelName },
-    #[error("message-error SET compile failed for '{node}': {source}")]
-    CompileMessageErrorSet {
-        node: ModelName,
-        #[source]
-        source: nervix_vm::CompileError,
-    },
+    #[error("message-error SET compile failed for '{node}'")]
+    CompileMessageErrorSet { node: ModelName },
     #[error("{target} requires at least one input relay")]
     MissingKeyProjectionInput { target: KeyProjectionTarget },
     #[error("{target} is invalid")]
     InvalidKeyProjection { target: KeyProjectionTarget },
-    #[error("{target} type inference failed: {source}")]
-    InferKeyProjection {
-        target: KeyProjectionTarget,
-        #[source]
-        source: nervix_vm::CompileError,
-    },
+    #[error("{target} type inference failed")]
+    InferKeyProjection { target: KeyProjectionTarget },
     #[error("{target} inferred {actual} key fields for {expected} expressions")]
     KeyProjectionFieldCountMismatch {
         target: KeyProjectionTarget,
         expected: usize,
         actual: usize,
     },
-    #[error("{target} compile failed: {source}")]
-    CompileKeyProjection {
-        target: KeyProjectionTarget,
-        #[source]
-        source: nervix_vm::CompileError,
-    },
+    #[error("{target} compile failed")]
+    CompileKeyProjection { target: KeyProjectionTarget },
     #[error("constant expression is invalid")]
     InvalidConstantExpression,
-    #[error("constant expression type inference failed: {source}")]
-    InferConstantExpression {
-        #[source]
-        source: nervix_vm::CompileError,
-    },
-    #[error("constant expression compile failed: {source}")]
-    CompileConstantExpression {
-        #[source]
-        source: nervix_vm::CompileError,
-    },
-    #[error("failed to build the constant expression input batch: {source}")]
-    BuildConstantInput {
-        #[source]
-        source: nervix_vm::RuntimeError,
-    },
-    #[error("constant expression execution failed: {source}")]
-    ExecuteConstantExpression {
-        #[source]
-        source: nervix_vm::RuntimeError,
-    },
+    #[error("constant expression type inference failed")]
+    InferConstantExpression,
+    #[error("constant expression compile failed")]
+    CompileConstantExpression,
+    #[error("failed to build the constant expression input batch")]
+    BuildConstantInput,
+    #[error("constant expression execution failed")]
+    ExecuteConstantExpression,
     #[error("constant expression did not produce exactly one row")]
     ConstantExpressionRowCount,
     #[error("failed to read field '{field}' from the constant expression output")]
@@ -713,12 +689,7 @@ pub(super) fn compile_message_error_set_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|source| {
-        Report::new(RuntimeVmCompileError::CompileMessageErrorSet {
-            node: node.clone(),
-            source,
-        })
-    })?;
+    .change_context(RuntimeVmCompileError::CompileMessageErrorSet { node: node.clone() })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
@@ -902,13 +873,14 @@ pub(super) fn compile_scoped_filter_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "filter compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1067,13 +1039,14 @@ pub(super) fn compile_processor_output_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "FILTER-MAP compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1194,13 +1167,14 @@ pub(super) fn compile_output_branch_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "output branch compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(Some(CompiledBranchProgram {
         program: CompiledProgramWithMaterializedInterest {
@@ -1311,13 +1285,14 @@ pub(super) fn compile_wasm_output_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "FILTER-MAP compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1529,13 +1504,14 @@ pub(super) fn compile_emitter_filter_map_part(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "FILTER-MAP compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1591,11 +1567,8 @@ pub(in crate::runtime) fn compile_key_projection_program(
     let signatures = runtime_udf_signatures(udfs);
     let key_types =
         infer_vm_set_expr_types_for_bindings_with_udfs(&parsed, bindings.clone(), signatures)
-            .map_err(|source| {
-                Report::new(RuntimeVmCompileError::InferKeyProjection {
-                    target: target.clone(),
-                    source,
-                })
+            .change_context(RuntimeVmCompileError::InferKeyProjection {
+                target: target.clone(),
             })?;
     if key_types.len() != expressions.len() {
         return Err(Report::new(
@@ -1627,7 +1600,7 @@ pub(in crate::runtime) fn compile_key_projection_program(
             },
         ),
     )
-    .map_err(|source| Report::new(RuntimeVmCompileError::CompileKeyProjection { target, source }))
+    .change_context(RuntimeVmCompileError::CompileKeyProjection { target })
 }
 
 pub(super) async fn evaluate_constant_expression_vm(
@@ -1662,7 +1635,7 @@ pub(super) async fn evaluate_constant_expression_vm(
         infer_bindings,
         runtime_udf_signatures(udfs),
     )
-    .map_err(|source| Report::new(RuntimeVmCompileError::InferConstantExpression { source }))?;
+    .change_context(RuntimeVmCompileError::InferConstantExpression)?;
     let output_schema = StdArc::new(arrow_schema::Schema::new(
         inferred
             .into_iter()
@@ -1689,9 +1662,7 @@ pub(super) async fn evaluate_constant_expression_vm(
                 },
             ),
         )
-        .map_err(|source| {
-            Report::new(RuntimeVmCompileError::CompileConstantExpression { source })
-        })?,
+        .change_context(RuntimeVmCompileError::CompileConstantExpression)?,
     );
     let input = VmTypedBatch::try_new_with_row_count(
         compiled.input_schema.clone(),
@@ -1703,7 +1674,7 @@ pub(super) async fn evaluate_constant_expression_vm(
             .collect(),
         1,
     )
-    .map_err(|source| Report::new(RuntimeVmCompileError::BuildConstantInput { source }))?;
+    .change_context(RuntimeVmCompileError::BuildConstantInput)?;
     let result = execute_program_with_selection_in_context(
         &compiled,
         &input,
@@ -1713,7 +1684,7 @@ pub(super) async fn evaluate_constant_expression_vm(
         },
     )
     .await
-    .map_err(|source| Report::new(RuntimeVmCompileError::ExecuteConstantExpression { source }))?;
+    .change_context(RuntimeVmCompileError::ExecuteConstantExpression)?;
     if !result.selected_rows.is_single(0) {
         return Err(Report::new(
             RuntimeVmCompileError::ConstantExpressionRowCount,
@@ -1865,13 +1836,14 @@ pub(super) fn compile_ingestor_filter_map_program(
             ..VmCompileOptions::default()
         }),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "FILTER-MAP compile failed for '{}': {}",
             identifier.as_str(),
-            error.message
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(Some(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
@@ -1947,12 +1919,15 @@ pub(super) fn compile_generator_set_program(
             },
         ),
     )
-    .map_err(|error| RuntimeError::BuildDomainExecution {
+    .map_err(|error| RuntimeError::VmCompile {
         domain: domain.as_str().to_string(),
         reason: format!(
             "generator '{}' output '{}' compile failed: {}",
-            generator.name, output.relay, error.message
+            generator.name,
+            output.relay,
+            error.current_context().message
         ),
+        report: error,
     })?;
     Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),

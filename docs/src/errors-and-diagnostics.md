@@ -35,6 +35,15 @@ Values a caller acts on belong in typed fields; display formatting happens when 
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
 
+The expression VM returns reports for compile, batch, and runtime failures. `CompileError` keeps
+its typed diagnostic code, stable code spelling, operation span, and safe message; validation adds
+the model and route context without losing that cause. Roto setup returns `UdfError` reports and
+Roto's VM injector returns runtime reports, so a failing Arrow operation can remain in the chain.
+Jaq returns `JaqProgramError` or `JaqFormatError` reports for compilation, evaluation, and format
+conversion. A codec or runtime caller retains that report under its operation context. VM row
+errors remain typed values in the batch outcome and are formatted only when a message error is
+reported; this conversion does not turn them into report allocations per row.
+
 Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
 syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
 unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and

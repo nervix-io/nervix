@@ -3,7 +3,7 @@
 //! Layer: data plane.
 //!
 //! - **Owns.** The one error the runtime's entry points return.
-//! - **Depends on.** The vocabulary its variants quote.
+//! - **Depends on.** The vocabulary its variants quote and typed engine failures it retains.
 //! - **Must not know.** How a caller reports or recovers from a failure.
 
 use super::*;
@@ -34,6 +34,19 @@ pub enum RuntimeError {
     },
     #[error("failed to build domain execution for '{domain}': {reason}")]
     BuildDomainExecution { domain: String, reason: String },
+    #[error("failed to build domain execution for '{domain}': {reason}")]
+    VmCompile {
+        domain: String,
+        reason: String,
+        report: Report<nervix_vm::CompileError>,
+    },
+    #[error(
+        "failed to build domain execution for '{domain}': failed to compile domain UDFs: {report}"
+    )]
+    CompileDomainUdfs {
+        domain: String,
+        report: Report<nervix_roto::UdfError>,
+    },
     #[error("failed to plan domain activation for '{domain}': {report}")]
     DomainActivationPlan {
         domain: DomainName,

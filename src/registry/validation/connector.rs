@@ -313,10 +313,11 @@ pub(in crate::registry) fn validate_direct_values_sensitivity(
     let udf_signatures = udf_compile_options(models, CompileOptions::default()).udf_signatures;
     let inferred = infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures)
         .map_err(|error| {
-            Report::new(RegistryError::InvalidModel {
+            let message = error.current_context().message.clone();
+            error.change_context(RegistryError::InvalidModel {
                 domain: domain.as_str().to_string(),
                 identifier: identifier.as_str().to_string(),
-                reason: format!("emitter VALUES type inference failed: {}", error.message),
+                reason: format!("emitter VALUES type inference failed: {}", message),
             })
         })?;
     for (index, field) in inferred.iter().enumerate() {
@@ -601,12 +602,13 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "SQS FIFO GROUP expression requires an exact non-sensitive STRING value: {}",
-                error.message
+                message
             ),
         })
     })?;
@@ -734,12 +736,13 @@ pub(in crate::registry) fn validate_http_request_expressions(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
             reason: format!(
                 "HTTP METHOD and PATH require exact non-sensitive STRING values: {}",
-                error.message
+                message
             ),
         })
     })?;
@@ -1184,10 +1187,11 @@ pub(in crate::registry) fn effective_ingestor_output_filter_map_schema(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", error.message),
+            reason: format!("FILTER-MAP compile failed: {}", message),
         })
     })?;
 
@@ -1364,10 +1368,11 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         ),
     )
     .map_err(|error| {
-        Report::new(RegistryError::InvalidModel {
+        let message = error.current_context().message.clone();
+        error.change_context(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: format!("FILTER-MAP compile failed: {}", error.message),
+            reason: format!("FILTER-MAP compile failed: {}", message),
         })
     })?;
 

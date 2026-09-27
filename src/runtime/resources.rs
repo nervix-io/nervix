@@ -499,7 +499,7 @@ impl Runtime {
     pub(crate) async fn prepare_domain_udfs(
         &self,
         mut models: Vec<CreateUdf>,
-    ) -> Result<CompiledDomainUdfs, nervix_roto::UdfError> {
+    ) -> error_stack::Result<CompiledDomainUdfs, nervix_roto::UdfError> {
         models.sort_by(|left, right| left.name.cmp(&right.name));
         let executor = UdfExecutor::compile(models.clone()).await?;
         Ok(CompiledDomainUdfs { models, executor })
@@ -519,7 +519,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         models: Vec<CreateUdf>,
-    ) -> Result<UdfExecutor, nervix_roto::UdfError> {
+    ) -> error_stack::Result<UdfExecutor, nervix_roto::UdfError> {
         let mut sorted_models = models;
         sorted_models.sort_by(|left, right| left.name.cmp(&right.name));
         if let Some(cached) = self.inner.compiled_domain_udfs.get(domain)

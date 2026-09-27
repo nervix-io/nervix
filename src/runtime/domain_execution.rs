@@ -394,9 +394,9 @@ impl Runtime {
                     .collect(),
             )
             .await
-            .map_err(|error| RuntimeError::BuildDomainExecution {
+            .map_err(|error| RuntimeError::CompileDomainUdfs {
                 domain: domain.as_str().to_string(),
-                reason: format!("failed to compile domain UDFs: {error}"),
+                report: error,
             })?;
 
         let activation_plan =

@@ -46,6 +46,16 @@ Five rules hold throughout:
 | Engines and infrastructure | `nervix-roto` | Compiling a `CREATE UDF`, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
 | Decisions | Registry validation | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, so a statement is rejected with exactly the error execution would report. |
 | Data plane | Runtime plan binding and hosts | Binding runtime programs against installed schemas once per typed node revision, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
+
+The VM compiler, batch constructors, runtime, and `FunctionInjector` return `error-stack`
+reports with their semantic `CompileError` or `RuntimeError` context. A compile error retains a
+typed code, its existing stable code spelling through `code()`, the operation span, and a safe
+message. Registry validation adds the owning model and route while retaining the VM report.
+Runtime plan binding likewise adds its operation above the original VM report. Roto UDF setup
+returns `UdfError` reports; its injected calls return VM runtime reports, retaining an underlying
+Arrow failure when one caused the call to fail. Jaq compilation, evaluation, and format conversion
+return their own typed reports to the codec or signaling caller. These reports are batch or setup
+failures; selected-row execution and `SideError` values remain the row-failure channel.
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
 
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted

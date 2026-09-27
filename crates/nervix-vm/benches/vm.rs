@@ -46,7 +46,7 @@ type BenchmarkProgramResult<T> = error_stack::Result<T, BenchmarkProgramError>;
 async fn execute_benchmark_program(
     program: &Arc<CompiledProgram>,
     batch: &TypedBatch,
-) -> Result<TypedBatch, RuntimeError> {
+) -> error_stack::Result<TypedBatch, RuntimeError> {
     let context = ExecutionContext::new(Timestamp::from_unix_nanos(0));
     execute_program_with_selection_in_context(program, batch, &context)
         .await

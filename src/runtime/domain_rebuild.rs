@@ -430,9 +430,9 @@ impl Runtime {
             ),
         )
         .await
-        .map_err(|error| RuntimeError::BuildDomainExecution {
+        .map_err(|error| RuntimeError::CompileDomainUdfs {
             domain: domain.as_str().to_string(),
-            reason: format!("failed to compile domain UDFs: {error}"),
+            report: error,
         })?;
         let all_branched_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
         let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
@@ -1137,9 +1137,9 @@ impl Runtime {
                     .collect(),
             )
             .await
-            .map_err(|error| RuntimeError::BuildDomainExecution {
+            .map_err(|error| RuntimeError::CompileDomainUdfs {
                 domain: domain.as_str().to_string(),
-                reason: format!("failed to compile domain UDFs: {error}"),
+                report: error,
             })?;
         let mut lookups = HashMap::new();
         let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)

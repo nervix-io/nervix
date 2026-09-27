@@ -141,6 +141,11 @@ before calling a row sink. It retains the ACKs of the source rows every record o
 carries, so no runtime ACK map enters the connector. Each publish is one call per batch, never a
 virtual call per row.
 
+The host compiles a row sink's `VALUES` projection before opening that sink. A failed VM
+inference or compilation retains its typed VM report under the domain and emitter context, then
+the sink-initialization context. The emitter follows its existing initialization retry policy;
+the connector never receives a partially compiled mapping.
+
 An ordering group exists only where the sink plan declares one; today that is the SQS
 `FIFO GROUP`. The host compiles the declaration, evaluates it once per filtered source batch, and
 carries the result beside the batch: the batch's branch key for `FROM BRANCH`, or a string column
