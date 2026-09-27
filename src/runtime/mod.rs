@@ -65,14 +65,13 @@ use nervix_interconnect::{
 use nervix_models::{
     AckMode, Assignment, AtomicTimestamp, BranchKeyFingerprint, BranchName, ClickHouseValueMapping,
     ClientConfigEntry, ClientName, ClientPoolBounds, ClientResourceMount, ClusterNodeIncarnation,
-    ClusterNodeName, ClusterSchedule, CodecName, CodecWireFormat, CommandExecutionReference,
-    CoordinationIdentity, CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateCodec,
-    CreateEmitter, CreateGenerator, CreateIngestor, CreateLookup, CreateReingestor, CreateRelay,
-    CreateSignalingProtocol, CreateUdf, CreateWasmProcessor, DomainClockAuthority, DomainConfig,
-    DomainName, DomainNodeRef, DomainSchedule, DomainState, EmitSink, EmitterAckWindow,
-    EmitterName, EmitterPublishingMode, EndpointName, EndpointType, ErrorPolicies, FieldName,
-    FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName, IcebergCatalog,
-    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
+    ClusterNodeName, ClusterSchedule, CodecName, CommandExecutionReference, CoordinationIdentity,
+    CorrelationTimeoutAction, CorrelatorMatchPolicy, CreateEmitter, CreateGenerator,
+    CreateIngestor, CreateLookup, CreateReingestor, CreateRelay, CreateUdf, CreateWasmProcessor,
+    DomainClockAuthority, DomainConfig, DomainName, DomainNodeRef, DomainSchedule, DomainState,
+    EmitSink, EmitterAckWindow, EmitterName, EmitterPublishingMode, EndpointName, EndpointType,
+    ErrorPolicies, FieldName, FieldPath, FlushPolicy, GeneralErrorPolicy, GeneratorName,
+    IcebergCatalog, IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
     InferencerTensorDeclaration, IngestQuiesceMode, IngestQuiesceOverflow, IngestSource,
     IngestTimestampSource, IngestorName, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule,
     Literal as ModelLiteral, LookupName, MaterializedStatePolicy, MessageErrorCode,
@@ -157,8 +156,9 @@ use crate::{
     registry::{
         ActiveGraph, BranchInstanceAckBoundary, BranchedIngestorSpec, BranchedNodeSpecs,
         BranchedProcessorNodeSpec, BranchedProcessorOperationSpec, BranchedProcessorOutputSpec,
-        BranchedProcessorOutputsSpec, BranchedProcessorSpec, RuntimeChange, RuntimeChanges,
-        ScheduleDelta, branched_node_specs_from_scheduled_nodes,
+        BranchedProcessorOutputsSpec, BranchedProcessorSpec, DomainActivationPlan,
+        DomainActivationPlanError, PlannedCodec, PlannedCodecWireFormat, PlannedSignalingProtocol,
+        RuntimeChange, RuntimeChanges, ScheduleDelta, branched_node_specs_from_scheduled_nodes,
     },
     resource::ResourceStore,
     runtime_ack::{
@@ -169,7 +169,7 @@ use crate::{
         ProtobufDescriptorPool, RuntimeProjectionComponent, RuntimeRecordBatch,
         RuntimeRecordBatchBuilder, RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError,
         RuntimeSchemaOperation, RuntimeValue, RuntimeValueColumn, RuntimeValueLocation,
-        RuntimeVmOperation, compile_codec_with_protobuf, compile_schema, decode_with_codec,
+        RuntimeVmOperation, compile_codec_spec_with_protobuf, compile_schema, decode_with_codec,
         parse_as_type_from_arrow, runtime_value_from_arrow_array,
     },
     task_shutdown::JoinShutdown as _,
@@ -186,7 +186,6 @@ mod deduplicator;
 mod domain_clock;
 mod domain_execution;
 mod domain_rebuild;
-mod domain_wire_schemas;
 mod emitter_batch_packing;
 mod emitter_buffer;
 mod emitter_encoding;
@@ -312,7 +311,6 @@ use domain_execution::{
 };
 pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::branch_relays_from_branched_specs;
-use domain_wire_schemas::DomainWireSchemas;
 use emitter_buffer::{
     DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
     EmitterPublishBatch, PublishReport, RowToPack,
@@ -414,10 +412,7 @@ use message_error_delivery::{
     matching_message_error_output,
 };
 use nervix_connector_kafka::KafkaOffsetPosition;
-use nervix_models::{
-    CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema, DeduplicatorName,
-    ReingestorName, ResolvedCodecWireFormat, WireSchemaLookup, WireSchemaName,
-};
+use nervix_models::{DeduplicatorName, ReingestorName};
 pub(in crate::runtime) use node::{RuntimeInner, SharedActiveGraph};
 use planning::{
     ProcessorPlanBindingContext, bind_published_processor_plans,

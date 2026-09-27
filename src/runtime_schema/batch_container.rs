@@ -495,7 +495,7 @@ mod tests {
     use super::*;
     use crate::runtime_schema::{
         ProtobufCodecDescriptors, ProtobufDescriptorPool, RuntimeRecordBatch, RuntimeRow,
-        RuntimeValue, compile_codec_with_protobuf, compile_schema, test_runtime_row,
+        RuntimeValue, compile_codec_spec_with_protobuf, compile_schema, test_runtime_row,
     };
 
     fn named<N>(raw: &str) -> N
@@ -614,8 +614,9 @@ mod tests {
         wire_format: ResolvedCodecWireFormat<'_>,
         descriptors: Option<ProtobufCodecDescriptors>,
     ) -> Arc<CompiledCodec> {
-        compile_codec_with_protobuf(
-            codec,
+        compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             Arc::new(compile_schema(&event_schema())),
             wire_format,
             descriptors,
@@ -1028,15 +1029,16 @@ mod tests {
             })
             .collect(),
         };
-        let codec = CreateCodec {
+        let codec: CreateCodec = CreateCodec {
             name: named("syslog_codec"),
             wire_format: CodecWireFormat::Syslog,
             schema: named("syslog_event"),
             encoding_rules: Vec::new(),
         };
         let compiled_schema = Arc::new(compile_schema(&schema));
-        let codec = compile_codec_with_protobuf(
-            &codec,
+        let codec = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema.clone(),
             ResolvedCodecWireFormat::Syslog,
             None,

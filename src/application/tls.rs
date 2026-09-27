@@ -23,7 +23,7 @@ use nervix_interconnect::{
 };
 #[cfg(not(feature = "testing"))]
 use nervix_models::ClusterNodeName;
-use nervix_models::{ClusterSchedule, DomainName, Model, ResourceId, ResourceName, VhostName};
+use nervix_models::{ClusterSchedule, DomainName, ResourceId, ResourceName, VhostName};
 use parking_lot::RwLock;
 use rustls::{
     RootCertStore, ServerConfig,
@@ -43,7 +43,10 @@ use tracing::{info, warn};
 use triomphe::Arc;
 
 use super::AppError;
-use crate::{ConfiguredFaultInjection, cluster::ClusterHandle, resource::ResourceStore};
+use crate::{
+    ConfiguredFaultInjection, cluster::ClusterHandle, registry::DomainActivationPlan,
+    resource::ResourceStore,
+};
 
 const INTERCONNECT_TLS_RELOAD_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -260,6 +263,8 @@ impl TlsMaterialError {
 /// Why this node's HTTPS listener could not present the TLS VHOSTs of a runtime state.
 #[derive(Debug, Error)]
 pub(in crate::application) enum HttpsListenerError {
+    #[error("failed to plan HTTPS listener VHOSTs for domain '{domain}'")]
+    ActivationPlan { domain: DomainName },
     #[error(
         "failed to load TLS resource '{resource}@{version}' for VHOST '{vhost}' in domain \
          '{domain}'"
@@ -434,14 +439,15 @@ struct ListenerVhosts {
 impl ListenerVhosts {
     /// Every TLS VHOST the schedule defines. A stopped domain keeps its schedule, so the listener
     /// presents its VHOSTs too.
-    fn from_schedule(schedule: &ClusterSchedule) -> Self {
+    fn from_schedule(schedule: &ClusterSchedule) -> Result<Self, Report<HttpsListenerError>> {
         let mut vhosts = BTreeMap::new();
         for (domain, domain_schedule) in &schedule.domains {
-            for node in domain_schedule.nodes.values() {
-                let Model::Vhost(vhost) = node.config.as_ref() else {
-                    continue;
-                };
-                let Some(tls) = vhost.tls.as_ref() else {
+            let plan = DomainActivationPlan::from_scheduled_nodes(domain, &domain_schedule.nodes)
+                .change_context_lazy(|| HttpsListenerError::ActivationPlan {
+                domain: domain.clone(),
+            })?;
+            for vhost in plan.vhosts.values() {
+                let Some(resource) = vhost.tls.as_ref() else {
                     continue;
                 };
                 let key = ListenerVhostKey {
@@ -450,12 +456,12 @@ impl ListenerVhosts {
                 };
                 let presented = ListenerVhost {
                     hostnames: vhost.hostnames.clone(),
-                    resource: ResourceId::new(domain.clone(), tls.resource.clone(), tls.version),
+                    resource: resource.clone(),
                 };
                 vhosts.insert(key, presented);
             }
         }
-        Self { vhosts }
+        Ok(Self { vhosts })
     }
 
     /// The server configuration presenting these VHOSTs, absent when there is none to present.
@@ -573,7 +579,7 @@ impl HttpsListenerCertificates {
         revision: u64,
         schedule: &ClusterSchedule,
     ) -> Result<(), Report<HttpsListenerError>> {
-        let desired = ListenerVhosts::from_schedule(schedule);
+        let desired = ListenerVhosts::from_schedule(schedule)?;
         let mut installation = self.inner.installation.lock().await;
         if let Some(latest) = installation.latest.revision()
             && latest >= revision
@@ -729,7 +735,8 @@ mod tests {
             ),
         ]);
 
-        let vhosts = ListenerVhosts::from_schedule(&schedule);
+        let vhosts = ListenerVhosts::from_schedule(&schedule)
+            .expect("the test schedule has valid VHOST references");
 
         let keys = vhosts.vhosts.keys().cloned().collect::<Vec<_>>();
         assert_eq!(

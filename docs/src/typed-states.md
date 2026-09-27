@@ -174,6 +174,13 @@ execution or recovery. Connectors and the session edge validate external represe
 they decode or publish them. A caller does not compensate for a failed lookup, absent required
 field, type mismatch, or conversion by supplying a default zero, empty value, or null.
 
+One in-memory domain activation plan resolves each relay's compiled schema, branch retention and
+materialized-state presence; each codec's schema and wire definition; and each endpoint's VHOST and
+signaling reference. A missing reference is a typed planning failure before installation. The
+same plan shape feeds running and passive builds. Passive builds retain the planned materialized
+relay identities and endpoint routes, while admission remains stopped. A server-side listener stays
+bound on every live node independently of graph placement or domain leadership.
+
 The owner reports a semantic typed error; contextual propagation uses `error-stack`. A
 per-record conversion error is reported at the record boundary without formatting a fresh
 message on every hot-path operation. Diagnostics contain the relevant identity, operation, and

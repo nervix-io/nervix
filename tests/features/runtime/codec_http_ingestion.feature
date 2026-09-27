@@ -204,10 +204,13 @@ Feature: HTTP codec ingestion
     Examples:
       | cluster_size | replica_count | wire_format | tenant_wire_type | user_id_wire_type |
       | 1            | 0             | JSON        | string           | integer           |
+      | 1            | 0             | CBOR        | string           | integer           |
       | 1            | 0             | AVRO        | STRING           | LONG              |
       | 3            | 0             | JSON        | string           | integer           |
+      | 3            | 0             | CBOR        | string           | integer           |
       | 3            | 0             | AVRO        | STRING           | LONG              |
       | 3            | 1             | JSON        | string           | integer           |
+      | 3            | 1             | CBOR        | string           | integer           |
       | 3            | 1             | AVRO        | STRING           | LONG              |
 
   Scenario Outline: HTTP endpoint ingestor delivers <wire_format> array and vector fields through a schemaful codec
