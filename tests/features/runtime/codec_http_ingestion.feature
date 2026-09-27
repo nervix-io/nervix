@@ -1,4 +1,155 @@
 Feature: HTTP codec ingestion
+  Scenario Outline: JSON ingestion preserves every wire value and reports strict and malformed payloads
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed
+      """
+      CREATE SCHEMA json_value (
+        max_u8 U8,
+        min_i8 I8,
+        max_u16 U16,
+        min_i16 I16,
+        max_u32 U32,
+        min_i32 I32,
+        min_i64 I64,
+        max_u64 U64,
+        float32 F32,
+        float64 F64,
+        enabled BOOL,
+        text STRING,
+        occurred_at DATETIME,
+        body BYTES,
+        nested <nested_type>,
+        optional_note STRING OPTIONAL
+      );
+      CREATE WIRE JSON SCHEMA json_value_wire MODE STRICT (
+        max_u8 integer,
+        min_i8 integer,
+        max_u16 integer,
+        min_i16 integer,
+        max_u32 integer,
+        min_i32 integer,
+        min_i64 integer,
+        max_u64 integer,
+        float32 number,
+        float64 number,
+        enabled boolean,
+        text string,
+        occurred_at string,
+        body bytes,
+        nested array,
+        optional_note string OPTIONAL
+      );
+      CREATE CODEC json_value_codec
+        FROM WIRE JSON SCHEMA json_value_wire
+        TO SCHEMA json_value
+        ENCODE occurred_at AS RFC3339;
+      CREATE RELAY json_values SCHEMA json_value UNBRANCHED;
+      CREATE VHOST edge json-values-{{test_id}}.example.com;
+      CREATE ENDPOINT json_values_endpoint ON edge PATH '/ingest' TYPE HTTP;
+      CREATE INGESTOR json_values_ingestor
+        FROM ENDPOINT json_values_endpoint MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING json_value_codec
+        TO json_values
+        INHERIT ALL
+        UNBRANCHED
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE SUBSCRIPTION json_values_subscription TO json_values;
+      START;
+      """
+    When http payload is posted to host "json-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"max_u8":255,"min_i8":-128,"max_u16":65535,"min_i16":-32768,"max_u32":4294967295,"min_i32":-2147483648,"min_i64":-9223372036854775808,"max_u64":18446744073709551615,"float32":1.25,"float64":-2.5,"enabled":true,"text":"line one\nline two \"quoted\" 雪","occurred_at":"2024-02-29T12:34:56.123456789Z","body":"AP9iaW5hcnk=","nested":[[-32768,32767],[0,42]],"optional_note":null}
+      """
+    Then within "10s" the relay subscription receives a payload
+      """
+      "max_u64":18446744073709551615
+      """
+    And the last relay subscription payload contains
+      """
+      "min_i64":-9223372036854775808
+      """
+    And the last relay subscription payload contains
+      """
+      "max_u8":255
+      """
+    And the last relay subscription payload contains
+      """
+      "min_i8":-128
+      """
+    And the last relay subscription payload contains
+      """
+      "max_u16":65535
+      """
+    And the last relay subscription payload contains
+      """
+      "min_i16":-32768
+      """
+    And the last relay subscription payload contains
+      """
+      "max_u32":4294967295
+      """
+    And the last relay subscription payload contains
+      """
+      "min_i32":-2147483648
+      """
+    And the last relay subscription payload contains
+      """
+      "float32":1.25
+      """
+    And the last relay subscription payload contains
+      """
+      "float64":-2.5
+      """
+    And the last relay subscription payload contains
+      """
+      "enabled":true
+      """
+    And the last relay subscription payload contains
+      """
+      "text":"line one\nline two \"quoted\" 雪"
+      """
+    And the last relay subscription payload contains
+      """
+      "body":"AP9iaW5hcnk="
+      """
+    And the last relay subscription payload contains
+      """
+      "occurred_at":"2024-02-29T12:34:56.123456789+00:00"
+      """
+    And the last relay subscription payload contains
+      """
+      "nested":[[-32768,32767],[0,42]]
+      """
+    And the last relay subscription payload does not contain "optional_note"
+    When http payload is posted to host "json-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"max_u8":0,"min_i8":0,"max_u16":0,"min_i16":0,"max_u32":0,"min_i32":0,"min_i64":0,"max_u64":0,"float32":0.0,"float64":0.0,"enabled":false,"text":"strict","occurred_at":"2024-02-29T12:34:56Z","body":"","nested":[],"extra":true}
+      """
+    Then within "10s" the active session observes a server error containing
+      """
+      codec 'json_value_codec' has unexpected field 'extra'
+      """
+    When http payload is posted to host "json-values-{{test_id}}.example.com" path "/ingest"
+      """
+      {"min_i64":
+      """
+    Then within "10s" the active session observes a server error containing
+      """
+      failed to parse json payload for codec 'json_value_codec'
+      """
+
+    Examples:
+      | cluster_size | nested_type        |
+      | 1            | VEC<ARRAY<I16, 2>> |
+      | 3            | VEC<ARRAY<I16, 2>> |
+
   Scenario Outline: HTTP endpoint ingestor maps a payload encoded as <wire_format> from wire field order into internal schema order
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

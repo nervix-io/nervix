@@ -1150,6 +1150,22 @@ impl Cluster {
         Ok(())
     }
 
+    /// Make an explicitly started external service visible to this cluster's DNS fixture.
+    pub(crate) fn publish_dns_service(&self, name: &str, address: IpAddr) -> io::Result<()> {
+        let Some(dns) = &self.dns else {
+            return Err(io::Error::other("the cluster has no DNS fixture"));
+        };
+        dns.publish_service(name, address);
+        Ok(())
+    }
+
+    pub(crate) fn dns_questions_for_name(&self, name: &str) -> io::Result<u64> {
+        let Some(dns) = &self.dns else {
+            return Err(io::Error::other("the cluster has no DNS fixture"));
+        };
+        Ok(dns.questions_for_name(name))
+    }
+
     /// Questions the cluster's DNS fixture received for the names of its nodes.
     pub(crate) fn dns_questions_for_node_names(&self) -> io::Result<u64> {
         let Some(dns) = &self.dns else {

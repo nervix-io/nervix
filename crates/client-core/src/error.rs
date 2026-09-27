@@ -20,6 +20,8 @@ pub enum RequestKind {
     Command,
     #[strum(serialize = "suggest")]
     Suggest,
+    #[strum(serialize = "choice lookup")]
+    Choice,
     #[strum(serialize = "list domains")]
     ListDomains,
     #[strum(serialize = "select domain")]
@@ -51,6 +53,7 @@ impl From<&ClientRequest> for RequestKind {
         match request {
             ClientRequest::Command(_) => Self::Command,
             ClientRequest::Suggest(_) => Self::Suggest,
+            ClientRequest::Choice(_) => Self::Choice,
             ClientRequest::ListDomains => Self::ListDomains,
             ClientRequest::SelectDomain(_) => Self::SelectDomain,
             ClientRequest::AttachTransaction(_) => Self::AttachTransaction,
@@ -242,6 +245,7 @@ impl ClientError {
             ReplyBody::Command(_)
             | ReplyBody::Attach(_)
             | ReplyBody::Suggest(_)
+            | ReplyBody::Choice(_)
             | ReplyBody::DomainList(_)
             | ReplyBody::DomainSelection(_)
             | ReplyBody::Inspection(_)

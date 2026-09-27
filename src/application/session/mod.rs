@@ -39,20 +39,20 @@ use error_stack::Report;
 use futures_util::{Stream, StreamExt as _};
 use nervix_client_wire::{
     AttachTransactionRequest, CancelOutcome, CancelRequest, CancelState, CancellationStage,
-    ClientFrame, ClientMessage, ClientRequest, CommandRequest, DomainList, DomainSelection,
-    EncodedFrame, InspectTransactionRequest, InspectionOutcome, Reply, ReplyBody, ReplyDelivery,
-    RequestCancelled, RequestId, RequestRejected, RequestRejection, SelectDomainRequest,
-    ServerFrame, SessionEndReason, SessionEnding, SessionLimits, SubscribeDisposition,
-    SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest, UnsubscribeDisposition,
-    UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError, WireEncodeError,
+    ChoiceLookupRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest, DomainList,
+    DomainSelection, EncodedFrame, InspectTransactionRequest, InspectionOutcome, Reply, ReplyBody,
+    ReplyDelivery, RequestCancelled, RequestId, RequestRejected, RequestRejection,
+    SelectDomainRequest, ServerFrame, SessionEndReason, SessionEnding, SessionLimits,
+    SubscribeDisposition, SubscribeOutcome, SubscribeRequest, SubscriptionType, SuggestRequest,
+    UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest, VerifiedFrame, WireDecodeError,
+    WireEncodeError,
 };
 use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
-use nervix_nspl::{
-    client_statement::{ClientStatement, ParsedClientStatement, parse_client_statement_sources},
-    schema::ParseFromSourceError,
+use nervix_nspl::client_statement::{
+    ClientStatement, ParsedClientStatement, parse_client_statement_sources,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::{
@@ -70,7 +70,7 @@ use self::{
 use super::{
     command_result::CommandResult,
     model_mutation::command_error,
-    session_service::{SessionServiceImpl, error_response},
+    session_service::{SessionServiceImpl, rejected_source_response},
     subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
     transaction::TransactionInspectionOutcome,
 };
@@ -109,6 +109,7 @@ enum OrderedRequest {
 /// A request that only reads the session, served beside the ordered lane.
 enum ConcurrentRequest {
     Suggest(SuggestRequest),
+    Choice(ChoiceLookupRequest),
     ListDomains,
     SelectDomain(SelectDomainRequest),
     Inspect(InspectTransactionRequest),
@@ -623,6 +624,9 @@ async fn accept_frame(
         ClientRequest::Suggest(suggest) => {
             RoutedRequest::Concurrent(ConcurrentRequest::Suggest(suggest))
         }
+        ClientRequest::Choice(choice) => {
+            RoutedRequest::Concurrent(ConcurrentRequest::Choice(choice))
+        }
         ClientRequest::ListDomains => RoutedRequest::Concurrent(ConcurrentRequest::ListDomains),
         ClientRequest::SelectDomain(select) => {
             RoutedRequest::Concurrent(ConcurrentRequest::SelectDomain(select))
@@ -676,6 +680,9 @@ async fn serve_concurrent(
             let view = shared.view.read().clone();
             let outcome = service.process_suggest(suggest, &view).await;
             ReplyBody::Suggest(outcome)
+        }
+        ConcurrentRequest::Choice(choice) => {
+            ReplyBody::Choice(service.process_choice(choice).await)
         }
         ConcurrentRequest::ListDomains => {
             let domains = service.domain_infos().await;
@@ -903,11 +910,8 @@ async fn open_subscription(
     }
     let statements = match parse_client_statement_sources(&statement) {
         Ok(statements) => statements,
-        Err(ParseFromSourceError::Lex { diagnostics, .. }) => {
-            return Err(Box::new(error_response("lex error", &diagnostics)));
-        }
-        Err(ParseFromSourceError::Parse { diagnostics, .. }) => {
-            return Err(Box::new(error_response("parse error", &diagnostics)));
+        Err(report) => {
+            return Err(Box::new(rejected_source_response(report.current_context())));
         }
     };
     let Some(subscription) = single_create_subscription(statements) else {

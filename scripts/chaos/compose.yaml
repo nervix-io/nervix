@@ -174,6 +174,52 @@ services:
     networks:
       - chaos
 
+  load:
+    image: ${CHAOS_KCAT_IMAGE:-edenhill/kcat:1.7.1}
+    profiles:
+      - rolling
+    entrypoint:
+      - /bin/sh
+      - /opt/chaos/continuous-load.sh
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: load
+    environment:
+      CHAOS_LOAD_INTERVAL: "0.5"
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/continuous-load.sh:/opt/chaos/continuous-load.sh:ro
+      - ${CHAOS_LOAD_FILE:?CHAOS_LOAD_FILE is required}:/opt/chaos/input.ndjson:ro
+      - ${CHAOS_TRAFFIC_DIR:?CHAOS_TRAFFIC_DIR is required}:/opt/chaos/traffic:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
+  observer:
+    image: ${CHAOS_PROBE_IMAGE:-alpine:3.22}
+    profiles:
+      - rolling
+    entrypoint:
+      - /bin/sh
+      - /opt/chaos/observe-nodes.sh
+    labels:
+      <<: *run-labels
+      io.nervix.chaos.role: observer
+    environment:
+      CHAOS_NODE_COUNT: ${CHAOS_NODE_COUNT:?CHAOS_NODE_COUNT is required}
+    volumes:
+      - ${CHAOS_SCRIPT_DIR:?CHAOS_SCRIPT_DIR is required}/observe-nodes.sh:/opt/chaos/observe-nodes.sh:ro
+    logging:
+      driver: local
+      options:
+        max-file: "2"
+        max-size: 2m
+    networks:
+      - chaos
+
 networks:
   chaos:
     labels:

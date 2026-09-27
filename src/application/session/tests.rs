@@ -3,8 +3,9 @@
 //! Test harness outside the product layer order.
 //! - **Owns.** Assertions that a reply larger than a frame arrives whole as transfer parts, that a
 //!   reply larger than the transfer limit is refused whole, that a cancellation of a request that
-//!   is not in flight says so, and that registration refuses a duplicate or excess request rather
-//!   than queueing it.
+//!   is not in flight says so, that registration refuses a duplicate or excess request rather
+//!   than queueing it, and that a subscription statement the parser rejects is refused with the
+//!   stage and the diagnostic located in that statement.
 //! - **Depends on.** The session engine and the session test fixtures.
 //! - **Must not know.** Production ownership beyond the parent module under test.
 
@@ -13,13 +14,15 @@ use std::{
     time::Duration,
 };
 
+use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
     CancelRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest,
     LeaderRedirect as WireLeaderRedirect, ReplyBody, RequestId, RequestRejection, ServerFrame,
-    ServerMessage, SessionLimitSettings, SessionLimits, TransferAssembly, VerifiedFrame,
+    ServerMessage, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeRequest,
+    SubscriptionType, TransferAssembly, VerifiedFrame,
 };
-use nervix_models::{TransactionPosition, UserName};
+use nervix_models::{DomainName, TransactionPosition, UserName};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -348,5 +351,46 @@ async fn a_redirect_while_no_leader_is_known_names_none() {
         Some(0.."CREATE SCHEMA orphan ( id I64 );".len())
     );
 
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[tokio::test]
+async fn a_subscription_statement_the_parser_rejects_is_refused_at_its_rejected_token() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+    let statement = "CREATE SUBSCRIPTION watch TO 42;";
+    session.send(&ClientMessage {
+        request_id: request_id(1),
+        request: ClientRequest::Subscribe(SubscribeRequest {
+            domain: named::<DomainName>("default"),
+            statement: statement.to_string(),
+            subscription_type: SubscriptionType::Row,
+        }),
+    });
+    let (body, _) = session.reply(request_id(1)).await;
+
+    let ReplyBody::Subscribe(outcome) = body else {
+        panic!("a subscribe request is answered with its outcome, found {body:?}");
+    };
+    assert!(matches!(outcome.disposition, SubscribeDisposition::Failed));
+    assert_eq!(outcome.message, "parse error");
+    let [diagnostic] = outcome.diagnostics.as_slice() else {
+        panic!(
+            "a rejected statement carries one diagnostic, found {:?}",
+            outcome.diagnostics
+        );
+    };
+    let span = diagnostic
+        .span
+        .assured("a parse diagnostic locates the token it rejected");
+    let start: usize = span.start().arch_into();
+    let end: usize = span.end().arch_into();
+    assert_eq!(statement.get(start..end), Some("42"));
+
+    session.close().await;
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");
 }

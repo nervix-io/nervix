@@ -63,6 +63,8 @@ Transient memory is 256 MiB per node, divided into ceilings that cannot borrow f
 bulk buffers. One relay operation may hold at most 32 MiB of encoded body, 32 MiB of decoded data
 and 16 MiB of conversion scratch, and the relay budget is sized to hold two such operations at
 once so one blocked channel cannot exhaust the capacity another needs.
+The commands budget also holds the 16 MiB working reservation for one normalized consensus state
+write; half is the keyed payload ceiling and half covers database journal encoding and descriptors.
 
 These budgets cover work in flight between nodes. They are separate from the process memory a
 running graph holds, which the [memory-pressure watermarks](metrics-and-observability.md) govern.

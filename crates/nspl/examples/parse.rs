@@ -78,21 +78,19 @@ fn print_diagnostics(kind: &str, source_id: &str, source: &str, diagnostics: &[D
 }
 
 fn print_parse_result(input: &str) {
-    match parse_statement(input) {
+    let error = match parse_statement(input) {
         Ok(parsed) => {
             println!("{parsed:#?}");
+            return;
         }
-        Err(ParseFromSourceError::Lex {
-            source,
-            diagnostics,
-        }) => {
-            print_diagnostics("lex", "repl", &source, &diagnostics);
+        Err(error) => error,
+    };
+    match error.current_context() {
+        ParseFromSourceError::Lex { text, diagnostics } => {
+            print_diagnostics("lex", "repl", text, diagnostics);
         }
-        Err(ParseFromSourceError::Parse {
-            source,
-            diagnostics,
-        }) => {
-            print_diagnostics("parse", "repl", &source, &diagnostics);
+        ParseFromSourceError::Parse { text, diagnostics } => {
+            print_diagnostics("parse", "repl", text, diagnostics);
         }
     }
 }

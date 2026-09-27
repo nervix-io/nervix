@@ -63,7 +63,8 @@ pub fn parse_create_vhost_tokens(
 
 pub fn parse_create_vhost(
     input: &str,
-) -> Result<CreateStatement<CreateVhost<RequestedResourceVersion>>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateVhost<RequestedResourceVersion>>, ParseFromSourceError>
+{
     let LexedInput {
         source,
         spanned_tokens,

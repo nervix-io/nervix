@@ -244,8 +244,6 @@ impl CompiledJaqNativeCodec {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use nervix_models::{
         CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
         ParseAsType, ResolvedCodecWireFormat, SchemaField,
@@ -254,7 +252,8 @@ mod tests {
 
     use super::*;
     use crate::runtime_schema::{
-        RuntimeRecordBatch, RuntimeValue, compile_codec, compile_schema, decode_with_codec,
+        JsonDecoder, RuntimeRecordBatch, RuntimeValue, compile_codec, compile_schema,
+        decode_with_codec,
     };
 
     fn named<N>(raw: &str) -> N
@@ -305,7 +304,7 @@ mod tests {
         builder: &mut RuntimeRecordBatchBuilder,
         payload: &[u8],
     ) -> Result<usize, CodecError> {
-        decode_with_codec(codec, Cow::Borrowed(payload), builder)
+        decode_with_codec(codec, payload, &mut JsonDecoder::default(), builder)
     }
 
     fn user_ids(batch: &RuntimeRecordBatch) -> Vec<i64> {

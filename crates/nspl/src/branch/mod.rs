@@ -62,7 +62,7 @@ pub fn parse_create_branch_tokens(
 
 pub fn parse_create_branch(
     input: &str,
-) -> Result<CreateStatement<CreateBranch>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateBranch>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

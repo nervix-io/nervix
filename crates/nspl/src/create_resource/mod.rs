@@ -38,7 +38,7 @@ pub fn parse_create_resource_tokens(
 
 pub fn parse_create_resource(
     input: &str,
-) -> Result<CreateStatement<CreateResource>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateResource>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -76,7 +76,7 @@ mod tests {
     fn rejects_trailing_from_clause() {
         let err = parse_create_resource("CREATE RESOURCE fraud_model FROM '/tmp/model';")
             .expect_err("parse should fail");
-        match err {
+        match err.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. }
             | ParseFromSourceError::Lex { diagnostics, .. } => {
                 assert!(!diagnostics.is_empty());

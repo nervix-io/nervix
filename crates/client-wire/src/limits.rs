@@ -26,7 +26,7 @@ const DEFAULT_NESTING_DEPTH: usize = 64;
 const DEFAULT_COLLECTION_ENTRIES: usize = 1 << 18;
 
 /// The longest string by default.
-const DEFAULT_STRING_BYTES: usize = DEFAULT_FRAME_BYTES;
+const DEFAULT_STRING_BYTES: usize = DEFAULT_TRANSFER_BYTES;
 
 /// A frame must hold a transfer part with a useful chunk, and a limit below this cannot.
 pub(crate) const MIN_FRAME_BYTES: usize = 1024;

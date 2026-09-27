@@ -1,5 +1,7 @@
 FRAME client_cancel.nxcm
 REQUEST 14 CANCEL target=18446744073709551615
+FRAME client_choice.nxcm
+REQUEST 15 CHOICE target=PlacementPolicy dependencies=[pace:Paced] search=str:636f page_size=2 cursor=choice-page-two
 FRAME client_command.nxcm
 REQUEST 1 COMMAND query=str:43524541544520534348454d41206f726465727320282069642055363420293b204352454154452052454c4159206f726465727320534348454d41206f726465727320554e4252414e434845443b domain=tenant reference=0192d4e4-7b36-7c3e.9f00_5b2d8c3a1e44 expected_position=0 expected_preview=none
 FRAME client_command_bare.nxcm
@@ -10,6 +12,13 @@ FRAME client_subscribe.nxcm
 REQUEST 12 SUBSCRIBE domain=tenant statement=str:43524541544520535542534352495054494f4e206c6976652046524f4d206f72646572733b type=Row
 FRAME client_suggest.nxcm
 REQUEST 4 SUGGEST input=str:53484f572052454c415920c2abc3bc6ec3af636f6465c2bb20 cursor=13 domain=tenant page_size=2 continuation=page-two
+FRAME server_choice.nxsm
+REPLY 9 CHOICE status=Ready cursor=choice-page-two
+CHOICE value=pace:Paced label=str:5041434544 detail=str:57616c6c20636c6f636b group=str:446f6d61696e20636c6f636b
+CHOICE value=placement:PreferColocation label=str:50524546455220434f4c4f434154494f4e detail=none group=str:506c6163656d656e74
+CHOICE value=domain:tenant label=str:74656e616e74 detail=none group=none
+CHOICE value=resource:bundle label=str:62756e646c65 detail=none group=none
+CHOICE value=model:relay/orders label=str:6f7264657273 detail=str:52454c4159 group=str:4d6f64656c73
 FRAME server_command_failed.nxsm
 REPLY 1 COMMAND failed reference=0192d4e4-7b36-7c3e-9f00-5b2d8c3a1e44 origin=Recovered message=str:636f6d6d6974746564207472616e73616374696f6e3b2071756965736365206c6576656c3a20454e544954595f5041555345
 DIAGNOSTIC span=7..12 message=str:756e657870656374656420746f6b656e202752454c415927

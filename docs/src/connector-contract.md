@@ -26,6 +26,30 @@ connector receives resolved configuration and a typed plan, not graph routing au
 exception among sources is the node's own HTTP/HTTPS endpoint: it has no external driver and lives
 in the server, but uses the same source lifecycle and host intake.
 
+### DNS for HTTP and Iceberg
+
+The node loads and validates one `nervix-dns` resolver at startup. Composition passes its handle
+into the HTTP polling and Prometheus source plans and into the Sentry, OTEL HTTP, and Iceberg sink
+plans. The shared `HttpClientConfig` installs it on every Nervix-owned Reqwest 0.13 HTTP client.
+Iceberg REST uses a separate Reqwest 0.12 client with that same resolver. Iceberg object storage
+uses OpenDAL 0.57 with a configured Reqwest 0.13 client installed through `HttpClientLayer`; the
+layer also supplies HTTP calls made by OpenDAL's credential providers through its accessor info.
+The Reqwest 0.12 client receives an explicit AWS-LC rustls configuration with bundled trust
+roots, including in an isolated Iceberg connector build.
+The three Iceberg backends keep their S3, GCS, and Azure property mappings, URL-derived bucket or
+container, timeout and retry layers, and commit boundary. The standalone OpenDAL S3
+`detect_region` helper constructs its own client, but Nervix does not call it; S3 operator
+construction requires its configured region or the driver's environment policy.
+
+No migrated client constructs Reqwest's default Hickory resolver. That default could choose a
+public name server if reading system DNS configuration failed. A bad node resolver configuration
+therefore fails node startup, while a lookup failure reaches the existing source or sink failure
+path. Request URLs, HTTP authority, proxy behavior, TLS verification, custom trust and identity,
+and connection pools remain with the HTTP client. The request timeout includes DNS resolution,
+connection setup, TLS and response handling; the resolver's own 30 second ceiling only bounds
+clients without a shorter request timeout. DNS failures use the host's existing retry policy and
+do not create application-level probes or acknowledgements.
+
 ```mermaid
 sequenceDiagram
     participant NSPL as NSPL and Models
@@ -65,6 +89,13 @@ The session completion resolver uses the same vocabulary source capability befor
 ingestor is parsed, so it offers those functions only for sources that can read headers. Its
 emitter `INVOKE` completion similarly uses the vocabulary sink capability to offer `write_header`
 only for sinks that can write headers. Runtime validation remains authoritative.
+
+The source host decodes consecutive payloads into one ingest group's Arrow builders. For a
+schemaful JSON codec, that group also owns mutable payload scratch and simd-json parser buffers;
+the connector continues lending immutable payload bytes, and the host reuses its storage until the
+group closes. Compiled field keys direct borrowed JSON values into typed columns without a serde
+tree or an intermediate row representation. A rejected payload abandons only the partial Arrow row
+it started, preserving the accepted rows and transport positions around it.
 
 The host runs three source loop families, with a listener using the broker loop:
 

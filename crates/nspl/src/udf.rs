@@ -114,7 +114,9 @@ pub fn show_udfs_parser<'src>()
         .then_ignore(tok(Token::Semicolon).or_not())
 }
 
-pub fn parse_create_udf(input: &str) -> Result<CreateStatement<CreateUdf>, ParseFromSourceError> {
+pub fn parse_create_udf(
+    input: &str,
+) -> error_stack::Result<CreateStatement<CreateUdf>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

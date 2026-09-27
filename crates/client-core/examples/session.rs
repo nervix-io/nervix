@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", result.message);
 
     let where_clause = nervix_nspl::parse_expression("input.tenant = 'acme'").map_err(|error| {
-        std::io::Error::other(format!("invalid subscription expression: {error:?}"))
+        std::io::Error::other(format!("invalid subscription expression: {error:#}"))
     })?;
     let request = SubscriptionRequest::new("acme_orders", "orders").with_where_clause(where_clause);
     let result = client.subscribe(&request).await?;

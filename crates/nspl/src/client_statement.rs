@@ -468,7 +468,7 @@ fn alter_schema_context(tokens: &[Token]) -> Option<SchemaFieldContext> {
         .into_output()
 }
 
-pub fn parse_use_domain(input: &str) -> Result<DomainName, ParseFromSourceError> {
+pub fn parse_use_domain(input: &str) -> error_stack::Result<DomainName, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -490,24 +490,40 @@ pub fn parse_use_domain(input: &str) -> Result<DomainName, ParseFromSourceError>
         .verified("has_errors returned false above, so this parse produced output"))
 }
 
-pub fn parse_upload_resource_query(input: &str) -> Result<UploadResource, ParseFromSourceError> {
+pub fn parse_upload_resource_query(
+    input: &str,
+) -> error_stack::Result<UploadResource, ParseFromSourceError> {
     crate::upload_resource::parse_upload_resource(input)
 }
 
-pub fn parse_client_statement(input: &str) -> Result<ClientStatement, ParseFromSourceError> {
-    let LexedInput {
-        source,
-        spanned_tokens,
-        tokens,
-    } = lex_input(input)?;
+pub fn parse_client_statement(
+    input: &str,
+) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
+    let lexed = lex_input(input)?;
+    let tokens = 0..lexed.tokens.len();
+    parse_lexed_client_statement(&lexed, tokens, input.len())
+}
+
+/// Parses the one statement that `tokens` of `lexed` hold.
+///
+/// The tokens keep the spans they have in the lexed source, so a rejection is located in that whole
+/// source rather than in the statement alone, and its diagnostics index the text it names.
+/// `source_end` is where the statement's source ends, at its terminating semicolon or at the end of
+/// the source; a rejection that expected another token points there.
+fn parse_lexed_client_statement(
+    lexed: &LexedInput,
+    tokens: Range<usize>,
+    source_end: usize,
+) -> error_stack::Result<ClientStatement, ParseFromSourceError> {
+    let spanned_tokens = &lexed.spanned_tokens[tokens.clone()];
     let out = client_statement_parser()
         .then_ignore(end())
-        .parse(tokens.as_slice());
+        .parse(&lexed.tokens[tokens]);
     if out.has_errors() {
         return Err(into_parse_error(
-            source,
-            &spanned_tokens,
-            input.len(),
+            lexed.source.clone(),
+            spanned_tokens,
+            source_end,
             out.into_errors(),
         ));
     }
@@ -516,7 +532,9 @@ pub fn parse_client_statement(input: &str) -> Result<ClientStatement, ParseFromS
         .verified("has_errors returned false above, so this parse produced output"))
 }
 
-pub fn parse_client_statements(input: &str) -> Result<Vec<ClientStatement>, ParseFromSourceError> {
+pub fn parse_client_statements(
+    input: &str,
+) -> error_stack::Result<Vec<ClientStatement>, ParseFromSourceError> {
     parse_client_statement_sources(input).map(|statements| {
         statements
             .into_iter()
@@ -525,36 +543,53 @@ pub fn parse_client_statements(input: &str) -> Result<Vec<ClientStatement>, Pars
     })
 }
 
+/// Parses a batch of semicolon-separated statements, keeping where each one sits in `input`.
+///
+/// The batch is lexed once and every statement is parsed from its own run of those tokens. A
+/// rejected statement is therefore reported against the whole batch: its diagnostics index `input`,
+/// wherever in the batch that statement starts.
 pub fn parse_client_statement_sources(
     input: &str,
-) -> Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
-    let LexedInput { spanned_tokens, .. } = lex_input(input)?;
-    let mut statements = Vec::new();
-    let mut segment_start: Option<usize> = None;
+) -> error_stack::Result<Vec<ParsedClientStatement>, ParseFromSourceError> {
+    /// The statement being read: where its first token sits among the batch's tokens and in the
+    /// batch's source.
+    struct OpenStatement {
+        first_token: usize,
+        start: usize,
+    }
 
-    for token in &spanned_tokens {
+    let lexed = lex_input(input)?;
+    let mut statements = Vec::new();
+    let mut open: Option<OpenStatement> = None;
+
+    for (index, token) in lexed.spanned_tokens.iter().enumerate() {
         if token.token == Token::Semicolon {
             // A segment is a statement only when it actually contains tokens, so a stray
             // semicolon or a trailing comment does not become an empty statement.
-            if let Some(start) = segment_start.take() {
+            if let Some(statement) = open.take() {
+                let tokens = statement.first_token..index;
                 statements.push(ParsedClientStatement {
-                    span: start..token.span.end,
-                    statement: parse_client_statement(&input[start..token.span.start])?,
+                    span: statement.start..token.span.end,
+                    statement: parse_lexed_client_statement(&lexed, tokens, token.span.start)?,
                 });
             }
-        } else if segment_start.is_none() {
-            segment_start = Some(token.span.start);
+        } else if open.is_none() {
+            open = Some(OpenStatement {
+                first_token: index,
+                start: token.span.start,
+            });
         }
     }
 
-    if let Some(start) = segment_start {
-        let end = match spanned_tokens.last() {
+    if let Some(statement) = open {
+        let end = match lexed.spanned_tokens.last() {
             Some(token) => token.span.end,
             None => input.len(),
         };
+        let tokens = statement.first_token..lexed.spanned_tokens.len();
         statements.push(ParsedClientStatement {
-            span: start..end,
-            statement: parse_client_statement(&input[start..])?,
+            span: statement.start..end,
+            statement: parse_lexed_client_statement(&lexed, tokens, input.len())?,
         });
     }
 
@@ -813,6 +848,64 @@ mod tests {
             ClientStatement::UploadResource(_)
         ));
         assert_eq!(parsed[2].source(input), "DESCRIBE RESOURCE proto;");
+    }
+
+    #[test]
+    fn a_rejected_statement_is_located_in_the_whole_source() {
+        for (input, rejected) in [
+            ("CREATE SCHEMA broken (id BOGUS);", 25..30),
+            ("  CREATE SCHEMA broken (id BOGUS);", 27..32),
+            (
+                "CREATE SCHEMA valid (id STRING);\nCREATE SCHEMA broken (id BOGUS);",
+                58..63,
+            ),
+            ("// why\nCREATE SCHEMA broken (id BOGUS)", 32..37),
+        ] {
+            let error = parse_client_statement_sources(input).expect_err("BOGUS is not a type");
+            let ParseFromSourceError::Parse { text, diagnostics } = error.current_context() else {
+                panic!("every statement lexes, so parsing rejects the batch: {error:?}");
+            };
+            assert_eq!(text, input, "the diagnostics index the text they name");
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+            assert_eq!(diagnostics[0].span, rejected, "{input:?}");
+            assert_eq!(&input[diagnostics[0].span.clone()], "BOGUS");
+            assert!(
+                diagnostics[0].message.ends_with("found BOGUS"),
+                "{}",
+                diagnostics[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn an_incomplete_statement_is_located_at_its_own_end() {
+        let input = "USE demo;\nCREATE RELAY;\nBEGIN;";
+        let error = parse_client_statement_sources(input).expect_err("a relay needs a name");
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
+            panic!("every statement lexes, so parsing rejects the batch: {error:?}");
+        };
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics[0].span,
+            22..22,
+            "the relay name is missing before the `;`"
+        );
+    }
+
+    #[test]
+    fn an_unlexable_batch_is_rejected_at_the_lex_stage() {
+        let input = "USE demo;\nUSE 'unterminated;";
+        let error = parse_client_statement_sources(input).expect_err("the string never closes");
+        let ParseFromSourceError::Lex { text, diagnostics } = error.current_context() else {
+            panic!("an unterminated string cannot be lexed: {error:?}");
+        };
+        assert_eq!(text, input);
+        assert!(!diagnostics.is_empty());
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.span.end <= input.len())
+        );
     }
 
     #[test]

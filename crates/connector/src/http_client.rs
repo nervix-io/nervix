@@ -2,14 +2,16 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Building an HTTP client from a client's entries: the request timeout, the optional
-//!   CA file and the optional client identity.
-//! - **Depends on.** The client configuration's entries, TLS paths and PEM files, and `reqwest`.
+//! - **Owns.** Building an HTTP client from a client's entries: the node DNS resolver, request
+//!   timeout, optional CA file and optional client identity.
+//! - **Depends on.** The client configuration's entries, TLS paths and PEM files, `nervix-dns`,
+//!   and `reqwest`.
 //! - **Must not know.** Which connector sends requests through the client, or what it sends.
 
 use std::time::Duration;
 
 use error_stack::{Report, ResultExt as _};
+use nervix_dns::DnsResolver;
 use reqwest::{Certificate as HttpCertificate, Client as HttpClient, Identity as HttpIdentity};
 use thiserror::Error;
 
@@ -34,11 +36,20 @@ pub enum HttpClientConfigError {
 pub struct HttpClientConfig<'a> {
     entries: &'a [nervix_models::ClientConfigEntry],
     label: &'static str,
+    dns: &'a DnsResolver,
 }
 
 impl<'a> HttpClientConfig<'a> {
-    pub fn new(entries: &'a [nervix_models::ClientConfigEntry], label: &'static str) -> Self {
-        Self { entries, label }
+    pub fn new(
+        entries: &'a [nervix_models::ClientConfigEntry],
+        label: &'static str,
+        dns: &'a DnsResolver,
+    ) -> Self {
+        Self {
+            entries,
+            label,
+            dns,
+        }
     }
 
     pub fn build(&self) -> Result<HttpClient, Report<HttpClientConfigError>> {
@@ -49,7 +60,7 @@ impl<'a> HttpClientConfig<'a> {
     }
 
     fn builder(&self) -> Result<reqwest::ClientBuilder, Report<HttpClientConfigError>> {
-        let mut builder = HttpClient::builder();
+        let mut builder = HttpClient::builder().dns_resolver(self.dns.clone());
         if let Some(timeout_ms) = optional_client_config_value(self.entries, "timeout_ms") {
             let timeout_ms = timeout_ms.parse::<u64>().map_err(|source| {
                 Report::new(HttpClientConfigError::InvalidTimeout { label: self.label })
@@ -84,18 +95,22 @@ impl<'a> HttpClientConfig<'a> {
 
 #[cfg(test)]
 mod tests {
+    use nervix_dns::{DnsConfiguration, DnsConfigurationError};
     use nervix_models::ClientConfigEntry;
 
     use super::*;
 
-    #[test]
-    fn http_client_validates_timeout_configuration() {
+    #[tokio::test]
+    async fn http_client_validates_timeout_configuration()
+    -> Result<(), Report<DnsConfigurationError>> {
+        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
         let client = HttpClientConfig::new(
             &[ClientConfigEntry {
                 key: "timeout_ms".to_string(),
                 value: "250".to_string(),
             }],
             "HTTP",
+            &dns,
         )
         .build();
         assert!(client.is_ok());
@@ -106,14 +121,18 @@ mod tests {
                 value: "oops".to_string(),
             }],
             "HTTP",
+            &dns,
         )
         .build()
         .expect_err("invalid timeout");
         assert!(err.to_string().contains("invalid HTTP timeout_ms"));
+        Ok(())
     }
 
-    #[test]
-    fn http_client_classifies_invalid_tls_material() {
+    #[tokio::test]
+    async fn http_client_classifies_invalid_tls_material()
+    -> Result<(), Report<DnsConfigurationError>> {
+        let dns = DnsResolver::load(DnsConfiguration::system()).await?;
         let root = tempfile::tempdir().expect("temporary TLS directory should open");
         let invalid = root.path().join("invalid.pem");
         std::fs::write(
@@ -127,7 +146,7 @@ mod tests {
             key: "tls_ca_file".to_string(),
             value: invalid.clone(),
         }];
-        let ca = HttpClientConfig::new(&ca_entries, "HTTP")
+        let ca = HttpClientConfig::new(&ca_entries, "HTTP", &dns)
             .build()
             .expect_err("an invalid CA certificate must fail");
         assert!(matches!(
@@ -146,12 +165,13 @@ mod tests {
                 value: invalid,
             },
         ];
-        let identity = HttpClientConfig::new(&identity_entries, "HTTP")
+        let identity = HttpClientConfig::new(&identity_entries, "HTTP", &dns)
             .build()
             .expect_err("an invalid client identity must fail");
         assert!(matches!(
             identity.current_context(),
             HttpClientConfigError::ParseClientIdentity { label: "HTTP" }
         ));
+        Ok(())
     }
 }

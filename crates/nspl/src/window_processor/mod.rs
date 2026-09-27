@@ -256,7 +256,7 @@ pub fn parse_create_window_processor_tokens(
 
 pub fn parse_create_window_processor(
     input: &str,
-) -> Result<CreateStatement<CreateWindowProcessor>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateWindowProcessor>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

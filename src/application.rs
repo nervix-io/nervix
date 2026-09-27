@@ -870,6 +870,7 @@ impl Application {
         );
         let runtime = Runtime::with_persistence_and_temp_dir(
             executor,
+            Some(dns.clone()),
             Some(db.clone()),
             state_snapshot_interval,
             fault_injection.clone(),

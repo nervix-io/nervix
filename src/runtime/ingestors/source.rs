@@ -719,10 +719,7 @@ impl RuntimeSourceHost {
         let mut metadata = Vec::with_capacity(batch.messages.len());
         for message in batch.messages {
             tokio::task::consume_budget().await;
-            if let Err(error) = collector
-                .decode_payload(&self.codec, std::borrow::Cow::Borrowed(message.payload))
-                .await
-            {
+            if let Err(error) = collector.decode_payload(&self.codec, message.payload).await {
                 collector.discard_undispatched_payloads();
                 return Err(Report::new(error).change_context(SourceIntakeError::Decode));
             }

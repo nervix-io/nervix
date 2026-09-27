@@ -292,7 +292,10 @@ pub fn parse_create_client_kafka_tokens(
 
 pub fn parse_create_client_kafka(
     input: &str,
-) -> Result<CreateStatement<CreateClientKafka<RequestedResourceVersion>>, ParseFromSourceError> {
+) -> error_stack::Result<
+    CreateStatement<CreateClientKafka<RequestedResourceVersion>>,
+    ParseFromSourceError,
+> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -799,6 +802,7 @@ mod tests {
         let error =
             crate::statement::parse_statement(input).expect_err("this statement must be rejected");
         error
+            .current_context()
             .diagnostics()
             .iter()
             .map(|diagnostic| diagnostic.message.clone())

@@ -30,20 +30,22 @@ fn every_request_variant_is_sampled() {
         .map(|message| match message.request {
             ClientRequest::Command(_) => 0,
             ClientRequest::Suggest(_) => 1,
-            ClientRequest::ListDomains => 2,
-            ClientRequest::SelectDomain(_) => 3,
-            ClientRequest::AttachTransaction(_) => 4,
-            ClientRequest::InspectTransaction(_) => 5,
-            ClientRequest::Subscribe(_) => 6,
-            ClientRequest::Unsubscribe(_) => 7,
-            ClientRequest::Cancel(_) => 8,
+            ClientRequest::Choice(_) => 2,
+            ClientRequest::ListDomains => 3,
+            ClientRequest::SelectDomain(_) => 4,
+            ClientRequest::AttachTransaction(_) => 5,
+            ClientRequest::InspectTransaction(_) => 6,
+            ClientRequest::Subscribe(_) => 7,
+            ClientRequest::Unsubscribe(_) => 8,
+            ClientRequest::Cancel(_) => 9,
         })
         .collect::<Vec<_>>();
+    sampled.sort_unstable();
     sampled.dedup();
-    assert_eq!(sampled, (0..9).collect::<Vec<_>>());
+    assert_eq!(sampled, (0..10).collect::<Vec<_>>());
     assert_eq!(
         wire::ClientRequest::ENUM_VALUES.len(),
-        10,
+        11,
         "the schema declares NONE and one member per request variant"
     );
 }
@@ -108,7 +110,7 @@ fn a_zero_request_identity_is_refused() {
 fn an_undeclared_request_variant_is_refused_with_its_request_identity() {
     for discriminant in [
         wire::ClientRequest::NONE,
-        wire::ClientRequest(10),
+        wire::ClientRequest(11),
         wire::ClientRequest(255),
     ] {
         let frame = raw_client(list_domains_frame(42, discriminant));
