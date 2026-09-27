@@ -21,6 +21,33 @@ Run the same workload on one node:
 just chaos run baseline --image nervix:debian --nodes 1
 ```
 
+Run graceful rolling restarts while Kafka traffic is flowing:
+
+```bash
+just chaos run rolling-restart --image nervix:debian
+just chaos run rolling-restart --image nervix:debian --nodes 1
+```
+
+The rolling scenario uses the same externally provisioned graph and immutable Nervix image as the
+baseline. A separate producer continuously writes unique records, an independent observer probes
+every configured listener, and Kafka remains up throughout the rotation. The controller observes
+the current leader, stops that node first, then restarts each remaining node once. It invokes a
+digest-pinned Pumba 1.2.1 container against the exact labeled Compose container name with a
+60-second stop grace, longer than Nervix's default 50-second shutdown deadline. Docker must expose
+the local `/var/run/docker.sock` to the Pumba container. The same stopped container is started
+through Docker to preserve its image and named volume.
+
+Each stop must produce Docker exit code zero and completed shutdown-phase logs. The independent
+observer must see the listener outage and restoration; the source broker must advance while the
+node is stopped. In a three-node run, the survivors must agree on a caught-up leader and the sink
+must progress before the stopped node returns. Before the next stop, the controller requires
+restored listeners on every node, agreed public leader and membership, caught-up applied Raft
+indexes, settled ingestor and emitter state, and output progress. At the end it stops the producer,
+reconstructs the accepted-input ledger from Kafka, waits for the consumer group and output
+boundaries, and runs the baseline's exact ledger verifier. The rolling default generates at most
+1,000 records and allows 20 minutes; `--records`, `--timeout`, and the other baseline options remain
+available.
+
 The controller resolves the supplied reference to its immutable local image ID before Compose
 starts. If the reference is not local, it performs one bounded pull and then resolves the result.
 The Compose file has no build directives. Every Nervix node and every disposable administration
@@ -35,11 +62,16 @@ content. Duplicate, missing, unexpected, and corrupt records are reported indepe
 
 Each run writes bounded evidence under `target/chaos/<run-id>/`: the immutable image identity,
 rendered Compose configuration, phase ledger, public cluster and placement output, listener and
-metrics probes, broker offsets, accepted and observed traffic, verifier reports, logs, and container
-inspection. The default fixture has 24 records and accepts at most 1,000 with `--records`.
+metrics probes, broker offsets, accepted and observed traffic, verifier reports, logs, Docker events,
+and container inspection. The default baseline fixture has 24 records and accepts at most 1,000
+with `--records`.
+Rolling runs additionally retain a Pumba command and version, each target's before/stop/start
+inspection, stop and observer logs, measured stop and recovery times, per-restart public status and
+metrics, and per-restart offset results. A failed identity, stop, exit, deadline, listener, or
+recovery check leaves the manifest and available evidence under that run directory.
 
 All owned containers, networks, and volumes carry `io.nervix.chaos.run=<run-id>`. This label also
-gives Pumba scenarios an exact future target selector; Nervix nodes additionally carry
+gives Pumba scenarios an exact target selector; Nervix nodes additionally carry
 `io.nervix.chaos.target=true`. Normal exit, failure, timeout, and catchable signals preserve
 diagnostics and remove the labeled resources. If a controller is killed before its trap runs, use:
 

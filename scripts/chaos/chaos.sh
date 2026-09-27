@@ -8,10 +8,12 @@ usage() {
 Usage:
   just chaos list
   just chaos run baseline --image IMAGE [--nodes 1|3] [--records N]
+  just chaos run rolling-restart --image IMAGE [--nodes 1|3] [--records N]
   just chaos cleanup --run-id RUN_ID
   just chaos self-test
 
 Run `just chaos run baseline --help` for all baseline options.
+Run `just chaos run rolling-restart --help` for rolling-restart options.
 EOF
 }
 
@@ -19,6 +21,8 @@ list_scenarios() {
     cat <<'EOF'
 baseline  Kafka-to-Kafka delivery baseline using the supplied Nervix image
           topologies: one-node (--nodes 1), three-node (--nodes 3, default)
+rolling-restart  Graceful Pumba stops and Docker restarts under Kafka traffic
+                 topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 EOF
 }
 
@@ -45,6 +49,9 @@ case "${command_name}" in
         case "${scenario}" in
             baseline)
                 exec "${script_dir}/run-baseline.sh" "$@"
+                ;;
+            rolling-restart)
+                exec "${script_dir}/run-rolling-restart.sh" "$@"
                 ;;
             *)
                 printf 'unknown chaos scenario: %s\n' "${scenario}" >&2

@@ -7,18 +7,18 @@ fixture_file="${script_dir}/fixtures/baseline.nspl"
 fixture_generator="${script_dir}/fixtures/generate-baseline.jq"
 
 usage() {
-    cat <<'EOF'
-usage: run-baseline.sh --image IMAGE [options]
+    cat <<EOF
+usage: just chaos run ${scenario} --image IMAGE [options]
 
 Required:
   --image IMAGE          Already-built Nervix image reference or local image ID.
 
 Options:
-  --nodes 1|3            Baseline topology (default: 3).
-  --records N            Finite fixture size, 1..1000 (default: 24).
+  --nodes 1|3            Cluster topology (default: 3).
+  --records N            Finite fixture size, 1..1000 (default: ${record_count}).
   --artifacts DIR        Artifact root (default: target/chaos).
   --run-id ID            Stable run identifier; generated when omitted.
-  --timeout SECONDS      Whole-run bound, 120..3600 (default: 900).
+  --timeout SECONDS      Whole-run bound, 120..3600 (default: ${overall_timeout}).
   --keep                 Retain labeled Docker resources after diagnostics.
   -h, --help             Show this help.
 EOF
@@ -30,6 +30,7 @@ setup_error() {
 }
 
 image_ref=""
+scenario="baseline"
 node_count=3
 record_count=24
 artifact_root="target/chaos"
@@ -42,6 +43,11 @@ while [[ "$#" -gt 0 ]]; do
         --image)
             [[ "$#" -ge 2 ]] || setup_error '--image requires a value'
             image_ref="$2"
+            shift 2
+            ;;
+        --scenario)
+            [[ "$#" -ge 2 ]] || setup_error '--scenario requires a value'
+            scenario="$2"
             shift 2
             ;;
         --nodes)
@@ -78,12 +84,14 @@ while [[ "$#" -gt 0 ]]; do
             exit 0
             ;;
         *)
-            setup_error "unknown baseline argument: $1"
+            setup_error "unknown ${scenario} argument: $1"
             ;;
     esac
 done
 
 [[ -n "${image_ref}" ]] || setup_error '--image is required and must name an already-built Nervix image'
+[[ "${scenario}" == "baseline" || "${scenario}" == "rolling-restart" ]] \
+    || setup_error '--scenario must be baseline or rolling-restart'
 [[ "${node_count}" == "1" || "${node_count}" == "3" ]] \
     || setup_error '--nodes must be 1 or 3'
 [[ "${record_count}" =~ ^[0-9]+$ ]] \
@@ -139,11 +147,17 @@ export CHAOS_PASSWORD="${password}"
 export CHAOS_KAFKA_IMAGE="apache/kafka:3.9.1"
 export CHAOS_KCAT_IMAGE="edenhill/kcat:1.7.1"
 export CHAOS_PROBE_IMAGE="alpine:3.22"
+export CHAOS_PUMBA_IMAGE="ghcr.io/alexei-led/pumba@sha256:780505fe261932765921c94a23e24bda107c72927654c26a5893a238d7708bf0"
+export CHAOS_LOAD_FILE="${artifact_dir}/fixtures/input.ndjson"
+export CHAOS_TRAFFIC_DIR="${artifact_dir}/traffic"
+export CHAOS_SCRIPT_DIR="${script_dir}"
+export CHAOS_NODE_COUNT="${node_count}"
 
 jq -n \
     --arg run_id "${run_id}" \
     --arg project "${project_name}" \
     --arg image "${image_ref}" \
+    --arg scenario "${scenario}" \
     --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --argjson nodes "${node_count}" \
     --argjson records "${record_count}" \
@@ -154,13 +168,17 @@ jq -n \
       status: "preflight",
       started_at: $started_at,
       requested_image: $image,
+      scenario: $scenario,
       topology_nodes: $nodes,
       fixture_record_limit: $records,
       timeout_seconds: $timeout_seconds,
       artifact_limits: {
         fixture_records: 1000,
         compose_log_bytes: 2097152,
+        docker_event_bytes: 2097152,
         metrics_bytes_per_node: 1048576,
+        restart_log_bytes: 2097152,
+        observer_log_bytes_per_restart: 1048576,
         compose_log_files_per_container: 2,
         compose_log_bytes_per_file: 2097152
       }
@@ -214,6 +232,9 @@ compose_args=(--project-name "${project_name}" --file "${compose_file}" --profil
 if [[ "${node_count}" == "3" ]]; then
     compose_args+=(--profile three-node)
 fi
+if [[ "${scenario}" == "rolling-restart" ]]; then
+    compose_args+=(--profile rolling)
+fi
 
 compose() {
     run_bounded 120 docker compose "${compose_args[@]}" "$@"
@@ -231,7 +252,7 @@ run_cli() {
     fi
     compose run --rm --no-deps admin \
         nervix-cli \
-        --server http://nervix-1:47391 \
+        --server "http://${cli_host}:47391" \
         "${domain_args[@]}" \
         --password "${CHAOS_PASSWORD}" \
         --command "${command_text}" >"${cli_output}" 2>&1 || cli_status=$?
@@ -310,6 +331,16 @@ capture_diagnostics() {
         trim_file "${artifact_dir}/diagnostics/compose.log" 2097152
     fi
 
+    local events_since
+    events_since="$(jq -r '.started_at' "${artifact_dir}/manifest.json")"
+    timeout --foreground --kill-after=5s 20s docker events \
+        --since "${events_since}" \
+        --until "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --filter "label=io.nervix.chaos.run=${run_id}" \
+        --format '{{json .}}' \
+        >"${artifact_dir}/diagnostics/docker-events.ndjson" 2>&1
+    trim_file "${artifact_dir}/diagnostics/docker-events.ndjson" 2097152
+
     mapfile -t owned_containers < <(
         docker container ls --all --quiet \
             --filter "label=io.nervix.chaos.run=${run_id}" 2>/dev/null
@@ -377,7 +408,7 @@ finish() {
         "${artifact_dir}/manifest.json" >"${manifest_tmp}" \
         && mv "${manifest_tmp}" "${artifact_dir}/manifest.json"
 
-    printf '\nchaos baseline %s (exit %d)\n' "${final_status}" "${status}"
+    printf '\nchaos %s %s (exit %d)\n' "${scenario}" "${final_status}" "${status}"
     printf 'artifacts: %s\n' "${artifact_dir}"
     if [[ "${retained}" == true ]]; then
         printf 'cleanup: just chaos cleanup --run-id %s\n' "${run_id}"
@@ -396,6 +427,8 @@ trap finish EXIT
 trap 'on_signal 130 INT' INT
 trap 'on_signal 143 TERM' TERM
 trap 'on_signal 129 HUP' HUP
+
+cli_host=nervix-1
 
 ensure_tool_image() {
     local tool_image="$1"
@@ -620,10 +653,29 @@ run_bounded 30 docker run --rm --entrypoint /bin/sh "${image_id}" -eu -c \
 ensure_tool_image "${CHAOS_KAFKA_IMAGE}"
 ensure_tool_image "${CHAOS_KCAT_IMAGE}"
 ensure_tool_image "${CHAOS_PROBE_IMAGE}"
+if [[ "${scenario}" == "rolling-restart" ]]; then
+    [[ -S /var/run/docker.sock ]] \
+        || setup_error 'rolling-restart requires a local /var/run/docker.sock for Pumba'
+    ensure_tool_image "${CHAOS_PUMBA_IMAGE}"
+    pumba_image_id="$(run_bounded 30 docker image inspect --format '{{.Id}}' "${CHAOS_PUMBA_IMAGE}")"
+    run_bounded 30 docker run --rm \
+        --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+        "${pumba_image_id}" --version >"${artifact_dir}/pumba-version.txt"
+    run_bounded 30 docker run --rm \
+        --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+        "${pumba_image_id}" --dry-run --label io.nervix.chaos.run="${run_id}" \
+        stop --time 60 impossible-chaos-preflight-target \
+        >"${artifact_dir}/diagnostics/pumba-docker-preflight.txt" 2>&1 \
+        || setup_error 'Pumba cannot access the selected Docker daemon'
+fi
 
 update_manifest \
     ".status = \"running\" | .resolved_image_id = \$image_id | .resolved_repo_digests = \$digests" \
     --arg image_id "${image_id}" --arg digests "${image_digest}"
+if [[ "${scenario}" == "rolling-restart" ]]; then
+    update_manifest '.pumba_image_id = $image_id | .pumba_image = $image' \
+        --arg image_id "${pumba_image_id}" --arg image "${CHAOS_PUMBA_IMAGE}"
+fi
 
 phase "verifier self-check"
 run_bounded 60 "${script_dir}/tests/self-test.sh" \
@@ -741,6 +793,12 @@ jq -n \
       ]
     }' >"${artifact_dir}/results/remote-path.json"
 
+if [[ "${scenario}" == "rolling-restart" ]]; then
+    # The rolling scenario uses this setup and the shared final ledger verifier.
+    # shellcheck source=rolling-restart-scenario.sh
+    source "${script_dir}/rolling-restart-scenario.sh"
+    run_rolling_restart
+else
 phase "fixture generation and production"
 jq -nc \
     --arg run_id "${run_id}" \
@@ -773,6 +831,7 @@ kcat -q -b broker:9092 -C -t chaos_input -p 0 -o beginning -c "${input_end}" \
 accepted_count="$(wc -l <"${artifact_dir}/traffic/accepted-input.ndjson")"
 [[ "${accepted_count}" -eq "${input_end}" ]] \
     || { printf 'accepted-input ledger has %s records, expected %s\n' "${accepted_count}" "${input_end}" >&2; exit 1; }
+fi
 
 phase "offset and output boundaries"
 wait_for "Nervix consumer offsets at source boundary ${input_end}" 120 \
@@ -807,62 +866,79 @@ domain_cli_command 'DESCRIBE RELAY chaos_records;' \
     >"${artifact_dir}/public/describe-relay-final.txt" 2>&1
 domain_cli_command 'DESCRIBE EMITTER chaos_emitter;' \
     >"${artifact_dir}/public/describe-emitter-final.txt" 2>&1
-wait_for "public traffic metrics for every path owner" 45 traffic_metrics_ready
-assert_metric_total "${artifact_dir}/public/metrics-nervix-1.txt" "${input_end}" \
-    'direction="sent"' 'physical_node_id="node-1"' 'relay="chaos_records"' \
-    'target="chaos_ingestor"'
-if [[ "${node_count}" == "3" ]]; then
-    assert_metric_total "${artifact_dir}/public/metrics-nervix-2.txt" "${input_end}" \
-        'direction="received"' 'physical_node_id="node-2"' 'relay="chaos_records"' \
-        'target="chaos_records"' 'target_kind="RELAY"'
-    assert_metric_total "${artifact_dir}/public/metrics-nervix-3.txt" "${input_end}" \
-        'direction="received"' 'physical_node_id="node-3"' 'relay="chaos_records"' \
-        'target="chaos_emitter"' 'target_kind="EMITTER"'
-else
+if [[ "${scenario}" == "baseline" ]]; then
+    wait_for "public traffic metrics for every path owner" 45 traffic_metrics_ready
     assert_metric_total "${artifact_dir}/public/metrics-nervix-1.txt" "${input_end}" \
-        'direction="received"' 'physical_node_id="node-1"' 'relay="chaos_records"' \
-        'target="chaos_emitter"' 'target_kind="EMITTER"'
+        'direction="sent"' 'physical_node_id="node-1"' 'relay="chaos_records"' \
+        'target="chaos_ingestor"'
+    if [[ "${node_count}" == "3" ]]; then
+        assert_metric_total "${artifact_dir}/public/metrics-nervix-2.txt" "${input_end}" \
+            'direction="received"' 'physical_node_id="node-2"' 'relay="chaos_records"' \
+            'target="chaos_records"' 'target_kind="RELAY"'
+        assert_metric_total "${artifact_dir}/public/metrics-nervix-3.txt" "${input_end}" \
+            'direction="received"' 'physical_node_id="node-3"' 'relay="chaos_records"' \
+            'target="chaos_emitter"' 'target_kind="EMITTER"'
+    else
+        assert_metric_total "${artifact_dir}/public/metrics-nervix-1.txt" "${input_end}" \
+            'direction="received"' 'physical_node_id="node-1"' 'relay="chaos_records"' \
+            'target="chaos_emitter"' 'target_kind="EMITTER"'
+    fi
 fi
 
-remote_path_tmp="$(mktemp "${artifact_dir}/results/.remote-path.XXXXXX")"
-jq \
-    --argjson records "${input_end}" \
-    --arg source_metrics "public/metrics-nervix-1.txt" \
-    --arg relay_metrics "public/metrics-nervix-$([[ "${node_count}" == "3" ]] && printf 2 || printf 1).txt" \
-    --arg emitter_metrics "public/metrics-nervix-$([[ "${node_count}" == "3" ]] && printf 3 || printf 1).txt" \
-    '.traffic_records = $records
-     | .traffic_evidence = [$source_metrics, $relay_metrics, $emitter_metrics]' \
-    "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
-mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
+if [[ "${scenario}" == "baseline" ]]; then
+    remote_path_tmp="$(mktemp "${artifact_dir}/results/.remote-path.XXXXXX")"
+    jq \
+        --argjson records "${input_end}" \
+        --arg source_metrics "public/metrics-nervix-1.txt" \
+        --arg relay_metrics "public/metrics-nervix-$([[ "${node_count}" == "3" ]] && printf 2 || printf 1).txt" \
+        --arg emitter_metrics "public/metrics-nervix-$([[ "${node_count}" == "3" ]] && printf 3 || printf 1).txt" \
+        '.traffic_records = $records
+         | .traffic_evidence = [$source_metrics, $relay_metrics, $emitter_metrics]' \
+        "${artifact_dir}/results/remote-path.json" >"${remote_path_tmp}"
+    mv "${remote_path_tmp}" "${artifact_dir}/results/remote-path.json"
+fi
 broker_admin /opt/kafka/bin/kafka-consumer-groups.sh \
     --bootstrap-server broker:9092 --group chaos_baseline --describe \
     >"${artifact_dir}/public/consumer-group-final.txt"
 
-jq -n \
-    --arg run_id "${run_id}" \
-    --arg image_id "${image_id}" \
-    --arg image_digest "${image_digest}" \
-    --argjson nodes "${node_count}" \
-    --argjson generated_records "${record_count}" \
-    --argjson accepted_records "${input_end}" \
-    --argjson observed_records "${output_end}" \
-    --argjson producer_exit_code "${producer_status}" \
-    --argjson remote_path "$([[ "${node_count}" == "3" ]] && printf true || printf false)" \
-    '{
-      verdict: "pass",
-      run_id: $run_id,
-      image_id: $image_id,
-      image_digest: $image_digest,
-      topology_nodes: $nodes,
-      generated_records: $generated_records,
-      accepted_source_records: $accepted_records,
-      observed_output_records: $observed_records,
-      producer_exit_code: $producer_exit_code,
-      producer_outcome_was_ambiguous: ($producer_exit_code != 0),
-      source_offsets_committed: true,
-      remote_path_proven: $remote_path,
-      ledger: "results/ledger.json",
-      placement: "results/remote-path.json"
-    }' >"${artifact_dir}/results/baseline.json"
+if [[ "${scenario}" == "baseline" ]]; then
+    jq -n \
+        --arg run_id "${run_id}" \
+        --arg image_id "${image_id}" \
+        --arg image_digest "${image_digest}" \
+        --argjson nodes "${node_count}" \
+        --argjson generated_records "${record_count}" \
+        --argjson accepted_records "${input_end}" \
+        --argjson observed_records "${output_end}" \
+        --argjson producer_exit_code "${producer_status}" \
+        --argjson remote_path "$([[ "${node_count}" == "3" ]] && printf true || printf false)" \
+        '{
+          verdict: "pass",
+          run_id: $run_id,
+          image_id: $image_id,
+          image_digest: $image_digest,
+          topology_nodes: $nodes,
+          generated_records: $generated_records,
+          accepted_source_records: $accepted_records,
+          observed_output_records: $observed_records,
+          producer_exit_code: $producer_exit_code,
+          producer_outcome_was_ambiguous: ($producer_exit_code != 0),
+          source_offsets_committed: true,
+          remote_path_proven: $remote_path,
+          ledger: "results/ledger.json",
+          placement: "results/remote-path.json"
+        }' >"${artifact_dir}/results/baseline.json"
+else
+    jq -n \
+        --arg run_id "${run_id}" \
+        --arg image_id "${image_id}" \
+        --arg pumba_image_id "${pumba_image_id}" \
+        --argjson nodes "${node_count}" \
+        --argjson accepted_records "${input_end}" \
+        --argjson observed_records "${output_end}" \
+        --slurpfile progress "${artifact_dir}/results/rolling-progress.json" \
+        '{verdict:"pass",run_id:$run_id,image_id:$image_id,pumba_image_id:$pumba_image_id,topology_nodes:$nodes,accepted_source_records:$accepted_records,observed_output_records:$observed_records,source_offsets_committed:true,ledger:"results/ledger.json",remote_path:"results/remote-path.json",progress:$progress[0]}' \
+        >"${artifact_dir}/results/rolling-restart.json"
+fi
 
 current_phase="complete"
