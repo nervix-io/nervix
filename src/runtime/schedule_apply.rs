@@ -793,10 +793,6 @@ impl Runtime {
                 reason: format!("failed to build entity-swap schedule graph: {error}"),
             },
         )?);
-        let graph_handle = self.domain_graph_handle(domain).await;
-        // Publish the whole desired graph before any entity swaps so no task observes a
-        // half-applied topology while its siblings are still being replaced.
-        graph_handle.store(Some(desired_graph));
         let desired_model_index = schedule
             .nodes
             .values()
@@ -1338,7 +1334,7 @@ impl Runtime {
                         let Some(runtime) = self.start_branched_entrypoint_runtime(
                             domain,
                             &entity.identifier,
-                            Some((graph_handle.clone(), template)),
+                            Some(template),
                         ) else {
                             continue;
                         };
@@ -1633,36 +1629,32 @@ impl Runtime {
                 }
             }
 
-            let (old_task, mut template) = {
+            let executes_locally =
+                Self::scheduled_node_executes_locally(desired_node, local_node_id);
+            let published_plan = if executes_locally {
+                Some(
+                    self.bind_installed_processor_plan(domain, &desired_spec, &desired_model_index)
+                        .await
+                        .map_err(|error| RuntimeError::BuildDomainExecution {
+                            domain: domain.as_str().to_string(),
+                            reason: format!("{error:#}"),
+                        })?,
+                )
+            } else {
+                None
+            };
+            let template = published_plan
+                .as_ref()
+                .map(|plan| plan.template.as_ref().clone());
+            let old_task = {
                 let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                     RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
                         reason: "domain execution is unavailable for entity swap".to_string(),
                     }
                 })?;
-                let template = materialize_processor_instance_template(
-                    &desired_spec,
-                    &desired_model_index,
-                    &execution.relay_schemas,
-                    &execution.relay_registries,
-                    &execution.relay_services,
-                    Some(&execution.udfs),
-                )
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: reason.to_string(),
-                })?;
-                let old_task = execution.node_tasks.remove(entity);
-                (old_task, template)
+                execution.node_tasks.remove(entity)
             };
-
-            template
-                .prepare_wasm_processors(self, domain)
-                .await
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("{reason:#}"),
-                })?;
             let had_old_task = old_task.is_some();
             let handoffs = if let Some(old_task) = old_task {
                 old_task
@@ -1682,6 +1674,14 @@ impl Runtime {
                     reason: "domain execution disappeared during entity swap".to_string(),
                 }
             })?;
+            if let Some(published_plan) = published_plan {
+                execution
+                    .routing
+                    .processor_plans
+                    .insert(entity.clone(), published_plan);
+            } else {
+                execution.routing.processor_plans.remove(entity);
+            }
             for relay in &old_spec.spec.input_relays {
                 if let Some(services) = execution.relay_services.get(relay)
                     && had_old_task
@@ -1690,9 +1690,10 @@ impl Runtime {
                 }
             }
 
-            let executes_locally =
-                local_node_id.is_some_and(|node_id| desired_node.executes_on(node_id));
             if executes_locally {
+                let template = template.assured(
+                    "a locally executing processor binds its template before its prior task stops",
+                );
                 let mut inputs = Vec::with_capacity(desired_spec.spec.input_relays.len());
                 for relay in &desired_spec.spec.input_relays {
                     let services = execution.relay_services.get(relay).ok_or_else(|| {
@@ -1710,11 +1711,7 @@ impl Runtime {
                     ));
                 }
                 let task = spawn_processor_node_runtime_with_handoffs(
-                    ProcessorRuntimeContext::new(
-                        self.clone(),
-                        domain.clone(),
-                        execution.graph.clone(),
-                    ),
+                    ProcessorRuntimeContext::new(self.clone(), domain.clone()),
                     &execution.shutdown,
                     template,
                     inputs,
@@ -1727,6 +1724,13 @@ impl Runtime {
 
         self.apply_dynamic_model_updates(domain, dynamic_updates)
             .await?;
+        let processor_plans = self
+            .bind_installed_processor_plans(domain, &schedule)
+            .await
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("{error:#}"),
+            })?;
         let mut routing_published = false;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id {
@@ -1749,8 +1753,13 @@ impl Runtime {
                 }
             }
             execution.schedule = schedule;
+            execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
             routing_published = true;
+        }
+        if routing_published {
+            let graph_handle = self.domain_graph_handle(domain).await;
+            graph_handle.store(Some(desired_graph));
         }
         if routing_published && materialized_routing_changed {
             // Readers must refresh only after the owner map is published. Waking them while the
@@ -1768,6 +1777,13 @@ impl Runtime {
         schedule: DomainSchedule,
         updates: &[nervix_models::DynamicModelUpdate],
     ) -> Result<(), RuntimeError> {
+        let processor_plans = self
+            .bind_installed_processor_plans(domain, &schedule)
+            .await
+            .map_err(|error| RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: format!("{error:#}"),
+            })?;
         let graph = ActiveGraph::from_scheduled_models(&schedule).map_err(|error| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
@@ -1779,11 +1795,20 @@ impl Runtime {
         // remain fenced until the same schedule reaches Ready.
         self.install_state_identities(&schedule);
         self.apply_dynamic_model_updates(domain, updates).await?;
-        let graph_handle = self.domain_graph_handle(domain).await;
-        graph_handle.store(Some(StdArc::new(graph)));
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             execution.schedule = schedule;
+            execution.routing.processor_plans = processor_plans;
+            execution.routing.publish();
+        } else {
+            return Err(RuntimeError::BuildDomainExecution {
+                domain: domain.as_str().to_string(),
+                reason: "domain execution disappeared while publishing processor plans".to_string(),
+            });
         }
+        // The active graph remains the control-plane observation surface. Processor tasks have
+        // already received the complete typed snapshot and never read this graph.
+        let graph_handle = self.domain_graph_handle(domain).await;
+        graph_handle.store(Some(StdArc::new(graph)));
         if updates.iter().any(|update| {
             !matches!(
                 update,
@@ -2268,13 +2293,7 @@ mod tests {
             )
             .await
             .expect("running schedule should build");
-        let graph_before_pause = runtime
-            .inner
-            .executions
-            .get(&domain)
-            .expect("execution should exist")
-            .graph
-            .clone();
+        let graph_before_pause = runtime.domain_graph_handle(&domain).await;
 
         let mut paused = running;
         paused.status = DomainStatus::Paused;
@@ -2287,13 +2306,14 @@ mod tests {
             .await
             .expect("paused schedule should remain active");
 
+        let graph_after_pause = runtime.domain_graph_handle(&domain).await;
         let execution = runtime
             .inner
             .executions
             .get(&domain)
             .expect("paused execution should remain");
         assert!(!execution.passive_only);
-        assert!(StdArc::ptr_eq(&graph_before_pause, &execution.graph));
+        assert!(StdArc::ptr_eq(&graph_before_pause, &graph_after_pause));
         assert!(execution.relay_registries.contains_key(&relay));
     }
 
@@ -2566,6 +2586,14 @@ mod tests {
                 materialized_state: None,
             }))
         };
+        let processor_routes = |name: &str| {
+            let mut routes = ProcessorOutputs::single(named(name));
+            routes.routes[0].construction.inherit = Some(nervix_models::Inheritance::All);
+            routes.with_flush_policy(FlushPolicy::Each {
+                interval: "100ms".to_string(),
+                max_batch_size: "1MiB".to_string(),
+            })
+        };
         let schedule = DomainSchedule::new(
             domain.clone(),
             vec![
@@ -2586,11 +2614,7 @@ mod tests {
                 scheduled_model(nervix_models::Model::Deduplicator(CreateDeduplicator {
                     name: named("dedup_orders"),
                     from: ProcessorInputs::single(named("orders")),
-                    output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        }),
+                    output_routes: processor_routes("projected_orders"),
                     branched_by: BranchSelection::unbranched(),
                     deduplicate_on: vec![expression("input.order_id")],
                     max_time: "10m".to_string(),
@@ -2604,11 +2628,7 @@ mod tests {
                         vec![named("left_orders"), named("right_orders")],
                         Vec::new(),
                     ),
-                    output_routes: (ProcessorOutputs::single(named("joined_orders")))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        }),
+                    output_routes: processor_routes("joined_orders"),
                     branched_by: BranchSelection::unbranched(),
                     mode: AckMode::Attached,
                     filter_where: None,

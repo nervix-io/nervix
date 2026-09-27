@@ -104,15 +104,14 @@ impl Runtime {
         &self,
         domain: &DomainName,
         identifier: impl Into<ModelName>,
-        branched: Option<(SharedActiveGraph, IngestorRouteTemplate)>,
+        branched: Option<IngestorRouteTemplate>,
     ) -> Option<Arc<IngestorRouteRuntime>> {
         let identifier = identifier.into();
-        branched.map(|(graph, template)| {
+        branched.map(|template| {
             IngestorRouteRuntime::new(
                 self.clone(),
                 domain.clone(),
                 IngestorName::from(&identifier),
-                graph,
                 template,
                 self.inner.branch_instance_expiration_scan_interval,
             )
@@ -123,7 +122,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         ingestor: &IngestorName,
-        branched: HashMap<RelayName, (SharedActiveGraph, IngestorRouteTemplate)>,
+        branched: HashMap<RelayName, IngestorRouteTemplate>,
     ) -> IngestorRouteRuntimes {
         let mut roots = branched.into_iter().collect::<Vec<_>>();
         roots.sort_by(|left, right| left.0.cmp(&right.0));
@@ -910,11 +909,9 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: reason.to_string(),
             })?;
-            let Some(runtime) = self.start_branched_entrypoint_runtime(
-                domain,
-                &spec.identifier,
-                Some((domain_graph.clone(), template)),
-            ) else {
+            let Some(runtime) =
+                self.start_branched_entrypoint_runtime(domain, &spec.identifier, Some(template))
+            else {
                 continue;
             };
             branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
@@ -924,37 +921,49 @@ impl Runtime {
                 .push(runtime);
         }
 
+        let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
+        let local_processor_specs = processor_input_specs
+            .iter()
+            .map(|(spec, _)| spec.clone())
+            .collect::<Vec<_>>();
+        let previous_processor_plans = HashMap::default();
+        let processor_plans = bind_published_processor_plans(
+            &local_processor_specs,
+            ProcessorPlanBindingContext {
+                runtime: self,
+                domain,
+                model_index: &model_index,
+                relay_schemas: &relay_schemas,
+                relay_registries: &relay_registries,
+                relay_services: &relay_services,
+                relay_branchings: &relay_branchings,
+                materialized_stream_specs: &materialized_stream_specs,
+                lookups: &lookup_runtimes,
+                udfs: Some(&udf_executor),
+                previous: &previous_processor_plans,
+            },
+        )
+        .await
+        .map_err(|reason| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("{reason:#}"),
+        })?;
+
         for (node_spec, inputs) in processor_input_specs {
-            let mut template = materialize_processor_instance_template(
-                &node_spec,
-                &model_index,
-                &relay_schemas,
-                &relay_registries,
-                &relay_services,
-                Some(&udf_executor),
-            )
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-            Box::pin(template.prepare_wasm_processors(self, domain))
-                .await
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("{reason:#}"),
-                })?;
             let entity = NodeRef {
                 kind: node_spec.spec.kind,
                 identifier: node_spec.spec.processor.clone(),
             };
+            let template = processor_plans
+                .get(&entity)
+                .verified("the published plan binder returns every local processor")
+                .template
+                .as_ref()
+                .clone();
             node_tasks.insert(
                 entity,
                 spawn_processor_node_runtime(
-                    ProcessorRuntimeContext::new(
-                        self.clone(),
-                        domain.clone(),
-                        domain_graph.clone(),
-                    ),
+                    ProcessorRuntimeContext::new(self.clone(), domain.clone()),
                     &shutdown_tx,
                     template,
                     inputs,
@@ -963,7 +972,6 @@ impl Runtime {
             );
         }
 
-        let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
         let execution_build_deps = ExecutionBuildDeps {
             domain,
             relay_schemas: &relay_schemas,
@@ -1075,7 +1083,6 @@ impl Runtime {
                 start_version: desired_start_version,
                 domain_clock,
                 shutdown: shutdown_tx,
-                graph: domain_graph.clone(),
                 routing: self.stage_domain_routing(
                     domain,
                     DomainRoutingSnapshot {
@@ -1090,6 +1097,7 @@ impl Runtime {
                         materialized_stream_owner_nodes,
                         codecs,
                         signaling_protocols,
+                        processor_plans,
                     },
                 ),
                 branched_ingestors: Self::branched_specs_by_identifier(&branched_specs),
@@ -1316,7 +1324,6 @@ impl Runtime {
             start_version,
             domain_clock,
             shutdown,
-            graph,
             routing: self.stage_domain_routing(
                 domain,
                 DomainRoutingSnapshot {
@@ -1331,6 +1338,7 @@ impl Runtime {
                     materialized_stream_owner_nodes: HashMap::default(),
                     codecs,
                     signaling_protocols: HashMap::default(),
+                    processor_plans: HashMap::default(),
                 },
             ),
             branched_ingestors: HashMap::default(),
