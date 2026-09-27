@@ -237,6 +237,49 @@ Feature: LOOKUP_HASH_MAP filter-map function
       | 1            | 0             |
       | 3            | 0             |
 
+  Scenario Outline: Filter-map LOOKUP_HASH_MAP validation rejects hash map and field names that are not string literals
+    Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+
+      CREATE SCHEMA notification_in (
+        id STRING,
+        title STRING
+      );
+
+      CREATE SCHEMA notification_out (
+        id STRING,
+        title_key STRING,
+        city STRING OPTIONAL
+      );
+
+      CREATE RELAY incoming_logs SCHEMA notification_in UNBRANCHED;
+      CREATE RELAY enriched_logs SCHEMA notification_out UNBRANCHED;
+      """
+    When these NSPL commands fail with "model 'enrich_titles' in domain '{{domain}}' is invalid: LOOKUP_HASH_MAP argument <argument> must be a string literal"
+      """
+      CREATE DEDUPLICATOR enrich_titles
+        FROM incoming_logs
+        DEDUPLICATE ON input.id
+        MAX TIME 10m
+        UNBRANCHED
+        TO enriched_logs
+          INHERIT ALL EXCEPT title
+          SET title_key = lower(input.title),
+              city = <lookup>
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size | replica_count | argument | lookup                                                                   |
+      | 1            | 0             | 1        | LOOKUP_HASH_MAP(input.title, lower(input.title), "city")                 |
+      | 1            | 0             | 3        | LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), input.title) |
+      | 3            | 0             | 1        | LOOKUP_HASH_MAP(input.title, lower(input.title), "city")                 |
+      | 3            | 0             | 3        | LOOKUP_HASH_MAP("titles_by_normalized", lower(input.title), input.title) |
+
   Scenario Outline: Output routes resolve LOOKUP_HASH_MAP calls independently per route
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
     And a <cluster_size> node nervix cluster is started

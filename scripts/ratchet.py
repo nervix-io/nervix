@@ -267,7 +267,7 @@ def _end_of_block(code: str, open_index: int) -> int:
     return length
 
 
-def _generic_arguments(code: str, open_index: int) -> list[str] | None:
+def generic_arguments(code: str, open_index: int) -> list[str] | None:
     """Split the arguments of the `<…>` opening at `open_index`, or `None` if it never closes."""
 
     arguments: list[str] = []
@@ -578,19 +578,6 @@ def _skip_space(code: str, index: int) -> int:
     return index
 
 
-_RESULT = re.compile(r"\bResult\s*<")
-
-
-def count_result_string_errors(files: Sequence[RustFile]) -> list[Site]:
-    sites: list[Site] = []
-    for file in product_files(files):
-        for match in _RESULT.finditer(file.product):
-            arguments = _generic_arguments(file.product, match.end() - 1)
-            if arguments and len(arguments) >= 2 and arguments[-1].strip() == "String":
-                sites.append(file.site(match.start(), file.source_line(match.start())))
-    return sites
-
-
 _STRUCT = re.compile(r"\bstruct\s+[A-Za-z_][A-Za-z0-9_]*")
 _TESTING_FEATURE = re.compile(r"""feature\s*=\s*"testing\"""")
 
@@ -717,14 +704,14 @@ def count_write_once_rwlock_fields(files: Sequence[RustFile]) -> list[Site]:
                 continue
             start, end = body
             for field in _RWLOCK_FIELD.finditer(file.product, start, end):
-                lock_arguments = _generic_arguments(file.product, field.end() - 1)
+                lock_arguments = generic_arguments(file.product, field.end() - 1)
                 if lock_arguments is None or len(lock_arguments) != 1:
                     continue
                 option = lock_arguments[0]
                 option_match = _OPTION_TYPE.match(option)
                 if option_match is None:
                     continue
-                option_arguments = _generic_arguments(option, option_match.end() - 1)
+                option_arguments = generic_arguments(option, option_match.end() - 1)
                 if option_arguments is None or len(option_arguments) != 1:
                     continue
                 value = option_arguments[0].strip()
@@ -770,7 +757,7 @@ def count_bare_error_signatures(files: Sequence[RustFile]) -> list[Site]:
         for match in _RESULT_RETURN.finditer(file.product):
             if match.group(1).replace(" ", "") == "error_stack::":
                 continue
-            arguments = _generic_arguments(file.product, match.end() - 1)
+            arguments = generic_arguments(file.product, match.end() - 1)
             if not arguments or len(arguments) < 2:
                 continue
             error = _PLAIN_TYPE.match(arguments[-1].strip())
@@ -824,11 +811,6 @@ COUNTS: tuple[Count, ...] = (
         "combinator_control_flow",
         "control flow written as `Option` and `Result` combinator chains",
         count_combinator_control_flow,
-    ),
-    Count(
-        "result_string_errors",
-        "`Result<_, String>` in place of a typed error",
-        count_result_string_errors,
     ),
     Count(
         "bare_error_signatures",

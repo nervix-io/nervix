@@ -50,7 +50,8 @@ Feature: MongoDB emission
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_out_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -131,7 +132,8 @@ Feature: MongoDB emission
           'addr' = '{{mongodb_addr}}',
           'database' = 'nervix'
         };
-        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_conflict_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } ON CONFLICT ("mongodb_user_id") <conflict_action> WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client INSERT TO COLLECTION notifications_mongodb_conflict_{{test_id}} VALUES { "mongodb_user_id" = input.user_id, "mongodb_now" = NOW() AS STRING, "mongodb_action" = LOWER(input.action) } ON CONFLICT ("mongodb_user_id") <conflict_action> MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -221,8 +223,8 @@ Feature: MongoDB emission
         "mongodb_now" = NOW() AS STRING,
         "mongodb_action" = LOWER(input.action)
       }
-      WITH MAX BATCH 10
       MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,
@@ -259,7 +261,7 @@ Feature: MongoDB emission
       | 3            |
 
   @database_emitter_modes @max_batch @mongodb_max_batch
-  Scenario Outline: MongoDB WITH MAX BATCH splits one oversized flush into multiple inserts
+  Scenario Outline: MongoDB BATCH MAX MESSAGES splits one oversized flush into multiple inserts
     Given MQTT is running
     And MongoDB is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -298,8 +300,8 @@ Feature: MongoDB emission
       FROM notifications
       TO MONGODB mongodb_client INSERT TO COLLECTION batch_mongodb_{{test_id}}
       VALUES { "mongodb_user_id" = input.user_id }
-      WITH MAX BATCH 2
       MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;
@@ -376,8 +378,8 @@ Feature: MongoDB emission
         "mongodb_action" = LOWER(input.action)
       }
       <conflict_clause>
-      WITH MAX BATCH 10
       MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      BATCH MAX MESSAGES 10 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR SEND TO emitter_errors
       SET error_code = error.code,

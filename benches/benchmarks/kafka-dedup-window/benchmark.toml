@@ -25,6 +25,9 @@ emitter_flush_each = "50ms"
 emitter_max_batch_size = "8MiB"
 ingestor_flush_each = "50ms"
 ingestor_max_batch_size = "64KiB"
+sketch_enabled = false
+sketch_precision = 10
+sketch_state_size = "16MiB"
 window_max_delay = "1s"
 window_messages = 500
 

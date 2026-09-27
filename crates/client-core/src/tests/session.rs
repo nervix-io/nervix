@@ -19,8 +19,8 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainPace, DomainStatus, FieldName, ParseAsType,
-    RelayName, SchemaField, SubscriptionName, TransactionInspectionRejection,
-    TransactionInspectionTarget,
+    PlacementPolicy, RelayName, SchemaField, SubscriptionName, TransactionInspection,
+    TransactionInspectionRejection, TransactionInspectionTarget,
 };
 use tokio::{
     net::TcpListener,
@@ -39,18 +39,20 @@ use triomphe::Arc;
 use url::Url;
 
 #[cfg(feature = "autocomplete")]
-use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind};
+use crate::wire::{SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit};
 use crate::{
     Client, ClientError, CommandDisposition, ConnectOptions, DomainName, Leadership, OutcomeOrigin,
     ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent, SubscriptionRequest,
     wire::{
-        ClientFrame, ClientMessage, ClientRequest, DomainInfo, DomainList, DomainsObserved,
-        EncodedFrame, InspectionOutcome, LeaderEndpoints, LeaderRedirect, LeadershipObserved,
-        NoticeLevel, Reply, ReplyBody, ReplyDelivery, RequestId, RowSchema, ServerFrame,
-        ServerNotice, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
-        SubscriptionEndReason, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
-        SubscriptionRowsEncoder, SubscriptionType, UploadDisposition, UploadFailure, UploadFrame,
-        UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
+        Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
+        ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
+        DomainInfo, DomainList, DomainPaceChoice, DomainsObserved, EncodedFrame, InspectionOutcome,
+        LeaderEndpoints, LeaderRedirect, LeadershipObserved, NoticeLevel, Reply, ReplyBody,
+        ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice, SessionLimitSettings,
+        SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
+        SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
+        SubscriptionType, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
+        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
         grpc::{
             EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec, ServerUploadCodec,
             UPLOAD_RESOURCE_PATH,
@@ -110,6 +112,8 @@ fn command_outcome(
         transaction: None,
         transaction_admission: None,
         inspection: None,
+        wasm_state: None,
+        resource: None,
     }))
 }
 
@@ -598,6 +602,55 @@ async fn inspection_recovers_its_typed_reply_after_the_exchange_closes() {
 }
 
 #[tokio::test]
+async fn typed_inspection_refreshes_the_attached_preview() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    client
+        .adopt_transaction_status(super::open_transaction("tx-1", 0))
+        .await;
+    let mut exchange = server.next_exchange().await;
+    let inspecting = client.clone();
+    let task = tokio::spawn(async move {
+        inspecting
+            .inspect_transaction(
+                TransactionInspectionTarget::Transaction {
+                    transaction_id: "tx-1".to_string(),
+                },
+                None,
+            )
+            .await
+    });
+    let request = exchange.next_request().await;
+    assert!(matches!(
+        request.request,
+        ClientRequest::InspectTransaction(_)
+    ));
+    let inspection = TransactionInspection {
+        transaction: super::open_transaction("tx-1", 0),
+        operation: None,
+        report: super::empty_report(),
+    };
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::Inspection(InspectionOutcome::Inspected(Box::new(inspection.clone()))),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(task)
+            .await
+            .assured("the inspection task completes")
+            .assured("the server returns the typed inspection"),
+        InspectionOutcome::Inspected(Box::new(inspection))
+    );
+    assert_eq!(
+        client.transaction_expectation().await.preview,
+        Some(super::test_preview("tx-1", 0))
+    );
+}
+
+#[tokio::test]
 async fn attaching_a_transaction_adopts_its_domain_and_status() {
     let mut server = TestServer::start().await;
     let client = server.connect().await;
@@ -868,6 +921,66 @@ async fn a_domain_list_recovers_after_its_session_closes() {
     );
 }
 
+#[tokio::test]
+async fn a_typed_choice_lookup_preserves_dependencies_and_returns_typed_values() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let lookup = ChoiceLookupRequest::new(
+        ChoiceTarget::PlacementPolicy,
+        vec![ChoiceSelection {
+            value: ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+        }],
+        "colo".to_string(),
+    )
+    .with_page(2, None)
+    .assured("two choices fit the bounded page size");
+    let choice_client = client.clone();
+    let choices = tokio::spawn(async move { choice_client.lookup_choices(lookup).await });
+
+    let request = exchange.next_request().await;
+    let ClientRequest::Choice(lookup) = request.request else {
+        panic!("the client sends a typed choice lookup");
+    };
+    assert_eq!(lookup.target(), ChoiceTarget::PlacementPolicy);
+    assert_eq!(
+        lookup.dependencies(),
+        [ChoiceSelection {
+            value: ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+        }]
+    );
+    assert_eq!(lookup.search(), "colo");
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::Choice(ChoiceOutcome {
+                status: ChoiceStatus::Ready,
+                choices: vec![Choice {
+                    value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
+                    presentation: ChoicePresentation {
+                        label: "PREFER COLOCATION".to_string(),
+                        detail: Some("Prefer placing domain work together".to_string()),
+                        group: Some("Placement".to_string()),
+                    },
+                }],
+                page_cursor: Some("next".to_string()),
+            }),
+            &limits(),
+        )
+        .await;
+
+    let outcome = within_deadline(choices)
+        .await
+        .assured("the choice task finishes")
+        .assured("the choice lookup succeeds");
+    assert_eq!(outcome.status, ChoiceStatus::Ready);
+    assert_eq!(
+        outcome.choices[0].value,
+        ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation)
+    );
+    assert_eq!(outcome.page_cursor.as_deref(), Some("next"));
+}
+
 #[cfg(feature = "autocomplete")]
 #[tokio::test]
 async fn a_suggestion_recovers_after_its_session_closes() {
@@ -888,7 +1001,8 @@ async fn a_suggestion_recovers_after_its_session_closes() {
     .assured("the primary accepts the session");
     let mut first_exchange = primary.next_exchange().await;
     let suggestion_client = client.clone();
-    let suggestion = tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7).await });
+    let suggestion =
+        tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
     let first = first_exchange.next_request().await;
     assert!(matches!(first.request, ClientRequest::Suggest(_)));
     drop(first_exchange);
@@ -900,9 +1014,16 @@ async fn a_suggestion_recovers_after_its_session_closes() {
         .reply(
             retried.request_id,
             ReplyBody::Suggest(SuggestOutcome {
+                status: SuggestionStatus::Ready,
+                continuation: None,
                 suggestions: vec![Suggestion {
                     value: "SCHEMA".to_string(),
                     kind: SuggestionKind::Text,
+                    edit: TextEdit {
+                        start: 7,
+                        end: 7,
+                        replacement: "SCHEMA".to_string(),
+                    },
                 }],
             }),
             &limits(),
@@ -912,7 +1033,8 @@ async fn a_suggestion_recovers_after_its_session_closes() {
         .await
         .assured("the suggestion task finishes")
         .assured("the recovered suggestion succeeds");
-    assert_eq!(suggestions[0].value, "SCHEMA");
+    assert_eq!(suggestions.status, SuggestionStatus::Ready);
+    assert_eq!(suggestions.suggestions[0].value, "SCHEMA");
 }
 
 #[cfg(feature = "autocomplete")]
@@ -924,7 +1046,8 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
 
     for order in [[2, 0, 1], [1, 2, 0], [0, 1, 2]] {
         let suggestion_client = client.clone();
-        let suggestion = tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7).await });
+        let suggestion =
+            tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
         let listing_client = client.clone();
         let listing = tokio::spawn(async move { listing_client.list_domains().await });
         let command_client = client.clone();
@@ -942,9 +1065,16 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
                 ClientRequest::Suggest(suggest) => {
                     assert_eq!(suggest.input(), "CREATE ");
                     ReplyBody::Suggest(SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: None,
                         suggestions: vec![Suggestion {
                             value: "SCHEMA".to_string(),
                             kind: SuggestionKind::Text,
+                            edit: TextEdit {
+                                start: 7,
+                                end: 7,
+                                replacement: "SCHEMA".to_string(),
+                            },
                         }],
                     })
                 }
@@ -964,8 +1094,9 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
             .await
             .assured("the suggestion task finishes")
             .assured("the suggestion request succeeds");
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].value, "SCHEMA");
+        assert_eq!(suggestions.status, SuggestionStatus::Ready);
+        assert_eq!(suggestions.suggestions.len(), 1);
+        assert_eq!(suggestions.suggestions[0].value, "SCHEMA");
         assert_eq!(
             within_deadline(listing)
                 .await
@@ -981,6 +1112,68 @@ async fn concurrent_suggestions_lists_and_commands_follow_their_request_ids() {
                 .succeeded()
         );
     }
+}
+
+#[cfg(feature = "autocomplete")]
+#[tokio::test]
+async fn suggestion_finishes_while_a_command_reply_is_pending() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    let command_client = client.clone();
+    let command = tokio::spawn(async move { command_client.execute("SHOW CLUSTER STATUS;").await });
+    let command_request = exchange.next_request().await;
+    let ClientRequest::Command(command_body) = &command_request.request else {
+        panic!("the first request is the pending command");
+    };
+    let execution_reference = command_body.execution_reference.clone();
+
+    let suggestion_client = client.clone();
+    let suggestion =
+        tokio::spawn(async move { suggestion_client.suggest("CREATE ", 7, 64, None).await });
+    let suggestion_request = exchange.next_request().await;
+    assert!(matches!(
+        suggestion_request.request,
+        ClientRequest::Suggest(_)
+    ));
+    exchange
+        .reply(
+            suggestion_request.request_id,
+            ReplyBody::Suggest(SuggestOutcome {
+                status: SuggestionStatus::Ready,
+                continuation: None,
+                suggestions: vec![Suggestion {
+                    value: "SCHEMA".to_string(),
+                    kind: SuggestionKind::Text,
+                    edit: TextEdit {
+                        start: 7,
+                        end: 7,
+                        replacement: "SCHEMA".to_string(),
+                    },
+                }],
+            }),
+            &limits(),
+        )
+        .await;
+    let response = within_deadline(suggestion)
+        .await
+        .assured("the suggestion completes before the command replies")
+        .assured("the suggestion succeeds");
+    assert_eq!(response.suggestions[0].value, "SCHEMA");
+    assert!(!command.is_finished());
+
+    exchange
+        .reply(
+            command_request.request_id,
+            command_outcome(&execution_reference, completed(), "cluster is healthy"),
+            &limits(),
+        )
+        .await;
+    within_deadline(command)
+        .await
+        .assured("the command completes after its reply")
+        .assured("the command succeeds");
 }
 
 #[tokio::test]

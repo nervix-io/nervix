@@ -65,7 +65,8 @@ impl BranchContext {
         &self.init.domain_type
     }
 
-    /// Serialized concrete branch key for this instance.
+    /// The concrete branch key of this instance as its canonical JSON text, or `None` for the
+    /// explicit unbranched instance of an unbranched processor.
     pub fn branch_key(&self) -> Option<&[u8]> {
         self.init.branch_key.as_deref()
     }

@@ -1,5 +1,9 @@
-use std::{io::Write as _, num::NonZeroUsize};
+use std::{
+    io::Write as _,
+    num::{NonZeroU32, NonZeroUsize},
+};
 
+use meticulous::OptionExt as _;
 use ubyte::ByteUnit;
 
 use crate::{
@@ -113,8 +117,12 @@ async fn a_management_budget_below_one_event_fails_to_start() {
 async fn a_commands_budget_below_the_resident_replication_window_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
-            commands: ByteUnit::Mebibyte(8),
+            commands: ByteUnit::Mebibyte(16),
             ..MemoryBudgets::default()
+        },
+        limits: OperationLimits {
+            resident_replication_batches: NonZeroU32::new(8).assured("eight is nonzero"),
+            ..OperationLimits::default()
         },
         ..ExecutionConfig::default()
     })
@@ -124,8 +132,29 @@ async fn a_commands_budget_below_the_resident_replication_window_fails_to_start(
         ExecutionConfigError::BudgetBelowOperation {
             class: "commands",
             operation: "resident replication batches beside one being encoded",
-            budget: ByteUnit::Mebibyte(8).as_u64(),
-            required: ByteUnit::Mebibyte(10).as_u64(),
+            budget: ByteUnit::Mebibyte(16).as_u64(),
+            required: ByteUnit::Mebibyte(18).as_u64(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_commands_budget_below_one_normalized_state_write_fails_to_start() {
+    let error = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            commands: ByteUnit::Mebibyte(15),
+            ..MemoryBudgets::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect_err("a commands budget below one normalized state write is rejected");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::BudgetBelowOperation {
+            class: "commands",
+            operation: "normalized command state storage",
+            budget: ByteUnit::Mebibyte(15).as_u64(),
+            required: ByteUnit::Mebibyte(16).as_u64(),
         }
     );
 }
@@ -172,12 +201,23 @@ async fn an_operation_larger_than_its_class_is_refused_rather_than_queued() {
 
 #[cfg(feature = "shuttle")]
 mod shuttle_checks {
-    use std::{future::Future, path::PathBuf, sync::Arc as StdArc, task::Poll};
+    use std::{
+        future::Future,
+        path::PathBuf,
+        sync::{
+            Arc as StdArc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::Poll,
+    };
 
     use meticulous::{OptionExt as _, ResultExt as _};
     use shuttle::{
-        Config, FailurePersistence, Runner,
-        scheduler::{PctScheduler, RandomScheduler},
+        Config, FailurePersistence, MaxSteps, Runner,
+        scheduler::{
+            PctScheduler, RandomScheduler, ReplayScheduler,
+            UncontrolledNondeterminismCheckScheduler,
+        },
     };
 
     use super::*;
@@ -186,6 +226,8 @@ mod shuttle_checks {
     const RANDOM_ITERATIONS: usize = 100;
     const PCT_ITERATIONS: usize = 100;
     const PCT_DEPTH: usize = 3;
+    const NONDETERMINISM_ITERATIONS: usize = 100;
+    const MAX_SCHEDULE_STEPS: usize = 10_000;
 
     struct ReservationProbe {
         started: tokio::sync::oneshot::Receiver<()>,
@@ -193,31 +235,63 @@ mod shuttle_checks {
         task: tokio::task::JoinHandle<()>,
     }
 
+    fn measured_invariant(
+        invariant: fn(),
+        highest_steps: StdArc<AtomicUsize>,
+    ) -> impl Fn() + Send + Sync + 'static {
+        move || {
+            invariant();
+            highest_steps.fetch_max(shuttle::current::context_switches(), Ordering::Relaxed);
+            if std::env::var_os("SHUTTLE_FORCE_FAILURE").is_some() {
+                panic!("forced Shuttle schedule replay verification");
+            }
+        }
+    }
+
     fn check_invariant(invariant: fn()) {
-        if let Some(schedule) = std::env::var_os("SHUTTLE_TRACE_FILE") {
-            shuttle::replay_from_file(invariant, schedule);
-            return;
+        let mut config = Config::new();
+        config.max_steps = MaxSteps::FailAfter(MAX_SCHEDULE_STEPS);
+        if let Some(trace_directory) = std::env::var_os("SHUTTLE_TRACE_DIR") {
+            let trace_directory = PathBuf::from(trace_directory);
+            if let Err(error) = std::fs::create_dir_all(&trace_directory) {
+                panic!(
+                    "cannot create Shuttle failure directory {}: {error}",
+                    trace_directory.display()
+                );
+            }
+            config.failure_persistence = FailurePersistence::File(Some(trace_directory));
         }
 
-        let Some(trace_directory) = std::env::var_os("SHUTTLE_TRACE_DIR") else {
-            shuttle::check_random(invariant, RANDOM_ITERATIONS);
-            shuttle::check_pct(invariant, PCT_ITERATIONS, PCT_DEPTH);
-            return;
-        };
+        let highest_steps = StdArc::new(AtomicUsize::new(0));
+        if let Some(schedule) = std::env::var_os("SHUTTLE_TRACE_FILE") {
+            let scheduler = match ReplayScheduler::new_from_file(&schedule) {
+                Ok(scheduler) => scheduler,
+                Err(error) => panic!(
+                    "cannot load Shuttle schedule {}: {error}",
+                    PathBuf::from(schedule).display()
+                ),
+            };
+            Runner::new(scheduler, config)
+                .run(measured_invariant(invariant, StdArc::clone(&highest_steps)));
+        } else if std::env::var_os("SHUTTLE_CHECK_NONDETERMINISM").is_some() {
+            let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(
+                NONDETERMINISM_ITERATIONS,
+            ));
+            Runner::new(scheduler, config)
+                .run(measured_invariant(invariant, StdArc::clone(&highest_steps)));
+        } else {
+            Runner::new(RandomScheduler::new(RANDOM_ITERATIONS), config.clone())
+                .run(measured_invariant(invariant, StdArc::clone(&highest_steps)));
+            Runner::new(PctScheduler::new(PCT_DEPTH, PCT_ITERATIONS), config)
+                .run(measured_invariant(invariant, StdArc::clone(&highest_steps)));
+        }
 
-        let trace_directory = PathBuf::from(trace_directory);
-        if let Err(error) = std::fs::create_dir_all(&trace_directory) {
-            panic!(
-                "cannot create Shuttle failure directory {}: {error}",
-                trace_directory.display()
+        if std::env::var_os("SHUTTLE_REPORT_STEPS").is_some() {
+            eprintln!(
+                "Shuttle maximum steps: {}",
+                highest_steps.load(Ordering::Relaxed)
             );
         }
-
-        let mut config = Config::new();
-        config.failure_persistence = FailurePersistence::File(Some(trace_directory));
-
-        Runner::new(RandomScheduler::new(RANDOM_ITERATIONS), config.clone()).run(invariant);
-        Runner::new(PctScheduler::new(PCT_DEPTH, PCT_ITERATIONS), config).run(invariant);
     }
 
     fn assert_live_reservations_fit(executor: &Executor) {

@@ -77,6 +77,7 @@ Feature: Syslog support
       reconnect wait: -
       from: syslog_events
       codec: syslog_codec
+      body: codec
       sink: SYSLOG client=syslog_forwarder
       """
     When Syslog UDP message is published to "{{syslog_ingest_addr}}"

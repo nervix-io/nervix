@@ -1,0 +1,15 @@
+[package]
+description = "An output buffer that refuses every write that would take it past a byte limit"
+edition.workspace = true
+license-file.workspace = true
+name = "nervix-bounded-write"
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+meticulous = { workspace = true }

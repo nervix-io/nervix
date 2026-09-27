@@ -1,3 +1,11 @@
+//! Concrete branch lifetime registry and least-recently-used eviction order.
+//!
+//! Layer: data plane.
+//! - **Owns.** Branch instance identity, incarnation assignment, activity order, and eviction.
+//! - **Depends on.** Typed branch keys, domain timestamps, and branch-owned runtime handles.
+//! - **Must not know.** NSPL parsing, control-plane transactions, connector protocols, or
+//!   persisted payloads.
+
 use std::{hash::Hash, num::NonZeroUsize, time::Duration};
 
 use indexmap::IndexMap;
@@ -15,7 +23,16 @@ where
 
 struct BranchInstanceEntry<V> {
     last_ingestion: Timestamp,
+    incarnation: u64,
     state: Arc<V>,
+}
+
+/// The branch lifetime recorded by the lifecycle checkpoint, independent of later LRU touches.
+#[derive(Debug, Clone)]
+pub(super) struct BranchInstanceSnapshotEntry<K> {
+    pub(super) key: K,
+    pub(super) last_ingestion: Timestamp,
+    pub(super) incarnation: u64,
 }
 
 pub(super) struct GetOrCreateBranchInstance<V> {
@@ -50,14 +67,22 @@ where
         self.version
     }
 
+    pub(super) fn next_incarnation(&self) -> u64 {
+        self.next_version()
+    }
+
     pub(super) fn set_version(&mut self, version: u64) {
         self.version = version;
     }
 
-    pub(super) fn snapshot_entries(&self) -> Vec<(K, Timestamp)> {
+    pub(super) fn snapshot_entries(&self) -> Vec<BranchInstanceSnapshotEntry<K>> {
         self.entries
             .iter()
-            .map(|(key, entry)| (key.clone(), entry.last_ingestion))
+            .map(|(key, entry)| BranchInstanceSnapshotEntry {
+                key: key.clone(),
+                last_ingestion: entry.last_ingestion,
+                incarnation: entry.incarnation,
+            })
             .collect()
     }
 
@@ -69,6 +94,7 @@ where
         &mut self,
         key: K,
         last_ingestion: Timestamp,
+        incarnation: u64,
         state: V,
     ) -> Arc<V> {
         let state = Arc::new(state);
@@ -76,6 +102,7 @@ where
             key,
             BranchInstanceEntry {
                 last_ingestion,
+                incarnation,
                 state: state.clone(),
             },
         );
@@ -88,7 +115,8 @@ where
     /// snapshot revision. A replica may already hold the preceding revision, so reusing it for a
     /// different branch set would let the replica acknowledge the preceding payload as current.
     pub(super) fn insert_changed(&mut self, key: K, last_ingestion: Timestamp, state: V) -> Arc<V> {
-        let state = self.insert_restored(key, last_ingestion, state);
+        let incarnation = self.next_version();
+        let state = self.insert_restored(key, last_ingestion, incarnation, state);
         self.bump_version();
         state
     }
@@ -100,7 +128,7 @@ where
         now: Timestamp,
         create: impl FnOnce(&K) -> V,
     ) -> GetOrCreateBranchInstance<V> {
-        match self.get_or_try_create_with(key, now, |key| Ok::<_, ()>(create(key))) {
+        match self.get_or_try_create_with(key, now, |key, _| Ok::<_, ()>(create(key))) {
             Ok(result) => result,
             Err(()) => unreachable!("infallible branch_instance constructor cannot fail"),
         }
@@ -110,38 +138,22 @@ where
         &mut self,
         key: K,
         now: Timestamp,
-        create: impl FnOnce(&K) -> Result<V, E>,
+        create: impl FnOnce(&K, u64) -> Result<V, E>,
     ) -> Result<GetOrCreateBranchInstance<V>, E> {
-        if let Some(index) = self.entries.get_index_of(&key) {
-            let state = {
-                let entry = self
-                    .entries
-                    .get_index_mut(index)
-                    .verified("the index was just returned by get_index_of on this same map")
-                    .1;
-                entry.last_ingestion = now;
-                entry.state.clone()
-            };
-            self.bump_version();
-            let last_index = self
-                .entries
-                .len()
-                .checked_sub(1)
-                .verified("the entry looked up above is still in the map");
-            if index != last_index {
-                self.entries.move_index(index, last_index);
-            }
+        if let Some(state) = self.touch(&key, now) {
             return Ok(GetOrCreateBranchInstance {
                 state,
                 created: false,
             });
         }
 
-        let state = Arc::new(create(&key)?);
+        let incarnation = self.next_version();
+        let state = Arc::new(create(&key, incarnation)?);
         self.entries.insert(
             key,
             BranchInstanceEntry {
                 last_ingestion: now,
+                incarnation,
                 state: state.clone(),
             },
         );
@@ -150,6 +162,31 @@ where
             state,
             created: true,
         })
+    }
+
+    /// Refresh one existing branch without constructing it. A caller that opens persisted state
+    /// asynchronously can perform that work only when this returns `None`, then insert the branch.
+    pub(super) fn touch(&mut self, key: &K, now: Timestamp) -> Option<Arc<V>> {
+        let index = self.entries.get_index_of(key)?;
+        let state = {
+            let entry = self
+                .entries
+                .get_index_mut(index)
+                .verified("the index was just returned by get_index_of on this same map")
+                .1;
+            entry.last_ingestion = now;
+            entry.state.clone()
+        };
+        self.bump_version();
+        let last_index = self
+            .entries
+            .len()
+            .checked_sub(1)
+            .verified("the entry looked up above is still in the map");
+        if index != last_index {
+            self.entries.move_index(index, last_index);
+        }
+        Some(state)
     }
 
     pub(super) fn remove(&mut self, key: &K) -> Option<Arc<V>> {
@@ -220,11 +257,14 @@ where
             .collect()
     }
 
-    fn bump_version(&mut self) {
-        self.version = self
-            .version
+    fn next_version(&self) -> u64 {
+        self.version
             .checked_add(1)
-            .assured("a registry cannot record 2^64 branch instance changes");
+            .assured("a registry cannot record 2^64 branch instance changes")
+    }
+
+    fn bump_version(&mut self) {
+        self.version = self.next_version();
     }
 }
 
@@ -293,6 +333,18 @@ mod tests {
             registry.ordered_keys(),
             vec!["globex".to_string(), "acme".to_string()]
         );
+    }
+
+    #[test]
+    fn recreated_key_gets_a_new_incarnation_while_a_touch_keeps_its_lifetime() {
+        let mut registry = BranchInstanceRegistry::<String, usize>::new();
+        registry.get_or_create_with("acme".to_string(), timestamp(1, 0), |_| 1);
+        let first = registry.snapshot_entries()[0].incarnation;
+        registry.get_or_create_with("acme".to_string(), timestamp(2, 0), |_| 2);
+        assert_eq!(registry.snapshot_entries()[0].incarnation, first);
+        registry.remove(&"acme".to_string());
+        registry.get_or_create_with("acme".to_string(), timestamp(3, 0), |_| 3);
+        assert!(registry.snapshot_entries()[0].incarnation > first);
     }
 
     #[test]

@@ -225,6 +225,7 @@ declare_model_change_aspects! {
     EmitterMode => EntityPause, None, false;
     EmitterPublishingMode => EntityPause, None, false;
     EmitterFlushPolicy => Dynamic, None, false;
+    EmitterBatchPolicy => EntityPause, None, false;
     EmitterConstruction => EntityPause, None, false;
     EmitterErrorPolicies => EntityPause, None, false;
     EmitterMaterializedState => EntityPause, None, false;
@@ -936,7 +937,10 @@ fn window_processor_change_aspects(
         &mut changes,
         &mut has_dynamic_change,
     );
-    if base.width != candidate.width || base.step != candidate.step {
+    if base.width != candidate.width
+        || base.step != candidate.step
+        || base.state_limit != candidate.state_limit
+    {
         changes.push(ModelChangeAspect::WindowBounds);
     }
     if has_dynamic_change {
@@ -1277,8 +1281,9 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     let CreateEmitter {
         name: base_name,
         from: base_from,
-        encode_using_codec: base_codec,
+        body: base_body,
         sink: base_sink,
+        batch: base_batch,
         flush_policy: base_flush_policy,
         error_policies: base_error_policies,
         publishing_mode: base_publishing_mode,
@@ -1289,8 +1294,9 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     let CreateEmitter {
         name: candidate_name,
         from: candidate_from,
-        encode_using_codec: candidate_codec,
+        body: candidate_body,
         sink: candidate_sink,
+        batch: candidate_batch,
         flush_policy: candidate_flush_policy,
         error_policies: candidate_error_policies,
         publishing_mode: candidate_publishing_mode,
@@ -1316,7 +1322,7 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if !emitter_sink_definition_eq(base_sink, candidate_sink) {
         changes.push(ModelChangeAspect::EmitterSink);
     }
-    if base_codec != candidate_codec {
+    if base_body != candidate_body {
         changes.push(ModelChangeAspect::EmitterCodec);
     }
     if base_from.collect_policy != candidate_from.collect_policy {
@@ -1337,6 +1343,9 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
     if base_materialized_state != candidate_materialized_state {
         changes.push(ModelChangeAspect::EmitterMaterializedState);
     }
+    if base_batch != candidate_batch {
+        changes.push(ModelChangeAspect::EmitterBatchPolicy);
+    }
     if base_flush_policy != candidate_flush_policy {
         changes.push_dynamic(
             ModelChangeAspect::EmitterFlushPolicy,
@@ -1351,6 +1360,18 @@ fn emitter_change_aspects(base: &CreateEmitter, candidate: &CreateEmitter) -> Mo
 
 fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
     match (base, candidate) {
+        (
+            EmitSink::Http {
+                method: base_method,
+                path: base_path,
+                ..
+            },
+            EmitSink::Http {
+                method: candidate_method,
+                path: candidate_path,
+                ..
+            },
+        ) => base_method == candidate_method && base_path == candidate_path,
         (
             EmitSink::Kafka {
                 client: _,
@@ -1455,39 +1476,30 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 client: _,
                 table: base_table,
                 values: base_values,
-                max_batch: base_max_batch,
             },
             EmitSink::ClickHouse {
                 client: _,
                 table: candidate_table,
                 values: candidate_values,
-                max_batch: candidate_max_batch,
             },
-        ) => {
-            base_table == candidate_table
-                && base_values == candidate_values
-                && base_max_batch == candidate_max_batch
-        }
+        ) => base_table == candidate_table && base_values == candidate_values,
         (
             EmitSink::Postgres {
                 client: _,
                 table: base_table,
                 values: base_values,
                 conflict_action: base_conflict,
-                max_batch: base_max_batch,
             },
             EmitSink::Postgres {
                 client: _,
                 table: candidate_table,
                 values: candidate_values,
                 conflict_action: candidate_conflict,
-                max_batch: candidate_max_batch,
             },
         ) => {
             base_table == candidate_table
                 && base_values == candidate_values
                 && base_conflict == candidate_conflict
-                && base_max_batch == candidate_max_batch
         }
         (
             EmitSink::MySql {
@@ -1495,20 +1507,17 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 table: base_table,
                 values: base_values,
                 conflict_action: base_conflict,
-                max_batch: base_max_batch,
             },
             EmitSink::MySql {
                 client: _,
                 table: candidate_table,
                 values: candidate_values,
                 conflict_action: candidate_conflict,
-                max_batch: candidate_max_batch,
             },
         ) => {
             base_table == candidate_table
                 && base_values == candidate_values
                 && base_conflict == candidate_conflict
-                && base_max_batch == candidate_max_batch
         }
         (
             EmitSink::MongoDb {
@@ -1516,20 +1525,17 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 collection: base_collection,
                 values: base_values,
                 conflict_action: base_conflict,
-                max_batch: base_max_batch,
             },
             EmitSink::MongoDb {
                 client: _,
                 collection: candidate_collection,
                 values: candidate_values,
                 conflict_action: candidate_conflict,
-                max_batch: candidate_max_batch,
             },
         ) => {
             base_collection == candidate_collection
                 && base_values == candidate_values
                 && base_conflict == candidate_conflict
-                && base_max_batch == candidate_max_batch
         }
         (
             EmitSink::Iceberg {
@@ -1562,7 +1568,8 @@ fn emitter_sink_definition_eq(base: &EmitSink, candidate: &EmitSink) -> bool {
                 && base_max_commit_size == candidate_max_commit_size
         }
         (
-            EmitSink::Kafka { .. }
+            EmitSink::Http { .. }
+            | EmitSink::Kafka { .. }
             | EmitSink::Pulsar { .. }
             | EmitSink::RabbitMq { .. }
             | EmitSink::Redis { .. }
@@ -1605,11 +1612,12 @@ mod tests {
     use crate::{
         AckMode, BranchSelection, CreateDeduplicator, CreateEmitter, CreateGenerator,
         CreateIngestor, CreateJunction, CreateReingestor, CreateRelay, CreateReorderer, EmitSink,
-        EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
-        IngestSource, IngestTimestampSource, InputCollectPolicy, Literal, MaterializedRelayState,
-        MaterializedStateDependency, MaterializedStatePolicy, MessageErrorPolicy, Model,
-        ModelChangeAspect, ModelKind, ProcessorInputWhere, ProcessorInputs, ProcessorOutput,
-        ProcessorOutputs, QuiesceLevel, RelayBranching, RetryPolicy,
+        EmitterBody, EmitterPublishingMode, EndpointIngestMode, ErrorPolicies, FlushPolicy,
+        GeneralErrorPolicy, IngestSource, IngestTimestampSource, InputCollectPolicy, Literal,
+        MaterializedRelayState, MaterializedStateDependency, MaterializedStatePolicy,
+        MessageErrorPolicy, Model, ModelChangeAspect, ModelKind, ProcessorInputWhere,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, QuiesceLevel, RelayBranching,
+        RetryPolicy,
     };
 
     fn named<N>(raw: &str) -> N
@@ -1692,10 +1700,13 @@ mod tests {
         CreateEmitter {
             name: named("emit"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("event_codec")),
+            body: EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "1s".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -2080,8 +2091,23 @@ mod tests {
             QuiesceLevel::EntityPause,
         );
 
+        let mut batch = base.clone();
+        batch.batch = Some(crate::EmitterBatchPolicy {
+            max_messages: crate::BatchMessageLimit::try_from(100u32)
+                .assured("100 is within the message limit range"),
+            max_size: "1MiB".parse().assured("1MiB is a whole number of bytes"),
+        });
+        assert_single_aspect(
+            Model::Emitter(base.clone()),
+            Model::Emitter(batch),
+            ModelChangeAspect::EmitterBatchPolicy,
+            QuiesceLevel::EntityPause,
+        );
+
         let mut codec = base.clone();
-        codec.encode_using_codec = Some(named("event_codec_v2"));
+        codec.body = EmitterBody::Codec {
+            codec: named("event_codec_v2"),
+        };
         assert_single_aspect(
             Model::Emitter(base.clone()),
             Model::Emitter(codec),
@@ -2486,6 +2512,7 @@ mod catch_all_kind_tests {
                 messages: Some(5),
                 duration: None,
             },
+            state_limit: crate::WindowStateLimit::Unbounded,
             mode: AckMode::Attached,
             filter_where: None,
             materialized_state: Vec::new(),

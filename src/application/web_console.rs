@@ -69,6 +69,7 @@ const WEB_CONSOLE_WASM: &[u8] =
 const WEB_CONSOLE_ICON: &[u8] = include_bytes!("../../crates/web-console/dist/nervix-icon.svg");
 
 const WEB_CONSOLE_WS_PATH: &str = "/console/ws";
+const WEB_CONSOLE_AUTH_CHECK_PATH: &str = "/console/auth";
 
 const WEB_CONSOLE_RESOURCE_UPLOAD_PATH: &str = "/console/resources/upload";
 
@@ -106,6 +107,22 @@ async fn handle_web_console_request(
     service: SessionServiceImpl,
     mut request: HyperRequest<HyperIncoming>,
 ) -> Result<HyperResponse<Full<Bytes>>, Infallible> {
+    if request.method() == Method::GET && request.uri().path() == WEB_CONSOLE_AUTH_CHECK_PATH {
+        let Some(credentials) = credentials_from_web_console_request(&request) else {
+            return Ok(text_response(
+                StatusCode::UNAUTHORIZED,
+                "authentication failed",
+            ));
+        };
+        let Some(_) = service.authenticate_basic_credentials(&credentials).await else {
+            return Ok(text_response(
+                StatusCode::UNAUTHORIZED,
+                "authentication failed",
+            ));
+        };
+        return Ok(text_response(StatusCode::NO_CONTENT, ""));
+    }
+
     if request.method() == Method::GET && request.uri().path() == WEB_CONSOLE_WS_PATH {
         let Some(credentials) = credentials_from_web_console_request(&request) else {
             return Ok(unauthorized_basic_response());

@@ -46,13 +46,42 @@ The console is one screen with three regions:
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
-The top bar carries the websocket connection state, the domain lifecycle button, and the theme
-picker.
+The top bar carries the websocket connection state, the global **Create** menu, the domain
+lifecycle button, and the theme picker.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
 The **Cluster** footer stays independent of the selected domain: it reports the number of running
 domains, non-relay graph nodes, and relays across the current cluster graph.
+
+## Creating Domains, Users, And Resources
+
+The top bar's **Create** menu opens keyboard-accessible forms for domains, users, and resource
+catalogs. The resource group in the sidebar also provides a contextual create action. A form keeps
+its unfinished draft when it closes, restores focus to the action that opened it, reports
+validation and server failures inline, and shows the canonical NSPL statement before submission.
+The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
+policy, and `IF NOT EXISTS`. User and resource forms support their corresponding names and the
+same creation modifier.
+
+Pace and placement are typed choices supplied by the session server. They are searchable and
+paged independently, and the placement lookup carries the selected pace as a typed dependency.
+Loading, no-match, stale-context, and lookup-failure states remain distinct. An edit, dialog close,
+or replacement session makes an older reply ineligible to change the form.
+
+A resource draft captures the selected domain the first time it opens. If the console later
+selects another domain, reopening the retained draft keeps its captured scope and offers **Use
+current domain** as an explicit change. Domain and user creation are cluster scoped. Passwords are
+sent in the canonical command but appear as eight asterisks in both the preview and REPL; the
+cleartext value is never added to terminal history.
+
+Submitting uses the same durable command path as the REPL. The form therefore keeps the command's
+execution reference through redirects and reconnects, uses the attached transaction's expected
+position, and reports **Editing**, **Submitting**, **Queued until reconnect**, **Queued in
+transaction**, **Completed**, or **Failed** from the correlated outcome. A queued transaction
+operation is not presented as externally complete. A successful standalone resource create opens
+the existing resource version dialog, where upload identity and completion continue to be owned by
+the upload workflow.
 
 ## The Execution Graph
 
@@ -156,6 +185,10 @@ nervix[quickstart tx]>
 nervix[quickstart committing]>
 ```
 
+The console sends a statement whether or not a domain is selected, and the server decides whether
+it needs one: `SHOW CLUSTER STATUS` or `CREATE DOMAIN` runs with no domain selected, while a
+statement that acts on a domain fails with `no active domain selected`.
+
 `BEGIN` requires a selected domain that already exists and binds the transaction to it. The
 console follows the transaction's domain, so attaching switches the domain selector to it.
 `DESCRIBE TRANSACTION` prints the open transaction's impact report between queued statements, and
@@ -177,14 +210,55 @@ while an accepted commit continues on the leader without the browser. See
 and `ArrowDown` walk the session's command history, `Ctrl`/`Cmd` with `Enter` submits, and `clear`
 empties the scrollback.
 
+Accepting a candidate replaces its exact source range, including the rest of a word after the
+cursor, while preserving surrounding text. The list shows one bounded page at a time; use **MORE
+SUGGESTIONS** to fetch the next page. The console shows a message when the selected domain or
+transaction context is missing or stale, or when the candidate lookup fails. An empty list with
+no message means there are no matches.
+
+## Inspecting a transaction
+
+![The transaction inspector showing ordered operations and the affected graph](images/console-transaction-inspector.png)
+
+Select **Transaction · Inspect** in the top bar while a transaction is active. The inspector reads
+the typed impact report without attaching another transaction or changing the session domain.
+Use **Discover transactions** to list retained transactions in the REPL, then enter a transaction
+ID to inspect one. A `DESCRIBE TRANSACTION` command also opens its typed result in the inspector;
+the REPL still prints the server's text or JSON rendering.
+
+The outline groups accepted operations by their execution steps. Selecting an operation shows
+its own planned contribution; selecting its step shows the effective pause and effects of the
+atomic step. **Whole transaction** shows the union of the steps. Switch between **Before**,
+**Changes**, and **After** without moving graph items, or between **Planned** and **Actual** to
+review recorded progress. Search frames matching names and kinds; **FIT**, zoom, and drag control
+the viewport. Select a node or relation for its before/after presence, roles, and contributing
+operation numbers. The **Relations** list offers labeled buttons for keyboard selection of graph
+edges, including parallel data and materialized-state paths. Role marks and the resource card
+shape supplement the graph colors.
+
+The summary names the transaction, domain, state, accepted and applied counts, completeness,
+freshness, aggregate quiesce level, planning basis, relocations, rebuilds, and state resets.
+An incomplete report shows its diagnostics. A stale preview must be refreshed before retrying
+`COMMIT`. The console sends the inspected whole-transaction preview identity with `COMMIT`, even
+when an operation is selected. Inspecting another transaction leaves the attached transaction's
+commit basis intact. Retained reports keep their own graph geometry when the live execution graph
+changes.
+
+The inspector receives the same complete typed report as the Rust client and CLI. It does not
+silently omit nodes, edges, operations, or steps from a large retained report; search, focus, and
+the outline change what is visible in the viewport without narrowing the result that was read.
+The [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) chapter defines the
+operation, step, and whole-transaction facts behind these views.
+
 ## Uploading Resources
 
 ![The resource dialog after uploading a version](images/console-resource-dialog.png)
 
 The sidebar shows each resource's highest completed version, such as `v2`, or `catalog` while no
-upload has completed. Selecting a resource opens its version list, read from the same
-`DESCRIBE RESOURCE` description the REPL prints: every version with its files, and under each
-version the models bound to it, listed by kind and name, or `none`.
+upload has completed. Selecting a resource opens its version list, read from the typed description
+that `DESCRIBE RESOURCE` returns beside the text the REPL prints: every version with each file and
+directory under its exact path, and under each version the models bound to it, listed by kind and
+name, or `none`.
 
 Files or a whole directory can be uploaded from the browser as a new version of that resource in
 the selected domain. The successful upload result arrives after every current live node has

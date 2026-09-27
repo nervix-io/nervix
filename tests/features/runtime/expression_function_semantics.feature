@@ -19,7 +19,8 @@ Feature: Expression function semantics
         uppered_again STRING,
         lowered STRING,
         literal_uppered STRING,
-        agrees BOOL
+        agrees BOOL,
+        aliases_agree BOOL
       );
       CREATE WIRE JSON SCHEMA greeting_wire MODE STRICT (
         id string,
@@ -50,8 +51,10 @@ Feature: Expression function semantics
               uppered_again = upper(output.uppered),
               lowered = lower(input.raw),
               literal_uppered = upper('Grüßen'),
-              agrees = output.uppered_again = upper('Grüßen')
-          WHERE output.agrees
+              agrees = output.uppered_again = upper('Grüßen'),
+              aliases_agree = substr(input.raw, 1, 3) = substring(input.raw, 1, 3)
+                AND length(input.raw) = char_length(input.raw)
+          WHERE output.agrees AND output.aliases_agree
           FLUSH IMMEDIATE
           ON MESSAGE ERROR LOG;
       CREATE SUBSCRIPTION normalized_greetings_subscription TO normalized_greetings;
@@ -63,7 +66,7 @@ Feature: Expression function semantics
       """
     Then within "30s" the relay subscription receives payloads containing all fragments
       """
-      "id":"expansion" | "uppered":"GRÜSSEN" | "uppered_again":"GRÜSSEN" | "lowered":"grüßen" | "literal_uppered":"GRÜSSEN" | "agrees":true
+      "id":"expansion" | "uppered":"GRÜSSEN" | "uppered_again":"GRÜSSEN" | "lowered":"grüßen" | "literal_uppered":"GRÜSSEN" | "agrees":true | "aliases_agree":true
       """
 
     Examples:

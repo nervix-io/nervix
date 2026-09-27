@@ -537,7 +537,7 @@ impl SessionServiceImpl {
             } => {
                 let user = user_credentials(create.body.name.clone(), create.body.password.clone())
                     .await
-                    .map_err(|error| Box::new(command_error(error)))?;
+                    .map_err(|error| Box::new(command_error(error.to_string())))?;
                 CommandExecutionEffect::CreateUser {
                     if_not_exists: create.if_not_exists,
                     name: user.name,

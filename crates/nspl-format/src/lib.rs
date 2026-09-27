@@ -16,34 +16,38 @@ pub mod diagnostics;
 pub mod document;
 
 use document::{Gap, GapItem};
+use error_stack::{Report, ResultExt as _};
 use meticulous::ResultExt as _;
 use nervix_models::CanonicalNsplError;
-use nervix_nspl::{
-    client_statement::{ClientStatement, parse_client_statement_sources, parse_client_statements},
-    schema::ParseFromSourceError,
+use nervix_nspl::client_statement::{
+    ClientStatement, parse_client_statement_sources, parse_client_statements,
 };
 use thiserror::Error;
 
 /// Why a source could not be formatted.
+///
+/// Each variant is the formatter's context over the report of the owner that refused: the
+/// language's [`ParseFromSourceError`](nervix_nspl::schema::ParseFromSourceError) beneath `Parse`,
+/// the vocabulary's [`CanonicalNsplError`] beneath `Render`. A caller that renders the refusal
+/// reads that typed cause from the report instead of from a copy held here.
 #[derive(Debug, Error)]
 pub enum FormatError {
+    /// The source did not lex or parse; the language's report beneath locates every diagnostic.
     #[error("the source could not be parsed")]
-    Parse(#[from] ParseFromSourceError),
-    #[error("the statement at line {line} could not be rendered: {source}")]
-    Render {
-        line: usize,
-        #[source]
-        source: CanonicalNsplError,
-    },
+    Parse,
+    /// A statement has no canonical spelling; the vocabulary's report beneath says why.
+    #[error("the statement at line {line} could not be rendered")]
+    Render { line: usize },
     /// The formatted output did not reparse to the statements it came from.
     ///
-    /// This is always a defect in the formatter, never in the input.
+    /// This is always a defect in the formatter, never in the input. When the output did not parse
+    /// at all, the language's report beneath locates the failure in the formatted text.
     #[error("formatting changed the meaning of the statement at line {line}; this is a defect")]
     Verification { line: usize },
 }
 
 /// Formats NSPL source into its canonical form.
-pub fn format_source(input: &str) -> Result<String, FormatError> {
+pub fn format_source(input: &str) -> error_stack::Result<String, FormatError> {
     let normalized = input.replace("\r\n", "\n");
     let formatted = render(&normalized)?;
     verify(&normalized, &formatted)?;
@@ -51,12 +55,12 @@ pub fn format_source(input: &str) -> Result<String, FormatError> {
 }
 
 /// Reports whether `input` is already in canonical form.
-pub fn is_formatted(input: &str) -> Result<bool, FormatError> {
+pub fn is_formatted(input: &str) -> error_stack::Result<bool, FormatError> {
     Ok(format_source(input)? == input)
 }
 
-fn render(input: &str) -> Result<String, FormatError> {
-    let statements = parse_client_statement_sources(input)?;
+fn render(input: &str) -> error_stack::Result<String, FormatError> {
+    let statements = parse_client_statement_sources(input).change_context(FormatError::Parse)?;
     // Parsing above already lexed this input, so lexing cannot fail here.
     let tokens = nervix_nspl::lex(input).verified("parsing above lexed this same input");
 
@@ -81,7 +85,7 @@ fn render(input: &str) -> Result<String, FormatError> {
             let rendered = parsed
                 .statement
                 .to_canonical_nspl()
-                .map_err(|source| FormatError::Render { line, source })?;
+                .change_context(FormatError::Render { line })?;
             lines.extend(rendered.lines().map(str::to_string));
         }
 
@@ -126,18 +130,23 @@ fn append_gap(lines: &mut Vec<String>, gap: Gap) {
 }
 
 /// Confirms the output parses back to exactly the statements the input held.
-fn verify(input: &str, formatted: &str) -> Result<(), FormatError> {
-    let before = parse_client_statements(input)?;
-    let after = parse_client_statements(formatted)?;
+///
+/// Output that does not parse at all is a rendering defect like any other, not a fault in the
+/// input. Neither it nor a changed statement count points at one statement, so both are reported at
+/// the first line.
+fn verify(input: &str, formatted: &str) -> error_stack::Result<(), FormatError> {
+    let before = parse_client_statements(input).change_context(FormatError::Parse)?;
+    let after =
+        parse_client_statements(formatted).change_context(FormatError::Verification { line: 1 })?;
 
     if before.len() != after.len() {
-        return Err(FormatError::Verification { line: 1 });
+        return Err(Report::new(FormatError::Verification { line: 1 }));
     }
 
     for (index, (before, after)) in before.iter().zip(after.iter()).enumerate() {
         if before != after {
             let line = statement_line(input, index);
-            return Err(FormatError::Verification { line });
+            return Err(Report::new(FormatError::Verification { line }));
         }
     }
 
@@ -164,13 +173,27 @@ fn line_of(input: &str, offset: usize) -> usize {
 }
 
 /// Renders a single statement, exposed so callers can format text that is not a whole file.
-pub fn render_statement(statement: &ClientStatement) -> Result<String, CanonicalNsplError> {
+pub fn render_statement(
+    statement: &ClientStatement,
+) -> error_stack::Result<String, CanonicalNsplError> {
     statement.to_canonical_nspl()
 }
 
 #[cfg(test)]
 mod tests {
+    use nervix_nspl::schema::ParseFromSourceError;
+
     use super::*;
+
+    #[test]
+    fn a_single_statement_renders_in_canonical_form() {
+        let statement = nervix_nspl::client_statement::parse_client_statement("use    demo  ;")
+            .expect("must parse");
+        assert_eq!(
+            render_statement(&statement).expect("must render"),
+            "USE demo;"
+        );
+    }
 
     #[test]
     fn an_empty_file_formats_to_nothing() {
@@ -282,6 +305,66 @@ mod tests {
     #[test]
     fn an_unparseable_file_is_reported() {
         let error = format_source("CREATE RELAY;").expect_err("must fail");
-        assert!(matches!(error, FormatError::Parse(_)));
+        assert!(matches!(error.current_context(), FormatError::Parse));
+
+        let rejection = error
+            .downcast_ref::<ParseFromSourceError>()
+            .expect("the parser's report stays beneath the formatter's context");
+        let ParseFromSourceError::Parse { diagnostics, .. } = rejection else {
+            panic!("the statement lexes, so parsing rejects it: {rejection:?}");
+        };
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].span, 12..12);
+        assert!(
+            diagnostics[0].message.starts_with("expected relay_name"),
+            "{}",
+            diagnostics[0].message
+        );
+    }
+
+    #[test]
+    fn an_unlexable_file_is_reported_at_the_lex_stage() {
+        let error = format_source("USE 'demo;").expect_err("must fail");
+        assert!(matches!(error.current_context(), FormatError::Parse));
+
+        let rejection = error
+            .downcast_ref::<ParseFromSourceError>()
+            .expect("the lexer's report stays beneath the formatter's context");
+        assert!(
+            matches!(rejection, ParseFromSourceError::Lex { .. }),
+            "an unterminated string is a lex failure: {rejection:?}"
+        );
+        assert!(!rejection.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn verification_rejects_output_that_changes_a_statement() {
+        let error = verify("USE demo;\nBEGIN;\n", "USE demo;\nCOMMIT;\n").expect_err("must refuse");
+        assert!(matches!(
+            error.current_context(),
+            FormatError::Verification { line: 2 }
+        ));
+    }
+
+    #[test]
+    fn verification_rejects_output_that_changes_the_statement_count() {
+        let error = verify("USE demo;\n", "USE demo;\nBEGIN;\n").expect_err("must refuse");
+        assert!(matches!(
+            error.current_context(),
+            FormatError::Verification { line: 1 }
+        ));
+    }
+
+    #[test]
+    fn verification_reports_unparseable_output_as_a_defect() {
+        let error = verify("USE demo;\n", "USE;\n").expect_err("must refuse");
+        assert!(matches!(
+            error.current_context(),
+            FormatError::Verification { line: 1 }
+        ));
+        assert!(
+            error.contains::<ParseFromSourceError>(),
+            "the reparse failure stays beneath the defect: {error:?}"
+        );
     }
 }

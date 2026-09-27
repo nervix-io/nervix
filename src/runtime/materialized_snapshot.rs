@@ -524,7 +524,7 @@ impl RestoredMaterializedSnapshot {
     pub(in crate::runtime) async fn open(
         executor: &Executor,
         schema: &StdArc<ArrowSchema>,
-        source: SealedSource,
+        source: SealedSource<'_>,
     ) -> Result<Self, Report<MaterializedSnapshotError>> {
         let mut cursor = source;
         let magic = cursor
@@ -573,8 +573,11 @@ impl RestoredMaterializedSnapshot {
                 }));
             }
             for (row, identity) in identities.identities.into_iter().enumerate() {
-                let branch = BranchKey::from_remote_key(identity.branch)
-                    .map_err(MaterializedSnapshotError::decoding)?;
+                let branch = BranchKey::from_remote_key(identity.branch).change_context(
+                    MaterializedSnapshotError::Decode {
+                        reason: "a record identity carries an invalid branch key".to_string(),
+                    },
+                )?;
                 let metadata = RuntimeRecordMetadata::from_remote(identity.watermarks);
                 let row = RuntimeRow::new(batch.clone(), row, metadata)
                     .map_err(MaterializedSnapshotError::decoding)?;
@@ -603,14 +606,33 @@ impl RestoredMaterializedSnapshot {
 /// arrived over the interconnect is read from the file it was staged into, one bounded section at
 /// a time, so a snapshot larger than the node's transfer-memory budget opens without ever being
 /// held whole.
-pub(in crate::runtime) enum SealedSource {
-    Memory { sealed: ChargedBytes, offset: usize },
+pub(in crate::runtime) enum SealedSource<'a> {
+    Memory {
+        sealed: ChargedBytes,
+        offset: usize,
+    },
+    Borrowed {
+        bytes: &'a [u8],
+        offset: usize,
+        executor: &'a Executor,
+    },
     Staged(StagedSnapshot),
 }
 
-impl SealedSource {
+impl<'a> SealedSource<'a> {
     pub(in crate::runtime) fn memory(sealed: ChargedBytes) -> Self {
         Self::Memory { sealed, offset: 0 }
+    }
+
+    /// Open an already resident snapshot one bounded section at a time, charging each copied
+    /// section only while its decoder reads it. A persisted window container can exceed the bulk
+    /// budget without holding the whole container under that budget during restore.
+    pub(in crate::runtime) fn borrowed(executor: &'a Executor, bytes: &'a [u8]) -> Self {
+        Self::Borrowed {
+            bytes,
+            offset: 0,
+            executor,
+        }
     }
 
     pub(in crate::runtime) fn staged(staged: StagedSnapshot) -> Self {
@@ -632,6 +654,20 @@ impl SealedSource {
                 let slice = sealed.slice(*offset, end).ok_or_else(truncated)?;
                 *offset = end;
                 Ok(slice)
+            }
+            Self::Borrowed {
+                bytes,
+                offset,
+                executor,
+            } => {
+                let length = usize::try_from(length).map_err(|_| truncated())?;
+                let end = offset.checked_add(length).ok_or_else(truncated)?;
+                let slice = bytes.get(*offset..end).ok_or_else(truncated)?;
+                *offset = end;
+                executor
+                    .charge_owned(MemoryClass::Bulk, slice.to_vec())
+                    .await
+                    .change_context(MaterializedSnapshotError::Admission)
             }
             Self::Staged(staged) => staged
                 .read(length)
@@ -717,8 +753,7 @@ async fn seal_container(
         length = next;
     }
     let reservation = executor
-        .reserve(MemoryClass::Bulk, length)
-        .await
+        .try_reserve(MemoryClass::Bulk, length)
         .change_context(MaterializedSnapshotError::Admission)?;
     let bytes = executor
         .run_cpu(CpuClass::Bulk, reservation, move |charge, cancellation| {
@@ -842,7 +877,9 @@ where
 /// eight-byte aligned base, so the bytes are moved into an aligned buffer first. Every caller has
 /// already bounded the slice by the limit for the section it belongs to, so the copy is bounded
 /// too.
-fn decode_aligned_rkyv<T>(bytes: &[u8]) -> Result<T, Report<MaterializedSnapshotError>>
+pub(in crate::runtime) fn decode_aligned_rkyv<T>(
+    bytes: &[u8],
+) -> Result<T, Report<MaterializedSnapshotError>>
 where
     T: Archive,
     T::Archived: for<'a> rkyv::bytecheck::CheckBytes<rkyv::api::high::HighValidator<'a, rkyv::rancor::Error>>

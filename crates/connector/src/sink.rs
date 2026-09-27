@@ -3,8 +3,9 @@
 //! Layer: engines and infrastructure.
 //!
 //! - **Owns.** The record and mapped-row sink traits, their lifecycle hooks, typed start and
-//!   publish failures, per-record outcomes, and the opaque handles through which a sink reports to
-//!   its host or keeps host-owned acknowledgements alive.
+//!   publish failures, the identities a sink answers for — a record the host assigned, or a mapped
+//!   row's source position — the outcome it answers with, and the opaque handles through which a
+//!   sink reports to its host or keeps host-owned acknowledgements alive.
 //! - **Depends on.** Arrow batches, vocabulary values, `error-stack`, Tokio's monotonic instant,
 //!   and trait-object support.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, error-policy
@@ -38,20 +39,45 @@ pub enum BrokerPublishingMode {
     Ack(AckConfirmation),
 }
 
-/// Where one record sits in a sink write: its source batch and row within that batch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where one source row sits in the host's buffered batches: its batch and its row within it.
+///
+/// A row sink answers for each mapped row under its position. Positions order by batch and then by
+/// row, which is the order the host hands rows over in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SinkRecordPosition {
     pub batch_index: usize,
     pub row_index: usize,
 }
 
+/// The identity of one record in a record sink write, which the connector answers for.
+///
+/// One record is one external payload: one source record, or with the emitter's `BATCH` clause
+/// every member of one batch. The host assigns the identity and keeps which source rows the record
+/// carries, so a connector answers for the record and never learns its members or their
+/// acknowledgements. Identities order the way the host hands records over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SinkRecordId(usize);
+
+impl SinkRecordId {
+    /// The identity of the record at `index` in the write the host hands over.
+    pub const fn new(index: usize) -> Self {
+        Self(index)
+    }
+
+    /// Where the record sits in the write it belongs to.
+    pub const fn index(self) -> usize {
+        self.0
+    }
+}
+
 /// One codec-encoded record ready for a connector to write.
 ///
-/// A record carries no runtime acknowledgement. The host retains acknowledgements by position and
-/// applies the returned outcome after the connector's one batch-level virtual call completes.
+/// A record carries no runtime acknowledgement. The host retains the acknowledgements of the
+/// source rows a record carries and applies the connector's answer for the record to each of them
+/// after the connector's one batch-level virtual call completes.
 #[derive(Debug)]
 pub struct SinkRecord {
-    pub position: SinkRecordPosition,
+    pub id: SinkRecordId,
     pub key: Option<String>,
     pub payload: Vec<u8>,
     pub headers: Vec<(String, String)>,
@@ -63,14 +89,14 @@ pub struct SinkRecord {
 
 impl SinkRecord {
     pub fn new(
-        position: SinkRecordPosition,
+        id: SinkRecordId,
         key: Option<String>,
         payload: Vec<u8>,
         headers: Vec<(String, String)>,
         occurred_at: Timestamp,
     ) -> Self {
         Self {
-            position,
+            id,
             key,
             payload,
             headers,
@@ -85,23 +111,26 @@ impl SinkRecord {
         self
     }
 
-    pub fn rejected(&self, message: String) -> RejectedSinkRecord {
-        RejectedSinkRecord::external(self.position, self.occurred_at, message)
+    pub fn rejected(&self, message: String) -> RejectedSinkRecord<SinkRecordId> {
+        RejectedSinkRecord::external(self.id, self.occurred_at, message)
     }
 }
 
 /// One record the connector definitively rejected, with the message error the host must deliver.
+///
+/// `Id` is what the connector answers for: a [`SinkRecordId`] from a record sink, or a
+/// [`SinkRecordPosition`] from a row sink.
 #[derive(Debug)]
-pub struct RejectedSinkRecord {
-    pub position: SinkRecordPosition,
+pub struct RejectedSinkRecord<Id> {
+    pub id: Id,
     pub error: StructuredMessageError,
 }
 
-impl RejectedSinkRecord {
+impl<Id> RejectedSinkRecord<Id> {
     /// A record the external system itself refused.
-    pub fn external(position: SinkRecordPosition, occurred_at: Timestamp, message: String) -> Self {
+    pub fn external(id: Id, occurred_at: Timestamp, message: String) -> Self {
         Self {
-            position,
+            id,
             error: StructuredMessageError {
                 reference: uuid::Uuid::now_v7(),
                 code: MessageErrorCode::External,
@@ -117,13 +146,13 @@ impl RejectedSinkRecord {
     /// A record whose mapped values the connector's own validation refused, naming the fields that
     /// carry them.
     pub fn invalid(
-        position: SinkRecordPosition,
+        id: Id,
         occurred_at: Timestamp,
         message: String,
         fields: impl IntoIterator<Item = FieldPath>,
     ) -> Self {
         Self {
-            position,
+            id,
             error: StructuredMessageError {
                 reference: uuid::Uuid::now_v7(),
                 code: MessageErrorCode::Validation,
@@ -138,20 +167,25 @@ impl RejectedSinkRecord {
 }
 
 /// The result of one connector write, classified per record where a definitive outcome exists.
-pub struct PerRecordOutcome {
-    delivered: Vec<SinkRecordPosition>,
-    rejected: Vec<RejectedSinkRecord>,
+///
+/// `Id` is what the connector answers for: a [`SinkRecordId`] from a record sink, whose host
+/// applies the answer to every source row the record carries, or a [`SinkRecordPosition`] from a
+/// row sink, which answers for each mapped row. A record the connector neither delivered nor
+/// rejected stays unresolved, and only an infrastructure failure explains why the write left it so.
+pub struct PerRecordOutcome<Id> {
+    delivered: Vec<Id>,
+    rejected: Vec<RejectedSinkRecord<Id>>,
     infrastructure_error: Option<Report<SinkPublishError>>,
 }
 
 /// The named parts of a [`PerRecordOutcome`] consumed by the host.
-pub struct PerRecordOutcomeParts {
-    pub delivered: Vec<SinkRecordPosition>,
-    pub rejected: Vec<RejectedSinkRecord>,
+pub struct PerRecordOutcomeParts<Id> {
+    pub delivered: Vec<Id>,
+    pub rejected: Vec<RejectedSinkRecord<Id>>,
     pub infrastructure_error: Option<Report<SinkPublishError>>,
 }
 
-impl PerRecordOutcome {
+impl<Id> PerRecordOutcome<Id> {
     pub fn empty() -> Self {
         Self::with_capacity(0)
     }
@@ -164,11 +198,11 @@ impl PerRecordOutcome {
         }
     }
 
-    pub fn deliver(&mut self, position: SinkRecordPosition) {
-        self.delivered.push(position);
+    pub fn deliver(&mut self, id: Id) {
+        self.delivered.push(id);
     }
 
-    pub fn reject(&mut self, rejected: RejectedSinkRecord) {
+    pub fn reject(&mut self, rejected: RejectedSinkRecord<Id>) {
         self.rejected.push(rejected);
     }
 
@@ -182,7 +216,7 @@ impl PerRecordOutcome {
         self.infrastructure_error.is_some()
     }
 
-    pub fn into_parts(self) -> PerRecordOutcomeParts {
+    pub fn into_parts(self) -> PerRecordOutcomeParts<Id> {
         PerRecordOutcomeParts {
             delivered: self.delivered,
             rejected: self.rejected,
@@ -327,13 +361,15 @@ pub trait SinkLifecycle: Send {
 /// A connector that writes codec-encoded records.
 #[async_trait]
 pub trait RecordSink: SinkLifecycle {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome;
+    /// Writes `records` and answers for each of them by its identity.
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId>;
 }
 
 /// A connector that encodes values directly from host-projected Arrow columns.
 #[async_trait]
 pub trait RowSink: SinkLifecycle {
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome;
+    /// Writes the selected rows and answers for each of them by its source position.
+    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition>;
 }
 
 /// Operations the host owns for acknowledgements retained by a sink.

@@ -52,11 +52,11 @@ writer.
 
 | State | Publication owner and scope | Reader contract |
 | --- | --- | --- |
-| Active graph | The runtime lifecycle publishes one optional graph for each domain on a node. Installation replaces the complete graph, and stop or removal publishes absence. | A unit of work sees one complete graph or no active graph. An in-flight reader may finish against the graph it already loaded. |
-| Domain routing snapshot | Each domain retains one stable publication handle across execution rebuilds. Schedule application stages and replaces the relay services, schemas, branch declarations, materialized-state ownership, lookups, UDFs, codecs, and signaling protocols together. | A task sees the old routing revision or the new routing revision, never a mixture of their fields. Long-lived tasks use a local pointer cache instead of returning to the domain execution registry per batch. |
+| Active graph | The runtime lifecycle publishes one optional graph for each domain on a node as a control-plane observation surface for sessions and inspection. Installation replaces the complete graph, and stop or removal publishes absence. | Control-plane readers see one complete graph or no active graph. Processor tasks never read it. |
+| Domain routing snapshot | Each domain retains one stable publication handle across execution rebuilds. Schedule application stages and replaces the relay services, schemas, branch declarations, materialized-state ownership, lookups, UDFs, codecs, signaling protocols, and the complete map of bound processor plans together. Each plan carries a typed identity and prepared VM and WASM artifacts for one installed node revision. | A task sees the old routing revision or the new routing revision, never a mixture of their fields. Long-lived tasks use a local pointer cache instead of returning to the domain execution registry per batch. Existing processor branches compare typed plan identities between batches; new branches resolve their template from the same published map. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
 | Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
-| Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation before reporting success. |
+| Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations and advertisement versions whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation and at least the current advertisement version before reporting success. |
 | Clock installation | Each domain-clock lifecycle on each node publishes the complete missing, stopped, uninstalled, unpaced, or paced installation. | A read validates its bound lifecycle generation against one installation, then advances that installation's nondecreasing timestamp watermark atomically. A same-generation replacement retains the watermark; a different generation cannot be clamped by a stale reader. |
 | Runtime-state assignment | Each state placement publishes one packed atomic binding containing its generation and capability. Replication roles are a separate immutable published snapshot. | A per-message operation admits itself, compares the exact binding it was granted, and proceeds only while that generation still grants the required capability. It never takes the assignment barrier. |
 | Ingestor quiesce decision | Each ingestor publishes the declared and pending modes, active causes, source support, and derived intake decision as one value. Concurrent lifecycle changes derive their replacement from the current publication. | Polling and per-message intake make one load to decide whether to dispatch, suspend, skip, buffer, drop, or reject. A source host retains its last observed publication across dispatch awaits; its change wait registers before comparing that publication with the current one, so an engagement or release in the gap wakes it. The retained-payload lock is reached only after the published decision selects buffering. |
@@ -67,11 +67,36 @@ owners still needs a protocol. Graph and schedule changes use quiescence and rel
 state operations carry generations; subscription creation uses a visibility handshake. Publication
 removes read-side contention without weakening those transition contracts.
 
+Schedule application prepares every changed local processor plan before publication. A preparation
+failure leaves the preceding routing revision and its active graph observable. Publication swaps the
+complete typed routing snapshot first and then updates the active graph used by control-plane
+clients. Unchanged processor specifications, schema fingerprints and resolved branch contracts keep
+their exact plan allocation, including prepared programs and compiled WASM modules.
+
 ## Mutable Execution State
 
 Per-row mutation is kept close to the lane that orders it. A global concurrent map is an index into
 those lanes, not the owner of their inner state. Once a task has found its lane, later mutation does
 not repeatedly acquire the registry guard.
+
+### Emitter payload assembly
+
+One emitter task owns the released carriers and their flush order. Its batch packer borrows each
+carrier's source relay, concrete branch key and ordered metadata while it prepares selected Arrow
+rows. It clones the Arc-backed Arrow batch once per carrier passed to the packer; no row
+acquires a lock or increments an Arc reference count for source identity. The open candidate holds
+at most `BATCH MAX MESSAGES` prepared members and is sealed on metadata or source changes, a failed
+member, or the message-count limit. Each encoding attempt uses the codec's bounded writer under
+`MAX SIZE`. The emitter retains original batch and row positions for acknowledgements and errors.
+
+A payload offered to the sink stays in the same task's buffer until the sink answers for it. The
+task marks each member row prepared, and the one answer for the payload resolves every member: a
+row resolves once, so neither a repeated answer nor a later attempt resolves its acknowledgement
+share again. No lock guards this state; only the emitter task touches its buffer, and resolving a
+member is one operation on the lock-free ACK tree. A confirmed payload's members are acknowledged
+in the same step that releases the payload, while a rejected payload's members return to pending
+until their message errors are delivered, so an attempt its stop deadline cuts short leaves every
+member either resolved or still owned by the buffer.
 
 ### Branch processor state
 
@@ -98,6 +123,22 @@ A window and its aggregate accumulators belong to one branch task. The task muta
 directly and publishes a complete immutable window generation for persistence, replication,
 handoff, and restoration. Snapshot encoding reads that generation instead of holding the branch
 runtime while it serializes.
+The publication shares the retained input and aggregate-argument Arrow columns through row views.
+The snapshot task seals those views as bounded Arrow sections on the bulk executor, while a
+separate bounded typed section carries each group of histogram delayed removals. Encoding never
+materializes a scalar-field copy of the retained payload. Restore opens the sections on the bulk
+executor and reuses their columns to rebuild exact accumulators and sketch panes.
+
+Evicting a concrete branch resets its retained window rows and aggregate structures before the
+branch task's final publication. The published generation is empty, so a later appearance of the
+same branch key cannot inherit the evicted window or its sketch panes. After the final checkpoint,
+the owner releases the evicted branch's in-memory publication. A branch that appears without a
+restored lifecycle entry also publishes an empty initial window, even if a previous lifetime of its
+key left a checkpoint behind. Stopping a branch for an ownership handoff follows the normal
+finalization path and publishes its retained window instead.
+The branch lifecycle and window checkpoint carry the same incarnation, assigned when the concrete
+branch appears. A restore whose incarnations differ begins with empty window state and marks it
+for publication, so a delayed checkpoint from the preceding lifetime cannot restore its panes.
 
 A WASM guest instance likewise belongs to one branch task. At the end of every guest callback the
 task asks the guest to save its computation state and checkpoints the returned buffer: it writes it
@@ -105,7 +146,14 @@ to stable storage, waits for the replicas the checkpoint names, and only then pu
 committed checkpoint a recreated instance restores. The branch runs no further callback until that
 checkpoint completes or fails. The publications retain the saved buffer rather than copying it for
 every persistence or replication reader. Input buffered by the guest host and ACK tokens remain
-execution state and are never included in a guest save.
+execution state and are never included in a guest save. See
+[WASM State And Recovery](./wasm-state.md#the-checkpoint) for the checkpoint's stages.
+
+Each branch publishes checkpoint revision, boundary, and stage together through one immutable
+observation. An inspection read samples that publication and replica progress without taking the
+branch task's execution lane or advancing durability. A failure before guest state was captured is
+an explicit observation without a new revision; any earlier committed checkpoint remains the
+restore source. The published observation contains no guest bytes.
 
 Every branch save is addressed by the guest-state generation in the committed schedule. Forced
 recovery publishes a new generation with the replacement schedule, so a late save, replica
@@ -264,6 +312,13 @@ These sites are accepted for the contract and bound named above. A lock that mer
 state convenient, protects immutable configuration, or repeats registry discovery on every batch
 does not belong in this category.
 
+The [simulated relay fault checks](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
+drive the production receipt, admission, and cancellation APIs through authenticated connections.
+They synchronize on the received Arrow batch and verify the same attempt cannot be admitted twice
+after a lost reply. Cancellation before grant and while receipt or reconnection is unresolved must
+win the attempt's existing admission fence before the runtime can admit it. A cancellation after
+admission returns the admitted outcome.
+
 Relay fan-out itself uses one bounded queue per consumer. Publishers share no fan-out lock;
 capacity and receiver counts are atomic, and a publisher registers for notification only when a
 consumer queue is full. Removing one consumer does not stop the others, and changing capacity does
@@ -313,3 +368,104 @@ The companion `write_once_rwlock_fields` count rejects names and shared referenc
 `RwLock<Option<...>>`. Such a field states that readers should coordinate forever around a value
 whose actual lifecycle is publication. The current shape uses an atomic optional reference and
 deletes the lock-backed form.
+
+## Deterministic Concurrency Verification
+
+The ordering contracts above are checked against the production owners under Shuttle. A check
+runs several tasks or threads through one scheduler, which chooses an interleaving at visible
+synchronization points. It can expose a lost notification, an early drain, a double completion, or
+a stale generation without depending on which OS thread happened to run first. A deadlock is a
+failed check. The model is the surrounding schedule and test data; the protocol under test is the
+same type used by the data plane, not a copied implementation of it.
+
+Shuttle does not model elapsed time. A wrapped sleep yields once; wrapped timeouts do not measure
+their deadlines and fire only when a test triggers them by task label. `Instant::now` still reads
+the wall clock, while paused-time controls do not advance a simulated clock. Checks of deadline
+ordering therefore use an already-passed or far-future instant and explicitly choose whether the
+timeout wins. Tokio paused-time tests retain responsibility for actual timer behavior. No
+concurrency check uses a wall-clock bound, sleep poll, or `recv_timeout` to establish progress.
+
+Only scheduler-visible operations create interleavings. The Shuttle feature selects wrapped
+Tokio, Tokio Util, Tokio Stream, parking_lot, and DashMap dependencies, forwarded through the
+server, interconnect, execution, and crates whose public synchronization types cross those
+boundaries. With the feature off, these wrappers re-export the real libraries. Feature-gated
+crate imports keep the product's `tokio`, `parking_lot`, and `dashmap` names; the ordinary build
+uses their normal behavior. The feature changes the test execution environment, not the public
+protocol. Edge I/O, networking, filesystem access, and signals remain real re-exports and are
+outside a Shuttle schedule.
+
+Some primitives are opaque to Shuttle: `arc-swap`, `async-broadcast`, `triomphe`, and
+`futures-channel` have no scheduler wrapper. Nervix routes `ArcSwap` and `ArcSwapOption` loads and
+stores, plus `ArcSwap` compare-and-swap and read-copy-update, through its execution synchronization
+boundary. That boundary yields under Shuttle and calls the underlying primitive directly
+otherwise. It also supplies a scheduler-visible synchronous yield for admission spin waits.
+A check may claim an ordering around an opaque primitive only when its relevant calls have
+visible scheduling points. Shuttle cannot interrupt an arbitrary instruction inside it or a
+standard-library atomic. The protocol atomics that the checks explore use Shuttle's atomic types
+under the feature.
+
+Even a wrapped Tokio primitive can hide a scheduling window. `shuttle-tokio` currently keeps
+`Notify` waiter registration behind a standard-library mutex, so registering `notified()` is not
+a scheduling point. A read followed by registration may therefore look safe in a check even
+though a release between the two would be lost in production. The corresponding `watch`
+`borrow()`/`subscribe()` window has the same verification limit. The ownership-handoff freeze
+check exercises release-before-wake, but does not prove its separate register-before-read order.
+That order remains a production owner contract until both sides of the race are scheduler-visible.
+
+Shuttle explores sequentially consistent schedules. It cannot prove that a chosen `Relaxed`,
+`Acquire`, or `Release` ordering is sufficient on weak-memory hardware. Loom is reserved for an
+actual memory-ordering claim over modeled atomics. The old copied dispatch-gate model was retired
+when Shuttle began exercising the production gate and fan-out. Cucumber remains the public
+behavior test: when a scheduling defect affects an NSPL operation, runtime output, or process
+outcome, its Shuttle regression is paired with a scenario through that interface. A scenario
+cannot exhaust the interleavings of an in-process protocol, and a Shuttle check cannot verify the
+whole cluster, socket, disk, or browser path.
+
+### Check contract and runner
+
+Each check names the invariant in its test name, drives competing operations on the production
+owner, and asserts the state at meaningful transitions or after all participants have joined.
+Use an explicit handshake or scheduler-visible yield to position a race. When both the decision
+read and waiter registration are scheduler-visible, a missed notification leaves the waiter
+pending and Shuttle reports the resulting deadlock. Name a bounded number of participants so the
+search remains reviewable; use bounded depth-first search for small races and random plus
+probabilistic concurrency testing (PCT) for larger ones. The server's shared runner supplies
+random, PCT, and bounded DFS modes; interconnect and execution use random and PCT. The runner
+caps each schedule at 10,000 steps. Individual checks choose their iteration counts and PCT
+depth; `SHUTTLE_REPORT_STEPS=1` reports the highest observed step count when tuning a check. A
+step cap is an exploration bound, not a product timeout.
+
+`just test-shuttle` runs only library tests whose full names contain `shuttle_`, one test per
+process, in `nervix-execution`, `nervix-interconnect`, and `nervix-server`. It then repeats each
+package under Shuttle's uncontrolled-nondeterminism detector. The recipe uses the repository's
+kache-backed build and prepares the server's test dependencies; `just test` continues to run the
+ordinary suite. CI runs `just test-shuttle` and uploads `target/shuttle-failures` when a check
+fails. `just test-shuttle <filter>` selects checks whose full name contains the filter. The
+runner stores a failing schedule under
+`target/shuttle-failures/<package>/<fully-qualified-test-name>/`; replay uses that path and exact
+test name. See the command recipe in [Developing Nervix](./developing-nervix.md).
+
+### Protocols and their checks
+
+The checks below hold the scheduler-visible parts of each protocol to their invariants. Test
+names are given relative to their owning module; the `shuttle` feature selects the modeled build.
+A family of names means each member runs independently through the recipe.
+
+| Protocol | Invariant and check |
+| --- | --- |
+| Execution budgets and storage jobs (`crates/execution/src/tests.rs`) | `shuttle_saturated_class_keeps_live_reservations_within_each_class_capacity` keeps live reservations within each class capacity; `shuttle_occupied_bulk_execution_leaves_control_execution_untouched` keeps bulk saturation from charging control; `shuttle_queued_job_drop_releases_its_reservation_and_exact_queue_slot` and `shuttle_running_job_observes_cancellation_and_keeps_its_charge_until_exit` balance queue slots and permits across drop and cancellation; `shuttle_full_wait_queue_is_exact_typed_backpressure` checks a full wait queue's typed rejection; `shuttle_consensus_storage_preserves_admission_order_and_returns_every_permit` checks storage admission order and permit return. |
+| Force-flush obligations (`src/runtime/force_flush.rs`) | `shuttle_two_participant_generation_waits_for_every_obligation` prevents completion before all participants live at publication complete and redelivers a dropped, unhandled completion; `shuttle_stale_completions_never_clear_a_newer_generation` prevents an old completion from clearing new work; `shuttle_published_generation_wakes_a_waiting_participant` catches a lost publication wakeup; `shuttle_participant_lifecycle_balances_obligations_through_close` balances `pending()` across subscribe, request, participant drop, and close. |
+| Ingestor intake (`src/runtime/ingestors/source_shuttle_tests.rs`; `src/runtime/ingestor_quiesce.rs`) | `shuttle_broker_source_observes_engagement_during_dispatch`, `shuttle_paced_source_observes_engagement_during_dispatch`, and `shuttle_request_source_observes_engagement_during_dispatch` exercise host-loop engagement for memory pressure, entity gate, handoff, and shutdown: after engagement returns, no further payload dispatches, and a change during dispatch is observed. `shuttle_an_open_control_answers_intake_without_waiting_on_retained_payloads` keeps the open decision independent of a retained-payload lock. |
+| Relay dispatch gate and fan-out (`src/runtime/relay_channel_shuttle_tests.rs`) | `shuttle_dispatch_permits_never_overlap_a_quiescent_lease_and_release_frees_every_waiter`, `shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes`, `shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence`, `shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence`, and `shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release` hold the fence, lease, expiry, cancellation, and waiter contract; in-flight dispatches drain before quiescence. `shuttle_capacity_shrink_keeps_buffered_batches_and_wakes_publishers_after_the_drain`, `shuttle_capacity_growth_admits_waiting_publishers_without_a_take`, `shuttle_publishers_wait_for_the_slowest_consumer_and_skip_consumers_that_leave`, and `shuttle_losing_every_consumer_delivers_or_returns_the_waiting_batch` keep queued batches across capacity changes, release waiting publishers, and return or deliver each batch when receivers leave. |
+| Assignment authority and state updates (`src/runtime/state_store_shuttle_tests.rs`, `materialized_state.rs`, `kafka_offset_state.rs`) | `shuttle_a_rebind_yields_until_the_operation_admitted_under_its_replaced_binding_finishes` and `shuttle_no_operation_admitted_under_a_superseded_binding_outlives_its_superseding_rebind` fence admitted work even when generations reuse an even or odd counter. `shuttle_snapshot_installation_never_overlaps_origination_or_a_capture` keeps exclusive installation apart from originators and captures. `shuttle_an_originator_update_proceeds_while_the_assignment_barrier_is_held` and `shuttle_a_committed_offset_proceeds_while_the_assignment_barrier_is_held` keep ordinary admitted updates independent of a capture's barrier. |
+| ACK tree (`src/runtime_ack.rs`) | The `shuttle_tests` checks `concurrent_attachment_and_final_ack_leave_exact_tracking`, `concurrent_wait_and_active_ack_exempt_the_remaining_root`, `concurrent_wait_release_and_completion_leave_no_tracking`, `attachment_losing_its_reservation_to_completion_resolves_no_share`, `attachment_losing_its_reservation_to_completion_parks_no_share`, `wait_release_racing_the_last_active_ack_holds_domain_and_ingestor_handoff_once`, and `attachment_racing_the_last_active_share_into_wait_publishes_one_active_share` keep pending, active, and handoff counts exact across attachment and `REQUIRED WAIT`. `concurrent_success_and_failure_choose_one_terminal_transition`, `fan_out_across_ingestors_with_a_failing_root_resolves_each_root_once_with_exact_counts`, and `parked_and_fanned_out_roots_hold_exact_counts_at_every_quiescent_point` require one terminal result per root, one observed completion, and zero outstanding counts after resolution. |
+| Entity gate and node quiesce (`src/runtime/entity_gate_shuttle_tests.rs`) | `shuttle_an_entity_gate_hold_fences_every_relay_and_admits_no_work_until_it_is_released` requires admitted work to drain before quiescence and prevents new admission while closed. `shuttle_a_work_item_parked_for_materialized_state_is_never_missing_from_a_drain` and `shuttle_every_node_quiesce_gauge_withdraws_exactly_what_it_contributed` keep parked, buffered, and branch work counted without underflow and back to zero. `shuttle_every_engagement_waiter_wakes_and_exactly_one_release_takes_the_hold`, `shuttle_a_hold_dropped_before_its_fence_completes_reopens_every_relay_it_engaged`, `shuttle_a_failed_engagement_wakes_every_waiter_with_its_failure`, and `shuttle_releasing_an_ownership_handoff_wakes_every_waiter_frozen_by_it` cover release, drop, failure, and publication-before-wake. The last check does not exercise the separate waiter-registration gap described above. |
+| Interconnect slots and membership (`crates/interconnect/src/connection/stream_slots/shuttle_checks.rs`, `request/shuttle_checks.rs`) | `management_drain_stops_leasing_and_waits_for_every_leased_slot`, `replication_drain_stops_leasing_and_waits_for_every_leased_slot`, `bulk_drain_stops_leasing_and_waits_for_every_leased_slot`, and `relay_drain_stops_leasing_and_waits_for_every_leased_slot` keep partition and subquota reservations isolated, forbid leases after drain starts, and wait for every lease to return. `racing_registrations_lose_no_handler_and_publish_each_name_once` prevents a lost handler registration and duplicate name. `a_membership_change_between_a_callers_check_and_its_wait_is_never_lost` prevents a missed discovery wakeup. |
+| Shutdown and signals (`src/application/shutdown.rs`, `termination_signals.rs`) | `shuttle_racing_stop_requests_accept_exactly_one_and_keep_its_deadline` retains the first stop request and its deadline. `shuttle_phases_only_advance_and_every_completion_waiter_observes_the_one_outcome` keeps phase order and one completion. `shuttle_an_expired_deadline_and_a_repeated_signal_let_exactly_one_forced_exit_end_the_process` and `shuttle_a_repeated_signal_before_the_deadline_ends_the_process_with_the_status_of_that_signal` give one forced-exit claimant and the exit status of the cause that won. |
+| Emitter batch payloads (`src/runtime/emitter_record_writes_shuttle_tests.rs`) | `shuttle_a_retried_payload_acknowledges_each_fanned_in_member_once_after_every_emitter` and `shuttle_a_sibling_failure_resolves_each_fanned_in_member_once_despite_a_retry` fan two source messages out to a batching emitter and a sibling: each source acknowledgement completes once, successfully only after both emitters confirmed it, and the retry writes the retained payload's first bytes. `shuttle_a_cancelled_attempt_leaves_each_member_to_resolve_once` cuts an attempt short at any point and requires the next one to write only unanswered payloads and deliver each rejected member's message error once. `shuttle_a_drain_never_finds_the_emitter_empty_while_a_member_is_retained` races a drain's reads against a stalled write and the force flush that repeats it. |
+| Domain clock (`src/runtime/domain_clock.rs`) | `shuttle_lifecycle_tests::concurrent_reads_of_one_installed_generation_never_decrease` checks the nondecreasing watermark; `a_clock_bound_to_a_replaced_generation_is_refused_by_revalidation` rejects a superseded generation; `readers_never_observe_an_installation_older_than_one_they_observed` prevents publication regression. `a_logical_waiter_wakes_when_its_generation_stops`, `a_logical_waiter_wakes_when_its_generation_is_replaced`, `a_logical_waiter_wakes_when_its_domain_is_removed`, and `a_logical_waiter_wakes_when_a_replacement_mapping_reaches_its_deadline` cover each lifecycle wakeup. |
+
+The checks of WASM checkpoint holds and the durability barrier use the same runner and replay
+contract. Their state semantics live in the WASM state documentation; they do not turn Shuttle
+into a disk or replica simulator. [Deterministic interconnect simulation](./interconnect-simulation.md)
+and Cucumber cover the network and process behavior outside this in-process scheduling boundary.

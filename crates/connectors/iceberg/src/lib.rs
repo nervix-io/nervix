@@ -6,8 +6,8 @@
 //!   through, the local Arrow IPC staging of every mapped batch, the `COMMIT EACH` cadence and
 //!   maximum commit size that release the staged files, the Parquet data files one commit writes,
 //!   and the acknowledgements it retains until that commit succeeds.
-//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio
-//!   and the `iceberg` crates.
+//! - **Depends on.** The connector contract, vocabulary values, Arrow arrays, `error-stack`, Tokio,
+//!   `nervix-dns`, Reqwest, OpenDAL, and the `iceberg` crates.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 //!
@@ -18,10 +18,13 @@
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
+mod storage;
+
 use std::{fs::File, path::PathBuf, sync::Arc as StdArc, time::Duration};
 
 use ::iceberg::{
-    Catalog, CatalogBuilder, NamespaceIdent, Result as IcebergResult, TableIdent,
+    Catalog, CatalogBuilder, Error as IcebergError, ErrorKind as IcebergErrorKind, NamespaceIdent,
+    Result as IcebergResult, TableIdent,
     arrow::FieldMatchMode,
     io::{
         ADLS_ACCOUNT_KEY, ADLS_ACCOUNT_NAME, ADLS_AUTHORITY_HOST, ADLS_CLIENT_ID,
@@ -55,15 +58,16 @@ use arrow_schema::{DataType, TimeUnit};
 use arrow_select::{concat::concat as concat_arrow_arrays, filter::filter as filter_arrow_array};
 use error_stack::{Report, ResultExt as _};
 use iceberg_catalog_rest::{RestCatalog, RestCatalogBuilder};
-use iceberg_storage_opendal::OpenDalStorageFactory;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     MappedSinkRows, PerRecordOutcome, RowSink, SinkAcknowledgementServices, SinkAcknowledgements,
     SinkCommitReport, SinkDeadline, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
     SinkRecordPosition, SinkStartError, SinkStartResult, physical_time::actual_utc_now,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, IcebergStorageBackend, TableName, Timestamp};
 use parquet::file::properties::WriterProperties;
+use storage::DnsStorageFactory;
 use tempfile::TempDir;
 use tracing::{debug, trace};
 use url::Url;
@@ -85,6 +89,7 @@ pub struct IcebergCommitPolicy {
 /// What one Iceberg emitter stages and commits through, from its typed sink plan.
 pub struct IcebergSinkConfig {
     pub backend: IcebergStorageBackend,
+    pub dns: DnsResolver,
     pub storage_config: Vec<ClientConfigEntry>,
     pub catalog_name: String,
     pub catalog_config: Vec<ClientConfigEntry>,
@@ -289,7 +294,6 @@ struct IcebergObjectStoreProperties {
 
 trait IcebergStorageBackendExt {
     fn accepts_location_scheme(self, scheme: &str) -> bool;
-    fn storage_factory(self) -> StdArc<dyn ::iceberg::io::StorageFactory>;
 }
 
 impl IcebergStorageBackendExt for IcebergStorageBackend {
@@ -300,22 +304,13 @@ impl IcebergStorageBackendExt for IcebergStorageBackend {
             Self::AzureBlob => scheme == "wasb" || scheme == "wasbs",
         }
     }
-
-    fn storage_factory(self) -> StdArc<dyn ::iceberg::io::StorageFactory> {
-        match self {
-            Self::S3 => StdArc::new(OpenDalStorageFactory::S3 {
-                customized_credential_load: None,
-            }),
-            Self::Gcs => StdArc::new(OpenDalStorageFactory::Gcs),
-            Self::AzureBlob => StdArc::new(OpenDalStorageFactory::Azdls),
-        }
-    }
 }
 
 impl IcebergSink {
     pub async fn new(config: IcebergSinkConfig, host: SinkHost) -> SinkStartResult<Self> {
         let IcebergSinkConfig {
             backend,
+            dns,
             storage_config,
             catalog_name,
             catalog_config,
@@ -332,7 +327,7 @@ impl IcebergSink {
         let properties = IcebergObjectStoreProperties::from_entries(backend, &storage_config);
         let catalog = StdArc::new(
             properties
-                .rest_catalog(&catalog_name, &catalog_config)
+                .rest_catalog(&catalog_name, &catalog_config, &dns)
                 .await
                 .map_err(|error| {
                     Report::new(SinkStartError::Initialize { sink: ICEBERG }).attach_printable(
@@ -773,7 +768,7 @@ impl SinkLifecycle for IcebergSink {
 
 #[async_trait::async_trait]
 impl RowSink for IcebergSink {
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome {
+    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
         let staged = match self.staged_batch(&rows) {
             Ok(staged) => staged,
@@ -1056,6 +1051,7 @@ impl IcebergObjectStoreProperties {
         &self,
         name: &str,
         catalog_config: &[ClientConfigEntry],
+        dns: &DnsResolver,
     ) -> IcebergResult<RestCatalog> {
         let props = self
             .props
@@ -1066,8 +1062,35 @@ impl IcebergObjectStoreProperties {
                     .iter()
                     .map(|entry| (entry.key.clone(), entry.value.clone())),
             );
+        let tls = rustls::ClientConfig::builder_with_provider(StdArc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| {
+            IcebergError::new(
+                IcebergErrorKind::Unexpected,
+                "failed to configure Iceberg REST TLS",
+            )
+            .with_source(error)
+        })?
+        .with_root_certificates(rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        })
+        .with_no_client_auth();
+        let client = reqwest_iceberg::Client::builder()
+            .dns_resolver(StdArc::new(dns.clone()))
+            .use_preconfigured_tls(tls)
+            .build()
+            .map_err(|error| {
+                IcebergError::new(
+                    IcebergErrorKind::Unexpected,
+                    format!("failed to build the Iceberg REST client: {error}"),
+                )
+            })?;
+        let storage_factory = DnsStorageFactory::new(self.backend, dns)?;
         RestCatalogBuilder::default()
-            .with_storage_factory(self.backend.storage_factory())
+            .with_client(client)
+            .with_storage_factory(StdArc::new(storage_factory))
             .load(name, props.collect())
             .await
     }
@@ -1086,8 +1109,151 @@ mod tests {
         },
     };
     use arrow_schema::Field;
+    use meticulous::ResultExt as _;
+    use nervix_dns::{DnsConfiguration, NameServers};
+    use nervix_test_environment::dns_authority::{DnsAnswer, DnsAuthority};
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+
+    #[tokio::test]
+    async fn iceberg_catalog_authentication_uses_the_node_dns_client() {
+        const CATALOG: &str = "catalog.nervix.test";
+        const AUTH: &str = "auth.nervix.test";
+        let authority = DnsAuthority::start_on_loopback()
+            .await
+            .assured("the fixture can bind a loopback DNS port");
+        for name in [CATALOG, AUTH] {
+            authority.set(
+                name,
+                DnsAnswer::Addresses {
+                    addresses: vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+                    ttl: Duration::from_secs(1),
+                },
+            );
+        }
+        let files = tempfile::tempdir().assured("the fixture can create a directory");
+        let resolver_configuration = files.path().join("resolv.conf");
+        let hosts_file = files.path().join("hosts");
+        std::fs::write(
+            &resolver_configuration,
+            "search nervix.test\noptions ndots:1 timeout:1 attempts:1\n",
+        )
+        .assured("the fixture resolver configuration can be written");
+        std::fs::write(&hosts_file, "").assured("the fixture hosts file can be written");
+        let dns = DnsResolver::load(DnsConfiguration {
+            resolver_configuration,
+            hosts_file,
+            name_servers: NameServers::Explicit(vec![authority.address()]),
+        })
+        .await
+        .assured("the fixture resolver configuration is valid");
+
+        let auth_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("the OAuth endpoint can bind");
+        let auth_port = auth_listener
+            .local_addr()
+            .assured("the OAuth endpoint has an address")
+            .port();
+        let auth_server = tokio::spawn(async move {
+            let (mut stream, _) = auth_listener
+                .accept()
+                .await
+                .assured("the OAuth request connects");
+            let mut bytes = [0_u8; 4096];
+            let length = stream
+                .read(&mut bytes)
+                .await
+                .assured("the OAuth request is readable");
+            let request = String::from_utf8_lossy(&bytes[..length]).to_ascii_lowercase();
+            assert!(request.starts_with("post /token http/1.1"), "{request}");
+            assert!(
+                request.contains(&format!("host: {AUTH}:{auth_port}")),
+                "{request}"
+            );
+            let body = r#"{"access_token":"fixture-token","token_type":"Bearer"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .assured("the OAuth response can be written");
+        });
+
+        let catalog_listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .assured("the catalog endpoint can bind");
+        let catalog_port = catalog_listener
+            .local_addr()
+            .assured("the catalog endpoint has an address")
+            .port();
+        let catalog_server = tokio::spawn(async move {
+            let (mut stream, _) = catalog_listener
+                .accept()
+                .await
+                .assured("the catalog request connects");
+            let mut bytes = [0_u8; 4096];
+            let length = stream
+                .read(&mut bytes)
+                .await
+                .assured("the catalog request is readable");
+            let request = String::from_utf8_lossy(&bytes[..length]).to_ascii_lowercase();
+            assert!(request.starts_with("get /v1/config http/1.1"), "{request}");
+            assert!(
+                request.contains(&format!("host: {CATALOG}:{catalog_port}")),
+                "{request}"
+            );
+            assert!(
+                request.contains("authorization: bearer fixture-token"),
+                "{request}"
+            );
+            let body = r#"{"overrides":{},"defaults":{}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .assured("the catalog response can be written");
+        });
+
+        let properties = IcebergObjectStoreProperties {
+            backend: IcebergStorageBackend::S3,
+            props: HashMap::default(),
+        };
+        let catalog_config = [
+            ClientConfigEntry {
+                key: "uri".to_string(),
+                value: format!("http://{CATALOG}:{catalog_port}"),
+            },
+            ClientConfigEntry {
+                key: "credential".to_string(),
+                value: "client:secret".to_string(),
+            },
+            ClientConfigEntry {
+                key: "oauth2-server-uri".to_string(),
+                value: format!("http://{AUTH}:{auth_port}/token"),
+            },
+        ];
+        let catalog = properties
+            .rest_catalog("fixture", &catalog_config, &dns)
+            .await
+            .assured("the REST catalog can be configured");
+        tokio::time::timeout(Duration::from_secs(10), catalog.invalidate_token())
+            .await
+            .assured("the catalog initialization completes")
+            .assured("the catalog accepts its runtime configuration");
+        assert!(authority.questions_for(CATALOG) > 0);
+        assert!(authority.questions_for(AUTH) > 0);
+        auth_server.await.assured("the OAuth server task completes");
+        catalog_server
+            .await
+            .assured("the catalog server task completes");
+    }
 
     fn commit_policy(interval_millis: u64, max_size: u64) -> IcebergCommitPolicy {
         IcebergCommitPolicy {

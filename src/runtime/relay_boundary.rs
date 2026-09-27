@@ -1043,73 +1043,8 @@ pub(super) struct ExpiringRelayState {
     pub(super) registry: RelayRegistry,
 }
 
-/// The branch retention enforced by a relay owner. It is derived from the relay's branch so an
-/// owner can start directly from the published schedule.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct RelayRetention {
-    pub(super) branch_ttl: Option<Duration>,
-    pub(super) branch_capacity: Option<NonZeroUsize>,
-}
-
-impl RelayRetention {
-    pub(super) fn from_schedule(
-        domain: &DomainName,
-        schedule: &DomainSchedule,
-        relay: &RelayName,
-    ) -> Result<Self, RuntimeError> {
-        let Some(Model::Relay(model)) = schedule
-            .nodes
-            .values()
-            .find(|node| {
-                node.kind() == ModelKind::Relay && node.identifier == ModelName::from(&*relay)
-            })
-            .map(|node| node.config.as_ref())
-        else {
-            return Err(RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("missing relay '{}'", relay.as_str()),
-            });
-        };
-        let Some(branch) = model.branching.branch() else {
-            return Ok(Self::default());
-        };
-        let branch_model = schedule
-            .nodes
-            .values()
-            .find_map(|node| {
-                let Model::Branch(candidate) = node.config.as_ref() else {
-                    return None;
-                };
-                (&candidate.name == branch).then_some(candidate)
-            })
-            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "missing branch '{}' for relay '{}'",
-                    branch.as_str(),
-                    relay.as_str()
-                ),
-            })?;
-        let branch_ttl = humantime::parse_duration(&branch_model.ttl).map_err(|error| {
-            RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!(
-                    "invalid branch ttl '{}' for relay '{}': {error}",
-                    branch_model.ttl,
-                    relay.as_str()
-                ),
-            }
-        })?;
-        let branch_capacity = branch_model
-            .eviction
-            .as_ref()
-            .map(|eviction| addressable_count(eviction.max_instances()));
-        Ok(Self {
-            branch_ttl: Some(branch_ttl),
-            branch_capacity,
-        })
-    }
-}
+/// A relay owner consumes the retention decision made with the rest of its domain plan.
+pub(super) use crate::registry::PlannedRelayRetention as RelayRetention;
 
 /// One materialized relay's runtime task: the relay it serves, the replicated state it maintains,
 /// the branch retention limits it enforces, and the fan-in it consumes.
@@ -1691,7 +1626,7 @@ impl Runtime {
             Some(branch_key) => {
                 let branch_instance = branches
                     .instances
-                    .get_or_try_create_with(batch.key.clone(), now, |_| {
+                    .get_or_try_create_with(batch.key.clone(), now, |_, _| {
                         Ok::<RelayMetricRecorders, std::convert::Infallible>(
                             self.inner.metrics.resolve_relay_metric_recorders(
                                 domain,
@@ -1966,7 +1901,7 @@ impl Runtime {
             let mut restored_branches = state.read().restored_branch_watermarks();
             restored_branches.sort_by_key(|(_, last_ingestion)| *last_ingestion);
             for (key, last_ingestion) in restored_branches {
-                branch_instances.insert_restored(key, last_ingestion, ());
+                branch_instances.insert_changed(key, last_ingestion, ());
             }
             let mut next_expiration_scan = Instant::now() + expiration_scan_interval;
             'state_task: loop {
@@ -2087,7 +2022,7 @@ impl Runtime {
                     }
                 };
                 branch_instances
-                    .get_or_try_create_with(branch_key.clone(), now, |_| {
+                    .get_or_try_create_with(branch_key.clone(), now, |_, _| {
                         Ok::<(), std::convert::Infallible>(())
                     })
                     .assured("the tracking closure's error type is Infallible");

@@ -2,8 +2,8 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** Building a domain's active graph from its Models: every node, every edge, and
-//!   every check that must hold before the graph is allowed to exist.
+//! - **Owns.** Building a domain's active graph from its Models: every node, edge, compiled HTTP
+//!   request plan, and check that must hold before the graph is allowed to exist.
 //! - **Depends on.** The validation rules, the graph types, and the vocabulary.
 //! - **Must not know.** How the graph is stored, placed or executed.
 
@@ -11,7 +11,8 @@ use ahash::{HashMap, HashMapExt};
 use error_stack::Report;
 use meticulous::{OptionExt, ResultExt};
 use nervix_models::{
-    DomainName, EndpointType, IngestSource, Model, ModelIndex, ModelKind, NodeRef, RelayName,
+    DomainName, EndpointType, HttpBodyMode, IngestSource, Model, ModelIndex, ModelKind, NodeRef,
+    RelayName,
 };
 use petgraph::graph::DiGraph;
 use triomphe::Arc;
@@ -35,9 +36,12 @@ use crate::registry::{
             validate_processing_branch_selections,
         },
         connector::{
-            effective_emitter_filter_map_schema, effective_ingestor_output_filter_map_schema,
-            ensure_ingestor_timestamp_source, ensure_signaling_protocol_is_valid,
-            validate_emitter_publishing_contract, validate_endpoint_paths,
+            HttpEmitterRequestPlan, effective_emitter_filter_map_schema,
+            effective_ingestor_output_filter_map_schema, ensure_ingestor_timestamp_source,
+            ensure_signaling_protocol_is_valid, validate_direct_values_sensitivity,
+            validate_emitter_batch_container, validate_emitter_publishing_contract,
+            validate_endpoint_paths, validate_http_emitter_client,
+            validate_http_literal_request_fields, validate_http_request_expressions,
             validate_ingestor_filter_where_for_internal_schemas, validate_ingestor_source,
             validate_sqs_fifo_group_expression, validate_vhost_hostnames,
         },
@@ -115,6 +119,7 @@ impl DomainState {
     ) -> Result<Self, Report<RegistryError>> {
         let mut graph = DiGraph::<ActiveNode, EdgeKind>::new();
         let mut indices = HashMap::new();
+        let mut http_emitter_plans = HashMap::new();
 
         for (key, model) in models {
             let resolved_branching = match model {
@@ -356,12 +361,8 @@ impl DomainState {
                         identifier,
                         &processor.output_routes,
                     )?;
-                    processor.execution_mode().map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    processor.execution_mode().map_err(|rejection| {
+                        RegistryError::invalid_model(domain, identifier.as_str(), rejection)
                     })?;
                     add_processor_output_edges(
                         domain,
@@ -1354,6 +1355,13 @@ impl DomainState {
                             }));
                         }
                     }
+                    validate_direct_values_sensitivity(
+                        domain,
+                        identifier,
+                        models,
+                        emitter,
+                        producer_schema,
+                    )?;
                     validate_sqs_fifo_group_expression(
                         domain,
                         identifier,
@@ -1370,7 +1378,7 @@ impl DomainState {
                         &emitter.from.r#where,
                     )?;
 
-                    if let Some(codec_name) = &emitter.encode_using_codec {
+                    if let Some(codec_name) = emitter.body.codec() {
                         let codec = expect_kind(
                             domain,
                             identifier,
@@ -1390,6 +1398,7 @@ impl DomainState {
                             codec_model,
                             codec_schema,
                         )?;
+                        validate_emitter_batch_container(domain, identifier, emitter, codec_model)?;
                     }
 
                     let client_name = emitter.sink.client();
@@ -1423,6 +1432,19 @@ impl DomainState {
                             ),
                         }));
                     }
+                    let http_client_plan = if let (
+                        nervix_models::EmitSink::Http { .. },
+                        Model::ClientHttp(http_client),
+                    ) = (emitter.sink.as_ref(), client_model)
+                    {
+                        Some(validate_http_emitter_client(
+                            domain,
+                            identifier,
+                            http_client,
+                        )?)
+                    } else {
+                        None
+                    };
                     graph.add_edge(client, source, EdgeKind::RequiredBy);
 
                     if let Some(catalog_client_name) = emitter.sink.catalog_client() {
@@ -1462,12 +1484,12 @@ impl DomainState {
                         graph.add_edge(catalog_client, source, EdgeKind::RequiredBy);
                     }
 
-                    let output_schema = if let Some(codec_name) = &emitter.encode_using_codec {
+                    let output_schema = if let Some(codec_name) = emitter.body.codec() {
                         schema_for_codec_model(domain, identifier, models, codec_name)?
                     } else {
                         producer_schema
                     };
-                    let effective_schema = effective_emitter_filter_map_schema(
+                    let http_fields = validate_http_request_expressions(
                         domain,
                         identifier,
                         models,
@@ -1475,7 +1497,39 @@ impl DomainState {
                         producer_schema,
                         output_schema,
                     )?;
-                    if let Some(codec_name) = &emitter.encode_using_codec {
+                    let (effective_schema, route_program) = effective_emitter_filter_map_schema(
+                        domain,
+                        identifier,
+                        models,
+                        emitter,
+                        producer_schema,
+                        output_schema,
+                    )?;
+                    if let Some(client_plan) = http_client_plan {
+                        validate_http_literal_request_fields(
+                            domain,
+                            identifier,
+                            &client_plan.origin,
+                            emitter,
+                        )?;
+                        let body = if emitter.body.codec().is_some() {
+                            HttpBodyMode::Codec
+                        } else {
+                            HttpBodyMode::WithoutBody
+                        };
+                        let fields = http_fields
+                            .verified("the HTTP emitter branch compiled request fields above");
+                        http_emitter_plans.insert(
+                            key.clone(),
+                            Arc::new(HttpEmitterRequestPlan {
+                                client: client_plan,
+                                body,
+                                fields,
+                                route: route_program,
+                            }),
+                        );
+                    }
+                    if let Some(codec_name) = emitter.body.codec() {
                         let consumer_schema =
                             schema_for_codec_model(domain, identifier, models, codec_name)?;
                         ensure_internal_schema_compatibility_with_policy(
@@ -1519,6 +1573,7 @@ impl DomainState {
                 graph,
                 indices,
                 placement,
+                http_emitter_plans,
             },
         })
     }

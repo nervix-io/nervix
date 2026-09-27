@@ -21,7 +21,7 @@ use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{CommandRequest, SuggestRequest};
 use nervix_consensus::{Consensus, ConsensusSettings, Proposer, RaftRetentionPolicy};
 use nervix_execution::sync::DashMap;
-use nervix_interconnect::{TlsConfigBundle, Transport};
+use nervix_interconnect::{TlsConfigBundle, Transport, TransportClock};
 use nervix_models::{
     AckMode, BranchSelection, ClusterNodeName, CommandExecutionReference, CreateDeduplicator,
     CreateEmitter, CreateIngestor, CreateJunction, CreateSchema, CreateWasmProcessor, DomainConfig,
@@ -302,19 +302,30 @@ fn test_session_service(
 
 pub(crate) async fn test_interconnect(cluster_id: &str, node_id: &ClusterNodeName) -> Transport {
     let files = test_tls_files(cluster_id, node_id);
-    let tls = TlsConfigBundle::from_pem_files(&files.ca, &files.certificate, &files.private_key)
-        .expect("test TLS bundle should load");
+    let tls = TlsConfigBundle::from_pem_files(
+        &files.ca,
+        &files.certificate,
+        &files.private_key,
+        TransportClock::system(),
+    )
+    .expect("test TLS bundle should load");
     let addr = "127.0.0.1:0"
         .parse()
         .expect("ephemeral interconnect address must parse");
+    let dns = nervix_dns::DnsResolver::load(nervix_dns::DnsConfiguration::system())
+        .await
+        .expect("the host's resolver configuration should load");
     let (transport, _rx) = Transport::bind(
         addr,
-        "127.0.0.1",
-        cluster_id,
-        node_id.clone(),
+        nervix_interconnect::TransportIdentity {
+            cluster_id: cluster_id.to_string(),
+            node_id: node_id.clone(),
+            advertised_host: "127.0.0.1".to_string(),
+        },
         tls,
         Default::default(),
         nervix_execution::Executor::default(),
+        nervix_interconnect::PeerResolver::new(dns),
     )
     .await
     .expect("test transport should bind");
@@ -352,10 +363,11 @@ fn model_of_kind(identifier_raw: &str, kind: ModelKind) -> Model {
         ModelKind::Emitter => Model::Emitter(CreateEmitter {
             name: named(identifier_raw),
             from: ProcessorInputs::new(Vec::new(), Vec::new()),
-            encode_using_codec: None,
+            body: nervix_models::EmitterBody::Values,
             sink: Box::new(EmitSink::Syslog {
                 client: named("syslog_forwarder"),
             }),
+            batch: None,
             flush_policy: nervix_models::FlushPolicy::Immediate,
             error_policies: nervix_models::ErrorPolicies::handled_by_log(),
             publishing_mode: nervix_models::EmitterPublishingMode::NoAck {

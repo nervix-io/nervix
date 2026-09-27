@@ -18,9 +18,10 @@ use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
     HttpClientConfig, PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRetryDelay, SinkStartError, SinkStartResult, client_config_value,
+    SinkRecord, SinkRecordId, SinkRetryDelay, SinkStartError, SinkStartResult, client_config_value,
     physical_time::actual_utc_now,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
 use reqwest::{
     Client as HttpClient, StatusCode,
@@ -38,6 +39,7 @@ const SENTRY_RATE_LIMITS_HEADER: &str = "x-sentry-rate-limits";
 /// What one Sentry sink sends with: the entries naming its project DSN and HTTP client settings.
 pub struct SentrySinkConfig {
     pub config: Vec<ClientConfigEntry>,
+    pub dns: DnsResolver,
 }
 
 pub struct SentrySink {
@@ -78,11 +80,12 @@ enum SentryEventError {
 
 impl SentrySink {
     pub fn new(config: SentrySinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
+        let dns = config.dns;
         let config = config.config.as_slice();
         let dsn = Self::config_value(config, "dsn")?
             .parse::<Dsn>()
             .map_err(|error| Self::config_error(format!("invalid Sentry dsn: {error}")))?;
-        let client = HttpClientConfig::new(config, "Sentry")
+        let client = HttpClientConfig::new(config, "Sentry", &dns)
             .build()
             .map_err(|error| {
                 let message = error.current_context().to_string();
@@ -231,7 +234,7 @@ impl SinkLifecycle for SentrySink {}
 
 #[async_trait]
 impl RecordSink for SentrySink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
@@ -260,7 +263,7 @@ impl RecordSink for SentrySink {
             };
             let status = response.status();
             if status.is_success() {
-                outcome.deliver(record.position);
+                outcome.deliver(record.id);
                 continue;
             }
             if Self::is_record_status(status) {

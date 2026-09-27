@@ -96,7 +96,7 @@ pub(super) fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String
         Expr::FieldRef(field_ref) => {
             refs.push((field_ref.relay.clone(), field_ref.field.clone()));
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             collect_expr_field_refs(expr, refs);
         }
         Expr::Binary { left, right, .. } => {
@@ -176,7 +176,9 @@ pub(super) fn expr_contains_lookup_hash_map(expr: &SpannedExpr) -> bool {
                 || expr_contains_lookup_hash_map(low)
                 || expr_contains_lookup_hash_map(high)
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expr_contains_lookup_hash_map(expr),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
+            expr_contains_lookup_hash_map(expr)
+        }
         Expr::Binary { left, right, .. } => {
             expr_contains_lookup_hash_map(left) || expr_contains_lookup_hash_map(right)
         }
@@ -288,6 +290,20 @@ pub(super) fn rewrite_lookup_hash_map_expr(
                 )?),
                 data_type: data_type.clone(),
                 on_failure: *on_failure,
+            },
+            span: expr.span,
+        },
+        Expr::Json {
+            document,
+            extraction,
+        } => nervix_vm::program::SpannedNode {
+            inner: Expr::Json {
+                document: Box::new(rewrite_lookup_hash_map_expr(
+                    document,
+                    available_lookups,
+                    pending_calls,
+                )?),
+                extraction: extraction.clone(),
             },
             span: expr.span,
         },

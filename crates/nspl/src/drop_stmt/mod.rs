@@ -163,7 +163,7 @@ pub fn parse_drop_tokens(tokens: &[Token]) -> Result<DropModel, Vec<ParseError<'
     }
 }
 
-pub fn parse_drop(input: &str) -> Result<DropModel, ParseFromSourceError> {
+pub fn parse_drop(input: &str) -> error_stack::Result<DropModel, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

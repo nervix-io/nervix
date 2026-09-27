@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use super::{
     WindowAggregateExpr, WindowAggregateProgram, WindowAggregateStorageKind, WindowArguments,
-    WindowLinearHistogramConfig,
+    WindowLinearHistogramConfig, WindowSketchConfig,
 };
 use crate::{
     CompileBinding, CompileOptions, OutputMode, SchemaSensitivity,
@@ -83,6 +83,7 @@ pub struct CompiledWindowDemand {
     pub functions: SortedSet<WindowAggregateFunction>,
     pub arguments: WindowArguments<WindowArgumentColumn>,
     pub linear_histogram: Option<WindowLinearHistogramConfig>,
+    pub sketch: Option<WindowSketchConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,7 +152,10 @@ impl WindowAggregateFunction {
             | Self::Max
             | Self::Min
             | Self::Sum => true,
-            Self::Avg
+            Self::ApproxCountDistinct
+            | Self::ApproxQuantile
+            | Self::ApproxTopK
+            | Self::Avg
             | Self::BoolAnd
             | Self::BoolOr
             | Self::Corr
@@ -425,6 +429,7 @@ impl CompiledArguments {
                 functions: demand.functions.clone(),
                 arguments,
                 linear_histogram: demand.linear_histogram.clone(),
+                sketch: demand.sketch,
             });
         }
         let output_schema = StdArc::new(Schema::new(fields));

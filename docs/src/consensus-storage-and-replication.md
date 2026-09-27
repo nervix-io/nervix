@@ -9,6 +9,11 @@ Consensus traffic uses the authenticated pools and admission classes described i
 [Cluster Interconnect](./interconnect.md). Consensus storage is node-local: a quorum makes a command
 committed, while every node independently persists and applies the committed log.
 
+The replicated transaction report and its content-addressed topology use this durable path;
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines which planned
+and actual facts that report retains. This chapter owns log reading, snapshot transfer, and the
+storage bounds that carry large reports.
+
 ## Durable Write Path
 
 Every consensus mutation uses a full synchronization barrier that asks the filesystem to persist
@@ -59,6 +64,12 @@ until adding the next entry's changes would exceed the reservation. That write c
 semantic records and metadata for the whole range. After synchronization succeeds, the node
 publishes the resulting coherent revision and then answers every entry in the range.
 
+One command may expand when its archive becomes independently keyed transaction report, commit-plan,
+and topology records. An applied command therefore reserves 16 MiB from the Commands class: up to
+8 MiB for the normalized records and keys, with the other half retained for Fjall's journal encoding
+and moving batch descriptors. The reservation is released after synchronization. This keeps a
+multi-mebibyte report atomic without making storage memory proportional to retained history.
+
 A crash after a log write and before application does not lose an acknowledged command. If the
 entry was committed, recovery streams it from the log and applies it. If it was not committed, a
 later leader may discard it. In either case, the client had not yet received an applied response.
@@ -98,7 +109,7 @@ remains fenced. A follower or offline replica that skips the intermediate runtim
 catches up through the ordered schedule records and cannot accept a checkpoint from the replaced
 generation. Thus a pre-publication failure leaves the old schedule authoritative, while a
 post-publication failure is recovered as committed but not yet usable rather than rolled back or
-acknowledged early.
+acknowledged early. See [Coordinated Reset](./wasm-state.md#coordinated-reset).
 
 ## Replication Pacing
 
@@ -226,6 +237,9 @@ bytes. The builder opens one consistent database view and seals it one section a
 default section limit is 8 MiB. Each section acquires the Bulk budget for one consensus-storage
 turn, is encoded and synchronized, and releases that reservation before the next section starts.
 Concurrent state-machine writes can proceed between sections without changing the pinned view.
+The section builder charges each key and value together with its archived record envelope, root,
+and alignment before accepting the record. The encoded section therefore stays within 8 MiB even
+when it contains many small keyed report records; the complete generation grows by adding sections.
 
 The manifest is synchronized only after every section is durable. Publishing that one record makes
 the generation active atomically with its applied position and membership. A build interrupted
@@ -338,6 +352,7 @@ does not expose flags for them:
 | Leader window per follower | 16 batches and a 16 MiB target byte budget |
 | Follower decoded resident window | 4 batches per live append stream |
 | Commands memory budget | 24 MiB per node |
+| Applied command storage | 8 MiB normalized payload in a 16 MiB working reservation |
 | Append stream setup / progress idle bound | 5 seconds / 5 seconds |
 | Snapshot section / transport chunk | 8 MiB / 64 KiB |
 | Complete snapshot transfer | 30 seconds |

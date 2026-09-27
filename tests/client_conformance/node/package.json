@@ -1,0 +1,13 @@
+{
+  "name": "nervix-client-conformance-probe",
+  "private": true,
+  "type": "module",
+  "description": "An independent TypeScript client of the Nervix session protocol, run by Node.js and Bun",
+  "dependencies": {
+    "flatbuffers": "25.9.23"
+  },
+  "devDependencies": {
+    "bun": "1.4.2",
+    "esbuild": "0.28.2"
+  }
+}

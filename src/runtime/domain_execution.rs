@@ -9,7 +9,7 @@
 
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
-use super::*;
+use super::{domain_rebuild::ActivatedDomainSurfaces, *};
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub(super) enum DomainRoutingError {
@@ -44,6 +44,7 @@ pub(crate) struct DomainRoutingSnapshot {
     pub(super) materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
+    pub(super) processor_plans: HashMap<NodeRef, StdArc<PublishedProcessorPlan>>,
 }
 
 pub(crate) type SharedDomainRouting = StdArc<ArcSwap<DomainRoutingSnapshot>>;
@@ -109,7 +110,6 @@ pub(super) struct DomainExecution {
     pub(super) start_version: u64,
     pub(super) domain_clock: DomainClock,
     pub(super) shutdown: watch::Sender<bool>,
-    pub(super) graph: SharedActiveGraph,
     pub(super) routing: DomainRouting,
     pub(super) branched_ingestors: HashMap<ModelName, Vec<BranchedIngestorSpec>>,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
@@ -348,24 +348,21 @@ impl Runtime {
                     reason: error.to_string(),
                 })?;
         let scheduled_nodes = graph.unplaced_schedule_nodes();
+        let scheduled_node_map = scheduled_nodes
+            .iter()
+            .cloned()
+            .map(|node| (node.identity(), node))
+            .collect::<ScheduledNodes>();
         self.install_state_identities_from_graph(domain, &scheduled_nodes);
 
         let domain_graph = self.domain_graph_handle(domain).await;
-        domain_graph.store(Some(StdArc::new(graph.clone())));
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();
         let mut relay_schemas = HashMap::new();
         let mut materialized_stream_specs = HashMap::new();
         let mut materialized_stream_owner_nodes = HashMap::new();
-        let mut schemas = HashMap::new();
-        let mut wire_schemas = DomainWireSchemas::default();
-        let mut codecs = HashMap::new();
-        let mut signaling_protocols = HashMap::new();
         let mut transports = HashMap::new();
-        let mut vhosts = HashMap::new();
-        let mut endpoint_specs = Vec::new();
-        let mut endpoint_routes = HashMap::new();
         let mut generator_specs = Vec::new();
         let mut lookup_specs = Vec::new();
         let mut emitter_specs = Vec::new();
@@ -375,7 +372,7 @@ impl Runtime {
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
         let mut reingestor_tasks = HashMap::new();
-        let branched_specs = branched_node_specs_from_active_graph(&graph);
+        let branched_specs = branched_node_specs_from_scheduled_nodes(&scheduled_node_map);
         let branch_relays = branch_relays_from_branched_specs(&branched_specs);
         let model_index = graph
             .nodes()
@@ -402,167 +399,69 @@ impl Runtime {
                 reason: format!("failed to compile domain UDFs: {error}"),
             })?;
 
+        let activation_plan =
+            DomainActivationPlan::from_scheduled_nodes(domain, &scheduled_node_map)
+                .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let ActivatedDomainSurfaces {
+            codecs,
+            signaling_protocols,
+            endpoint_routes,
+        } = self
+            .activate_domain_surfaces(domain, &activation_plan)
+            .await?;
+
         for node in graph.nodes() {
-            match node.config.as_ref() {
-                Model::Schema(schema) => {
-                    schemas.insert(schema.name.clone(), Arc::new(compile_schema(schema)));
-                }
-                Model::WireJsonSchema(wire_schema) => {
-                    wire_schemas.insert_json(wire_schema.clone());
-                }
-                Model::WireCborSchema(wire_schema) => {
-                    wire_schemas.insert_cbor(wire_schema.clone());
-                }
-                Model::WireAvroSchema(wire_schema) => {
-                    wire_schemas.insert_avro(wire_schema.clone());
-                }
-                model if model.kind() == ModelKind::Client => {
-                    transports.insert(ClientName::from(&node.identifier), node.config.clone());
-                }
-                Model::Vhost(vhost) => {
-                    vhosts.insert(vhost.name.clone(), vhost.clone());
-                }
-                Model::Endpoint(endpoint) => {
-                    endpoint_specs.push(endpoint.clone());
-                }
-                Model::SignalingProtocol(protocol) => {
-                    signaling_protocols.insert(
-                        protocol.name.clone(),
-                        self.compile_signaling_protocol(domain, protocol).await?,
-                    );
-                }
-                _ => {}
+            if node.config.kind() == ModelKind::Client {
+                transports.insert(ClientName::from(&node.identifier), node.config.clone());
             }
         }
 
-        for endpoint in endpoint_specs {
-            let Some(vhost) = vhosts.get(&endpoint.on_vhost) else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("missing vhost '{}'", endpoint.on_vhost.as_str()),
-                });
+        for relay in activation_plan.relays.values() {
+            let expiring_state = if branch_relays.contains(&relay.name) {
+                let state = self
+                    .expiring_stream_state(domain, &relay.name)
+                    .map_err(|error| RuntimeError::BuildDomainExecution {
+                        domain: domain.as_str().to_string(),
+                        reason: error.to_string(),
+                    })?;
+                Some(state)
+            } else {
+                None
             };
-            let signaling_protocol = endpoint
-                .signaling_protocol
-                .as_ref()
-                .map(|signaling_protocol| {
-                    signaling_protocols
-                        .get(signaling_protocol)
-                        .cloned()
-                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing signaling protocol '{}'",
-                                signaling_protocol.as_str()
-                            ),
-                        })
-                })
-                .transpose()?;
-            endpoint_routes.insert(
-                endpoint.name.clone(),
-                EndpointRoute {
-                    path: endpoint.path,
-                    hostnames: vhost
-                        .hostnames
-                        .iter()
-                        .map(|host| host.to_ascii_lowercase())
-                        .collect(),
-                    endpoint_type: endpoint.endpoint_type,
-                    signaling_protocol,
+            let fanout = self
+                .relay_boundary_fanout_with_capacity(
+                    domain,
+                    &relay.name,
+                    relay.capacity,
+                    RelaySubscriptionDefinition::new(relay.schema.clone(), relay.branching.clone()),
+                )
+                .await;
+            let registry = match expiring_state.as_ref() {
+                Some(state) => state.registry.clone(),
+                None => RelayRegistry::new(),
+            };
+            relay_builders.insert(
+                relay.name.clone(),
+                RelayBoundaryBuilder {
+                    fanout,
+                    attached_runtime_consumer_count: 0,
+                    detached_runtime_consumer_count: 0,
+                    registry,
+                    remote_runtime_consumers: Vec::new(),
                 },
             );
-        }
-
-        for node in graph.nodes() {
-            if let Model::Codec(codec) = node.config.as_ref() {
-                let Some(schema) = schemas.get(&codec.schema).cloned() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("missing compiled schema '{}'", codec.schema.as_str()),
-                    });
-                };
-                let wire_format = wire_schemas.resolve(domain, &codec.wire_format)?;
-                let compiled = self
-                    .compile_domain_codec(domain, codec, schema, wire_format)
-                    .await?;
-                codecs.insert(codec.name.clone(), compiled);
-            }
-        }
-
-        for node in graph.nodes() {
-            if let Model::Relay(relay) = node.config.as_ref() {
-                let Some(schema) = schemas.get(&relay.schema).cloned() else {
-                    return Err(RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing compiled relay schema '{}' for relay '{}'",
-                            relay.schema.as_str(),
-                            relay.name.as_str()
-                        ),
-                    });
-                };
-                let expiring_state = if branch_relays.contains(&relay.name) {
-                    let state =
-                        self.expiring_stream_state(domain, &relay.name)
-                            .map_err(|error| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: error.to_string(),
-                            })?;
-                    Some(state)
-                } else {
-                    None
-                };
-                let branching = node
-                    .resolved_branching
-                    .clone()
-                    .assured("the registry resolves every relay branch declaration");
-                let fanout = self
-                    .relay_boundary_fanout_with_capacity(
-                        domain,
-                        &relay.name,
-                        relay.buffer,
-                        RelaySubscriptionDefinition::new(schema.clone(), branching.clone()),
-                    )
-                    .await;
-                let registry = match expiring_state.as_ref() {
-                    Some(state) => state.registry.clone(),
-                    None => RelayRegistry::new(),
-                };
-                relay_builders.insert(
+            relay_branchings.insert(relay.name.clone(), relay.branching.clone());
+            relay_schemas.insert(relay.name.clone(), relay.schema.clone());
+            if relay.materialized {
+                materialized_stream_specs.insert(
                     relay.name.clone(),
-                    RelayBoundaryBuilder {
-                        fanout,
-                        attached_runtime_consumer_count: 0,
-                        detached_runtime_consumer_count: 0,
-                        registry,
-                        remote_runtime_consumers: Vec::new(),
-                    },
+                    RuntimeMaterializedRelaySpec::new(
+                        relay.schema.arrow_schema(),
+                        relay.schema.vm_sensitivity(),
+                        relay.branching.clone(),
+                    ),
                 );
-                relay_branchings.insert(relay.name.clone(), branching.clone());
-                relay_schemas.insert(relay.name.clone(), schema);
-                if relay.materialized_state.is_some() {
-                    materialized_stream_specs.insert(
-                        relay.name.clone(),
-                        RuntimeMaterializedRelaySpec::new(
-                            relay_schemas
-                                .get(&RelayName::from(&node.identifier))
-                                .verified(
-                                    "the schema was inserted under this identifier immediately \
-                                     above",
-                                )
-                                .arrow_schema(),
-                            relay_schemas
-                                .get(&RelayName::from(&node.identifier))
-                                .verified(
-                                    "the schema was inserted under this identifier immediately \
-                                     above",
-                                )
-                                .vm_sensitivity(),
-                            branching,
-                        ),
-                    );
-                    materialized_stream_owner_nodes.insert(relay.name.clone(), None);
-                }
+                materialized_stream_owner_nodes.insert(relay.name.clone(), None);
             }
         }
 
@@ -756,11 +655,9 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: reason.to_string(),
             })?;
-            let Some(runtime) = self.start_branched_entrypoint_runtime(
-                domain,
-                &spec.identifier,
-                Some((domain_graph.clone(), template)),
-            ) else {
+            let Some(runtime) =
+                self.start_branched_entrypoint_runtime(domain, &spec.identifier, Some(template))
+            else {
                 continue;
             };
             branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
@@ -770,38 +667,49 @@ impl Runtime {
                 .push(runtime);
         }
 
+        let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
+        let processor_specs = processor_input_specs
+            .iter()
+            .map(|(spec, _)| spec.clone())
+            .collect::<Vec<_>>();
+        let previous_processor_plans = HashMap::default();
+        let processor_plans = bind_published_processor_plans(
+            &processor_specs,
+            ProcessorPlanBindingContext {
+                runtime: self,
+                domain,
+                model_index: &model_index,
+                relay_schemas: &relay_schemas,
+                relay_registries: &relay_registries,
+                relay_services: &relay_services,
+                relay_branchings: &relay_branchings,
+                materialized_stream_specs: &materialized_stream_specs,
+                lookups: &lookup_runtimes,
+                udfs: Some(&udf_executor),
+                previous: &previous_processor_plans,
+            },
+        )
+        .await
+        .map_err(|reason| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("failed to bind published processor plans: {reason:#}"),
+        })?;
+
         for (node_spec, inputs) in processor_input_specs {
-            let mut template = materialize_processor_instance_template(
-                &node_spec,
-                &model_index,
-                &relay_schemas,
-                &relay_registries,
-                &relay_services,
-                Some(&udf_executor),
-            )
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-            template
-                .prepare_wasm_processors(self, domain)
-                .await
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("{reason:#}"),
-                })?;
             let entity = NodeRef {
                 kind: node_spec.spec.kind,
                 identifier: node_spec.spec.processor.clone(),
             };
+            let template = processor_plans
+                .get(&entity)
+                .verified("the published plan binder returns every planned processor")
+                .template
+                .as_ref()
+                .clone();
             node_tasks.insert(
                 entity,
                 spawn_processor_node_runtime(
-                    ProcessorRuntimeContext::new(
-                        self.clone(),
-                        domain.clone(),
-                        domain_graph.clone(),
-                    ),
+                    ProcessorRuntimeContext::new(self.clone(), domain.clone()),
                     &shutdown_tx,
                     template,
                     inputs,
@@ -810,7 +718,6 @@ impl Runtime {
             );
         }
 
-        let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
         let execution_build_deps = ExecutionBuildDeps {
             domain,
             relay_schemas: &relay_schemas,
@@ -919,7 +826,6 @@ impl Runtime {
                 start_version,
                 domain_clock,
                 shutdown: shutdown_tx,
-                graph: domain_graph.clone(),
                 routing: self.stage_domain_routing(
                     domain,
                     DomainRoutingSnapshot {
@@ -934,6 +840,7 @@ impl Runtime {
                         materialized_stream_owner_nodes,
                         codecs,
                         signaling_protocols,
+                        processor_plans,
                     },
                 ),
                 branched_ingestors: Self::branched_specs_by_identifier(&branched_specs.entrypoints),
@@ -950,19 +857,28 @@ impl Runtime {
                 tasks,
             },
         );
+        domain_graph.store(Some(StdArc::new(graph)));
 
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "domain_routing_shuttle_tests.rs"]
+mod shuttle_tests;
 
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::{
-        DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick,
-        DomainTimeRate, Timestamp,
+        CodecWireFormat, CreateCodec, CreateEndpoint, CreateRelay, CreateSchema,
+        CreateSignalingProtocol, CreateVhost, CreateWireSchema, DomainClockState, DomainConfig,
+        DomainPace, DomainState, DomainStatus, DomainTick, DomainTimeRate, EndpointType, JsonType,
+        MaterializedRelayState, Model, ParseAsType, RelayBranching, SchemaField,
+        SignalingProtocolOnConnect, SignalingWireFormat, Timestamp, WireSchemaField,
     };
+    use nonzero_ext::nonzero;
 
     use super::*;
     use crate::runtime::domain_clock::DomainClockAccessError;
@@ -1209,5 +1125,98 @@ mod tests {
             DomainClockAccessError::Stopped { domain, generation: 0 }
                 if domain == &clock_domain
         ));
+    }
+
+    #[tokio::test]
+    async fn passive_execution_installs_planned_surfaces_without_admitting_endpoint_traffic() {
+        let runtime = Runtime::new();
+        let domain = domain("stopped_surfaces");
+        let mut stopped = unpaced_domain_state(domain.as_str());
+        stopped.status = DomainStatus::Stopped;
+        runtime.sync_domains(&BTreeMap::from([(domain.clone(), stopped)]));
+        let schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
+                scheduled_model(Model::Schema(CreateSchema {
+                    name: named("payload"),
+                    fields: vec![SchemaField {
+                        name: named("value"),
+                        ty: ParseAsType::String,
+                        optional: false,
+                        sensitive: false,
+                    }],
+                })),
+                scheduled_model(Model::WireJsonSchema(CreateWireSchema {
+                    name: named("payload_wire"),
+                    strictness: Default::default(),
+                    fields: vec![WireSchemaField {
+                        name: named("value"),
+                        ty: JsonType::String,
+                        optional: false,
+                    }],
+                })),
+                scheduled_model(Model::Codec(CreateCodec {
+                    name: named("payload_codec"),
+                    wire_format: CodecWireFormat::Json {
+                        wire_schema: named("payload_wire"),
+                    },
+                    schema: named("payload"),
+                    encoding_rules: Vec::new(),
+                })),
+                scheduled_model(Model::Relay(CreateRelay {
+                    name: named("events"),
+                    schema: named("payload"),
+                    buffer: nonzero!(7usize),
+                    branching: RelayBranching::unbranched(),
+                    materialized_state: Some(MaterializedRelayState::LastByTimestamp),
+                })),
+                scheduled_model(Model::Vhost(CreateVhost {
+                    name: named("edge"),
+                    hostnames: vec!["EVENTS.EXAMPLE.COM".to_string()],
+                    tls: None,
+                })),
+                scheduled_model(Model::SignalingProtocol(CreateSignalingProtocol {
+                    name: named("handshake"),
+                    format: SignalingWireFormat::Json,
+                    on_connect: SignalingProtocolOnConnect {
+                        accept_data: true,
+                        steps: Vec::new(),
+                        fail_matchers: Vec::new(),
+                        timeout: "1s".to_string(),
+                    },
+                })),
+                scheduled_model(Model::Endpoint(CreateEndpoint {
+                    name: named("receive"),
+                    on_vhost: named("edge"),
+                    path: "/ingest".to_string(),
+                    endpoint_type: EndpointType::Websockets,
+                    signaling_protocol: Some(named("handshake")),
+                })),
+            ],
+            Vec::new(),
+        );
+
+        let mut execution = runtime
+            .build_passive_execution_from_schedule(&domain, &schedule)
+            .await
+            .expect("a stopped domain can install its planned surfaces");
+        assert!(execution.passive_only);
+        assert!(execution.codecs.contains_key("payload_codec"));
+        assert!(execution.relay_schemas.contains_key("events"));
+        assert!(execution.materialized_stream_specs.contains_key("events"));
+        assert!(execution.signaling_protocols.contains_key("handshake"));
+        assert_eq!(
+            execution.endpoint_routes["receive"].hostnames,
+            vec!["events.example.com".to_string()]
+        );
+        runtime.publish_routed_endpoints(&domain, &execution);
+        assert!(runtime.inner.routed_endpoints.is_empty());
+
+        execution.routing.passive_only = false;
+        runtime.publish_routed_endpoints(&domain, &execution);
+        assert_eq!(runtime.inner.routed_endpoints.len(), 1);
+        execution.routing.deactivate();
+        runtime.withdraw_routed_endpoints(&domain, &execution);
+        assert!(runtime.inner.routed_endpoints.is_empty());
     }
 }

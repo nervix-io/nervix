@@ -65,6 +65,9 @@ struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_sink_clients: DashMap<String, (), RandomState>,
+    /// One-shot, emitter-scoped sink stalls: the next write of the emitter keeps the sink's answers
+    /// for this many of its records, and the answers for the rest are lost.
+    stalled_emitter_sinks: DashMap<String, usize, RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
@@ -106,6 +109,9 @@ struct FaultInjectionState {
     /// Runtime and harness waiters clone a pause so it remains alive after its map guard drops.
     domain_clock_progress_pauses:
         DashMap<DomainClockProgressPausePoint, Arc<TestPause>, RandomState>,
+    /// A WASM processor branch holds its next guest-state checkpoint at one window, so a scenario
+    /// can end the node while the checkpoint is exactly that far.
+    wasm_checkpoint_pauses: DashMap<WasmCheckpointPausePoint, Arc<TestPause>, RandomState>,
     /// Wall time already elapsed when the next newly supplied mapping for a domain starts.
     domain_clock_initial_elapsed: DashMap<DomainName, Duration, RandomState>,
     state_replica_polling_paused: AtomicBool,
@@ -229,6 +235,33 @@ enum CommandPausePoint {
     },
 }
 
+/// How far one WASM guest-state checkpoint has come when a scenario holds it.
+///
+/// Every window lies after the callback's output was dispatched and before the success
+/// acknowledgements the callback decided are released, so each names one crash window of the
+/// checkpoint's completion boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumString, strum::AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum WasmCheckpointWindow {
+    /// The callback's output is dispatched and the guest has not saved its state yet.
+    BeforeCapture,
+    /// The guest saved its state and the checkpoint has its revision, but none of it is on stable
+    /// storage.
+    AfterCapture,
+    /// The checkpoint is on this node's stable storage and its replicas have not confirmed it.
+    AfterLocalDurability,
+    /// The checkpoint reached its whole boundary, and is neither committed nor has it released the
+    /// acknowledgements it holds.
+    BeforeAcknowledgement,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WasmCheckpointPausePoint {
+    domain: DomainName,
+    processor: ModelName,
+    window: WasmCheckpointWindow,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct DomainClockProgressPausePoint {
     domain: String,
@@ -249,6 +282,7 @@ impl Default for FaultInjection {
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
                 unavailable_sink_clients: DashMap::default(),
+                stalled_emitter_sinks: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
@@ -270,6 +304,7 @@ impl Default for FaultInjection {
                 ownership_handoff_preparation_pauses: DashMap::default(),
                 ownership_handoff_prepare_response_pauses: DashMap::default(),
                 domain_clock_progress_pauses: DashMap::default(),
+                wasm_checkpoint_pauses: DashMap::default(),
                 domain_clock_initial_elapsed: DashMap::default(),
                 state_replica_polling_paused: AtomicBool::new(false),
                 wasm_checkpoint_storage_failing: AtomicBool::new(false),
@@ -585,6 +620,18 @@ impl FaultInjection {
         self.inner
             .unavailable_sink_clients
             .remove(&emitter.to_ascii_lowercase());
+    }
+
+    /// Makes the sink of `emitter` stall after it resolved `resolved` records of its next write.
+    ///
+    /// The sink still writes every record, but the emitter receives only its answers for the first
+    /// `resolved` records in the order it handed them over, as it does from a broker that stops
+    /// answering after it accepted the rest. The write then fails the way an unanswered one does,
+    /// so the emitter cannot tell which of the other records landed.
+    pub fn stall_emitter_sink_after_resolving(&self, emitter: &str, resolved: usize) {
+        self.inner
+            .stalled_emitter_sinks
+            .insert(emitter.to_ascii_lowercase(), resolved);
     }
 
     /// Fails the next schedule publication for a domain so a test can observe recovery after the
@@ -1060,6 +1107,48 @@ impl FaultInjection {
         );
     }
 
+    /// Hold the next guest-state checkpoint of `processor` at `window`, on whichever node and branch
+    /// reaches it first. The pause is one-shot: every later checkpoint passes the window, including
+    /// the checkpoints of a node that restarted while the first one was held.
+    pub fn pause_wasm_checkpoint(
+        &self,
+        domain: DomainName,
+        processor: ModelName,
+        window: WasmCheckpointWindow,
+    ) {
+        self.inner.wasm_checkpoint_pauses.insert(
+            WasmCheckpointPausePoint {
+                domain,
+                processor,
+                window,
+            },
+            Arc::new(TestPause::default()),
+        );
+    }
+
+    pub async fn wait_for_wasm_checkpoint_pause(
+        &self,
+        domain: DomainName,
+        processor: ModelName,
+        window: WasmCheckpointWindow,
+    ) {
+        let point = WasmCheckpointPausePoint {
+            domain,
+            processor,
+            window,
+        };
+        let pause = self.wasm_checkpoint_pause(&point);
+        pause.wait_until_reached().await;
+    }
+
+    /// Release every held WASM guest-state checkpoint, so a checkpoint whose node still runs
+    /// continues from its window.
+    pub fn release_all_wasm_checkpoint_pauses(&self) {
+        for pause in self.inner.wasm_checkpoint_pauses.iter() {
+            pause.value().release();
+        }
+    }
+
     pub fn pause_state_replica_polling(&self) {
         self.inner
             .state_replica_polling_paused
@@ -1216,6 +1305,15 @@ impl FaultInjection {
         self.inner
             .unavailable_sink_clients
             .contains_key(&emitter.as_str().to_ascii_lowercase())
+    }
+
+    /// Consumes the sink stall armed for the next write of `emitter`: how many of its records the
+    /// sink resolves before it stalls.
+    pub(crate) fn take_emitter_sink_stall(&self, emitter: &EmitterName) -> Option<usize> {
+        self.inner
+            .stalled_emitter_sinks
+            .remove(&emitter.as_str().to_ascii_lowercase())
+            .map(|(_, resolved)| resolved)
     }
 
     /// Consumes an armed fault so the rollback publication can still reach the cluster.
@@ -1484,6 +1582,34 @@ impl FaultInjection {
         self.inner.remote_relay_admission_pauses.remove(&key);
     }
 
+    /// Hold a guest-state checkpoint of `processor` at `window` when a scenario armed that window
+    /// and no other checkpoint has claimed it.
+    pub(crate) async fn pause_wasm_checkpoint_if_armed(
+        &self,
+        domain: &DomainName,
+        processor: &ModelName,
+        window: WasmCheckpointWindow,
+    ) {
+        let point = WasmCheckpointPausePoint {
+            domain: domain.clone(),
+            processor: processor.clone(),
+            window,
+        };
+        let Some(pause) = self
+            .inner
+            .wasm_checkpoint_pauses
+            .get(&point)
+            .map(|pause| pause.value().clone())
+        else {
+            return;
+        };
+        if pause.claimed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        pause.reach();
+        pause.wait_until_released().await;
+    }
+
     pub(crate) async fn pause_ownership_handoff_after_preparation_if_armed(
         &self,
         domain: &DomainName,
@@ -1739,6 +1865,13 @@ impl FaultInjection {
             .get(key)
         else {
             panic!("ownership handoff prepare response pause for domain '{key}' is not armed");
+        };
+        pause.value().clone()
+    }
+
+    fn wasm_checkpoint_pause(&self, point: &WasmCheckpointPausePoint) -> Arc<TestPause> {
+        let Some(pause) = self.inner.wasm_checkpoint_pauses.get(point) else {
+            panic!("WASM checkpoint pause at {point:?} is not armed");
         };
         pause.value().clone()
     }

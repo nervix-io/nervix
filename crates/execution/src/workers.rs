@@ -6,13 +6,16 @@ use std::{
         Arc as StdArc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use thiserror::Error;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::{
+    sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError},
+    time::Instant,
+};
 
 use crate::{
     SemaphoreRef,
@@ -107,7 +110,7 @@ impl WorkerPool {
         }
     }
 
-    /// Admit one job, then run it off the async workers.
+    /// Admit one job, then dispatch it through this class's execution strategy.
     ///
     /// The order is deliberate. The queue slot is taken first, so a class can never accumulate an
     /// unbounded number of futures waiting in front of the blocking pool. `reservation` then moves
@@ -149,7 +152,7 @@ impl WorkerPool {
         Ok(())
     }
 
-    /// Take this class's ordered worker and put one blocking job onto it.
+    /// Take this class's ordered worker and submit the job while retaining its charge.
     async fn start<T>(
         &self,
         reservation: Reservation,
@@ -176,7 +179,7 @@ impl WorkerPool {
         let job_cancellation = cancellation.clone();
         let completed = StdArc::clone(&self.completed);
         let worked_nanos = StdArc::clone(&self.worked_nanos);
-        let handle = tokio::task::spawn_blocking(move || {
+        let work = move || {
             // The job owns its charge while it runs, so the allocation it made is released when
             // the work actually exits and not when the caller stopped waiting.
             let started_at = Instant::now();
@@ -185,7 +188,16 @@ impl WorkerPool {
             completed.fetch_add(1, Ordering::AcqRel);
             drop(worker);
             value
-        });
+        };
+        #[cfg(feature = "turmoil")]
+        let handle = match self.class {
+            // Bounded CPU work in the simulation target is one scheduler task. Its synchronous
+            // body is one scheduling step; instruction-level races need Shuttle or real threads.
+            WorkerClassName::Cpu(_) => tokio::task::spawn(async move { work() }),
+            WorkerClassName::Storage(_) => tokio::task::spawn_blocking(work),
+        };
+        #[cfg(not(feature = "turmoil"))]
+        let handle = tokio::task::spawn_blocking(work);
         Ok(RunningJob {
             handle,
             cancellation,
@@ -215,7 +227,7 @@ impl WorkerPool {
     }
 }
 
-/// A blocking job already submitted to its worker, with the signal an awaiting caller may cancel.
+/// A job already submitted to its worker, with the signal an awaiting caller may cancel.
 struct RunningJob<T> {
     handle: tokio::task::JoinHandle<T>,
     cancellation: Cancellation,
@@ -240,5 +252,157 @@ impl Drop for QueueSlot {
         if self.permit.take().is_some() {
             self.pending.fetch_sub(1, Ordering::AcqRel);
         }
+    }
+}
+
+#[cfg(all(test, feature = "turmoil"))]
+mod simulation_checks {
+    use std::{
+        future::{Future as _, poll_fn},
+        num::NonZeroUsize,
+        sync::Arc as StdArc,
+        task::Poll,
+    };
+
+    use super::*;
+    use crate::{CpuClass, Executor, MemoryClass};
+
+    fn one() -> NonZeroUsize {
+        NonZeroUsize::MIN
+    }
+
+    #[tokio::test]
+    async fn saturation_and_dropped_waiters_restore_the_queue_and_charge() {
+        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Data), one(), one());
+        let executor = Executor::default();
+        let occupied = StdArc::clone(&pool.worker_permits)
+            .acquire_owned()
+            .await
+            .assured("the new pool has its one worker permit");
+
+        let queued_charge = executor
+            .try_reserve(MemoryClass::Relay, 1024)
+            .assured("the untouched relay budget has room");
+        let mut queued = Box::pin(pool.start(queued_charge, |_, _| ()));
+        let state = poll_fn(|context| Poll::Ready(queued.as_mut().poll(context))).await;
+        assert!(matches!(state, Poll::Pending));
+        assert_eq!(pool.snapshot().pending, 1);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024);
+
+        let refused_charge = executor
+            .try_reserve(MemoryClass::Relay, 2048)
+            .assured("worker queue pressure does not consume memory admission");
+        let refused = pool.start(refused_charge, |_, _| ()).await;
+        assert!(matches!(
+            refused,
+            Err(error) if matches!(error.current_context(), ExecutionError::QueueFull { pending: 1, .. })
+        ));
+        assert_eq!(pool.snapshot().refused, 1);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 1024);
+
+        drop(queued);
+        assert_eq!(pool.snapshot().pending, 0);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+        drop(occupied);
+
+        let next_charge = executor
+            .try_reserve(MemoryClass::Relay, 4096)
+            .assured("the dropped waiter returned its charge");
+        let next = pool
+            .start(next_charge, |_, _| ())
+            .await
+            .assured("the dropped waiter returned its queue place");
+        next.handle.await.assured("the replacement job completes");
+        assert_eq!(pool.snapshot().running, 0);
+        assert_eq!(pool.snapshot().pending, 0);
+        assert_eq!(pool.snapshot().completed, 1);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn queued_jobs_take_the_worker_in_admission_order() {
+        let two = NonZeroUsize::new(2).assured("2 is nonzero");
+        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Data), one(), two);
+        let executor = Executor::default();
+        let occupied = StdArc::clone(&pool.worker_permits)
+            .acquire_owned()
+            .await
+            .assured("the new pool has its one worker permit");
+        let (completed, mut observed) = tokio::sync::mpsc::unbounded_channel();
+
+        let first_charge = executor
+            .try_reserve(MemoryClass::Relay, 1024)
+            .assured("the untouched relay budget admits the first job");
+        let first_completed = completed.clone();
+        let mut first = Box::pin(pool.start(first_charge, move |_, _| {
+            first_completed
+                .send(1)
+                .assured("the test holds the completion receiver");
+        }));
+        let first_state = poll_fn(|context| Poll::Ready(first.as_mut().poll(context))).await;
+        assert!(matches!(first_state, Poll::Pending));
+
+        let second_charge = executor
+            .try_reserve(MemoryClass::Relay, 1024)
+            .assured("the relay budget admits the second job");
+        let mut second = Box::pin(pool.start(second_charge, move |_, _| {
+            completed
+                .send(2)
+                .assured("the test holds the completion receiver");
+        }));
+        let second_state = poll_fn(|context| Poll::Ready(second.as_mut().poll(context))).await;
+        assert!(matches!(second_state, Poll::Pending));
+        assert_eq!(pool.snapshot().pending, 2);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 2048);
+
+        drop(occupied);
+        let first_job = first
+            .await
+            .assured("the first waiter holds the next permit");
+        assert_eq!(pool.snapshot().pending, 1);
+        first_job.handle.await.assured("the first job completes");
+        let second_job = second
+            .await
+            .assured("the second waiter holds the returned permit");
+        second_job.handle.await.assured("the second job completes");
+        assert_eq!(observed.recv().await, Some(1));
+        assert_eq!(observed.recv().await, Some(2));
+        assert_eq!(pool.snapshot().running, 0);
+        assert_eq!(pool.snapshot().pending, 0);
+        assert_eq!(pool.snapshot().completed, 2);
+        assert_eq!(executor.snapshot().relay_memory.reserved_bytes, 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_running_job_keeps_its_charge_until_exit() {
+        let pool = WorkerPool::new(WorkerClassName::Cpu(CpuClass::Control), one(), one());
+        let executor = Executor::default();
+        let charge = executor
+            .try_reserve(MemoryClass::Management, 8192)
+            .assured("the untouched management budget has room");
+        let observed = executor.clone();
+        let running = pool
+            .start(charge, move |_, cancellation| {
+                (
+                    cancellation.check().is_err(),
+                    observed.snapshot().management_memory.reserved_bytes,
+                )
+            })
+            .await
+            .assured("the running job took its worker permit");
+        assert_eq!(pool.snapshot().running, 1);
+        assert_eq!(executor.snapshot().management_memory.reserved_bytes, 8192);
+
+        let signal = CancelOnDrop::new(running.cancellation.clone());
+        drop(signal);
+        let (cancelled, charged_at_exit) = running
+            .handle
+            .await
+            .assured("the cancelled job exits cooperatively");
+        assert!(cancelled);
+        assert_eq!(charged_at_exit, 8192);
+        assert_eq!(pool.snapshot().running, 0);
+        assert_eq!(pool.snapshot().completed, 1);
+        assert_eq!(executor.snapshot().management_memory.reserved_bytes, 0);
     }
 }

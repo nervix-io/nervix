@@ -11,6 +11,9 @@ aggregation. `DESCRIBE` reads Nervix runtime state and includes derived values s
 recent percentiles. Relay descriptions are routed to the scheduled relay owner; nonowners do not
 maintain relay metrics.
 
+[Errors And Diagnostics](./errors-and-diagnostics.md) defines the error information that may be
+reported and its sensitivity and log-level rules. This chapter defines metric surfaces and labels.
+
 ## Observability Server
 
 The observability listener exposes:
@@ -140,7 +143,8 @@ Transport pools:
   and `operation`
 - `nervix_interconnect_connections_established_total`: connections established, by `class`
 - `nervix_interconnect_connection_failures_total`: connections that failed to establish or ended,
-  by `class` and `reason`, where `reason` is `setup`, `handshake`, `capacity`, or `closed`
+  by `class` and `reason`, where `reason` is `setup`, `handshake`, `capacity`, `closed`, or
+  `resolution` for an attempt whose peer's advertised host did not resolve
 - `nervix_interconnect_stream_resets_total`: streams that ended without a result, by `class` and
   `reason`, where `reason` is `deadline`, `capacity`, `peer`, `shutdown`, or `malformed`
 - `nervix_interconnect_quota_failures_total`: requests refused because their reserved subquota was

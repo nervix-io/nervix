@@ -40,6 +40,7 @@ mod counts;
 mod extremes;
 mod histogram;
 mod moments;
+mod sketches;
 mod sums;
 mod two_stacks;
 
@@ -50,6 +51,7 @@ use counts::{RowCounter, TruthCounter};
 use extremes::{ExtremeOrder, RowExtremes};
 use histogram::LinearHistogram;
 use moments::{CoMoments, Moments};
+use sketches::PaneSketches;
 use sums::{CompensatedSum, IntegerSum};
 use two_stacks::TwoStacks;
 
@@ -60,16 +62,26 @@ use super::*;
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct WindowAccumulatorPlan {
     demands: Vec<CompiledWindowDemand>,
+    pub(super) sketch_layout: Option<WindowPaneLayout>,
+    pub(super) max_state_bytes: Option<std::num::NonZeroU64>,
 }
 
 impl WindowAccumulatorPlan {
     /// The plan of a window whose routes compiled into `routes`, in written route order.
-    pub(super) fn new<'a>(routes: impl IntoIterator<Item = &'a CompiledWindowRoute>) -> Self {
+    pub(super) fn new<'a>(
+        routes: impl IntoIterator<Item = &'a CompiledWindowRoute>,
+        sketch_layout: Option<WindowPaneLayout>,
+        max_state_bytes: Option<std::num::NonZeroU64>,
+    ) -> Self {
         let mut demands = Vec::new();
         for route in routes {
             demands.extend(route.demands.iter().cloned());
         }
-        Self { demands }
+        Self {
+            demands,
+            sketch_layout,
+            max_state_bytes,
+        }
     }
 
     pub(super) fn demands(&self) -> &[CompiledWindowDemand] {
@@ -78,7 +90,10 @@ impl WindowAccumulatorPlan {
 
     /// The accumulators of an empty window.
     pub(super) fn empty_accumulators(&self) -> Vec<WindowAccumulator> {
-        self.demands.iter().map(WindowAccumulator::new).collect()
+        self.demands
+            .iter()
+            .map(|demand| WindowAccumulator::new(demand, self.sketch_layout))
+            .collect()
     }
 }
 
@@ -201,12 +216,23 @@ pub(super) enum WindowAccumulator {
     CoMoments(TwoStacks<CoMoments>),
     Extremes(RowExtremes),
     Histogram(LinearHistogram),
+    Sketch(PaneSketches),
 }
 
 impl WindowAccumulator {
     /// The accumulator of an empty window for `demand`.
-    pub(super) fn new(demand: &CompiledWindowDemand) -> Self {
+    pub(super) fn new(demand: &CompiledWindowDemand, layout: Option<WindowPaneLayout>) -> Self {
         match demand.storage {
+            WindowAggregateStorageKind::DistinctSketch
+            | WindowAggregateStorageKind::QuantileSketch
+            | WindowAggregateStorageKind::TopKSketch => {
+                let config = demand
+                    .sketch
+                    .verified("a sketch storage demand carries its validated config");
+                let layout =
+                    layout.verified("registry validation requires duration panes for sketches");
+                Self::Sketch(PaneSketches::new(config, layout))
+            }
             WindowAggregateStorageKind::Counter => Self::Counter(RowCounter::default()),
             WindowAggregateStorageKind::TruthCounter => Self::TruthCounter(TruthCounter::default()),
             WindowAggregateStorageKind::Sum => {
@@ -256,7 +282,7 @@ impl WindowAccumulator {
     /// Fold the retained rows at `positions` without expiring anything, which is how both
     /// admission and restoring a published window count rows.
     fn fold<R: RetainedWindowRows>(&mut self, demand: usize, rows: &R, positions: Range<usize>) {
-        for run in retained_runs(rows, positions) {
+        for run in retained_runs(rows, positions.clone()) {
             let arguments = run.arguments.demand(demand);
             match self {
                 Self::Counter(counter) => counter.admit(run.rows.len()),
@@ -271,7 +297,11 @@ impl WindowAccumulator {
                 Self::CoMoments(moments) => moments.admit(CoMoments::of_rows(arguments, run.rows)),
                 Self::Extremes(extremes) => extremes.admit(demand, rows, &run),
                 Self::Histogram(histogram) => histogram.admit(arguments.first(), run.rows),
+                Self::Sketch(_) => {}
             }
+        }
+        if let Self::Sketch(sketch) = self {
+            sketch.admit(demand, rows, positions);
         }
     }
 
@@ -317,6 +347,7 @@ impl WindowAccumulator {
                     histogram.retract(run.arguments.demand(demand).first(), run.rows, removed_at);
                 }
             }
+            Self::Sketch(sketch) => sketch.retain_after(demand, rows, count),
         }
     }
 
@@ -330,7 +361,8 @@ impl WindowAccumulator {
             | Self::FloatSum(_)
             | Self::Moments(_)
             | Self::CoMoments(_)
-            | Self::Extremes(_) => false,
+            | Self::Extremes(_)
+            | Self::Sketch(_) => false,
         }
     }
 
@@ -344,7 +376,8 @@ impl WindowAccumulator {
             | Self::FloatSum(_)
             | Self::Moments(_)
             | Self::CoMoments(_)
-            | Self::Extremes(_) => None,
+            | Self::Extremes(_)
+            | Self::Sketch(_) => None,
         }
     }
 
@@ -366,6 +399,7 @@ impl WindowAccumulator {
             Self::CoMoments(moments) => moments.aggregate().evaluate(function),
             Self::Extremes(extremes) => Ok(extremes.evaluate(demand, function, rows, output_type)),
             Self::Histogram(histogram) => Ok(histogram.evaluate(invocation.percentile)),
+            Self::Sketch(sketch) => sketch.evaluate(demand, invocation, output_type, rows),
         }
     }
 
@@ -379,7 +413,8 @@ impl WindowAccumulator {
             | Self::FloatSum(_)
             | Self::Moments(_)
             | Self::CoMoments(_)
-            | Self::Extremes(_) => WindowAccumulatorSnapshot::Retained,
+            | Self::Extremes(_)
+            | Self::Sketch(_) => WindowAccumulatorSnapshot::Retained,
         }
     }
 
@@ -390,8 +425,9 @@ impl WindowAccumulator {
         demand: usize,
         rows: &R,
         snapshot: &WindowAccumulatorSnapshot,
+        layout: Option<WindowPaneLayout>,
     ) -> error_stack::Result<Self, WindowProcessorError> {
-        let mut accumulator = Self::new(plan);
+        let mut accumulator = Self::new(plan, layout);
         accumulator.fold(demand, rows, 0..rows.retained());
         match (&mut accumulator, snapshot) {
             (
@@ -407,7 +443,8 @@ impl WindowAccumulator {
                 | Self::FloatSum(_)
                 | Self::Moments(_)
                 | Self::CoMoments(_)
-                | Self::Extremes(_),
+                | Self::Extremes(_)
+                | Self::Sketch(_),
                 WindowAccumulatorSnapshot::Retained,
             ) => {}
             _ => {

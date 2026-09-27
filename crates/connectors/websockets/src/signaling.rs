@@ -3,7 +3,7 @@ use std::{future::Future, time::Duration};
 use error_stack::{AttachmentKind, FrameKind, Report};
 use futures_util::{SinkExt, StreamExt};
 use nervix_jaq::{JaqNativeFormat, StatefulJaqProgram};
-use nervix_models::CreateSignalingProtocol;
+use nervix_models::{SignalingProtocolName, SignalingProtocolOnConnect, SignalingWireFormat};
 use prost::Message as ProstMessage;
 use prost_reflect::{
     DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage, MessageDescriptor,
@@ -282,12 +282,15 @@ pub struct CompiledSignalingProtocol {
 }
 
 impl CompiledSignalingProtocol {
-    pub fn compile(
-        protocol: &CreateSignalingProtocol,
+    /// Compile a signaling contract after the decision layer has resolved its endpoint binding.
+    pub fn compile_parts(
+        protocol_name: &SignalingProtocolName,
+        format: &SignalingWireFormat,
+        on_connect: &SignalingProtocolOnConnect,
         protobuf: Option<SignalingProtobufDescriptors>,
     ) -> Result<Self, SignalingProtocolCompileError> {
-        let name = protocol.name.as_str();
-        let wire = match JaqNativeFormat::try_from(&protocol.format) {
+        let name = protocol_name.as_str();
+        let wire = match JaqNativeFormat::try_from(format) {
             Ok(format) => CompiledSignalingWire::Native(format),
             Err(()) => {
                 let SignalingProtobufDescriptors { send, wait } = protobuf.ok_or_else(|| {
@@ -312,8 +315,8 @@ impl CompiledSignalingProtocol {
                 })
         };
 
-        let mut steps = Vec::with_capacity(protocol.on_connect.steps.len());
-        for step in &protocol.on_connect.steps {
+        let mut steps = Vec::with_capacity(on_connect.steps.len());
+        for step in &on_connect.steps {
             steps.push(match step {
                 nervix_models::SignalingStep::Send(programs) => CompiledSignalingStep::Send(
                     programs
@@ -345,25 +348,24 @@ impl CompiledSignalingProtocol {
             });
         }
 
-        let fails = protocol
-            .on_connect
+        let fails = on_connect
             .fail_matchers
             .iter()
             .enumerate()
             .map(|(index, matcher)| compile("FAIL JAQ", index + 1, matcher))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let timeout = humantime::parse_duration(&protocol.on_connect.timeout).map_err(|error| {
+        let timeout = humantime::parse_duration(&on_connect.timeout).map_err(|error| {
             SignalingProtocolCompileError::InvalidTimeout {
                 protocol: name.to_string(),
-                timeout: protocol.on_connect.timeout.clone(),
+                timeout: on_connect.timeout.clone(),
                 reason: error.to_string(),
             }
         })?;
 
         Ok(Self {
             wire,
-            accept_data: protocol.on_connect.accept_data,
+            accept_data: on_connect.accept_data,
             steps,
             fails,
             timeout,
@@ -715,14 +717,27 @@ mod tests {
     use std::sync::Arc as StdArc;
 
     use nervix_models::{
-        ModelName, ResourceName, SignalingProtobufConfig, SignalingProtocolName,
-        SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep, SignalingWireFormat,
+        CreateSignalingProtocol, ModelName, ResourceName, SignalingProtobufConfig,
+        SignalingProtocolName, SignalingProtocolOnConnect, SignalingStep, SignalingWaitStep,
+        SignalingWireFormat,
     };
     use parking_lot::Mutex;
     use serde_json::json;
     use tokio_tungstenite::tungstenite::protocol::Role;
 
     use super::*;
+
+    macro_rules! compile_fixture {
+        ($protocol:expr, $protobuf:expr $(,)?) => {{
+            let protocol = $protocol;
+            CompiledSignalingProtocol::compile_parts(
+                &protocol.name,
+                &protocol.format,
+                &protocol.on_connect,
+                $protobuf,
+            )
+        }};
+    }
 
     fn protocol(
         format: SignalingWireFormat,
@@ -826,7 +841,7 @@ mod tests {
 
     #[test]
     fn compiles_a_native_protocol() {
-        let compiled = CompiledSignalingProtocol::compile(
+        let compiled = compile_fixture!(
             &protocol(
                 SignalingWireFormat::Json,
                 on_connect(&["{id: 1}"], &[".id == 1"], &[".error"]),
@@ -842,7 +857,7 @@ mod tests {
 
     #[test]
     fn rejects_an_invalid_send_program() {
-        let error = CompiledSignalingProtocol::compile(
+        let error = compile_fixture!(
             &protocol(
                 SignalingWireFormat::Json,
                 on_connect(&["{id: 1}", ".["], &[".id == 1"], &[]),
@@ -866,7 +881,7 @@ mod tests {
 
     #[test]
     fn requires_descriptors_for_a_protobuf_protocol() {
-        let error = CompiledSignalingProtocol::compile(
+        let error = compile_fixture!(
             &protocol(
                 SignalingWireFormat::Protobuf(SignalingProtobufConfig {
                     resource: ResourceName::parse("proto_bundle").expect("valid identifier"),
@@ -889,7 +904,7 @@ mod tests {
 
     #[test]
     fn encodes_text_and_binary_frames_by_format() {
-        let json = CompiledSignalingProtocol::compile(
+        let json = compile_fixture!(
             &protocol(
                 SignalingWireFormat::Json,
                 on_connect(&["{id: 1}"], &[".id == 1"], &[]),
@@ -902,7 +917,7 @@ mod tests {
             Ok(Message::Text(_))
         ));
 
-        let cbor = CompiledSignalingProtocol::compile(
+        let cbor = compile_fixture!(
             &protocol(
                 SignalingWireFormat::Cbor,
                 on_connect(&["{id: 1}"], &[".id == 1"], &[]),
@@ -918,7 +933,7 @@ mod tests {
 
     #[test]
     fn rejects_a_raw_send_output_that_is_not_a_string() {
-        let raw = CompiledSignalingProtocol::compile(
+        let raw = compile_fixture!(
             &protocol(
                 SignalingWireFormat::Raw,
                 on_connect(&["{id: 1}"], &[". == \"ok\""], &[]),
@@ -932,7 +947,7 @@ mod tests {
 
     #[test]
     fn decodes_only_frames_the_format_can_carry() {
-        let json = CompiledSignalingProtocol::compile(
+        let json = compile_fixture!(
             &protocol(
                 SignalingWireFormat::Json,
                 on_connect(&["{id: 1}"], &[".id == 1"], &[]),
@@ -952,7 +967,7 @@ mod tests {
         );
         assert_eq!(json.decode_frame(b"not json", true), None);
 
-        let cbor = CompiledSignalingProtocol::compile(
+        let cbor = compile_fixture!(
             &protocol(
                 SignalingWireFormat::Cbor,
                 on_connect(&["{id: 1}"], &[".id == 1"], &[]),
@@ -1045,9 +1060,8 @@ mod tests {
         sink: &RecordingSink,
     ) -> Result<(), WebsocketSignalingError> {
         let (server_io, client_io) = tokio::io::duplex(8 * 1024);
-        let compiled = Arc::new(
-            CompiledSignalingProtocol::compile(&protocol, None).expect("protocol should compile"),
-        );
+        let compiled =
+            Arc::new(compile_fixture!(&protocol, None).expect("protocol should compile"));
         let failure = StdArc::new(Mutex::new(None::<String>));
         let peer_failure = StdArc::clone(&failure);
 

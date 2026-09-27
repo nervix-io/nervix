@@ -12,23 +12,51 @@ In particular, a transport response is not automatically a statement that runtim
 Relay delivery exposes separate receipt, admission, and downstream-completion boundaries so callers
 can distinguish those outcomes.
 
+For a transaction, a timed-out remote gate response may mean that engagement happened. The
+control plane retains that uncertainty and any later recovery scope in the impact report;
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines those
+outcomes. This chapter owns the transport deadline and failure signal.
+
+[Errors And Diagnostics](./errors-and-diagnostics.md) explains how local typed reports and remote
+failure classes reach their callers and public edges. This chapter owns their wire representation
+and transport failure semantics.
+
 ## Simulation Boundary
 
-The interconnect and its execution dependency have an optional Turmoil test mode. It is separate
-from the Shuttle scheduler mode; selecting both is an invalid build configuration. The normal
-runtime dependency graph contains neither simulation scheduler. The synchronous Turmoil runner is
-a test harness outside product ownership, with a fixed seed, UTC epoch, network topology, simulated
-duration, step limit, and real wall-clock escape bound. It supervises host tasks so their failures
-fail the scenario.
+The transport also runs, unchanged, inside a seeded Turmoil network simulation. That simulation is a
+test harness outside product ownership, and
+[Deterministic Interconnect Simulation](./interconnect-simulation.md) owns it: its build mode, the
+fault model, supervision, replay and failure records, the scenario matrix, the commands and CI
+budget, and the limits of what it establishes. The interconnect owns only the seams the simulation
+plugs into. Each seam has one production behavior, which is what every node uses:
 
-The initial runner qualifies bounded scheduling and Tokio timers. The production listener,
-outbound TCP connections, and DNS resolution still use Tokio's real network APIs; execution jobs
-still use Tokio's blocking pool. Certificate validity still reads the process wall clock, while
-process-epoch generation uses OS randomness. External connectors, filesystem and database work,
-gossip and consensus randomness, and domain-clock authority are outside this first simulation
-boundary. A simulated host crash tears down its runtime and is not evidence of power-loss or
-SIGKILL durability. A simulation result therefore makes no claim yet about production transport
-faults, authentication, or full-node recovery.
+- **Sockets and name resolution.** The TCP listener and outbound streams use Tokio's
+  operating-system sockets, and peer names resolve through the node's own resolver, described in
+  [Peer Name Resolution](#peer-name-resolution). The dedicated `turmoil` test build selects
+  Turmoil's simulated TCP and its simulated DNS table at that one boundary and never constructs the
+  node resolver; TLS, HTTP/2, the envelope codec, and Arrow IPC above it are the same code in every
+  build.
+- **Certificate time.** Each credential bundle carries the one UTC clock its certificates are judged
+  by, as described in [Peer Identity And Authentication](#peer-identity-and-authentication).
+  Production bundles use the system clock.
+- **Identity entropy.** The process epoch and relay grant identifiers are drawn from the transport's
+  configured entropy, which in production is the operating system's secure random source.
+- **Deadlines.** Every transport deadline is a Tokio instant, so it follows the clock of the runtime
+  it runs on: connection setup, request and progress timeouts, reconnect backoff, relay grant
+  lifetimes, and the drain deadline derived from certificate expiry.
+- **CPU work.** Encoding and decoding run through `nervix-execution`. Its Turmoil build runs bounded
+  CPU jobs as tasks on the simulated scheduler under the same admission, charge, and cancellation
+  policy.
+
+The transport's concurrent maps use per-process hash seeds. Where a walk over one of them causes
+effects, the walk runs in the key's semantic order instead of map order: retiring removed or
+departed peer targets, cancelling a node's or every connection slot, re-establishing preconnected
+slots after a credential replacement, and sending relay progress reports. Walks that only count,
+take a maximum, or remove entries independently of one another keep map order, because it cannot
+change their result.
+
+The Shuttle and Turmoil scheduler modes cannot be selected together; that build fails to compile
+with a diagnostic naming both. The normal runtime dependency graph contains neither.
 
 ## Listener And Peer Topology
 
@@ -81,6 +109,92 @@ connections in total and performs at most 32 connection handshakes concurrently.
 the six possible connections in each direction for every peer: five preconnected connections plus
 the on-demand bulk connection.
 
+## Peer Name Resolution
+
+A node resolves every host name the interconnect dials through one resolver, owned by the
+`nervix-dns` crate and loaded once when the node starts. The resolver is Hickory's asynchronous DNS
+client: lookups never occupy Tokio's blocking pool and never call the C library resolver. It reads
+its configuration from three server options:
+
+| Option | Environment variable | Default | Meaning |
+| --- | --- | --- | --- |
+| `--dns-resolver-config` | `NERVIX_DNS_RESOLVER_CONFIG` | `/etc/resolv.conf` | A `resolv.conf`-format file: its `nameserver` lines, its last `search` or `domain` line, and the `ndots`, `timeout`, `attempts`, and `edns0` options |
+| `--dns-hosts-file` | `NERVIX_DNS_HOSTS_FILE` | `/etc/hosts` | A hosts-format file consulted before DNS |
+| `--dns-name-server` | `NERVIX_DNS_NAME_SERVERS` | none | A name server address with its port, repeatable or comma-separated, that replaces the resolver configuration's `nameserver` lines while the rest of that file still applies |
+
+A `nameserver` line names a server on port 53, asked over UDP and, for a truncated answer, over
+TCP. `attempts` counts tries of each server, as the C library counts them, and `timeout` bounds each
+try. When the file has neither a `search` nor a `domain` line, the domain of the host's own name is
+the search list, as the C library does. Lines the grammar cannot read are logged as warnings and
+ignored. Both files are read once, on the blocking pool; a changed file takes effect when the node
+next starts. Startup fails with `failed to load the name resolver configuration` when either file
+cannot be read, when no name server remains, or when a search domain is not a valid DNS name. There
+is no fallback to a public resolver or to the C library.
+
+A host resolves in this order:
+
+1. A literal IPv4 or IPv6 address, bracketed or not, is its own answer and sends no query.
+2. A name the hosts file lists, compared exactly and without case, answers with every address the
+   file gives it in either family, and nothing is asked of DNS for it.
+3. Any other name is asked of the name servers for IPv4 and IPv6 addresses together, completed by
+   the search list according to `ndots`. A name with a trailing dot is fully qualified and asked
+   exactly as written. The answer lists IPv4 addresses first, then IPv6 addresses, each in the
+   order the server gave them.
+
+### Where The Interconnect Resolves
+
+At startup a node resolves its own advertised interconnect endpoint, whose first address becomes
+its gossip identity address, and its bootstrap endpoint, every address of which becomes a gossip
+seed. Each lookup has the connection setup timeout, five seconds by default, and a lookup that fails
+fails startup.
+
+A discovered peer is registered at the interconnect endpoint it advertised, and every attempt to
+open one of its pool connections resolves that endpoint again, inside the attempt's connection setup
+deadline. The attempt dials the resolved addresses in order, giving each an equal share of the time
+that remains, so an address that refuses or never answers leaves time for the next one. The first
+address that accepts carries the TLS handshake. The advertised host stays the TLS server name, which
+the peer's certificate must name, and the authority of every request on the connection; a literal
+IPv6 host is written in brackets there. A bootstrap exchange is the one exception: it dials the
+exact seed address it was given, and the node it authenticates is dialled at that address until
+discovery publishes the node's own endpoint.
+
+Answers are cached for their DNS TTL, bounded above by one hour for addresses and thirty seconds for
+a name that does not exist or has no address, in a cache of 4,096 entries; an expired answer is
+asked again on the next attempt. Pool connections are keyed by the advertised endpoint rather than
+by an address, so a changed answer or an expired TTL never retires an established connection. Only
+the next connection attempt, after a connection ends, uses the new answer. A changed advertised
+host or port is a different endpoint and retires the old one, as described in
+[Connection And Credential Lifecycle](#connection-and-credential-lifecycle).
+
+At most 64 lookups run at once on a node; a lookup beyond that waits for a slot inside its own
+deadline. The resolver configuration's `timeout` and `attempts` bound each query, the connection
+setup deadline bounds the lookup, and the pool slot's reconnect backoff is the only retry around it,
+so DNS retries never multiply the transport's own.
+
+A lookup ends in an address list or in one of these failures: the name does not exist, the name has
+no address, no answer arrived in time, a name server refused or failed the query, no name server
+could be reached, or the host is not a valid DNS name. A failed lookup is a connection setup
+failure: the slot retries with its backoff, the attempt is counted with reason `resolution` in
+`nervix_interconnect_connection_failures_total`, and the failure is logged at `debug` with the
+endpoint and its kind. A peer whose name does not resolve stays a health target, and its probes
+fail as they would for a peer that cannot be reached.
+
+### Resolver Limits
+
+The resolver implements the `resolv.conf` and hosts-file behavior above and nothing else of the
+operating system's name service. It does not consult `nsswitch.conf`, so the hosts file always
+answers before DNS; it does not load NSS modules, so names served only by LDAP, NIS, `mdns`, or
+`myhostname` do not resolve; it does not answer `.local` names by multicast DNS; and it ignores the
+`rotate`, `single-request`, `use-vc`, `no-aaaa`, and `trust-ad` options. A platform split-DNS policy
+applies only as far as the name server the configuration names applies it, for example the
+`systemd-resolved` stub at `127.0.0.53`. Docker's embedded DNS and Kubernetes cluster DNS, with
+their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
+
+The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP, and Iceberg REST and
+object-store clients. Other connectors and client libraries still resolve through their own
+drivers. The ledger in `tests/dns-resolution-ledger.md` records each boundary and its current
+owner.
+
 ## Peer Identity And Authentication
 
 Every node certificate is signed by the configured cluster CA and supports both the TLS client and
@@ -102,6 +216,10 @@ when all of the following are true:
 - its certificate is currently valid
 - TLS negotiates the `h2` application protocol
 
+"Currently valid" is judged by the UTC clock of the local credential bundle. Production bundles use
+the process wall clock. Rustls verification on both sides of the handshake and the transport's own
+validity and expiry checks read that one clock, so they cannot disagree about a certificate.
+
 The first HTTP/2 exchange binds the connection to its authenticated node, traffic class, advertised
 endpoint, current process epoch, and wire-contract fingerprint. The receiver cross-checks those
 claims against the TLS identity and the connection slot it is accepting. This prevents a valid peer
@@ -113,7 +231,8 @@ Three identities serve different purposes:
 - The discovery incarnation and endpoint generation identify the current cluster presence and
   advertised address of that node.
 - The process epoch identifies one running interconnect process and fences in-memory delivery state
-  across restarts.
+  across restarts. It is drawn from the transport's entropy when the transport binds, which in
+  production is the operating system's secure random source.
 
 Replacing an endpoint, restarting a process, and rotating a certificate therefore have distinct
 meanings even when the stable node identifier does not change.
@@ -147,8 +266,9 @@ the leader uses that reference when invoking this same coordinator request. A re
 leader resumes the recorded step with the same identity. No separate public reset wire request or
 JSON command path is introduced.
 
-The management pool exposes one typed coordinator request for internal administrative, SDK, and
-recovery callers. It carries the stable execution reference and exact reset target to the leader,
+The management pool carries one typed coordinator request, which a node sends to the leader for a
+reset that starts outside the ordered transaction path, such as a guest's request for a new lifetime
+of its own branch. It carries the stable execution reference and exact reset target to the leader,
 which runs the single control-plane operation. Its lower-level runtime requests have three actions.
 `Prepare` reaches only the scheduled processor owner and creates fresh guest state while retaining
 enough stopped branch state to abort before publication. `ActivateCommittedSchedule` reaches every
@@ -206,11 +326,18 @@ All nodes in a running cluster use one current wire contract. A fixed fingerprin
 supported operations and their encoded shapes. A fingerprint mismatch rejects connection setup;
 there is no version negotiation or alternate decoding path. A wire-contract change therefore
 requires a coordinated cluster stop and start with all nodes on the same version.
+The subscription-interest visibility request includes the advertisement version, and its current
+wire fingerprint fences that request shape during connection setup.
 
 Control records use bounded `rkyv` archives. The receiver validates an archive, including its shape
 and nesting depth, before exposing it to an operation handler. Encoded and decoded memory is charged
 to the traffic class before decoding begins. Unknown operations, a pool mismatch, malformed
 archives, and values above the operation limit fail at the transport boundary.
+
+Control-operation responses preserve a typed failure class and subject across the wire. A receiver
+can distinguish a node that rejects ownership, an unavailable subject, a subject that is not ready,
+and an operation that ran and failed without parsing display text. Only the final class carries an
+operator-facing reason; callers decide retry and relocation from the class and subject.
 
 Relay metadata uses the same validated control encoding, while relay bodies remain Arrow IPC from
 the source relay to the destination runtime. Bulk operations transfer opaque byte chunks and let
@@ -305,6 +432,32 @@ four decoded replication batches a follower keeps resident beside one batch bein
 follower whose receive window is full can still produce the answer that releases it. Startup
 validates the relationships among operation limits and these budgets, including the paired work
 that must fit for independent operations to keep making progress.
+
+Stream slots are isolated per connection, and therefore per peer. Admission quotas, memory budgets,
+and CPU wait queues are isolated per class and shared by every peer of the node. A slow or stalled
+peer therefore holds at most the stream slots of its own connections. Once it holds the 32 shared
+management streams of a connection, a further shared operation to that peer waits for a slot
+until its own deadline, while liveness, cancellation, and discovery still use the reserved streams
+of the same connection. Every connection to another peer keeps all of its slots. A stream whose
+reader stops reading holds one HTTP/2 stream window of response bytes: flow control stops the
+producer once that window is spent, and five seconds without progress resets the stream and returns
+its admission and memory. A relay batch the receiving application holds without admitting keeps
+the reservation of its exact body, the largest decoded batch, and decode scratch. Another channel
+still receives grants and admission beside it, and cancelling the held batch returns the whole
+reservation once the application drops the batch.
+
+A CPU class admits each job separately: one of its workers runs, a bounded number wait, and the
+next job is refused at once instead of joining an unbounded queue. A typed request runs several
+jobs of its class in turn, encoding its payload and envelope and later decoding the response.
+While a burst keeps the queue full, a request that was admitted for one job can therefore be
+refused at its next one. A request refused at its first encode fails with `RequestError::Encode`,
+and one refused at a later stage fails with `RequestError::Transport`. Every refused job holds no
+memory charge, and every other class keeps admitting independently.
+
+The [stalled-peer simulation](./interconnect-simulation.md#stalled-peer-isolation) checks these
+bounds with exact values: a stalled peer and a healthy peer share one hub, and every observation of
+the hub's pools, streams, admissions, worker queues, and memory budgets stays within its configured
+bound until teardown releases them.
 
 ## Exchange Forms
 
@@ -430,6 +583,12 @@ reconcile. A consultation reads the watermark through a shared lookup and refres
 with one atomic maximum, so checking a delivery against its channel takes no exclusive lock on the
 watermark.
 
+The [relay reconciliation and receiver-restart simulations](./interconnect-simulation.md#relay-reconciliation-and-cancellation)
+check this boundary through the production authenticated connection. They lose the reply after an
+Arrow batch reaches the receiver, reconnect to the same process or restart it, and require
+reconciliation within this retention contract and an indeterminate result against a new process
+epoch.
+
 Each attempt carries the channel and admission identities it was granted under. Once the receiver
 has delivered an attempt's terminal outcome, it retires that same attempt: it advances the channel
 watermark and releases the attempt, its channel occupancy, and its admission without rebuilding
@@ -456,9 +615,12 @@ keeps a previous branch lifetime from being confused with the new runtime instan
 
 Cluster membership gossip uses management discovery capacity. It discovers topology and
 incarnations but does not replace application health checks. Gossip payloads remain below the
-management-event bound, so discovery cannot allocate an arbitrary wire message. A node that is
-shutting down closes its gossip transport before it stops gossip, so an exchange still waiting on a
-peer that stopped first ends at once instead of holding shutdown until its one-second deadline.
+management-event bound, so discovery cannot allocate an arbitrary wire message. A node that cannot
+take an exchange answers with a typed refusal rather than text: the message exceeds the gossip
+bound, the sending node could not be registered as an outbound peer, or its gossip receiver has
+shut down. A node that is shutting down closes its gossip transport before it stops gossip, so an
+exchange still waiting on a peer that stopped first ends at once instead of holding shutdown until
+its one-second deadline.
 
 Admission to consensus membership requires an available interconnect endpoint. A discovered node
 without one is not an admission candidate, so it is neither added as a learner nor promoted to
@@ -480,11 +642,16 @@ peer that is itself stopping fail at once, instead of holding teardown for the r
 
 Session subscription interest also propagates through gossip. The key encoding is private to the
 cluster layer: whenever the live-node state watcher changes, each node rebuilds an immutable index
-from domain and relay to the interested node incarnations and publishes it through `ArcSwap`. A
-relay owner loads that snapshot and performs borrowed domain and relay lookups, so per-batch remote
-fan-out neither formats a gossip key nor waits on the gossip mutex. Subscription creation waits for
-the exact subscriber incarnation to appear in every live node's published index before it reports
-success. A withdrawal disappears from fan-out when the next gossip state snapshot is published.
+from domain and relay to the interested node incarnations and advertisement versions and publishes
+it through `ArcSwap`. A relay owner loads that snapshot and performs borrowed domain and relay
+lookups, so per-batch remote fan-out neither formats a gossip key nor waits on the gossip mutex.
+Subscription creation waits for the exact subscriber incarnation and at least the current interest
+key's gossip version to appear in every live node's published index before it reports success.
+The creating subscription holds its lease while capturing that version and waiting for visibility.
+After withdrawal and reopening, an
+advertisement from before the withdrawal cannot satisfy this handshake, even when the subscriber
+node has not restarted. A withdrawal disappears from fan-out when the next gossip state snapshot is
+published.
 
 A node advertises interest in a relay exactly while at least one of its session subscriptions
 holds a lease on it. Every subscription takes one lease before it attaches and releases it exactly
@@ -567,6 +734,9 @@ current one.
 The schedule fingerprint an ownership handoff or forced recovery is bound to covers those schema
 fingerprints and generations, so a preparation staged against an earlier schema or generation cannot
 activate after a later one is committed.
+Window state also binds to its current window model. A model replacement with unchanged schemas
+therefore addresses a different checkpoint and cannot install rows accumulated under the preceding
+window definition.
 
 The same rule fences a coordinated reset. Once its `Publishing` schedule is committed, every
 runtime-state request for the replaced WASM generation is stale even while the new initial
@@ -574,6 +744,15 @@ checkpoint is still being made durable. Replicas that were offline install the c
 before accepting state, then synchronize only the new placement. A reset does not delete old bytes
 through an unbounded cluster sweep; generation-addressed reads make them unreachable immediately,
 and the existing bounded state-store retention removes them locally.
+
+The leader forwards coordinated reset requests with a typed reason, so a guest request, operator
+request, transaction effect, and rejected-snapshot recovery keep their provenance across nodes.
+The existing remote describe exchange returns typed checkpoint facts from the execution owner:
+generation, revisions, stage, and required and confirmed replica counts. The receiver combines
+them with its scheduled binding, reset, and recovery facts, accepting only checkpoints of the
+schedule's current generation. This read does not request synchronization, take ownership, or
+change a checkpoint's completion state. A stored checkpoint whose previous replica boundary is
+unknown is reported as such rather than treated as newly confirmed.
 
 A replica acknowledges a branch-state checkpoint — WASM guest state, deduplicator and window state,
 and the branch lifecycle that names the branches — only after it has written the checkpoint to its
@@ -588,7 +767,21 @@ checkpoint fails after its ten-second deadline. The owner announces a WASM proce
 its replicas as soon as the branch appears. A replica that receives a checkpoint of a branch its
 replicated branch lifecycle does not name yet first synchronizes the owner's branch lifecycle, and
 refuses the checkpoint only when that lifecycle does not name the branch either, as for a branch the
-owner has evicted.
+owner has evicted. [WASM State And Recovery](./wasm-state.md#the-checkpoint) defines the checkpoint
+these acknowledgements complete.
+The owner publishes an empty final window checkpoint when it evicts a concrete window branch. A
+replica that installs that revision replaces the evicted branch's rows and sketch panes with the
+empty state. The branch lifecycle checkpoint records an incarnation for each concrete branch;
+restoring a window checkpoint with a different incarnation starts an empty window. Reusing a branch
+key after eviction therefore cannot attach a prior lifetime's retained rows, even when the earlier
+checkpoint remains on a replica.
+Window checkpoints carry a sealed container with separate bounded Arrow sections for retained
+input and aggregate arguments, plus bounded typed sections for delayed histogram removals. Its
+revision, row count, and branch incarnation are checked across the sections before restoration;
+the ownership handoff and replica installation fences still govern whether the checkpoint can be
+installed. A section that exceeds its bulk limit or disagrees with the container fails to open.
+Sealing also refuses a container that cannot fit the available bulk memory reservation, instead
+of waiting for a reservation larger than that budget.
 
 Runtime-state synchronization replies and materialized-snapshot descriptions carry the shared
 typed remote-operation failure envelope. Rejection, absence, temporary unreadiness, and execution
@@ -677,11 +870,11 @@ probe is running, its late result is ignored.
 Health observations distinguish:
 
 - **Healthy:** the current target returned the expected application identity within the deadline.
-- **Failure:** the current target returned an error or did not answer within the deadline.
+- **Failure:** the current target returned an error or did not answer within the deadline,
+  including a target whose advertised host does not resolve.
 - **Capacity exhausted:** the probe could not obtain its reserved local capacity.
-- **Unscheduled:** no probe was due for that target in the current round.
 
-A missing, stale, capacity-exhausted, or unscheduled observation produces unknown availability. It
+A missing, stale, or capacity-exhausted observation produces unknown availability. It
 does not mark a peer unavailable and does not extend a previous run of failures. Only continuous,
 fresh failures for the configured node-unavailability interval produce unavailable status; a healthy
 observation resets that run. Scheduling and runtime availability use this application result, while
@@ -696,12 +889,17 @@ probe is healthy, rather than merely that a transport pool exists.
 A preconnected pool slot that fails reconnects with exponential backoff beginning at 200
 milliseconds and capped at five seconds. A peer removal, incarnation change, or advertised endpoint
 change retires the old target and cancels work tied to its slots. New operations use only the new
-target generation.
+target generation. A new DNS answer for the same advertised endpoint is not a target change: it
+leaves established connections in place and is used by the next connection attempt.
 
 Interconnect certificate, key, and CA files are watched as one credential bundle. A candidate must
 be complete, valid, and identical in two consecutive reads before it replaces the active bundle, so
 a multi-file update cannot install a mixed generation. An invalid or partially written candidate
 leaves the current credentials active while the watcher continues trying.
+
+TLS loading identifies the CA certificate, node certificate, or node private key by kind and keeps
+PEM parsing failures as typed categories. Error reports and watcher logs omit credential file paths
+and malformed PEM input bytes.
 
 After a valid replacement, new outbound pools use the new credentials and existing inbound HTTP/2
 connections begin graceful shutdown. Certificate expiration is also mapped to a process-monotonic
@@ -736,22 +934,24 @@ observed. These owners keep admitted work visible while the supporting interconn
 still running.
 
 Only after drain support completes or reports abandonment does terminal teardown call transport
-shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation
-waiters, and starts graceful HTTP/2 shutdown. Active transport work receives up to ten seconds to
-drain; remaining connections and handlers are then closed. Connection setup and incomplete TLS
-handshakes remain inside this bound. A repeated `SIGINT` or `SIGTERM`, or the shutdown deadline
-passing, ends the process without running the rest of its shutdown, so its peers observe its
-connections ending exactly as they do when the process crashes.
+shutdown. Transport shutdown rejects new interconnect admission, cancels pool and operation waiters,
+and retires every pool connection the node opened: each stops leasing and closes once its leased
+streams return. Connections that peers opened to the node close at once, together with the handlers
+still serving their streams, so a peer's request the node has not answered fails instead of
+completing. Whatever remains after ten seconds is then closed. Connection setup, including the name
+resolution it performs, and incomplete TLS handshakes remain inside this bound. A repeated `SIGINT`
+or `SIGTERM`, or the shutdown deadline passing, ends the process without running the rest of its
+shutdown, so its peers observe its connections ending exactly as they do when the process crashes.
 
 See [Shutdown And Recovery](./shutdown.md) for the complete phase contract, the deadline and exit
 statuses, and what each ending preserves.
 
 ## Failure Ownership And Persistence
 
-Transport failures identify setup, authentication, admission, encoding, decoding, flow-control,
-timeout, remote-response, and target-departure failures separately. Typed remote errors remain
-available to the operation owner, which decides whether a request is safe to retry. The interconnect
-does not infer idempotency for arbitrary control-plane or runtime operations.
+Transport failures identify name-resolution, setup, authentication, admission, encoding, decoding,
+flow-control, timeout, remote-response, and target-departure failures separately. Typed remote
+errors remain available to the operation owner, which decides whether a request is safe to retry.
+The interconnect does not infer idempotency for arbitrary control-plane or runtime operations.
 
 Connections, request state, relay grants, delivery reconciliation, progress trackers, and
 acknowledgement maps are never persisted. Durable control-plane state remains in consensus, and
@@ -769,7 +969,9 @@ Each node exports interconnect measurements through its local metrics endpoint. 
 cover connection and stream occupancy, pending operations, setup failures and resets, quota
 exhaustion, request latency, relay channels and grants, admission wait, unresolved delivery age, and
 bulk-transfer bytes. Interconnect memory, worker queues, reactor delay, and consensus retention show
-whether pressure originates in transport, execution, or the protocol using it.
+whether pressure originates in transport, execution, or the protocol using it. A connection attempt
+that could not resolve its peer's advertised host is counted with reason `resolution`, apart from
+setup, handshake, capacity, and closed failures, so a DNS outage is visible as itself.
 
 Typed-request observations identify application health as operation `liveness` and replaceable
 domain-clock delivery and HTTPS listener installation probes as operation `progress`, so their

@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, BTreeSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, VecDeque, btree_map::Entry},
     num::NonZeroU64,
     time::Duration,
 };
@@ -8,7 +8,10 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use futures_util::{FutureExt, SinkExt, StreamExt};
+use futures_util::{
+    FutureExt, SinkExt, StreamExt,
+    future::{AbortHandle, Abortable},
+};
 use gloo_net::websocket::{
     Message as WebSocketMessage, State as WebSocketState, futures::WebSocket,
 };
@@ -16,14 +19,17 @@ use leptos::{ev, mount::mount_to_body, prelude::*};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
 use nervix_client_wire::{
-    AttachDisposition, AttachOutcome, AttachTransactionRequest, CancellationStage, ClientMessage,
-    ClientRequest, ClusterObserved, CommandDisposition, CommandOutcome, CommandRequest, Diagnostic,
-    DomainEntity, DomainInfo, DomainSelection, DomainSnapshotObserved, LeaderRedirect, Leadership,
-    NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView, RowSchema,
+    AttachDisposition, AttachOutcome, AttachTransactionRequest, CancellationStage,
+    ChoiceLookupRequest, ClientMessage, ClientRequest, ClusterObserved, CommandDisposition,
+    CommandOutcome, CommandRequest, Diagnostic, DomainEntity, DomainInfo, DomainSelection,
+    DomainSnapshotObserved, InspectTransactionRequest, InspectionOutcome, LeaderRedirect,
+    Leadership, NoticeLevel, ReplyBody, RequestCancelled, RequestId, RowBatchView, RowSchema,
     SelectDomainRequest, ServerEvent, ServerFrame, ServerMessage, ServerNotice, SessionEndReason,
     SessionLimits, StatementDisposition, StatementOutcome, SubscribeDisposition, SubscribeOutcome,
     SubscribeRequest, SubscriptionHandle, SubscriptionOpened, SubscriptionRows, SubscriptionType,
-    SuggestRequest, TransferAssembly, TransferPart, UnsubscribeRequest, VerifiedFrame,
+    SuggestRequest, Suggestion as WireSuggestion, SuggestionKind, SuggestionStatus, TextEdit,
+    TransferAssembly, TransferPart, UnsubscribeDisposition, UnsubscribeOutcome, UnsubscribeRequest,
+    VerifiedFrame,
     websocket::{ClientWebSocketCodec, WebSocketData},
 };
 use nervix_dataflow_graph::{
@@ -32,8 +38,10 @@ use nervix_dataflow_graph::{
     DataflowStatistics,
 };
 use nervix_models::{
-    ClusterNodeName, CommandExecutionReference, DomainName, DomainPace, DomainStatus, ModelKind,
-    Statement, SubscriptionName, TransactionLifecycle, TransactionStatus,
+    CommandExecutionReference, DomainName, DomainPace, DomainStatus, ModelKind,
+    ResourceDescription, ResourceEntryContent, ResourceManifestEntry, ResourceUsage,
+    ResourceVersionDescription, ResourceVersionEntries, Statement, SubscriptionName,
+    TransactionLifecycle, TransactionStatus,
 };
 use nervix_nspl::client_statement::{
     ClientStatement, parse_client_statement, parse_client_statements, parse_use_domain,
@@ -48,10 +56,20 @@ use url::Url;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
+mod create_dialog;
+mod transaction_inspector;
+
+use create_dialog::{
+    ChoiceControl, ChoiceRequestContext, CreateCommandContext, CreateDialog, CreateKind,
+    CreateMenu, CreateSignals, CreateSubmission,
+};
+use transaction_inspector::{InspectorSignals, TransactionInspector};
+
 const RUNTIME_VERSION_LABEL: &str = concat!("nervix runtime v", env!("CARGO_PKG_VERSION"));
 const SUGGESTION_REQUEST_DEBOUNCE_DELAY: Duration = Duration::from_millis(50);
 const WEBSOCKET_INITIAL_RECONNECT_DELAY: Duration = Duration::from_millis(250);
 const WEBSOCKET_MAX_RECONNECT_DELAY: Duration = Duration::from_secs(5);
+const SUBSCRIPTION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// The limits every frame of the console's session is held to.
 const SESSION_LIMITS: SessionLimits = SessionLimits::DEFAULT;
@@ -77,12 +95,16 @@ struct WebConsoleSession {
 
 #[derive(Clone, Copy)]
 struct WebConsoleSignals {
-    terminal_lines: RwSignal<Vec<TermLine>>,
-    suggestions: RwSignal<Vec<String>>,
+    terminal_lines: RwSignal<TermLineHistory>,
+    suggestions: RwSignal<Vec<WireSuggestion>>,
+    suggestion_status: RwSignal<Option<SuggestionStatus>>,
+    suggestion_query: RwSignal<Option<SuggestionQuery>>,
+    suggestion_continuation: RwSignal<Option<String>>,
     domain_snapshots: RwSignal<BTreeMap<DomainName, DomainSnapshotView>>,
     cluster_counters: RwSignal<ClusterCounters>,
     active_domain: RwSignal<Option<DomainName>>,
     transaction_status: RwSignal<Option<TransactionStatus>>,
+    inspector: InspectorSignals,
     domains: RwSignal<Vec<DomainView>>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
@@ -90,6 +112,80 @@ struct WebConsoleSignals {
     domains_loaded: RwSignal<bool>,
     auth_token: RwSignal<Option<String>>,
     auth_error: RwSignal<Option<String>>,
+    session_generation: RwSignal<u64>,
+    create: CreateSignals,
+    selected_resource: RwSignal<Option<String>>,
+    upload_status: RwSignal<String>,
+}
+
+impl WebConsoleSignals {
+    /// A replacement credential starts a separate view of the cluster. No tab, suggestion, or
+    /// observed graph from the previous identity may remain visible to the new session.
+    fn clear_authenticated_view(self) {
+        self.active_domain.set(None);
+        self.transaction_status.set(None);
+        self.inspector.clear();
+        self.domains.set(Vec::new());
+        self.domain_snapshots.set(BTreeMap::new());
+        self.resource_details.set(BTreeMap::new());
+        self.cluster_counters.set(ClusterCounters::default());
+        self.domains_loaded.set(false);
+        self.subscription_tabs.set(Vec::new());
+        self.active_subscription_tab.set(None);
+        self.suggestions.set(Vec::new());
+        self.suggestion_status.set(None);
+        self.suggestion_query.set(None);
+        self.suggestion_continuation.set(None);
+        self.terminal_lines.set(TermLineHistory::default());
+        self.create.connection_lost();
+        self.selected_resource.set(None);
+        self.upload_status.set(String::new());
+    }
+
+    /// Closing a pending start waits for its reply before deleting that subscription. An opened
+    /// stream stays visible as closing until its unsubscribe reply names the same generation.
+    fn begin_subscription_close(self, tab_id: u64) -> Option<UnsubscribeRequest> {
+        let tab = self
+            .subscription_tabs
+            .get_untracked()
+            .into_iter()
+            .find(|tab| tab.id == tab_id)?;
+        let stream = match tab.state {
+            SubscriptionTabState::Pending | SubscriptionTabState::Restoring => {
+                self.subscription_tabs.update(|tabs| {
+                    if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.state = SubscriptionTabState::Closing(None);
+                    }
+                });
+                return None;
+            }
+            SubscriptionTabState::Interrupted => {
+                remove_subscription_tab(
+                    self.subscription_tabs,
+                    self.active_subscription_tab,
+                    tab_id,
+                );
+                return None;
+            }
+            SubscriptionTabState::Open(stream) => stream,
+            SubscriptionTabState::Closing(_) => return None,
+        };
+        self.subscription_tabs.update(|tabs| {
+            if let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.state = SubscriptionTabState::Closing(Some(stream));
+            }
+        });
+        Some(UnsubscribeRequest {
+            subscription: tab.name,
+        })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SuggestionQuery {
+    input: String,
+    cursor: usize,
+    domain: Option<DomainName>,
 }
 
 /// A request the console sends over its session, together with what its reply is for.
@@ -108,13 +204,23 @@ enum ConsoleRequest {
         request: SubscribeRequest,
     },
     /// Closes the subscription of a tab the operator closed.
-    SubscriptionStop(UnsubscribeRequest),
+    SubscriptionStop {
+        tab_id: u64,
+        request: UnsubscribeRequest,
+    },
     /// Selects the domain whose observations the session receives.
     SelectDomain(SelectDomainRequest),
     /// Asks for completions of the REPL input.
     Suggest(SuggestRequest),
+    /// Resolves a structured form control into typed choices.
+    Choice {
+        request: ChoiceLookupRequest,
+        context: ChoiceRequestContext,
+    },
     /// Binds the session's transaction to the connection.
     AttachTransaction(AttachTransactionRequest),
+    /// Reads an impact report without binding the inspected transaction.
+    InspectTransaction(InspectTransactionRequest),
 }
 
 /// Who reads the outcome of a command.
@@ -122,24 +228,47 @@ enum ConsoleRequest {
 enum CommandPurpose {
     /// The REPL prints it.
     Repl,
-    /// The resource dialog reads the versions of `resource` from its `DESCRIBE RESOURCE` text.
+    /// A popup form reads the terminal outcome and its own submission state.
+    Create(CreateCommandContext),
+    /// The resource dialog reads the versions of `resource` from its typed `DESCRIBE RESOURCE`
+    /// description.
     ResourceDescription { resource: String },
 }
 
 impl ConsoleRequest {
+    fn inspects_transaction(&self) -> bool {
+        match self {
+            Self::InspectTransaction(_) => true,
+            Self::Command { request, .. } => {
+                matches!(parse_client_statement(&request.query), Ok(statement) if statement.inspects_transaction())
+            }
+            Self::ListDomains
+            | Self::SubscriptionStart { .. }
+            | Self::SubscriptionStop { .. }
+            | Self::SelectDomain(_)
+            | Self::Suggest(_)
+            | Self::Choice { .. }
+            | Self::AttachTransaction(_) => false,
+        }
+    }
+
     /// Whether the request keeps its place in the order the console issued requests: it waits
     /// until the session can serve it and outlives a connection that ended before answering it.
     ///
     /// Every connection selects the active domain and attaches the session's transaction again
-    /// itself, and a completion request only matters while the operator is typing, so those are
-    /// sent at once and forgotten with the connection.
+    /// itself. Completion and structured-choice requests only matter for the current input or
+    /// draft, so those are sent at once and forgotten with the connection.
     fn is_ordered(&self) -> bool {
         match self {
             Self::Command { .. }
             | Self::ListDomains
             | Self::SubscriptionStart { .. }
-            | Self::SubscriptionStop(_) => true,
-            Self::SelectDomain(_) | Self::Suggest(_) | Self::AttachTransaction(_) => false,
+            | Self::SubscriptionStop { .. } => true,
+            Self::InspectTransaction(_) => true,
+            Self::SelectDomain(_)
+            | Self::Suggest(_)
+            | Self::Choice { .. }
+            | Self::AttachTransaction(_) => false,
         }
     }
 
@@ -149,10 +278,12 @@ impl ConsoleRequest {
             Self::Command { request, .. } => ClientRequest::Command(request.clone()),
             Self::ListDomains => ClientRequest::ListDomains,
             Self::SubscriptionStart { request, .. } => ClientRequest::Subscribe(request.clone()),
-            Self::SubscriptionStop(request) => ClientRequest::Unsubscribe(request.clone()),
+            Self::SubscriptionStop { request, .. } => ClientRequest::Unsubscribe(request.clone()),
             Self::SelectDomain(request) => ClientRequest::SelectDomain(request.clone()),
             Self::Suggest(request) => ClientRequest::Suggest(request.clone()),
+            Self::Choice { request, .. } => ClientRequest::Choice(request.clone()),
             Self::AttachTransaction(request) => ClientRequest::AttachTransaction(request.clone()),
+            Self::InspectTransaction(request) => ClientRequest::InspectTransaction(request.clone()),
         }
     }
 }
@@ -215,6 +346,9 @@ struct SessionRequests {
     /// The latest completion request. An earlier one is no longer awaited, so its stale
     /// suggestions are never shown.
     latest_suggestion: Option<RequestId>,
+    /// The latest request for each structured control. Older replies cannot overwrite a newer
+    /// draft or search.
+    latest_choices: BTreeMap<ChoiceControl, RequestId>,
     /// Whether the server confirmed that the node serving the connection leads the cluster.
     leader_confirmed: bool,
     /// The request attaching the session's transaction to the connection, while it is in flight.
@@ -230,6 +364,7 @@ impl SessionRequests {
             in_flight: BTreeMap::new(),
             transfers: BTreeMap::new(),
             latest_suggestion: None,
+            latest_choices: BTreeMap::new(),
             leader_confirmed: false,
             attaching: None,
         }
@@ -285,13 +420,20 @@ impl SessionRequests {
                     self.in_flight.remove(&previous);
                 }
             }
+            ConsoleRequest::Choice { context, .. } => {
+                if let Some(previous) = self.latest_choices.insert(context.control, request_id) {
+                    self.in_flight.remove(&previous);
+                    self.transfers.remove(&previous);
+                }
+            }
             ConsoleRequest::AttachTransaction(_) => {
                 self.attaching = Some(request_id);
             }
             ConsoleRequest::Command { .. }
             | ConsoleRequest::ListDomains
+            | ConsoleRequest::InspectTransaction(_)
             | ConsoleRequest::SubscriptionStart { .. }
-            | ConsoleRequest::SubscriptionStop(_)
+            | ConsoleRequest::SubscriptionStop { .. }
             | ConsoleRequest::SelectDomain(_) => {}
         }
         let message = ClientMessage {
@@ -350,6 +492,8 @@ impl SessionRequests {
         if self.latest_suggestion == Some(request_id) {
             self.latest_suggestion = None;
         }
+        self.latest_choices
+            .retain(|_, latest| *latest != request_id);
         Some(request)
     }
 
@@ -404,13 +548,18 @@ impl SessionRequests {
     fn end_connection(&mut self) {
         let in_flight = std::mem::take(&mut self.in_flight);
         for issued in in_flight.into_values() {
-            if issued.request.is_ordered() {
+            if issued.request.is_ordered()
+                && !matches!(&issued.request, ConsoleRequest::SubscriptionStop { .. })
+            {
                 self.hold_again(issued);
             }
         }
+        self.held
+            .retain(|_, request| !matches!(request, ConsoleRequest::SubscriptionStop { .. }));
         self.transfers.clear();
         self.next_request_id = NonZeroU64::MIN;
         self.latest_suggestion = None;
+        self.latest_choices.clear();
         self.leader_confirmed = false;
         self.attaching = None;
     }
@@ -450,9 +599,7 @@ struct SubscriptionTabView {
     sample_rate_index: usize,
     title: String,
     subscribe_command: String,
-    lines: Vec<TermLine>,
-    /// The subscription the tab shows, once the server opened it.
-    stream: Option<TabStream>,
+    lines: TermLineHistory,
 }
 
 /// An opened subscription and the schema its rows follow.
@@ -466,15 +613,14 @@ impl SubscriptionTabView {
     /// Whether the tab shows `subscription`. A name reused after deletion has a new generation, so
     /// messages about an earlier subscription never reach a later tab.
     fn streams(&self, subscription: &SubscriptionHandle) -> bool {
-        match &self.stream {
-            Some(stream) => stream.subscription == *subscription,
-            None => false,
-        }
+        matches!(&self.state, SubscriptionTabState::Open(stream) if stream.subscription == *subscription)
     }
 
     /// The schema of `subscription`'s rows, when the tab shows that subscription.
     fn stream_schema(&self, subscription: &SubscriptionHandle) -> Option<&RowSchema> {
-        let stream = self.stream.as_ref()?;
+        let SubscriptionTabState::Open(stream) = &self.state else {
+            return None;
+        };
         if stream.subscription != *subscription {
             return None;
         }
@@ -482,10 +628,32 @@ impl SubscriptionTabView {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 enum SubscriptionTabState {
     Pending,
-    Open,
+    Open(TabStream),
+    Interrupted,
+    Restoring,
+    Closing(Option<TabStream>),
+}
+
+impl SubscriptionTabState {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Open(_) => "active",
+            Self::Interrupted => "interrupted",
+            Self::Restoring => "restoring",
+            Self::Closing(_) => "closing",
+        }
+    }
+
+    fn can_activate(&self) -> bool {
+        match self {
+            Self::Open(_) | Self::Interrupted | Self::Restoring | Self::Closing(Some(_)) => true,
+            Self::Pending | Self::Closing(None) => false,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -494,55 +662,14 @@ struct ResourceDetailView {
     status: String,
 }
 
-/// Everything one version row of the resource dialog shows. A keyed list re-renders a row only
-/// when its key changes, so the dialog keys each row by this whole value: a later description
-/// that changes the row, such as the usages a rebinding moved, replaces it.
+/// Everything one version row of the resource dialog shows: the version as the typed description
+/// reports it, and the models bound to it. A keyed list re-renders a row only when its key
+/// changes, so the dialog keys each row by this whole value: a later description that changes the
+/// row, such as the usages a rebinding moved, replaces it.
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct ResourceVersionView {
-    version: u64,
-    root_checksum: Option<String>,
-    manifest_checksum: Option<String>,
-    file_count: Option<String>,
-    total_bytes: Option<String>,
-    created_by_node: Option<ClusterNodeName>,
-    created_at: Option<String>,
-    files: Vec<ResourceFileView>,
-    usages: Vec<ResourceUsageView>,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct ResourceFileView {
-    path: String,
-    entry_type: String,
-    size: Option<String>,
-    checksum: Option<String>,
-}
-
-/// One model bound to a resource version.
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct ResourceUsageView {
-    /// The model kind as a statement names it, such as `HASH MAP`.
-    kind: String,
-    name: String,
-}
-
-/// One line of the `usages` section of `DESCRIBE RESOURCE`: a bound model and the version it
-/// pins.
-struct ResourceUsageDetail {
-    version: u64,
-    usage: ResourceUsageView,
-}
-
-/// The part of a `DESCRIBE RESOURCE` description a line belongs to. The version and usage lists
-/// share the `- key=value` line shape, so a line is read by the section that holds it.
-#[derive(Clone, Copy)]
-enum ResourceDescribeSection {
-    /// The `resource`, `latest` and `versions` summary lines.
-    Summary,
-    /// `version_details`: one line per version, each followed by its entries.
-    VersionDetails,
-    /// `usages`: one line per model bound to the resource.
-    Usages,
+    version: ResourceVersionDescription,
+    usages: Vec<ResourceUsage>,
 }
 
 impl ConsoleConnectionState {
@@ -596,31 +723,52 @@ fn main() {
     mount_to_body(App);
 }
 
+#[cfg(test)]
+fn initialize_test_executor() {
+    static EXECUTOR: std::sync::Once = std::sync::Once::new();
+    EXECUTOR.call_once(|| {
+        any_spawner::Executor::init_futures_executor()
+            .assured("the test process initializes the Leptos executor once");
+    });
+}
+
 #[component]
 fn App() -> impl IntoView {
     let active_domain = RwSignal::new(None::<DomainName>);
     let domains = RwSignal::new(Vec::<DomainView>::new());
     let active_theme = RwSignal::new(0_usize);
     let input = RwSignal::new(String::new());
-    let terminal_lines = RwSignal::new(Vec::<TermLine>::new());
+    let terminal_lines = RwSignal::new(TermLineHistory::default());
     let transaction_status = RwSignal::new(None::<TransactionStatus>);
+    let inspector = InspectorSignals::new();
     let subscription_tabs = RwSignal::new(Vec::<SubscriptionTabView>::new());
     let active_subscription_tab = RwSignal::new(None::<u64>);
     let next_subscription_tab_id = RwSignal::new(1_u64);
-    let suggestions = RwSignal::new(Vec::<String>::new());
+    let suggestions = RwSignal::new(Vec::<WireSuggestion>::new());
+    let suggestion_status = RwSignal::new(None::<SuggestionStatus>);
+    let suggestion_query = RwSignal::new(None::<SuggestionQuery>);
+    let suggestion_continuation = RwSignal::new(None::<String>);
     let domain_snapshots = RwSignal::new(BTreeMap::<DomainName, DomainSnapshotView>::new());
     let cluster_counters = RwSignal::new(ClusterCounters::default());
     let resource_details = RwSignal::new(BTreeMap::<String, ResourceDetailView>::new());
     let domains_loaded = RwSignal::new(false);
     let auth_token = RwSignal::new(web_console_auth_token_from_location());
     let auth_error = RwSignal::new(None::<String>);
-    let web_console_session = use_websocket_session(WebConsoleSignals {
+    let session_generation = RwSignal::new(0_u64);
+    let create = CreateSignals::new();
+    let selected_resource = RwSignal::new(None::<String>);
+    let upload_status = RwSignal::new(String::new());
+    let signals = WebConsoleSignals {
         terminal_lines,
         suggestions,
+        suggestion_status,
+        suggestion_query,
+        suggestion_continuation,
         domain_snapshots,
         cluster_counters,
         active_domain,
         transaction_status,
+        inspector,
         domains,
         resource_details,
         subscription_tabs,
@@ -628,7 +776,12 @@ fn App() -> impl IntoView {
         domains_loaded,
         auth_token,
         auth_error,
-    });
+        session_generation,
+        create,
+        selected_resource,
+        upload_status,
+    };
+    let web_console_session = use_websocket_session(signals);
 
     let active_domain_name = move || match active_domain.get() {
         Some(domain) => domain.to_string(),
@@ -670,26 +823,44 @@ fn App() -> impl IntoView {
     });
     let suggestion_request_sequence = RwSignal::new(0_u64);
     let suggestion_session = web_console_session.clone();
-    let request_suggestions = move |value: String| {
+    let request_suggestions = move |value: String, cursor: usize, continuation: Option<String>| {
         suggestion_request_sequence.update(|sequence| {
             *sequence = sequence
                 .checked_add(1)
                 .assured("a console session cannot request 2^64 suggestions");
         });
         let request_sequence = suggestion_request_sequence.get_untracked();
+        if continuation.is_none() {
+            suggestions.set(Vec::new());
+            suggestion_status.set(None);
+            suggestion_query.set(None);
+            suggestion_continuation.set(None);
+        }
         if !domains_loaded.get_untracked() {
             suggestions.set(Vec::new());
             return;
         }
         let domain = active_domain.get_untracked();
+        suggestion_query.set(Some(SuggestionQuery {
+            input: value.clone(),
+            cursor,
+            domain: domain.clone(),
+        }));
+        let auth_at_schedule = suggestion_session.auth_token.get_untracked();
         spawn_local(async move {
             wait_for_browser_delay(SUGGESTION_REQUEST_DEBOUNCE_DELAY).await;
-            if suggestion_request_sequence.get_untracked() != request_sequence {
+            if suggestion_request_sequence.get_untracked() != request_sequence
+                || suggestion_session.auth_token.get_untracked() != auth_at_schedule
+                || (continuation.is_some()
+                    && suggestion_continuation.get_untracked() != continuation)
+            {
                 return;
             }
-            let cursor = value.len();
             let request = SuggestRequest::new(value, cursor, domain)
-                .assured("the end of the input is always a character boundary");
+                .assured("the browser cursor is converted to a UTF-8 character boundary");
+            let request = request
+                .with_page(64, continuation)
+                .assured("the console page size is within the protocol bound");
             let queued = ConsoleRequest::Suggest(request);
             if let Some(request_tx) = suggestion_session.request_tx.get_untracked()
                 && request_tx.unbounded_send(queued).is_err()
@@ -705,6 +876,9 @@ fn App() -> impl IntoView {
                 .checked_add(1)
                 .assured("a console session cannot request 2^64 suggestions");
         });
+        suggestion_query.set(None);
+        suggestion_status.set(None);
+        suggestion_continuation.set(None);
         let command = next_command
             .unwrap_or_else(|| input.get())
             .trim()
@@ -718,7 +892,7 @@ fn App() -> impl IntoView {
             lines.push(TermLine::prompt(command.clone(), prompt_transaction));
         });
         if command.eq_ignore_ascii_case("clear") {
-            terminal_lines.set(Vec::new());
+            terminal_lines.set(TermLineHistory::default());
             input.set(String::new());
             return;
         }
@@ -772,16 +946,31 @@ fn App() -> impl IntoView {
                 });
             }
         } else {
+            // The server decides which statements need a selected domain, and answers one sent
+            // without it with a failed outcome.
             let request_domain = active_domain.get_untracked();
-            if request_domain.is_none() && !is_domainless_server_command(&command) {
+            let transaction = transaction_status.get_untracked();
+            let parsed = parse_client_statement(&command).ok();
+            if let Some(ClientStatement::Server(Statement::DescribeTransaction(describe))) = &parsed
+            {
+                inspector.prepare_describe(describe.request.target.clone());
+            }
+            let is_commit = matches!(parsed, Some(ClientStatement::CommitTransaction));
+            let preview = if is_commit {
+                transaction
+                    .as_ref()
+                    .and_then(|status| inspector.commit_basis(status))
+            } else {
+                None
+            };
+            if is_commit && preview.is_none() {
                 terminal_lines.update(|lines| {
-                    lines.push(TermLine::error("no active domain selected"));
+                    lines.push(TermLine::error(
+                        "Inspect the attached transaction at its current position before COMMIT",
+                    ))
                 });
-                suggestions.set(Vec::new());
-                input.set(String::new());
                 return;
             }
-            let transaction = transaction_status.get_untracked();
             let expected_transaction_position = match &transaction {
                 Some(status) if status.lifecycle().is_active() => {
                     Some(status.accepted_operations())
@@ -793,7 +982,7 @@ fn App() -> impl IntoView {
                 domain: request_domain,
                 execution_reference: command_execution_reference(),
                 expected_transaction_position,
-                expected_preview: None,
+                expected_preview: preview,
             };
             let queued = ConsoleRequest::Command {
                 request,
@@ -820,6 +1009,18 @@ fn App() -> impl IntoView {
         suggestions.set(Vec::new());
         input.set(String::new());
     };
+    let create_request_tx = web_console_session.request_tx;
+    let submit_create = move |submission: CreateSubmission, attempt: u64, draft_revision: u64| {
+        submit_create_request(
+            create,
+            terminal_lines,
+            transaction_status,
+            create_request_tx,
+            submission,
+            attempt,
+            draft_revision,
+        );
+    };
     let subscription_session = web_console_session.clone();
     let start_subscription = move |relay: String, filter: String, sample_rate_index: usize| {
         let Some(domain) = active_domain.get_untracked() else {
@@ -836,7 +1037,13 @@ fn App() -> impl IntoView {
                 && tab.filter == filter
                 && tab.sample_rate_index == sample_rate_index
         }) {
-            if existing.state == SubscriptionTabState::Open {
+            if matches!(
+                existing.state,
+                SubscriptionTabState::Open(_)
+                    | SubscriptionTabState::Interrupted
+                    | SubscriptionTabState::Restoring
+                    | SubscriptionTabState::Closing(Some(_))
+            ) {
                 active_subscription_tab.set(Some(existing.id));
             }
             return;
@@ -861,8 +1068,7 @@ fn App() -> impl IntoView {
                 sample_rate_index,
                 title,
                 subscribe_command: subscribe_command.clone(),
-                lines: Vec::new(),
-                stream: None,
+                lines: TermLineHistory::default(),
             });
         });
         let request = SubscribeRequest {
@@ -891,27 +1097,21 @@ fn App() -> impl IntoView {
     };
     let stop_subscription_session = web_console_session.clone();
     let stop_subscription = move |tab_id: u64| {
-        let Some(tab) = subscription_tabs
-            .get_untracked()
-            .into_iter()
-            .find(|tab| tab.id == tab_id)
-        else {
+        let Some(request) = signals.begin_subscription_close(tab_id) else {
             return;
         };
-        subscription_tabs.update(|tabs| tabs.retain(|tab| tab.id != tab_id));
-        active_subscription_tab.update(|active| {
-            if *active == Some(tab_id) {
-                *active = None;
-            }
-        });
-        let request = UnsubscribeRequest {
-            subscription: tab.name,
-        };
-        if let Some(request_tx) = stop_subscription_session.request_tx.get_untracked() {
-            request_tx
-                .unbounded_send(ConsoleRequest::SubscriptionStop(request))
-                .means_shutdown("web console session");
+        if let Some(request_tx) = stop_subscription_session.request_tx.get_untracked()
+            && request_tx
+                .unbounded_send(ConsoleRequest::SubscriptionStop { tab_id, request })
+                .is_ok()
+        {
+            return;
         }
+        restore_failed_unsubscribe(
+            subscription_tabs,
+            tab_id,
+            "websocket session is not available".to_string(),
+        );
     };
 
     view! {
@@ -930,10 +1130,19 @@ fn App() -> impl IntoView {
                     active_domain=active_domain
                     domains=domains
                     run_command=run_command
+                    transaction_status=transaction_status
+                    inspector=inspector
+                    create=create
                 />
                 <div class="console-body">
-                    <Sidebar active_domain=active_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details web_console_session=web_console_session.clone() run_command=run_command />
+                    <Sidebar active_domain=active_domain domains=domains domains_loaded=domains_loaded active_graph=active_graph active_entities=active_entities cluster_counters=cluster_counters resource_details=resource_details selected_resource=selected_resource upload_status=upload_status create=create web_console_session=web_console_session.clone() run_command=run_command />
                     <section class="main-pane">
+                        <TransactionInspector
+                            inspector=inspector
+                            transaction_status=transaction_status
+                            request_tx=web_console_session.request_tx
+                            run_command=run_command
+                        />
                         <GraphPanel
                             active_domain=active_domain
                             domains=domains
@@ -951,14 +1160,87 @@ fn App() -> impl IntoView {
                             active_subscription_tab=active_subscription_tab
                             stop_subscription=stop_subscription
                             suggestions=move || suggestions.get()
+                            suggestion_status=move || suggestion_status.get()
+                            suggestion_continuation=move || suggestion_continuation.get()
                             request_suggestions=request_suggestions
                             input_enabled=move || domains_loaded.get()
                             run_command=run_command
                         />
                     </section>
                 </div>
+                <CreateDialog
+                    signals=create
+                    active_domain=active_domain
+                    connection_state=web_console_session.state
+                    session_generation=session_generation
+                    request_tx=web_console_session.request_tx
+                    submit=submit_create
+                />
             </main>
         </Show>
+    }
+}
+
+fn submit_create_request(
+    create: CreateSignals,
+    terminal_lines: RwSignal<TermLineHistory>,
+    transaction_status: RwSignal<Option<TransactionStatus>>,
+    request_tx: RwSignal<Option<UnboundedSender<ConsoleRequest>>>,
+    submission: CreateSubmission,
+    attempt: u64,
+    draft_revision: u64,
+) {
+    let CreateSubmission {
+        kind,
+        query,
+        presentation,
+        domain,
+        resource,
+        created_domain,
+    } = submission;
+    let prompt_transaction =
+        transaction_status.with_untracked(|status| ActiveTransaction::of(status.as_ref()));
+    terminal_lines.update(|lines| {
+        lines.push(TermLine::prompt(presentation.clone(), prompt_transaction));
+    });
+    let transaction = transaction_status.get_untracked();
+    let expected_transaction_position = match &transaction {
+        Some(status) if status.lifecycle().is_active() => Some(status.accepted_operations()),
+        Some(_) | None => None,
+    };
+    let context = CreateCommandContext {
+        attempt,
+        draft_revision,
+        kind,
+        presentation,
+        domain: domain.clone(),
+        resource,
+        created_domain,
+    };
+    let queued = ConsoleRequest::Command {
+        request: CommandRequest {
+            query,
+            domain,
+            execution_reference: command_execution_reference(),
+            expected_transaction_position,
+            expected_preview: None,
+        },
+        purpose: CommandPurpose::Create(context),
+    };
+    let Some(request_tx) = request_tx.get_untracked() else {
+        create.failed(
+            attempt,
+            draft_revision,
+            "WebSocket session is not available".to_string(),
+        );
+        return;
+    };
+    if request_tx.unbounded_send(queued).is_err() {
+        create.failed(
+            attempt,
+            draft_revision,
+            "WebSocket command channel is closed".to_string(),
+        );
     }
 }
 
@@ -1021,12 +1303,19 @@ fn use_websocket_session(signals: WebConsoleSignals) -> WebConsoleSession {
     let upload_base_url = RwSignal::new(web_console_http_base_url());
     let (sender, receiver) = unbounded::<ConsoleRequest>();
     let request_tx = RwSignal::new(Some(sender));
-    spawn_local(run_websocket_session(
-        signals,
-        state,
-        upload_base_url,
-        receiver,
-    ));
+    let (abort, registration) = AbortHandle::new_pair();
+    spawn_local(async move {
+        Abortable::new(
+            run_websocket_session(signals, state, upload_base_url, receiver),
+            registration,
+        )
+        .await
+        .discarded("the console owner aborts its session when its browser view is removed");
+    });
+    on_cleanup(move || {
+        abort.abort();
+        request_tx.set(None);
+    });
     WebConsoleSession {
         state,
         request_tx,
@@ -1052,7 +1341,20 @@ async fn run_websocket_session(
     let mut reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
     let mut requests = SessionRequests::new();
     let mut redirected_url = None::<String>;
+    let mut session_auth_token = auth_token.get_untracked();
     loop {
+        let next_auth_token = auth_token.get_untracked();
+        if next_auth_token != session_auth_token {
+            let previous_was_authenticated = session_auth_token.is_some();
+            session_auth_token = next_auth_token.clone();
+            redirected_url = None;
+            if previous_was_authenticated {
+                requests = SessionRequests::new();
+                while queued.try_recv().is_ok() {}
+                upload_base_url.set(web_console_http_base_url());
+                signals.clear_authenticated_view();
+            }
+        }
         let Some(current_auth_token) = auth_token.get_untracked() else {
             state.set(ConsoleConnectionState::Waiting);
             domains_loaded.set(false);
@@ -1077,19 +1379,57 @@ async fn run_websocket_session(
         match WebSocket::open(&url) {
             Ok(socket) => {
                 wait_for_websocket_open(&socket).await;
+                if auth_token.get_untracked().as_deref() != Some(current_auth_token.as_str()) {
+                    requests.end_connection();
+                    signals.create.connection_lost();
+                    interrupt_subscription_tabs(signals);
+                    continue;
+                }
                 let ended = if let WebSocketState::Open = socket.state() {
-                    Some(serve_connection(signals, state, socket, &mut requests, &mut queued).await)
+                    signals.session_generation.update(|generation| {
+                        *generation = generation
+                            .checked_add(1)
+                            .assured("a console cannot open 2^64 websocket connections");
+                    });
+                    Some(
+                        serve_connection(
+                            signals,
+                            state,
+                            socket,
+                            &mut requests,
+                            &mut queued,
+                            &current_auth_token,
+                        )
+                        .await,
+                    )
                 } else {
                     // A server that ends the session at once, such as a follower redirecting to the
                     // leader, can close the connection before this loop sees it open. Its frames
                     // are still buffered, and only a connection that never opened delivers none.
-                    drain_closed_connection(signals, state, socket, &mut requests).await
+                    drain_closed_connection(
+                        signals,
+                        state,
+                        socket,
+                        &mut requests,
+                        &current_auth_token,
+                    )
+                    .await
                 };
                 if let Some(ended) = ended {
+                    if auth_token.get_untracked().as_deref() != Some(current_auth_token.as_str()) {
+                        requests.end_connection();
+                        signals.create.connection_lost();
+                        interrupt_subscription_tabs(signals);
+                        continue;
+                    }
                     opened_this_attempt = true;
                     reconnect_delay = WEBSOCKET_INITIAL_RECONNECT_DELAY;
                     auth_error.set(None);
                     requests.end_connection();
+                    signals.create.connection_lost();
+                    if !matches!(&ended, ConnectionEnd::ConsoleClosed) {
+                        interrupt_subscription_tabs(signals);
+                    }
                     match ended {
                         ConnectionEnd::Dropped => {}
                         ConnectionEnd::Redirected(leader) => {
@@ -1110,6 +1450,8 @@ async fn run_websocket_session(
         }
         if !opened_this_attempt
             && auth_token.get_untracked().as_deref() == Some(current_auth_token.as_str())
+            && credentials_invalid(&current_auth_token).await
+            && auth_token.get_untracked().as_deref() == Some(current_auth_token.as_str())
         {
             auth_error.set(Some("Authentication failed".to_string()));
             auth_token.set(None);
@@ -1123,6 +1465,32 @@ async fn run_websocket_session(
     }
 }
 
+/// A failed WebSocket handshake does not tell browser JavaScript whether the server rejected the
+/// credentials or was unreachable. The same-origin authentication probe does: a valid
+/// credential gets `204 No Content`, and a rejected credential gets `401 Unauthorized` without a
+/// browser-managed Basic authentication challenge.
+/// Network failures and a slow probe leave the token in place for the next reconnect attempt.
+async fn credentials_invalid(auth_token: &str) -> bool {
+    let Some(base) = web_console_http_base_url() else {
+        return false;
+    };
+    let Ok(mut url) = Url::parse(&base) else {
+        return false;
+    };
+    url.set_path("/console/auth");
+    url.query_pairs_mut().append_pair("auth", auth_token);
+    let response = gloo_net::http::Request::get(url.as_str()).send().fuse();
+    let timeout = wait_for_browser_delay(Duration::from_secs(3)).fuse();
+    futures_util::pin_mut!(response, timeout);
+    match futures_util::select! {
+        result = response => Some(result),
+        () = timeout => None,
+    } {
+        Some(Ok(response)) => response.status() == 401,
+        Some(Err(_)) | None => false,
+    }
+}
+
 /// Reads the frames a connection delivered before it closed, without sending anything on it.
 ///
 /// `None` says no frame arrived, so the connection never opened, as when the server refused its
@@ -1132,10 +1500,14 @@ async fn drain_closed_connection(
     state: RwSignal<ConsoleConnectionState>,
     mut socket: WebSocket,
     requests: &mut SessionRequests,
+    current_auth_token: &str,
 ) -> Option<ConnectionEnd> {
     let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
     let mut received = false;
     while let Some(Ok(message)) = socket.next().await {
+        if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
+            return Some(ConnectionEnd::Dropped);
+        }
         let WebSocketMessage::Bytes(payload) = message else {
             continue;
         };
@@ -1166,6 +1538,7 @@ async fn serve_connection(
     mut socket: WebSocket,
     requests: &mut SessionRequests,
     queued: &mut UnboundedReceiver<ConsoleRequest>,
+    current_auth_token: &str,
 ) -> ConnectionEnd {
     let codec = ClientWebSocketCodec::new(SESSION_LIMITS);
     let mut opening = Vec::new();
@@ -1181,19 +1554,33 @@ async fn serve_connection(
         ));
     }
     for request in opening {
+        if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
+            return ConnectionEnd::Dropped;
+        }
         let issued = requests.issue(request);
         let message = requests.dispatch(issued);
         if !send_message(&mut socket, &codec, signals, requests, message).await {
             return ConnectionEnd::Dropped;
         }
     }
+    queue_subscription_restorations(signals, requests);
+    let mut retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
     loop {
+        if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
+            return ConnectionEnd::Dropped;
+        }
         let step = futures_util::select! {
             request = queued.next().fuse() => {
+                if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
+                    return ConnectionEnd::Dropped;
+                }
                 let Some(request) = request else {
                     return ConnectionEnd::ConsoleClosed;
                 };
                 let issued = requests.issue(request);
+                if issued.request.inspects_transaction() {
+                    signals.inspector.requested(issued.order.0);
+                }
                 if let Some(message) = requests.accept(issued)
                     && !send_message(&mut socket, &codec, signals, requests, message).await
                 {
@@ -1202,6 +1589,9 @@ async fn serve_connection(
                 SessionStep::Continue
             }
             message = socket.next().fuse() => {
+                if signals.auth_token.get_untracked().as_deref() != Some(current_auth_token) {
+                    return ConnectionEnd::Dropped;
+                }
                 let Some(message) = message else {
                     return ConnectionEnd::Dropped;
                 };
@@ -1229,6 +1619,11 @@ async fn serve_connection(
                     }
                 }
             }
+            () = retry_delay.as_mut() => {
+                retry_delay = Box::pin(wait_for_browser_delay(SUBSCRIPTION_RETRY_DELAY).fuse());
+                queue_subscription_restorations(signals, requests);
+                SessionStep::Continue
+            }
         };
         match step {
             SessionStep::Continue => {}
@@ -1252,6 +1647,57 @@ async fn serve_connection(
                 return ConnectionEnd::Dropped;
             }
         }
+    }
+}
+
+/// An acknowledged subscription belongs to the connection that ended. Its tab remains desired,
+/// but its previous generation must never accept rows from the replacement connection.
+fn interrupt_subscription_tabs(signals: WebConsoleSignals) {
+    signals.subscription_tabs.update(|tabs| {
+        for tab in tabs.iter_mut() {
+            if let SubscriptionTabState::Open(_) = &tab.state {
+                tab.state = SubscriptionTabState::Interrupted;
+                tab.lines.push(TermLine::info(
+                    "delivery interrupted; restoring on the next connection",
+                ));
+            }
+        }
+        tabs.retain(|tab| !matches!(&tab.state, SubscriptionTabState::Closing(Some(_))));
+    });
+    let active = signals.active_subscription_tab.get_untracked();
+    if let Some(active) = active {
+        let still_present = signals.subscription_tabs.with_untracked(|tabs| {
+            // The operator explicitly controls the number of open tabs in this console.
+            tabs.iter().any(|tab| tab.id == active)
+        });
+        if !still_present {
+            signals.active_subscription_tab.set(None);
+        }
+    }
+}
+
+/// A tab acknowledged on an earlier connection is reissued once on the new connection. Starts
+/// that were already in flight remain in the request ledger and are replayed there instead.
+fn queue_subscription_restorations(signals: WebConsoleSignals, requests: &mut SessionRequests) {
+    let mut restore = Vec::new();
+    signals.subscription_tabs.update(|tabs| {
+        for tab in tabs.iter_mut() {
+            if let SubscriptionTabState::Interrupted = &tab.state {
+                tab.state = SubscriptionTabState::Restoring;
+                restore.push((
+                    tab.id,
+                    SubscribeRequest {
+                        domain: tab.domain.clone(),
+                        statement: tab.subscribe_command.clone(),
+                        subscription_type: SubscriptionType::Row,
+                    },
+                ));
+            }
+        }
+    });
+    for (tab_id, request) in restore {
+        let issued = requests.issue(ConsoleRequest::SubscriptionStart { tab_id, request });
+        requests.hold_again(issued);
     }
 }
 
@@ -1591,23 +2037,76 @@ fn apply_reply(
             signals.terminal_lines.update(|lines| lines.push(line));
             SessionStep::Continue
         }
-        (ConsoleRequest::Suggest(_), ReplyBody::Suggest(outcome)) => {
-            let values = outcome
+        (ConsoleRequest::Suggest(request), ReplyBody::Suggest(outcome)) => {
+            let Some(query) = signals.suggestion_query.get_untracked() else {
+                return SessionStep::Continue;
+            };
+            if query.input != request.input()
+                || query.cursor != request.cursor()
+                || query.domain.as_ref() != request.domain()
+                || query.domain != signals.active_domain.get_untracked()
+            {
+                return SessionStep::Continue;
+            }
+            signals.suggestion_status.set(Some(outcome.status));
+            signals.suggestion_continuation.set(outcome.continuation);
+            let text_suggestions = outcome
                 .suggestions
                 .into_iter()
-                .map(|suggestion| suggestion.value)
-                .collect();
-            signals.suggestions.set(values);
+                .filter(|suggestion| suggestion.kind == SuggestionKind::Text)
+                .collect::<Vec<_>>();
+            if request.continuation().is_some() && outcome.status == SuggestionStatus::Ready {
+                signals
+                    .suggestions
+                    .update(|suggestions| suggestions.extend(text_suggestions));
+            } else {
+                signals.suggestions.set(text_suggestions);
+            }
+            SessionStep::Continue
+        }
+        (ConsoleRequest::Choice { context, .. }, ReplyBody::Choice(outcome)) => {
+            signals.create.apply_choice(
+                context,
+                signals.session_generation.get_untracked(),
+                outcome,
+            );
             SessionStep::Continue
         }
         (ConsoleRequest::AttachTransaction(_), ReplyBody::Attach(outcome)) => {
             apply_attach_outcome(signals, requests, outcome)
         }
+        (ConsoleRequest::InspectTransaction(request), ReplyBody::Inspection(outcome)) => {
+            match outcome {
+                InspectionOutcome::Inspected(inspection) => {
+                    signals.inspector.accept(
+                        *inspection,
+                        order.0,
+                        Some(&request.target),
+                        signals.transaction_status.get_untracked().as_ref(),
+                    );
+                    SessionStep::Continue
+                }
+                InspectionOutcome::Rejected { message, .. } => {
+                    signals.inspector.error.set(Some(message));
+                    SessionStep::Continue
+                }
+                InspectionOutcome::NotLeader(redirect) => {
+                    requests.hold_again(IssuedRequest {
+                        order,
+                        request: ConsoleRequest::InspectTransaction(request),
+                    });
+                    redirect_step(signals, &redirect)
+                }
+            }
+        }
         (ConsoleRequest::SubscriptionStart { tab_id, request }, ReplyBody::Subscribe(outcome)) => {
-            apply_subscribe_outcome(signals, tab_id, &request.statement, outcome);
+            apply_subscribe_outcome(signals, requests, tab_id, &request.statement, outcome);
             SessionStep::Continue
         }
-        (ConsoleRequest::SubscriptionStop(_), ReplyBody::Unsubscribe(_)) => SessionStep::Continue,
+        (ConsoleRequest::SubscriptionStop { tab_id, request }, ReplyBody::Unsubscribe(outcome)) => {
+            apply_unsubscribe_outcome(signals, tab_id, &request, outcome);
+            SessionStep::Continue
+        }
         (request, _) => {
             fail_request(signals, requests, request, UNEXPECTED_REPLY.to_string());
             SessionStep::Continue
@@ -1619,9 +2118,9 @@ fn apply_reply(
 ///
 /// A command the serving node could not run because it does not lead is sent again at the leader's
 /// console, and a command the leader could not bind to the session's transaction is sent again
-/// once the transaction is attached. Either keeps the command's execution reference, so the server
-/// recovers its recorded outcome instead of running it twice. Every other outcome goes to whoever
-/// reads the command.
+/// once the transaction is attached. An unknown outcome reconnects before another attempt. Each
+/// attempt keeps the command's execution reference, so the server recovers its recorded outcome
+/// instead of running it twice. A definitive outcome goes to whoever reads the command.
 fn apply_command_outcome(
     signals: WebConsoleSignals,
     requests: &mut SessionRequests,
@@ -1630,14 +2129,32 @@ fn apply_command_outcome(
     purpose: CommandPurpose,
     mut outcome: CommandOutcome,
 ) -> SessionStep {
-    if let Some(leader) = command_redirect(&outcome.disposition) {
-        let leader = leader.clone();
+    if let Some(redirect) = command_redirect(&outcome.disposition) {
+        if let CommandPurpose::Create(context) = &purpose {
+            signals
+                .create
+                .queued_reconnect(context.attempt, context.draft_revision);
+        }
+        let step = redirect_step(signals, redirect);
         requests.hold_again(IssuedRequest {
             order,
             request: ConsoleRequest::Command { request, purpose },
         });
-        return SessionStep::Redirect(leader);
+        return step;
     }
+    if matches!(outcome.disposition, CommandDisposition::OutcomeUnknown(_)) {
+        if let CommandPurpose::Create(context) = &purpose {
+            signals
+                .create
+                .queued_reconnect(context.attempt, context.draft_revision);
+        }
+        requests.hold_again(IssuedRequest {
+            order,
+            request: ConsoleRequest::Command { request, purpose },
+        });
+        return SessionStep::Reconnect;
+    }
+    let queued_transaction_position = queued_transaction_position(&outcome);
     if let Some(status) = outcome.transaction.take() {
         adopt_transaction(signals, status);
     }
@@ -1650,7 +2167,16 @@ fn apply_command_outcome(
         return SessionStep::Reattach { transaction_id };
     }
     match purpose {
-        CommandPurpose::Repl => show_command_outcome(signals, &request.query, outcome),
+        CommandPurpose::Repl => show_command_outcome(signals, order, &request.query, outcome),
+        CommandPurpose::Create(context) => {
+            show_create_outcome(
+                signals,
+                requests,
+                context,
+                outcome,
+                queued_transaction_position,
+            );
+        }
         CommandPurpose::ResourceDescription { resource } => {
             let detail = ResourceDetailView::from_description(outcome);
             signals.resource_details.update(|details| {
@@ -1661,9 +2187,105 @@ fn apply_command_outcome(
     SessionStep::Continue
 }
 
+fn show_create_outcome(
+    signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
+    context: CreateCommandContext,
+    outcome: CommandOutcome,
+    queued_transaction_position: Option<usize>,
+) {
+    let completed = matches!(outcome.disposition, CommandDisposition::Completed { .. });
+    let failure = if outcome.message.is_empty() {
+        "Create failed".to_string()
+    } else {
+        outcome.message.clone()
+    };
+    let lines = command_outcome_lines(outcome, &context.presentation);
+    signals
+        .terminal_lines
+        .update(|terminal| terminal.extend(lines));
+
+    if let Some(position) = queued_transaction_position {
+        signals
+            .create
+            .queued_transaction(context.attempt, context.draft_revision, position);
+        return;
+    }
+    if !completed {
+        signals
+            .create
+            .failed(context.attempt, context.draft_revision, failure);
+        return;
+    }
+    if !signals
+        .create
+        .completed(context.attempt, context.draft_revision)
+    {
+        return;
+    }
+    if context.kind == CreateKind::Domain
+        && let Some(domain) = context.created_domain
+    {
+        signals.active_domain.set(Some(domain));
+    }
+    if context.kind == CreateKind::Resource
+        && let (Some(resource), Some(domain)) = (context.resource, context.domain)
+    {
+        signals.selected_resource.set(Some(resource.clone()));
+        signals.upload_status.set(String::new());
+        let issued = requests.issue(ConsoleRequest::Command {
+            request: CommandRequest {
+                query: format!("DESCRIBE RESOURCE {resource};"),
+                domain: Some(domain),
+                execution_reference: command_execution_reference(),
+                expected_transaction_position: None,
+                expected_preview: None,
+            },
+            purpose: CommandPurpose::ResourceDescription { resource },
+        });
+        requests.hold_again(issued);
+    }
+}
+
+/// The accepted position of a popup command that remains queued in an attached transaction.
+///
+/// Standalone model commands also use a short durable transaction internally. Their completed
+/// outcomes retain an admission as retry evidence but carry no active transaction, so that
+/// admission describes completed work rather than a queued operation.
+fn queued_transaction_position(outcome: &CommandOutcome) -> Option<usize> {
+    outcome
+        .transaction
+        .as_ref()
+        .filter(|status| status.lifecycle().is_active())?;
+    outcome
+        .transaction_admission
+        .as_ref()
+        .map(|admission| admission.operation.get())
+}
+
 /// Prints the outcome of a REPL command, and makes the domain a completed `CREATE DOMAIN` created
 /// the active one.
-fn show_command_outcome(signals: WebConsoleSignals, query: &str, outcome: CommandOutcome) {
+fn show_command_outcome(
+    signals: WebConsoleSignals,
+    order: IssueOrder,
+    query: &str,
+    mut outcome: CommandOutcome,
+) {
+    if let Some(inspection) = outcome.inspection.take() {
+        signals.inspector.accept(
+            *inspection,
+            order.0,
+            None,
+            signals.transaction_status.get_untracked().as_ref(),
+        );
+    }
+    if let CommandDisposition::PreviewStale { .. } = &outcome.disposition {
+        signals.inspector.requested(order.0);
+        signals.inspector.error.set(Some(
+            "Preview is stale. Refresh the inspection before committing.".to_string(),
+        ));
+        signals.inspector.stale_preview.set(true);
+    }
     if let CommandDisposition::Completed { .. } = outcome.disposition
         && let Some(domain) = first_created_domain_from_query(query)
     {
@@ -1730,6 +2352,7 @@ fn apply_attach_outcome(
 /// subscription streams its rows into it, and a failure is shown in it.
 fn apply_subscribe_outcome(
     signals: WebConsoleSignals,
+    requests: &mut SessionRequests,
     tab_id: u64,
     statement: &str,
     outcome: SubscribeOutcome,
@@ -1750,11 +2373,84 @@ fn apply_subscribe_outcome(
                 subscription,
                 schema,
             };
-            open_subscription_tab(signals, tab_id, Some(stream), Vec::new());
+            let mut close_after_open = false;
+            let mut opened = false;
+            signals.subscription_tabs.update(|tabs| {
+                let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+                    return;
+                };
+                match tab.state.clone() {
+                    SubscriptionTabState::Pending | SubscriptionTabState::Restoring => {
+                        tab.state = SubscriptionTabState::Open(stream.clone());
+                        opened = true;
+                    }
+                    SubscriptionTabState::Closing(None) => {
+                        tab.state = SubscriptionTabState::Closing(Some(stream.clone()));
+                        close_after_open = true;
+                    }
+                    SubscriptionTabState::Open(_)
+                    | SubscriptionTabState::Interrupted
+                    | SubscriptionTabState::Closing(Some(_)) => {}
+                }
+            });
+            if close_after_open {
+                let issued = requests.issue(ConsoleRequest::SubscriptionStop {
+                    tab_id,
+                    request: UnsubscribeRequest {
+                        subscription: stream.subscription.name,
+                    },
+                });
+                requests.hold_again(issued);
+            } else if opened {
+                signals.active_subscription_tab.set(Some(tab_id));
+            }
         }
         SubscribeDisposition::Failed => {
             let lines = failed_lines(message, diagnostics, statement);
-            open_subscription_tab(signals, tab_id, None, lines);
+            fail_subscription_start(signals, tab_id, lines);
+        }
+    }
+}
+
+fn apply_unsubscribe_outcome(
+    signals: WebConsoleSignals,
+    tab_id: u64,
+    request: &UnsubscribeRequest,
+    outcome: UnsubscribeOutcome,
+) {
+    match outcome.disposition {
+        UnsubscribeDisposition::Deleted(deleted) => {
+            let matches_closing = signals.subscription_tabs.with_untracked(|tabs| {
+                tabs.iter().any(|tab| {
+                    tab.id == tab_id
+                        && matches!(
+                            &tab.state,
+                            SubscriptionTabState::Closing(Some(stream))
+                                if stream.subscription == deleted
+                        )
+                })
+            });
+            if matches_closing && deleted.name == request.subscription {
+                remove_subscription_tab(
+                    signals.subscription_tabs,
+                    signals.active_subscription_tab,
+                    tab_id,
+                );
+            } else {
+                restore_failed_unsubscribe(
+                    signals.subscription_tabs,
+                    tab_id,
+                    "the server confirmed another subscription deletion".to_string(),
+                );
+            }
+        }
+        UnsubscribeDisposition::Failed => {
+            let reason = outcome.message.clone();
+            let lines = failed_lines(outcome.message, outcome.diagnostics, "");
+            restore_failed_unsubscribe(signals.subscription_tabs, tab_id, reason);
+            signals
+                .terminal_lines
+                .update(|terminal| terminal.extend(lines));
         }
     }
 }
@@ -1773,8 +2469,18 @@ fn fail_request(
             ..
         }
         | ConsoleRequest::ListDomains
-        | ConsoleRequest::SubscriptionStop(_)
         | ConsoleRequest::SelectDomain(_) => {
+            signals
+                .terminal_lines
+                .update(|lines| lines.push(TermLine::error(reason)));
+        }
+        ConsoleRequest::Command {
+            purpose: CommandPurpose::Create(context),
+            ..
+        } => {
+            signals
+                .create
+                .failed(context.attempt, context.draft_revision, reason.clone());
             signals
                 .terminal_lines
                 .update(|lines| lines.push(TermLine::error(reason)));
@@ -1792,9 +2498,21 @@ fn fail_request(
             });
         }
         ConsoleRequest::SubscriptionStart { tab_id, .. } => {
-            open_subscription_tab(signals, tab_id, None, vec![TermLine::error(reason)]);
+            fail_subscription_start(signals, tab_id, vec![TermLine::error(reason)]);
+        }
+        ConsoleRequest::SubscriptionStop { tab_id, .. } => {
+            restore_failed_unsubscribe(signals.subscription_tabs, tab_id, reason.clone());
+            signals
+                .terminal_lines
+                .update(|lines| lines.push(TermLine::error(reason)));
         }
         ConsoleRequest::Suggest(_) => signals.suggestions.set(Vec::new()),
+        ConsoleRequest::Choice { context, .. } => {
+            signals
+                .create
+                .fail_choice(context, signals.session_generation.get_untracked(), reason)
+        }
+        ConsoleRequest::InspectTransaction(_) => signals.inspector.error.set(Some(reason)),
         ConsoleRequest::AttachTransaction(_) => {
             // Without its transaction attached, the session cannot serve what was held for it.
             signals.transaction_status.set(None);
@@ -1808,6 +2526,7 @@ fn fail_request(
 
 /// Takes the session's transaction as the server reports it, and makes its domain the active one.
 fn adopt_transaction(signals: WebConsoleSignals, status: TransactionStatus) {
+    signals.inspector.retain_finished(&status);
     let domain = status.domain().clone();
     let already_active = signals
         .active_domain
@@ -1870,11 +2589,11 @@ fn redirect_step(signals: WebConsoleSignals, redirect: &LeaderRedirect) -> Sessi
 
 /// The leader's web console a command has to be sent to, when the serving node does not lead and
 /// knows where the leader's console is.
-fn command_redirect(disposition: &CommandDisposition) -> Option<&Url> {
+fn command_redirect(disposition: &CommandDisposition) -> Option<&LeaderRedirect> {
     let CommandDisposition::NotLeader(redirect) = disposition else {
         return None;
     };
-    redirect_console(redirect)
+    Some(redirect)
 }
 
 /// The web console a redirect names, when the leader is known and advertises one.
@@ -2026,26 +2745,64 @@ fn append_subscription_tab_lines(
     });
 }
 
-/// Opens a tab and shows it, appending `lines` and, once the server opened its subscription, the
-/// stream it shows.
-fn open_subscription_tab(
-    signals: WebConsoleSignals,
-    tab_id: u64,
-    stream: Option<TabStream>,
-    lines: Vec<TermLine>,
-) {
+/// A creation failure leaves no live tab. A failed restoration keeps the acknowledged tab visible
+/// and interrupted, so it can be restored on the next connection.
+fn fail_subscription_start(signals: WebConsoleSignals, tab_id: u64, lines: Vec<TermLine>) {
+    let mut remove = false;
     signals.subscription_tabs.update(|tabs| {
-        // Bounded by the subscription tabs the operator has open in this console.
         let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
-        if let Some(stream) = stream {
-            tab.stream = Some(stream);
+        match tab.state.clone() {
+            SubscriptionTabState::Pending | SubscriptionTabState::Closing(None) => remove = true,
+            SubscriptionTabState::Restoring => {
+                tab.state = SubscriptionTabState::Interrupted;
+                tab.lines.extend(lines.clone());
+            }
+            SubscriptionTabState::Open(_)
+            | SubscriptionTabState::Interrupted
+            | SubscriptionTabState::Closing(Some(_)) => {}
         }
-        tab.lines.extend(lines);
-        tab.state = SubscriptionTabState::Open;
     });
-    signals.active_subscription_tab.set(Some(tab_id));
+    if remove {
+        remove_subscription_tab(
+            signals.subscription_tabs,
+            signals.active_subscription_tab,
+            tab_id,
+        );
+    }
+    signals
+        .terminal_lines
+        .update(|terminal| terminal.extend(lines));
+}
+
+fn restore_failed_unsubscribe(
+    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
+    tab_id: u64,
+    reason: String,
+) {
+    subscription_tabs.update(|tabs| {
+        let Some(tab) = tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if let SubscriptionTabState::Closing(Some(stream)) = &tab.state {
+            tab.state = SubscriptionTabState::Open(stream.clone());
+            tab.lines.push(TermLine::error(reason));
+        }
+    });
+}
+
+fn remove_subscription_tab(
+    subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
+    active_subscription_tab: RwSignal<Option<u64>>,
+    tab_id: u64,
+) {
+    subscription_tabs.update(|tabs| tabs.retain(|tab| tab.id != tab_id));
+    active_subscription_tab.update(|active| {
+        if *active == Some(tab_id) {
+            *active = None;
+        }
+    });
 }
 
 /// Shows a batch of a subscription's rows, one line per row, in the tabs that show the
@@ -2159,10 +2916,13 @@ fn domain_list_lines(domains: &[DomainView]) -> Vec<TermLine> {
         .collect()
 }
 
+/// What the resource dialog shows for a completed description that carries no typed description.
+const MISSING_RESOURCE_DESCRIPTION: &str = "the server returned no resource description";
+
 impl ResourceDetailView {
-    /// Reads the dialog's versions from the same `DESCRIBE RESOURCE` description the REPL prints,
-    /// attaching to each version the usages that pin it. A description that did not complete
-    /// shows its message instead.
+    /// Reads the dialog's versions from the typed description `DESCRIBE RESOURCE` returns beside
+    /// the text the REPL prints, attaching to each version the usages that pin it. A description
+    /// that did not complete shows its message instead.
     fn from_description(outcome: CommandOutcome) -> Self {
         let CommandDisposition::Completed { .. } = outcome.disposition else {
             return Self {
@@ -2170,188 +2930,87 @@ impl ResourceDetailView {
                 status: outcome.message,
             };
         };
-        let mut versions = Vec::<ResourceVersionView>::new();
-        let mut usages_by_version = BTreeMap::<u64, Vec<ResourceUsageView>>::new();
-        let mut section = ResourceDescribeSection::Summary;
-        for line in outcome.message.lines() {
-            if line == "version_details:" {
-                section = ResourceDescribeSection::VersionDetails;
-                continue;
-            }
-            if line == "usages:" {
-                section = ResourceDescribeSection::Usages;
-                continue;
-            }
-            match section {
-                ResourceDescribeSection::Summary => {}
-                ResourceDescribeSection::VersionDetails => {
-                    if let Some(version) = parse_resource_version_detail(line) {
-                        versions.push(version);
-                    } else if let Some(file) = parse_resource_file_detail(line)
-                        && let Some(version) = versions.last_mut()
-                    {
-                        version.files.push(file);
-                    }
-                }
-                ResourceDescribeSection::Usages => {
-                    if let Some(detail) = ResourceUsageDetail::parse(line) {
-                        usages_by_version
-                            .entry(detail.version)
-                            .or_default()
-                            .push(detail.usage);
-                    }
-                }
-            }
+        let Some(description) = outcome.resource else {
+            return Self {
+                versions: Vec::new(),
+                status: MISSING_RESOURCE_DESCRIPTION.to_string(),
+            };
+        };
+        let ResourceDescription {
+            versions, usages, ..
+        } = *description;
+        let mut usages_by_version = BTreeMap::<NonZeroU64, Vec<ResourceUsage>>::new();
+        for usage in usages {
+            usages_by_version
+                .entry(usage.version)
+                .or_default()
+                .push(usage);
         }
-        for version in &mut versions {
-            if let Some(usages) = usages_by_version.remove(&version.version) {
-                version.usages = usages;
-            }
+        let mut version_views = Vec::with_capacity(versions.len());
+        for version in versions {
+            let usages = usages_by_version
+                .remove(&version.version)
+                .unwrap_or_default();
+            version_views.push(ResourceVersionView { version, usages });
         }
         Self {
-            versions,
+            versions: version_views,
             status: "ready".to_string(),
         }
     }
 }
 
-impl ResourceUsageDetail {
-    /// Reads `- kind=<kind> name=<name> version=<n>`. The description spells the kind in
-    /// snake_case, such as `hash_map`; the dialog shows it as a statement names it, `HASH MAP`.
-    fn parse(line: &str) -> Option<Self> {
-        let line = line.strip_prefix("- ")?;
-        let mut kind = None;
-        let mut name = None;
-        let mut version = None;
-        for part in line.split_whitespace() {
-            let Some((key, value)) = part.split_once('=') else {
-                continue;
-            };
-            match key {
-                "kind" => kind = Some(value.replace('_', " ").to_ascii_uppercase()),
-                "name" => name = Some(value.to_string()),
-                "version" => version = value.parse::<u64>().ok(),
-                _ => {}
-            }
-        }
-        Some(Self {
-            version: version?,
-            usage: ResourceUsageView {
-                kind: kind?,
-                name: name?,
-            },
-        })
-    }
+fn resource_version_summary(version: &ResourceVersionDescription) -> String {
+    format!(
+        "{} files | {} bytes | from {} | {}",
+        version.file_count, version.total_bytes, version.created_by_node, version.created_at
+    )
 }
 
-fn parse_resource_version_detail(line: &str) -> Option<ResourceVersionView> {
-    let line = line.strip_prefix("- ")?;
-    let mut version = None;
-    let mut root_checksum = None;
-    let mut manifest_checksum = None;
-    let mut file_count = None;
-    let mut total_bytes = None;
-    let mut created_by_node = None;
-    let mut created_at = None;
-    for part in line.split_whitespace() {
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        match key {
-            "version" => version = value.parse::<u64>().ok(),
-            "root_checksum" => root_checksum = Some(value.to_string()),
-            "manifest_checksum" => manifest_checksum = Some(value.to_string()),
-            "file_count" => file_count = Some(value.to_string()),
-            "total_bytes" => total_bytes = Some(value.to_string()),
-            "created_by_node" => created_by_node = ClusterNodeName::parse(value).ok(),
-            "created_at" => created_at = Some(value.to_string()),
-            _ => {}
+fn resource_version_checksums(version: &ResourceVersionDescription) -> String {
+    format!(
+        "root {} | manifest {}",
+        version.root_checksum, version.manifest_checksum
+    )
+}
+
+fn resource_entry_summary(entry: &ResourceManifestEntry) -> String {
+    match &entry.content {
+        ResourceEntryContent::Directory => "directory".to_string(),
+        ResourceEntryContent::File { size, checksum } => {
+            format!("file | {size} bytes | checksum {checksum}")
         }
     }
-    version.map(|version| ResourceVersionView {
-        version,
-        root_checksum,
-        manifest_checksum,
-        file_count,
-        total_bytes,
-        created_by_node,
-        created_at,
-        files: Vec::new(),
-        usages: Vec::new(),
-    })
 }
 
-fn parse_resource_file_detail(line: &str) -> Option<ResourceFileView> {
-    let line = line.strip_prefix("  - ")?;
-    if line.starts_with("none") || line.starts_with("unavailable") {
-        return None;
-    }
-    let mut path = None;
-    let mut entry_type = None;
-    let mut size = None;
-    let mut checksum = None;
-    for part in line.split_whitespace() {
-        let Some((key, value)) = part.split_once('=') else {
-            continue;
-        };
-        match key {
-            "type" => entry_type = Some(value.to_string()),
-            "path" => path = Some(value.to_string()),
-            "size" => size = Some(value.to_string()),
-            "checksum" => checksum = Some(value.to_string()),
-            _ => {}
+/// The entries of one version row: each entry by its path, or why the serving node could not
+/// list them.
+fn resource_entries_view(entries: ResourceVersionEntries) -> AnyView {
+    match entries {
+        ResourceVersionEntries::Listed(entries) => view! {
+            <For
+                each=move || entries.clone()
+                key=|entry| entry.clone()
+                children=|entry| {
+                    let summary = resource_entry_summary(&entry);
+                    view! {
+                        <div class="resource-file-row">
+                            <strong>{entry.path}</strong>
+                            <span>{summary}</span>
+                        </div>
+                    }
+                }
+            />
         }
+        .into_any(),
+        ResourceVersionEntries::Unavailable { reason } => view! {
+            <div class="resource-file-row resource-file-unavailable">
+                <strong>"entries unavailable"</strong>
+                <span>{reason}</span>
+            </div>
+        }
+        .into_any(),
     }
-    Some(ResourceFileView {
-        path: path?,
-        entry_type: entry_type.unwrap_or_else(|| "file".to_string()),
-        size,
-        checksum,
-    })
-}
-
-fn resource_version_summary(version: &ResourceVersionView) -> String {
-    let mut parts = Vec::new();
-    if let Some(file_count) = &version.file_count {
-        parts.push(format!("{file_count} files"));
-    }
-    if let Some(total_bytes) = &version.total_bytes {
-        parts.push(format!("{total_bytes} bytes"));
-    }
-    if let Some(created_by_node) = &version.created_by_node {
-        parts.push(format!("from {created_by_node}"));
-    }
-    if let Some(created_at) = &version.created_at {
-        parts.push(created_at.clone());
-    }
-    parts.join(" | ")
-}
-
-fn resource_version_checksums(version: &ResourceVersionView) -> String {
-    let mut parts = Vec::new();
-    if let Some(root_checksum) = &version.root_checksum {
-        parts.push(format!("root {root_checksum}"));
-    }
-    if let Some(manifest_checksum) = &version.manifest_checksum {
-        parts.push(format!("manifest {manifest_checksum}"));
-    }
-    parts.join(" | ")
-}
-
-fn resource_file_summary(file: &ResourceFileView) -> String {
-    let mut parts = Vec::new();
-    parts.push(file.entry_type.clone());
-    if let Some(size) = &file.size
-        && file.entry_type != "directory"
-    {
-        parts.push(format!("{size} bytes"));
-    }
-    if let Some(checksum) = &file.checksum
-        && checksum != "-"
-    {
-        parts.push(format!("checksum {checksum}"));
-    }
-    parts.join(" | ")
 }
 
 /// The domain the first `CREATE DOMAIN` in `query` declares, or `None` when there is none.
@@ -2366,17 +3025,6 @@ fn first_created_domain_from_query(query: &str) -> Option<DomainName> {
         }
     }
     None
-}
-
-fn is_domainless_server_command(command: &str) -> bool {
-    let normalized = command.trim_start().to_ascii_uppercase();
-    normalized.starts_with("COMMIT")
-        || normalized.starts_with("REVERT")
-        || normalized.starts_with("CREATE DOMAIN ")
-        || normalized.starts_with("CREATE UNPACED DOMAIN ")
-        || normalized.starts_with("CREATE PACED DOMAIN ")
-        || normalized.starts_with("CREATE USER ")
-        || normalized.starts_with("CREATE IF NOT EXISTS USER ")
 }
 
 /// One diagnostic as the terminal shows it: the text its span covers in `query` and its message.
@@ -2420,6 +3068,9 @@ fn Header(
     active_domain: RwSignal<Option<DomainName>>,
     domains: RwSignal<Vec<DomainView>>,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
+    transaction_status: RwSignal<Option<TransactionStatus>>,
+    inspector: InspectorSignals,
+    create: CreateSignals,
 ) -> impl IntoView {
     let theme_open = RwSignal::new(false);
     let selected_domain = move || {
@@ -2440,6 +3091,12 @@ fn Header(
             <span class="crumb-separator">"/"</span>
             <span class="crumb">"console"</span>
             <div class="topbar-status">
+                <CreateMenu signals=create active_domain=active_domain />
+                <Show when=move || transaction_status.get().is_some_and(|status| status.lifecycle().is_active()) fallback=|| ()>
+                    <button class="transaction-indicator" type="button" on:click=move |_| inspector.open_attached()>
+                        "Transaction · Inspect"
+                    </button>
+                </Show>
                 <span class=move || websocket_state.get().pill_class()>
                     {move || websocket_state.get().label()}
                 </span>
@@ -2560,6 +3217,9 @@ fn Sidebar(
     active_entities: impl Fn() -> Vec<EntityView> + Copy + Send + Sync + 'static,
     cluster_counters: RwSignal<ClusterCounters>,
     resource_details: RwSignal<BTreeMap<String, ResourceDetailView>>,
+    selected_resource: RwSignal<Option<String>>,
+    upload_status: RwSignal<String>,
+    create: CreateSignals,
     web_console_session: WebConsoleSession,
     run_command: impl Fn(Option<String>) + Copy + Send + Sync + 'static,
 ) -> impl IntoView {
@@ -2571,8 +3231,6 @@ fn Sidebar(
     let clients_open = RwSignal::new(true);
     let vhosts_open = RwSignal::new(true);
     let endpoints_open = RwSignal::new(true);
-    let selected_resource = RwSignal::new(None::<String>);
-    let upload_status = RwSignal::new(String::new());
     let entities_for = move |kind: EntityKind| {
         active_entities()
             .into_iter()
@@ -2698,6 +3356,19 @@ fn Sidebar(
                 </div>
             </div>
             <nav class="nav-list" aria-label="Console entities">
+                <button
+                    id="sidebar-create-resource"
+                    class="sidebar-create-button"
+                    type="button"
+                    on:click=move |_| create.open(
+                        CreateKind::Resource,
+                        active_domain.get_untracked(),
+                        "sidebar-create-resource",
+                    )
+                >
+                    <span aria-hidden="true">"＋"</span>
+                    <span>"Create resource in this domain"</span>
+                </button>
                 <NavHeader title="Schemas" count=move || entities_for(EntityKind::Model(ModelKind::Schema)).len().to_string() kind="schemas" open=schemas_open />
                 <Show when=move || schemas_open.get() fallback=|| ()>
                     <For
@@ -2912,6 +3583,12 @@ fn ResourceDialog(
     let file_input = NodeRef::<leptos::html::Input>::new();
     let directory_input = NodeRef::<leptos::html::Input>::new();
     let uploading = RwSignal::new(false);
+    let upload_abort = RwSignal::new(None::<AbortHandle>);
+    on_cleanup(move || {
+        if let Some(abort) = upload_abort.get_untracked() {
+            abort.abort();
+        }
+    });
     let trigger_upload = move |input: web_sys::HtmlInputElement| {
         let resource_name = resource();
         let Some(upload_domain) = active_domain.get_untracked() else {
@@ -2920,15 +3597,32 @@ fn ResourceDialog(
         };
         upload_status.set("uploading".to_string());
         uploading.set(true);
+        let attempt_auth = auth_token.get_untracked();
+        let (abort, registration) = AbortHandle::new_pair();
+        upload_abort.update(|active| {
+            if let Some(previous) = active.replace(abort) {
+                previous.abort();
+            }
+        });
         spawn_local(async move {
-            let message = upload_resource_files(
-                resource_name.clone(),
-                upload_domain,
-                input,
-                upload_base_url.get_untracked(),
-                auth_token.get_untracked(),
+            let outcome = Abortable::new(
+                upload_resource_files(
+                    resource_name.clone(),
+                    upload_domain,
+                    input,
+                    upload_base_url.get_untracked(),
+                    attempt_auth.clone(),
+                ),
+                registration,
             )
             .await;
+            let Ok(message) = outcome else {
+                return;
+            };
+            if auth_token.get_untracked() != attempt_auth {
+                return;
+            }
+            upload_abort.set(None);
             upload_status.set(message);
             uploading.set(false);
             request_resource_describe(request_tx, resource_name, active_domain.get_untracked());
@@ -3036,30 +3730,18 @@ fn ResourceDialog(
                             }
                             key=|version| version.clone()
                             children=|version| {
+                                let ResourceVersionView { version, usages } = version;
                                 let summary = resource_version_summary(&version);
                                 let checksums = resource_version_checksums(&version);
-                                let files = version.files.clone();
-                                let usages = version.usages.clone();
-                                let unbound = version.usages.is_empty();
+                                let number = version.version;
+                                let unbound = usages.is_empty();
                                 view! {
-                                    <div class="resource-version-row" data-version=version.version.to_string()>
-                                        <strong>{format!("version {}", version.version)}</strong>
+                                    <div class="resource-version-row" data-version=number.to_string()>
+                                        <strong>{format!("version {number}")}</strong>
                                         <span>{summary.clone()}</span>
                                         <em>{checksums.clone()}</em>
                                         <div class="resource-file-list">
-                                            <For
-                                                each=move || files.clone()
-                                                key=|file| format!("{}:{}", file.entry_type, file.path)
-                                                children=|file| {
-                                                    let file_summary = resource_file_summary(&file);
-                                                    view! {
-                                                        <div class="resource-file-row">
-                                                            <strong>{file.path}</strong>
-                                                            <span>{file_summary}</span>
-                                                        </div>
-                                                    }
-                                                }
-                                            />
+                                            {resource_entries_view(version.entries)}
                                         </div>
                                         <div class="resource-usage-list">
                                             <p>"usages"</p>
@@ -3069,9 +3751,9 @@ fn ResourceDialog(
                                                 children=|usage| {
                                                     view! {
                                                         <div class="resource-usage-row">
-                                                            <em>{usage.kind}</em>
+                                                            <em>{usage.node.kind.keyword_phrase()}</em>
                                                             " "
-                                                            <strong>{usage.name}</strong>
+                                                            <strong>{usage.node.identifier.as_str().to_string()}</strong>
                                                         </div>
                                                     }
                                                 }
@@ -4389,13 +5071,15 @@ fn BranchDetailsDialog(
 fn ReplPanel(
     domain: impl Fn() -> String + Copy + Send + 'static,
     input: RwSignal<String>,
-    terminal_lines: RwSignal<Vec<TermLine>>,
+    terminal_lines: RwSignal<TermLineHistory>,
     transaction_state: impl Fn() -> Option<ActiveTransaction> + Copy + Send + 'static,
     subscription_tabs: RwSignal<Vec<SubscriptionTabView>>,
     active_subscription_tab: RwSignal<Option<u64>>,
     stop_subscription: impl Fn(u64) + Copy + Send + 'static,
-    suggestions: impl Fn() -> Vec<String> + Copy + Send + 'static,
-    request_suggestions: impl Fn(String) + Copy + Send + 'static,
+    suggestions: impl Fn() -> Vec<WireSuggestion> + Copy + Send + 'static,
+    suggestion_status: impl Fn() -> Option<SuggestionStatus> + Copy + Send + 'static,
+    suggestion_continuation: impl Fn() -> Option<String> + Copy + Send + 'static,
+    request_suggestions: impl Fn(String, usize, Option<String>) + Copy + Send + 'static,
     input_enabled: impl Fn() -> bool + Copy + Send + 'static,
     run_command: impl Fn(Option<String>) + Copy + Send + 'static,
 ) -> impl IntoView {
@@ -4414,14 +5098,14 @@ fn ReplPanel(
     });
     let visible_lines = move || {
         let Some(tab_id) = active_subscription_tab.get() else {
-            return (None, terminal_lines.get());
+            return (None, terminal_lines.get().into_lines());
         };
         let tab = subscription_tabs
             .get()
             .into_iter()
             .find(|tab| tab.id == tab_id);
         let lines = match tab {
-            Some(tab) => tab.lines,
+            Some(tab) => tab.lines.into_lines(),
             None => Vec::new(),
         };
         (Some(tab_id), lines)
@@ -4444,32 +5128,39 @@ fn ReplPanel(
                     <span>"NSPL REPL"</span>
                 </button>
                 <For
-                    each=move || {
-                        subscription_tabs
-                            .get()
-                            .into_iter()
-                            .filter(|tab| tab.state == SubscriptionTabState::Open)
-                            .collect::<Vec<_>>()
-                    }
+                    each=move || subscription_tabs.get()
                     key=|tab| tab.id
                     children={move |tab| {
                         let tab_id = tab.id;
                         let title = tab.title.clone();
+                        let state = move || subscription_tabs.with(|tabs| {
+                            // The operator controls the number of visible subscription tabs.
+                            match tabs.iter().find(|tab| tab.id == tab_id) {
+                                Some(tab) => tab.state.clone(),
+                                None => SubscriptionTabState::Pending,
+                            }
+                        });
                         view! {
-                            <div class=move || if active_subscription_tab.get() == Some(tab_id) { "tab active subscription-tab" } else { "tab subscription-tab" }>
+                            <div
+                                class=move || if active_subscription_tab.get() == Some(tab_id) { "tab active subscription-tab" } else { "tab subscription-tab" }
+                                data-subscription-state=move || state().label()
+                            >
                                 <button
                                     type="button"
                                     class="tab-main"
                                     title=tab.subscribe_command.clone()
                                     data-subscription-title=title.clone()
                                     on:click=move |_| {
+                                        if !state().can_activate() {
+                                            return;
+                                        }
                                         active_subscription_tab.set(Some(tab_id));
                                         if collapsed.get() {
                                             collapsed.set(false);
                                         }
                                     }
                                 >
-                                    <span class="live-dot"></span>
+                                    <span class=move || if matches!(state(), SubscriptionTabState::Open(_)) { "live-dot" } else { "live-dot paused" }></span>
                                     <span>{title.clone()}</span>
                                 </button>
                                 <button
@@ -4508,8 +5199,7 @@ fn ReplPanel(
                         let (tab_id, lines) = visible_lines();
                         lines
                             .into_iter()
-                            .enumerate()
-                            .map(|(index, line)| ((tab_id, index), line))
+                            .map(|entry| ((tab_id, entry.id), entry.line))
                             .collect::<Vec<_>>()
                     }}
                     key=|(line_key, _)| *line_key
@@ -4519,22 +5209,46 @@ fn ReplPanel(
             <div class="suggestions" class:hidden=move || !repl_active() || suggestions().is_empty()>
                 <For
                     each=suggestions
-                    key=|suggestion| suggestion.clone()
+                    key=|suggestion| suggestion.value.clone()
                     children={move |suggestion| {
-                        let value = suggestion.clone();
+                        let edit = suggestion.edit.clone();
                         view! {
                             <button
                                 type="button"
                                 on:click=move |_| {
                                     completion_cycle.set(None);
-                                    input.set(apply_completion(&input.get_untracked(), &value));
+                                    input.set(apply_completion(&input.get_untracked(), &edit));
                                 }
                             >
-                                {suggestion}
+                                {suggestion.value}
                             </button>
                         }
                     }}
                 />
+            </div>
+            <button
+                type="button"
+                class="completion-more"
+                class:hidden=move || !repl_active() || suggestion_continuation().is_none()
+                on:click=move |_| {
+                    let Some(next) = suggestion_continuation() else {
+                        return;
+                    };
+                    let value = input.get_untracked();
+                    let cursor = match input_ref.get_untracked() {
+                        Some(element) => browser_cursor_byte_offset(&value, &element),
+                        None => value.len(),
+                    };
+                    request_suggestions(value, cursor, Some(next));
+                }
+            >"MORE SUGGESTIONS"</button>
+            <div class="completion-status" class:hidden=move || !repl_active() || matches!(suggestion_status(), None | Some(SuggestionStatus::Ready))>
+                {move || match suggestion_status() {
+                    Some(SuggestionStatus::MissingContext) => "Select an existing domain for this reference.",
+                    Some(SuggestionStatus::StaleContext) => "Transaction context changed; reconnect or reattach it.",
+                    Some(SuggestionStatus::LookupFailed) => "Completion lookup failed; try again.",
+                    Some(SuggestionStatus::Ready) | None => "",
+                }}
             </div>
             <form class="prompt-row" class:hidden=move || !repl_active() on:submit=move |event| {
                 event.prevent_default();
@@ -4567,7 +5281,11 @@ fn ReplPanel(
                         completion_cycle.set(None);
                         command_history.update(CommandHistory::reset_navigation);
                         input.set(value.clone());
-                        request_suggestions(value);
+                        let cursor = match input_ref.get_untracked() {
+                            Some(element) => browser_cursor_byte_offset(&value, &element),
+                            None => value.len(),
+                        };
+                        request_suggestions(value, cursor, None);
                     }
                     on:keydown=move |event: ev::KeyboardEvent| {
                         if event.key() == "Tab" {
@@ -4582,13 +5300,18 @@ fn ReplPanel(
                                     Some(cycle) => cycle.next_index % suggestion_items.len(),
                                     None => 0,
                                 };
-                                input.set(apply_completion(&source, &suggestion_items[index]));
+                                input.set(apply_completion(&source, &suggestion_items[index].edit));
                                 completion_cycle.set(Some(CompletionCycle {
                                     source,
                                     next_index: (index + 1) % suggestion_items.len(),
                                 }));
                             } else {
-                                request_suggestions(input.get_untracked());
+                                let value = input.get_untracked();
+                                let cursor = match input_ref.get_untracked() {
+                                    Some(element) => browser_cursor_byte_offset(&value, &element),
+                                    None => value.len(),
+                                };
+                                request_suggestions(value, cursor, None);
                             }
                         } else if event.key() == "ArrowUp" {
                             event.prevent_default();
@@ -4603,7 +5326,7 @@ fn ReplPanel(
                             });
                             if let Some(command) = command {
                                 input.set(command.clone());
-                                request_suggestions(command);
+                                request_suggestions(command.clone(), command.len(), None);
                             }
                         } else if event.key() == "ArrowDown" {
                             event.prevent_default();
@@ -4614,7 +5337,7 @@ fn ReplPanel(
                             });
                             if let Some(command) = command {
                                 input.set(command.clone());
-                                request_suggestions(command);
+                                request_suggestions(command.clone(), command.len(), None);
                             }
                         } else if event.key() == "Enter" && (event.meta_key() || event.ctrl_key()) {
                             event.prevent_default();
@@ -4693,19 +5416,37 @@ impl CommandHistory {
     }
 }
 
-fn apply_completion(input: &str, suggestion: &str) -> String {
-    let prefix_start = input
-        .char_indices()
-        .rev()
-        .find_map(|(index, character)| {
-            character
-                .is_whitespace()
-                .then_some(index + character.len_utf8())
-        })
-        .unwrap_or(0);
-    let mut completed = String::with_capacity(prefix_start + suggestion.len());
-    completed.push_str(&input[..prefix_start]);
-    completed.push_str(suggestion);
+fn browser_cursor_byte_offset(value: &str, element: &web_sys::HtmlInputElement) -> usize {
+    let Some(cursor) = element.selection_start().ok().flatten() else {
+        return value.len();
+    };
+    let target =
+        usize::try_from(cursor).assured("browser UTF-16 offsets fit the target pointer width");
+    let mut utf16_offset = 0;
+    for (byte_offset, character) in value.char_indices() {
+        if utf16_offset >= target {
+            return byte_offset;
+        }
+        utf16_offset = utf16_offset
+            .checked_add(character.len_utf16())
+            .assured("the browser cursor cannot exceed a string already held in memory");
+        if utf16_offset > target {
+            return byte_offset;
+        }
+    }
+    value.len()
+}
+
+fn apply_completion(input: &str, edit: &TextEdit) -> String {
+    let start = usize::try_from(edit.start).assured("wire offsets fit the target pointer width");
+    let end = usize::try_from(edit.end).assured("wire offsets fit the target pointer width");
+    if start > end || input.get(start..end).is_none() {
+        return input.to_string();
+    }
+    let mut completed = String::with_capacity(input.len());
+    completed.push_str(&input[..start]);
+    completed.push_str(&edit.replacement);
+    completed.push_str(&input[end..]);
     completed
 }
 
@@ -6046,6 +6787,109 @@ struct TermLine {
     text: String,
 }
 
+const MAX_HISTORY_RECORDS: usize = 256;
+const MAX_HISTORY_BYTES: usize = 256 * 1024;
+const HISTORY_MARKER: &str = "history limit reached; earlier lines were omitted";
+const HISTORY_SUFFIX: &str = "… [line truncated]";
+const HISTORY_PAYLOAD_RECORDS: usize = MAX_HISTORY_RECORDS - 1;
+const HISTORY_PAYLOAD_BYTES: usize = MAX_HISTORY_BYTES - HISTORY_MARKER.len();
+const _: () = assert!(HISTORY_PAYLOAD_RECORDS > 0);
+const _: () = assert!(HISTORY_PAYLOAD_BYTES > HISTORY_SUFFIX.len());
+
+/// A rendered line and its stable identity. Trimming the front of a history never reuses an ID,
+/// so the keyed browser view cannot show stale content after an eviction.
+#[derive(Clone)]
+struct HistoryEntry {
+    id: u64,
+    line: TermLine,
+}
+
+/// The console's displayed history, bounded independently for the REPL and every subscription.
+/// One record and its bytes are reserved for the visible overflow notice.
+#[derive(Clone)]
+struct TermLineHistory {
+    lines: VecDeque<HistoryEntry>,
+    bytes: usize,
+    next_id: u64,
+    dropped: bool,
+}
+
+impl Default for TermLineHistory {
+    fn default() -> Self {
+        Self {
+            lines: VecDeque::new(),
+            bytes: 0,
+            next_id: 1,
+            dropped: false,
+        }
+    }
+}
+
+impl TermLineHistory {
+    fn push(&mut self, mut line: TermLine) {
+        if line.text.len() > HISTORY_PAYLOAD_BYTES {
+            let prefix_limit = HISTORY_PAYLOAD_BYTES
+                .checked_sub(HISTORY_SUFFIX.len())
+                .assured("the history payload capacity exceeds its truncation suffix");
+            let boundary = line.text.floor_char_boundary(prefix_limit);
+            line.text.truncate(boundary);
+            line.text.push_str(HISTORY_SUFFIX);
+            self.dropped = true;
+        }
+        let line_bytes = line.text.len();
+        while self.lines.len() >= HISTORY_PAYLOAD_RECORDS
+            || self
+                .bytes
+                .checked_add(line_bytes)
+                .assured("both byte counts are bounded by the 256 KiB history capacity")
+                > HISTORY_PAYLOAD_BYTES
+        {
+            let evicted = self
+                .lines
+                .pop_front()
+                .verified("the capacity condition requires an existing line to evict");
+            self.bytes = self
+                .bytes
+                .checked_sub(evicted.line.text.len())
+                .assured("the retained byte count includes the evicted line");
+            self.dropped = true;
+        }
+        self.bytes = self
+            .bytes
+            .checked_add(line_bytes)
+            .assured("the capacity loop left room for the new line");
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .assured("one browser session cannot display 2^64 lines");
+        self.lines.push_back(HistoryEntry { id, line });
+    }
+
+    fn extend(&mut self, lines: impl IntoIterator<Item = TermLine>) {
+        for line in lines {
+            self.push(line);
+        }
+    }
+
+    fn into_lines(self) -> Vec<HistoryEntry> {
+        let mut lines = Vec::with_capacity(
+            self.lines
+                .len()
+                .checked_add(usize::from(self.dropped))
+                .assured("the history stores fewer than 256 lines"),
+        );
+        if self.dropped {
+            lines.push(HistoryEntry {
+                id: 0,
+                line: TermLine::info(HISTORY_MARKER),
+            });
+        }
+        lines.extend(self.lines);
+        lines
+    }
+}
+
 impl TermLine {
     fn prompt(text: impl Into<String>, transaction: Option<ActiveTransaction>) -> Self {
         let prompt = match transaction {
@@ -6102,15 +6946,1043 @@ impl TermLineKind {
 
 #[cfg(test)]
 mod tests {
+    use leptos::prelude::Owner;
     use nervix_client_wire::{DomainList, DomainsObserved, OutcomeOrigin, Reply, SourceSpan};
     use nervix_dataflow_graph::{
         DataflowBranchStatistics, DataflowEdge, DataflowNode, DataflowProcessorKind,
     };
     use nervix_models::{
-        DomainClockPeriod, DomainClockSkew, ModelName, NodeRef, ResourceName, TransactionPosition,
+        ClusterNodeName, DomainClockPeriod, DomainClockSkew, ImpactPlanningBasis,
+        ImpactReportCompleteness, ModelName, NodeRef, ResourceName, Timestamp,
+        TransactionImpactReport, TransactionInspection, TransactionInspectionRejection,
+        TransactionInspectionTarget, TransactionLifecycle, TransactionOperationAdmission,
+        TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity,
+        TransactionStatus,
     };
 
     use super::*;
+
+    #[test]
+    fn completion_edits_preserve_unicode_suffixes_and_ignore_invalid_byte_ranges() {
+        let input = "SHOW CLUST;😊";
+        assert_eq!(
+            apply_completion(
+                input,
+                &TextEdit {
+                    start: 5,
+                    end: 10,
+                    replacement: "CLUSTER".to_string(),
+                },
+            ),
+            "SHOW CLUSTER;😊"
+        );
+        let unicode_input = "éclair";
+        for (start, end) in [(1, 2), (3, 2), (0, 99)] {
+            assert_eq!(
+                apply_completion(
+                    unicode_input,
+                    &TextEdit {
+                        start,
+                        end,
+                        replacement: "changed".to_string(),
+                    },
+                ),
+                unicode_input
+            );
+        }
+    }
+
+    #[test]
+    fn completion_replies_filter_local_paths_append_pages_and_ignore_stale_queries() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let domain = domain_name("tenant");
+            let query = SuggestionQuery {
+                input: "SH".to_string(),
+                cursor: 2,
+                domain: Some(domain.clone()),
+            };
+            signals.suggestion_query.set(Some(query));
+            let mut requests = SessionRequests::new();
+            let suggestion = |value: &str, kind| WireSuggestion {
+                value: value.to_string(),
+                kind,
+                edit: TextEdit {
+                    start: 0,
+                    end: 2,
+                    replacement: value.to_string(),
+                },
+            };
+            let first = SuggestRequest::new("SH".to_string(), 2, Some(domain.clone()))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let first = requests.issue(ConsoleRequest::Suggest(first));
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: first,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: Some("page-two".to_string()),
+                        suggestions: vec![
+                            suggestion("SHOW", SuggestionKind::Text),
+                            suggestion("./local", SuggestionKind::LocalDirectoryLookup),
+                        ],
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(signals.suggestions.get_untracked().len(), 1);
+            assert_eq!(signals.suggestions.get_untracked()[0].value, "SHOW");
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::Ready)
+            );
+            assert_eq!(
+                signals.suggestion_continuation.get_untracked().as_deref(),
+                Some("page-two")
+            );
+
+            let next = SuggestRequest::new("SH".to_string(), 2, Some(domain.clone()))
+                .assured("the test cursor ends at a UTF-8 boundary")
+                .with_page(64, Some("page-two".to_string()))
+                .assured("the test page size is valid");
+            let next = requests.issue(ConsoleRequest::Suggest(next));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: next,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::Ready,
+                        continuation: None,
+                        suggestions: vec![suggestion("SHUTDOWN", SuggestionKind::Text)],
+                    }),
+                },
+            );
+            let values = signals
+                .suggestions
+                .get_untracked()
+                .into_iter()
+                .map(|item| item.value)
+                .collect::<Vec<_>>();
+            assert_eq!(values, ["SHOW", "SHUTDOWN"]);
+            assert_eq!(signals.suggestion_continuation.get_untracked(), None);
+
+            let stale = SuggestRequest::new("S".to_string(), 1, Some(domain))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let stale = requests.issue(ConsoleRequest::Suggest(stale));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: stale,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::LookupFailed,
+                        continuation: None,
+                        suggestions: Vec::new(),
+                    }),
+                },
+            );
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::Ready)
+            );
+            assert_eq!(signals.suggestions.get_untracked().len(), 2);
+
+            let failed = SuggestRequest::new("SH".to_string(), 2, Some(domain_name("tenant")))
+                .assured("the test cursor ends at a UTF-8 boundary");
+            let failed = requests.issue(ConsoleRequest::Suggest(failed));
+            apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: failed,
+                    body: ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                        status: SuggestionStatus::LookupFailed,
+                        continuation: None,
+                        suggestions: Vec::new(),
+                    }),
+                },
+            );
+            assert_eq!(
+                signals.suggestion_status.get_untracked(),
+                Some(SuggestionStatus::LookupFailed)
+            );
+            assert!(signals.suggestions.get_untracked().is_empty());
+        });
+    }
+
+    fn subscription_signals(state: SubscriptionTabState) -> WebConsoleSignals {
+        let name = SubscriptionName::parse("live").assured("the test subscription name is valid");
+        let domain = DomainName::parse("tenant").assured("the test domain name is valid");
+        WebConsoleSignals {
+            terminal_lines: RwSignal::new(TermLineHistory::default()),
+            suggestions: RwSignal::new(Vec::new()),
+            suggestion_status: RwSignal::new(None),
+            suggestion_query: RwSignal::new(None),
+            suggestion_continuation: RwSignal::new(None),
+            domain_snapshots: RwSignal::new(BTreeMap::new()),
+            cluster_counters: RwSignal::new(ClusterCounters::default()),
+            active_domain: RwSignal::new(Some(domain.clone())),
+            transaction_status: RwSignal::new(None),
+            inspector: InspectorSignals::new(),
+            domains: RwSignal::new(Vec::new()),
+            resource_details: RwSignal::new(BTreeMap::new()),
+            subscription_tabs: RwSignal::new(vec![SubscriptionTabView {
+                id: 1,
+                state,
+                name,
+                domain,
+                relay: "orders".to_string(),
+                filter: String::new(),
+                sample_rate_index: 0,
+                title: "orders".to_string(),
+                subscribe_command: "SUBSCRIBE live TO orders;".to_string(),
+                lines: TermLineHistory::default(),
+            }]),
+            active_subscription_tab: RwSignal::new(Some(1)),
+            domains_loaded: RwSignal::new(true),
+            auth_token: RwSignal::new(None),
+            auth_error: RwSignal::new(None),
+            session_generation: RwSignal::new(0),
+            create: CreateSignals::new(),
+            selected_resource: RwSignal::new(None),
+            upload_status: RwSignal::new(String::new()),
+        }
+    }
+
+    fn test_stream() -> TabStream {
+        TabStream {
+            subscription: SubscriptionHandle {
+                name: SubscriptionName::parse("live").assured("the test name is valid"),
+                generation: NonZeroU64::MIN,
+            },
+            schema: RowSchema {
+                fields: Vec::new(),
+                branch: None,
+            },
+        }
+    }
+
+    fn test_inspection() -> TransactionInspection {
+        let domain = DomainName::parse("tenant").assured("the test domain name is valid");
+        let report = TransactionImpactReport::new(
+            domain.clone(),
+            TransactionPosition::new(0),
+            ImpactPlanningBasis::new([4; 32]),
+            ImpactReportCompleteness::Complete,
+            Vec::new(),
+            Vec::new(),
+        )
+        .assured("an empty test report has no operation-step inconsistencies");
+        let transaction = TransactionStatus::new(
+            "attached".to_string(),
+            domain,
+            TransactionLifecycle::Open,
+            TransactionPosition::new(0),
+            0,
+        )
+        .assured("the test transaction has no applied operations");
+        TransactionInspection {
+            transaction,
+            operation: None,
+            report,
+        }
+    }
+
+    #[test]
+    fn inspection_reply_sets_the_commit_basis_and_rejection_reports_an_error() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let inspection = test_inspection();
+            signals
+                .transaction_status
+                .set(Some(inspection.transaction.clone()));
+            signals.inspector.open_attached();
+            let request = ConsoleRequest::InspectTransaction(InspectTransactionRequest {
+                target: TransactionInspectionTarget::Attached,
+                operation: None,
+            });
+            assert!(request.inspects_transaction());
+            assert!(repl_command("DESCRIBE TRANSACTION;").inspects_transaction());
+            assert!(!repl_command("SHOW DOMAINS;").inspects_transaction());
+            assert!(request.is_ordered());
+            assert!(matches!(
+                request.client_request(),
+                ClientRequest::InspectTransaction(_)
+            ));
+            let mut requests = SessionRequests::new();
+            let issued = requests.issue(request);
+            signals.inspector.requested(issued.order.0);
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: issued,
+                    body: ReplyBody::Inspection(InspectionOutcome::Inspected(Box::new(
+                        inspection.clone(),
+                    ))),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(
+                signals
+                    .inspector
+                    .commit_basis(&inspection.transaction)
+                    .is_some()
+            );
+
+            let rejected = requests.issue(ConsoleRequest::InspectTransaction(
+                InspectTransactionRequest {
+                    target: TransactionInspectionTarget::Attached,
+                    operation: None,
+                },
+            ));
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: rejected,
+                    body: ReplyBody::Inspection(InspectionOutcome::Rejected {
+                        rejection: TransactionInspectionRejection::ReportUnavailable,
+                        message: "report is unavailable".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(
+                signals.inspector.error.get_untracked().as_deref(),
+                Some("report is unavailable")
+            );
+
+            let invalid = requests.issue(ConsoleRequest::InspectTransaction(
+                InspectTransactionRequest {
+                    target: TransactionInspectionTarget::Attached,
+                    operation: None,
+                },
+            ));
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: invalid,
+                    body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                        rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                        field: None,
+                        message: "invalid inspection request".to_string(),
+                    }),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(
+                signals.inspector.error.get_untracked().as_deref(),
+                Some("invalid inspection request")
+            );
+        });
+    }
+
+    #[test]
+    fn describe_outcome_opens_the_inspector_without_rebinding_the_session() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let inspection = test_inspection();
+            signals
+                .transaction_status
+                .set(Some(inspection.transaction.clone()));
+            signals
+                .inspector
+                .prepare_describe(TransactionInspectionTarget::Attached);
+            signals.inspector.requested(1);
+            let mut outcome = completed_outcome("transaction described");
+            outcome.inspection = Some(Box::new(inspection.clone()));
+            show_command_outcome(signals, IssueOrder(1), "DESCRIBE TRANSACTION;", outcome);
+            assert!(signals.inspector.open.get_untracked());
+            assert_eq!(
+                signals
+                    .inspector
+                    .commit_basis(&inspection.transaction)
+                    .map(|basis| basis.position),
+                Some(inspection.report.position())
+            );
+        });
+    }
+
+    #[test]
+    fn stale_preview_outcome_requests_a_fresh_inspection() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let inspection = test_inspection();
+            signals
+                .transaction_status
+                .set(Some(inspection.transaction.clone()));
+            signals.inspector.open_attached();
+            let preview = TransactionPreviewIdentity {
+                transaction_id: inspection.transaction.transaction_id().to_string(),
+                position: inspection.report.position(),
+                planning_basis: inspection.report.planning_basis(),
+            };
+            let mut outcome = completed_outcome("preview changed");
+            outcome.disposition = CommandDisposition::PreviewStale {
+                expected: preview.clone(),
+                current: preview,
+            };
+            show_command_outcome(signals, IssueOrder(1), "COMMIT;", outcome);
+            assert!(signals.inspector.stale_preview.get_untracked());
+            assert!(
+                signals
+                    .inspector
+                    .error
+                    .get_untracked()
+                    .is_some_and(|message| message.contains("Refresh"))
+            );
+            assert_eq!(
+                signals.transaction_status.get_untracked(),
+                Some(inspection.transaction)
+            );
+        });
+    }
+
+    #[test]
+    fn changing_credentials_clears_the_previous_users_private_view() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Open(test_stream()));
+            signals.suggestions.set(vec![WireSuggestion {
+                value: "private completion".to_string(),
+                kind: nervix_client_wire::SuggestionKind::Text,
+                edit: TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: "private completion".to_string(),
+                },
+            }]);
+            signals
+                .terminal_lines
+                .update(|lines| lines.push(TermLine::output("private output")));
+
+            signals.clear_authenticated_view();
+
+            assert_eq!(signals.active_domain.get_untracked(), None);
+            assert_eq!(signals.transaction_status.get_untracked(), None);
+            assert!(signals.domains.get_untracked().is_empty());
+            assert!(signals.domain_snapshots.get_untracked().is_empty());
+            assert!(signals.resource_details.get_untracked().is_empty());
+            assert!(!signals.domains_loaded.get_untracked());
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+            assert!(signals.suggestions.get_untracked().is_empty());
+            assert!(
+                signals
+                    .terminal_lines
+                    .get_untracked()
+                    .into_lines()
+                    .is_empty()
+            );
+        });
+    }
+
+    #[test]
+    fn subscription_tab_states_expose_only_usable_tabs() {
+        let stream = test_stream();
+        let cases = [
+            (SubscriptionTabState::Pending, "pending", false),
+            (SubscriptionTabState::Open(stream.clone()), "active", true),
+            (SubscriptionTabState::Interrupted, "interrupted", true),
+            (SubscriptionTabState::Restoring, "restoring", true),
+            (SubscriptionTabState::Closing(None), "closing", false),
+            (SubscriptionTabState::Closing(Some(stream)), "closing", true),
+        ];
+        for (state, label, can_activate) in cases {
+            assert_eq!(state.label(), label);
+            assert_eq!(state.can_activate(), can_activate, "state {label}");
+        }
+    }
+
+    #[test]
+    fn a_tab_accepts_rows_only_from_its_open_generation() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
+            let current = stream.subscription.clone();
+            let next = SubscriptionHandle {
+                name: current.name.clone(),
+                generation: NonZeroU64::new(2).assured("two is nonzero"),
+            };
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(tabs[0].streams(&current));
+                assert!(tabs[0].stream_schema(&current).is_some());
+                assert!(!tabs[0].streams(&next));
+                assert!(tabs[0].stream_schema(&next).is_none());
+            });
+            signals.subscription_tabs.update(|tabs| {
+                tabs[0].state = SubscriptionTabState::Closing(Some(stream));
+            });
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(!tabs[0].streams(&current));
+                assert!(tabs[0].stream_schema(&current).is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn interrupted_subscription_restores_once_and_rejects_its_previous_stream() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
+            let mut requests = SessionRequests::new();
+
+            interrupt_subscription_tabs(signals);
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(matches!(&tabs[0].state, SubscriptionTabState::Interrupted));
+                assert!(!tabs[0].streams(&stream.subscription));
+                assert!(
+                    tabs[0].lines.clone().into_lines()[0]
+                        .line
+                        .text
+                        .contains("delivery interrupted")
+                );
+            });
+
+            queue_subscription_restorations(signals, &mut requests);
+            queue_subscription_restorations(signals, &mut requests);
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Restoring)
+            }));
+            requests.confirm_leader();
+            let messages = requests.release_held();
+            assert_eq!(messages.len(), 1, "one restore is held per interrupted tab");
+            let ClientRequest::Subscribe(request) = &messages[0].request else {
+                panic!("the held request restores the subscription");
+            };
+            assert_eq!(request.statement, "SUBSCRIBE live TO orders;");
+        });
+    }
+
+    #[test]
+    fn disconnect_forgets_a_closing_stream_and_its_selected_tab() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Closing(Some(test_stream())));
+            interrupt_subscription_tabs(signals);
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+        });
+    }
+
+    #[test]
+    fn closing_an_open_tab_waits_for_the_matching_delete_reply() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
+            let request = signals
+                .begin_subscription_close(1)
+                .assured("an open tab needs an unsubscribe request");
+            assert_eq!(request.subscription, stream.subscription.name);
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Closing(Some(_)))
+            }));
+            assert!(signals.begin_subscription_close(1).is_none());
+
+            apply_unsubscribe_outcome(
+                signals,
+                1,
+                &request,
+                UnsubscribeOutcome {
+                    disposition: UnsubscribeDisposition::Deleted(stream.subscription),
+                    message: "deleted".to_string(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+        });
+    }
+
+    #[test]
+    fn closing_a_pending_or_interrupted_tab_never_sends_a_stale_delete() {
+        for state in [
+            SubscriptionTabState::Pending,
+            SubscriptionTabState::Restoring,
+        ] {
+            Owner::new().with(|| {
+                let signals = subscription_signals(state);
+                assert!(signals.begin_subscription_close(1).is_none());
+                assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                    matches!(&tabs[0].state, SubscriptionTabState::Closing(None))
+                }));
+                assert!(signals.begin_subscription_close(1).is_none());
+            });
+        }
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Interrupted);
+            assert!(signals.begin_subscription_close(1).is_none());
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+            assert!(signals.begin_subscription_close(1).is_none());
+        });
+    }
+
+    #[test]
+    fn failed_unsubscribe_keeps_the_tab_active_and_reports_one_error_prefix() {
+        Owner::new().with(|| {
+            let name = SubscriptionName::parse("live").assured("the test name is valid");
+            let handle = SubscriptionHandle {
+                name: name.clone(),
+                generation: NonZeroU64::MIN,
+            };
+            let signals = subscription_signals(SubscriptionTabState::Closing(Some(TabStream {
+                subscription: handle,
+                schema: RowSchema {
+                    fields: Vec::new(),
+                    branch: None,
+                },
+            })));
+            let request = UnsubscribeRequest { subscription: name };
+            apply_unsubscribe_outcome(
+                signals,
+                1,
+                &request,
+                UnsubscribeOutcome {
+                    disposition: UnsubscribeDisposition::Failed,
+                    message: "server refused deletion".to_string(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            let tab = signals.subscription_tabs.get_untracked().remove(0);
+            assert!(matches!(tab.state, SubscriptionTabState::Open(_)));
+            assert_eq!(
+                tab.lines.into_lines()[0].line.text,
+                "error: server refused deletion"
+            );
+        });
+    }
+
+    #[test]
+    fn acknowledged_unsubscribe_removes_only_the_matching_closing_tab() {
+        Owner::new().with(|| {
+            let name = SubscriptionName::parse("live").assured("the test name is valid");
+            let handle = SubscriptionHandle {
+                name: name.clone(),
+                generation: NonZeroU64::MIN,
+            };
+            let signals = subscription_signals(SubscriptionTabState::Closing(Some(TabStream {
+                subscription: handle.clone(),
+                schema: RowSchema {
+                    fields: Vec::new(),
+                    branch: None,
+                },
+            })));
+            let request = UnsubscribeRequest { subscription: name };
+
+            apply_unsubscribe_outcome(
+                signals,
+                1,
+                &request,
+                UnsubscribeOutcome {
+                    disposition: UnsubscribeDisposition::Deleted(handle),
+                    message: "subscription deleted".to_string(),
+                    diagnostics: Vec::new(),
+                },
+            );
+
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+        });
+    }
+
+    #[test]
+    fn a_delete_reply_for_another_generation_cannot_close_the_current_tab() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Closing(Some(stream.clone())));
+            let request = UnsubscribeRequest {
+                subscription: stream.subscription.name.clone(),
+            };
+            let other_generation = SubscriptionHandle {
+                name: stream.subscription.name,
+                generation: NonZeroU64::new(2).assured("two is nonzero"),
+            };
+
+            apply_unsubscribe_outcome(
+                signals,
+                1,
+                &request,
+                UnsubscribeOutcome {
+                    disposition: UnsubscribeDisposition::Deleted(other_generation),
+                    message: "deleted".to_string(),
+                    diagnostics: Vec::new(),
+                },
+            );
+
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(matches!(&tabs[0].state, SubscriptionTabState::Open(_)));
+                assert!(
+                    tabs[0].lines.clone().into_lines()[0]
+                        .line
+                        .text
+                        .contains("another subscription deletion")
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn rejected_unsubscribe_restores_the_tab_and_reports_the_failure() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Closing(Some(stream.clone())));
+            let mut requests = SessionRequests::new();
+            let issued = requests.issue(ConsoleRequest::SubscriptionStop {
+                tab_id: 1,
+                request: UnsubscribeRequest {
+                    subscription: stream.subscription.name,
+                },
+            });
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: issued,
+                    body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                        rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                        field: None,
+                        message: "delete was rejected".to_string(),
+                    }),
+                },
+            );
+
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Open(_))
+            }));
+            assert!(
+                signals.terminal_lines.get_untracked().into_lines()[0]
+                    .line
+                    .text
+                    .contains("delete was rejected")
+            );
+        });
+    }
+
+    #[test]
+    fn a_new_subscription_activates_only_after_the_open_reply() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            signals.active_subscription_tab.set(None);
+            let mut requests = SessionRequests::new();
+            let stream = test_stream();
+            apply_subscribe_outcome(
+                signals,
+                &mut requests,
+                1,
+                "SUBSCRIBE live TO orders;",
+                SubscribeOutcome {
+                    disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+                        subscription: stream.subscription.clone(),
+                        domain: DomainName::parse("tenant").assured("the test domain is valid"),
+                        relay: nervix_models::RelayName::parse("orders")
+                            .assured("the test relay is valid"),
+                        subscription_type: SubscriptionType::Row,
+                        schema: stream.schema,
+                    })),
+                    message: String::new(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            assert_eq!(signals.active_subscription_tab.get_untracked(), Some(1));
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(&tabs[0].state, SubscriptionTabState::Open(_))
+            }));
+        });
+    }
+
+    #[test]
+    fn a_failed_new_subscription_leaves_no_live_tab() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let mut requests = SessionRequests::new();
+            apply_subscribe_outcome(
+                signals,
+                &mut requests,
+                1,
+                "SUBSCRIBE live TO orders;",
+                SubscribeOutcome {
+                    disposition: SubscribeDisposition::Failed,
+                    message: "relay is unavailable".to_string(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+            assert!(
+                signals.terminal_lines.get_untracked().into_lines()[0]
+                    .line
+                    .text
+                    .contains("relay is unavailable")
+            );
+        });
+    }
+
+    #[test]
+    fn a_failed_restore_remains_desired_and_reports_its_error() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Restoring);
+            let mut requests = SessionRequests::new();
+            apply_subscribe_outcome(
+                signals,
+                &mut requests,
+                1,
+                "SUBSCRIBE live TO orders;",
+                SubscribeOutcome {
+                    disposition: SubscribeDisposition::Failed,
+                    message: "leader is changing".to_string(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(matches!(&tabs[0].state, SubscriptionTabState::Interrupted));
+                assert!(
+                    tabs[0].lines.clone().into_lines()[0]
+                        .line
+                        .text
+                        .contains("leader is changing")
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn closing_an_in_flight_restore_deletes_its_late_success() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Closing(None));
+            let mut requests = SessionRequests::new();
+            let name = SubscriptionName::parse("live").assured("the test name is valid");
+            let handle = SubscriptionHandle {
+                name,
+                generation: NonZeroU64::MIN,
+            };
+            apply_subscribe_outcome(
+                signals,
+                &mut requests,
+                1,
+                "SUBSCRIBE live TO orders;",
+                SubscribeOutcome {
+                    disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+                        subscription: handle.clone(),
+                        domain: DomainName::parse("tenant").assured("the test domain is valid"),
+                        relay: nervix_models::RelayName::parse("orders")
+                            .assured("the test relay is valid"),
+                        subscription_type: SubscriptionType::Row,
+                        schema: RowSchema {
+                            fields: Vec::new(),
+                            branch: None,
+                        },
+                    })),
+                    message: String::new(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            assert!(signals.subscription_tabs.with_untracked(|tabs| {
+                matches!(
+                    &tabs[0].state,
+                    SubscriptionTabState::Closing(Some(stream))
+                        if stream.subscription == handle
+                )
+            }));
+            requests.confirm_leader();
+            let messages = requests.release_held();
+            assert_eq!(messages.len(), 1);
+            assert!(matches!(
+                &messages[0].request,
+                ClientRequest::Unsubscribe(request) if request.subscription == handle.name
+            ));
+        });
+    }
+
+    #[test]
+    fn subscription_replies_follow_the_request_that_opened_and_closed_the_tab() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            signals.active_subscription_tab.set(None);
+            let mut requests = SessionRequests::new();
+            let stream = test_stream();
+            let domain = DomainName::parse("tenant").assured("the test domain is valid");
+            let start = requests.issue(ConsoleRequest::SubscriptionStart {
+                tab_id: 1,
+                request: SubscribeRequest {
+                    domain: domain.clone(),
+                    statement: "SUBSCRIBE live TO orders;".to_string(),
+                    subscription_type: SubscriptionType::Row,
+                },
+            });
+            let opened = SubscribeOutcome {
+                disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+                    subscription: stream.subscription.clone(),
+                    domain,
+                    relay: nervix_models::RelayName::parse("orders")
+                        .assured("the test relay is valid"),
+                    subscription_type: SubscriptionType::Row,
+                    schema: stream.schema,
+                })),
+                message: String::new(),
+                diagnostics: Vec::new(),
+            };
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: start,
+                    body: ReplyBody::Subscribe(opened),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert_eq!(signals.active_subscription_tab.get_untracked(), Some(1));
+
+            let stop_request = signals
+                .begin_subscription_close(1)
+                .assured("the acknowledged tab has a stream to close");
+            let stop = requests.issue(ConsoleRequest::SubscriptionStop {
+                tab_id: 1,
+                request: stop_request,
+            });
+            let deleted = UnsubscribeOutcome {
+                disposition: UnsubscribeDisposition::Deleted(stream.subscription),
+                message: String::new(),
+                diagnostics: Vec::new(),
+            };
+            let step = apply_reply(
+                signals,
+                &mut requests,
+                AnsweredRequest {
+                    request: stop,
+                    body: ReplyBody::Unsubscribe(deleted),
+                },
+            );
+            assert!(matches!(step, SessionStep::Continue));
+            assert!(signals.subscription_tabs.get_untracked().is_empty());
+            assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+        });
+    }
+
+    #[test]
+    fn a_late_open_reply_cannot_replace_an_already_open_stream() {
+        Owner::new().with(|| {
+            let stream = test_stream();
+            let signals = subscription_signals(SubscriptionTabState::Open(stream.clone()));
+            let mut requests = SessionRequests::new();
+            let late = SubscriptionHandle {
+                name: stream.subscription.name.clone(),
+                generation: NonZeroU64::new(2).assured("two is nonzero"),
+            };
+            apply_subscribe_outcome(
+                signals,
+                &mut requests,
+                1,
+                "SUBSCRIBE live TO orders;",
+                SubscribeOutcome {
+                    disposition: SubscribeDisposition::Opened(Box::new(SubscriptionOpened {
+                        subscription: late.clone(),
+                        domain: DomainName::parse("tenant").assured("the test domain is valid"),
+                        relay: nervix_models::RelayName::parse("orders")
+                            .assured("the test relay is valid"),
+                        subscription_type: SubscriptionType::Row,
+                        schema: stream.schema,
+                    })),
+                    message: String::new(),
+                    diagnostics: Vec::new(),
+                },
+            );
+            signals.subscription_tabs.with_untracked(|tabs| {
+                assert!(tabs[0].streams(&stream.subscription));
+                assert!(!tabs[0].streams(&late));
+            });
+            assert!(requests.release_held().is_empty());
+        });
+    }
+
+    #[test]
+    fn rejected_subscribe_reply_removes_a_new_tab_but_keeps_a_desired_restore() {
+        for restoring in [false, true] {
+            Owner::new().with(|| {
+                let state = if restoring {
+                    SubscriptionTabState::Restoring
+                } else {
+                    SubscriptionTabState::Pending
+                };
+                let signals = subscription_signals(state);
+                let mut requests = SessionRequests::new();
+                let issued = requests.issue(ConsoleRequest::SubscriptionStart {
+                    tab_id: 1,
+                    request: SubscribeRequest {
+                        domain: DomainName::parse("tenant").assured("the test domain is valid"),
+                        statement: "SUBSCRIBE live TO orders;".to_string(),
+                        subscription_type: SubscriptionType::Row,
+                    },
+                });
+                let step = apply_reply(
+                    signals,
+                    &mut requests,
+                    AnsweredRequest {
+                        request: issued,
+                        body: ReplyBody::Rejected(nervix_client_wire::RequestRejected {
+                            rejection: nervix_client_wire::RequestRejection::InvalidRequest,
+                            field: None,
+                            message: "subscription rejected".to_string(),
+                        }),
+                    },
+                );
+                assert!(matches!(step, SessionStep::Continue));
+                if restoring {
+                    signals.subscription_tabs.with_untracked(|tabs| {
+                        assert!(matches!(&tabs[0].state, SubscriptionTabState::Interrupted));
+                        assert!(
+                            tabs[0].lines.clone().into_lines()[0]
+                                .line
+                                .text
+                                .contains("subscription rejected")
+                        );
+                    });
+                } else {
+                    assert!(signals.subscription_tabs.get_untracked().is_empty());
+                    assert_eq!(signals.active_subscription_tab.get_untracked(), None);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn terminal_history_bounds_records_and_keeps_render_keys_stable() {
+        let mut history = TermLineHistory::default();
+        for index in 0..300 {
+            history.push(TermLine::output(format!("line {index}")));
+        }
+        let lines = history.into_lines();
+        assert_eq!(lines.len(), MAX_HISTORY_RECORDS);
+        assert_eq!(lines[0].line.text, HISTORY_MARKER);
+        assert_eq!(lines[1].line.text, "line 45");
+        assert_eq!(lines[1].id, 46);
+        assert_eq!(lines[255].line.text, "line 299");
+        assert_eq!(lines[255].id, 300);
+    }
+
+    #[test]
+    fn terminal_history_bounds_utf8_bytes_and_exposes_truncation() {
+        let mut history = TermLineHistory::default();
+        history.push(TermLine::output("é".repeat(MAX_HISTORY_BYTES)));
+        let lines = history.into_lines();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].line.text, HISTORY_MARKER);
+        assert!(lines[1].line.text.ends_with(HISTORY_SUFFIX));
+        let retained_bytes = lines
+            .iter()
+            .map(|entry| entry.line.text.len())
+            .sum::<usize>();
+        assert!(retained_bytes <= MAX_HISTORY_BYTES);
+        assert!(
+            lines[1]
+                .line
+                .text
+                .is_char_boundary(lines[1].line.text.len())
+        );
+    }
 
     #[test]
     fn untracked_domain_push_cannot_discard_a_pending_websocket_request() {
@@ -6143,6 +8015,49 @@ mod tests {
             answered.request.request,
             ConsoleRequest::AttachTransaction(_)
         ));
+    }
+
+    #[test]
+    fn command_with_temporarily_unknown_leader_keeps_its_redirect() {
+        let disposition = CommandDisposition::NotLeader(LeaderRedirect { leader: None });
+        assert!(
+            command_redirect(&disposition).is_some(),
+            "a leaderless redirect must keep the command pending for another connection"
+        );
+    }
+
+    #[test]
+    fn a_redirect_moves_to_the_leaders_console_only_when_the_leader_advertises_one() {
+        let unknown = LeaderRedirect { leader: None };
+        assert_eq!(redirect_console(&unknown), None);
+        assert_eq!(
+            leader_redirect_line(&unknown).text,
+            "topology: not-a-leader"
+        );
+
+        let node = ClusterNodeName::parse("node-2").assured("a literal node name");
+        let unadvertised = LeaderRedirect {
+            leader: Some(nervix_client_wire::LeaderEndpoints {
+                node: node.clone(),
+                grpc_uri: None,
+                web_console_uri: None,
+            }),
+        };
+        assert_eq!(redirect_console(&unadvertised), None);
+        assert_eq!(
+            leader_redirect_line(&unadvertised).text,
+            "topology: not-a-leader, retry on leader 'node-2'"
+        );
+
+        let console = Url::parse("http://node-2:17420/console/").assured("a literal URL");
+        let advertised = LeaderRedirect {
+            leader: Some(nervix_client_wire::LeaderEndpoints {
+                node,
+                grpc_uri: None,
+                web_console_uri: Some(console.clone()),
+            }),
+        };
+        assert_eq!(redirect_console(&advertised), Some(&console));
     }
 
     #[test]
@@ -6191,6 +8106,89 @@ mod tests {
             execution_references(&sent),
             "a command sent again keeps its execution reference"
         );
+    }
+
+    #[test]
+    fn repeated_replay_keeps_every_unanswered_request_and_drops_a_stale_close() {
+        let mut requests = SessionRequests::new();
+        requests.confirm_leader();
+        let first = requests.issue(repl_command("first"));
+        let second = requests.issue(repl_command("second"));
+        let third = requests.issue(repl_command("third"));
+        let first = requests
+            .accept(first)
+            .assured("the leader can send the first request");
+        let second = requests
+            .accept(second)
+            .assured("the leader can send the second request");
+        let third = requests
+            .accept(third)
+            .assured("the leader can send the third request");
+        let sent = [first, second, third];
+        assert!(requests.answer(sent[0].request_id).is_some());
+        let name = SubscriptionName::parse("closing").assured("the test name is valid");
+        let closing = requests.issue(ConsoleRequest::SubscriptionStop {
+            tab_id: 9,
+            request: UnsubscribeRequest { subscription: name },
+        });
+        assert!(requests.accept(closing).is_some());
+
+        requests.end_connection();
+        requests.confirm_leader();
+        let replayed = requests.release_held();
+        assert_eq!(
+            replayed.len(),
+            2,
+            "the close belongs to the ended connection"
+        );
+        assert_eq!(sent_queries(&replayed), vec!["second", "third"]);
+        assert_eq!(
+            execution_references(&replayed),
+            execution_references(&sent[1..])
+        );
+
+        requests.end_connection();
+        requests.confirm_leader();
+        let replayed_again = requests.release_held();
+        assert_eq!(sent_queries(&replayed_again), vec!["second", "third"]);
+        assert_eq!(
+            execution_references(&replayed_again),
+            execution_references(&sent[1..])
+        );
+    }
+
+    #[test]
+    fn unknown_command_outcome_retries_with_its_execution_reference() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let mut requests = SessionRequests::new();
+            let issued = requests.issue(repl_command("CREATE SCHEMA pending ( value I64 );"));
+            let order = issued.order;
+            let ConsoleRequest::Command { request, purpose } = issued.request else {
+                panic!("the test issued a command");
+            };
+            let reference = request.execution_reference.clone();
+            let mut outcome = completed_outcome("leadership moved during admission");
+            outcome.disposition = CommandDisposition::OutcomeUnknown(
+                nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+            );
+
+            let step =
+                apply_command_outcome(signals, &mut requests, order, request, purpose, outcome);
+            assert!(matches!(step, SessionStep::Reconnect));
+            assert!(
+                signals
+                    .terminal_lines
+                    .get_untracked()
+                    .into_lines()
+                    .is_empty()
+            );
+
+            requests.end_connection();
+            requests.confirm_leader();
+            let resent = requests.release_held();
+            assert_eq!(sent_commands(&resent)[0].execution_reference, reference);
+        });
     }
 
     #[test]
@@ -6248,6 +8246,8 @@ mod tests {
             .assured("a completion request is sent at once");
         let suggestions = || {
             ReplyBody::Suggest(nervix_client_wire::SuggestOutcome {
+                status: nervix_client_wire::SuggestionStatus::Ready,
+                continuation: None,
                 suggestions: Vec::new(),
             })
         };
@@ -6256,6 +8256,47 @@ mod tests {
         assert!(matches!(stale, Routed::Untracked));
         let latest = requests.route(reply(later.request_id, suggestions()));
         assert!(matches!(latest, Routed::Reply(_)));
+    }
+
+    #[test]
+    fn only_the_latest_request_for_each_typed_choice_control_is_awaited() {
+        let mut requests = SessionRequests::new();
+        let earlier = requests.issue(choice_request(ChoiceControl::DomainPace, 1));
+        let earlier = requests
+            .accept(earlier)
+            .assured("a choice request is sent without waiting for leadership");
+        assert!(matches!(earlier.request, ClientRequest::Choice(_)));
+
+        let placement = requests.issue(choice_request(ChoiceControl::PlacementPolicy, 1));
+        let placement = requests
+            .accept(placement)
+            .assured("an independent choice control is sent at once");
+        let later = requests.issue(choice_request(ChoiceControl::DomainPace, 1));
+        let later = requests
+            .accept(later)
+            .assured("a newer request for the same control is sent at once");
+
+        assert!(matches!(
+            requests.route(reply(earlier.request_id, ready_choice_reply())),
+            Routed::Untracked
+        ));
+        assert!(matches!(
+            requests.route(reply(placement.request_id, ready_choice_reply())),
+            Routed::Reply(_)
+        ));
+
+        let Routed::Reply(answered) = requests.route(reply(later.request_id, ready_choice_reply()))
+        else {
+            panic!("the latest choice request remains tracked");
+        };
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            signals.create.open(CreateKind::Domain, None, "trigger");
+            assert!(matches!(
+                apply_reply(signals, &mut requests, *answered),
+                SessionStep::Continue
+            ));
+        });
     }
 
     #[test]
@@ -6326,46 +8367,114 @@ mod tests {
             span: None,
         };
         assert_eq!(diagnostic_line(query, unplaced).text, "- bad name");
+        assert_eq!(
+            diagnostic_line(query, diagnostic("unknown statement", 0, 6)).text,
+            "- CREATE at 0..6: unknown statement",
+            "a span starting at zero is a location in the query"
+        );
+    }
+
+    fn described_version(number: u64, path: &str) -> ResourceVersionDescription {
+        ResourceVersionDescription {
+            version: NonZeroU64::new(number).assured("the test version is non-zero"),
+            root_checksum: format!("root-{number}"),
+            manifest_checksum: format!("manifest-{number}"),
+            file_count: 1,
+            total_bytes: 24,
+            created_at: Timestamp::from_unix_nanos(1_789_000_000_000_000_000),
+            created_by_node: ClusterNodeName::parse("node-1").assured("a literal node name"),
+            entries: ResourceVersionEntries::Listed(vec![ResourceManifestEntry {
+                path: path.to_string(),
+                content: ResourceEntryContent::File {
+                    size: 24,
+                    checksum: format!("checksum-{number}"),
+                },
+            }]),
+        }
+    }
+
+    fn usage(kind: ModelKind, name: &str, version: u64) -> ResourceUsage {
+        ResourceUsage {
+            node: NodeRef::new(kind, ModelName::parse(name).assured("a literal model name")),
+            version: NonZeroU64::new(version).assured("the test version is non-zero"),
+        }
     }
 
     #[test]
     fn resource_description_lists_each_usage_under_the_version_it_pins() {
-        let message = [
-            "resource: lookup_bundle",
-            "latest: 2",
-            "versions: 1,2",
-            "version_details:",
-            "- version=1 file_count=1 total_bytes=24",
-            "  entries:",
-            "  - type=file path=lookup.jsonl size=24 checksum=first",
-            "- version=2 file_count=1 total_bytes=24",
-            "  entries:",
-            "  - type=file path=lookup.jsonl size=24 checksum=second",
-            "usages:",
-            "- kind=client name=lookup_store version=2",
-            "- kind=hash_map name=lookup_by_id version=2",
-        ]
-        .join("\n");
+        let mut outcome = completed_outcome("resource: lookup_bundle");
+        outcome.resource = Some(Box::new(ResourceDescription {
+            resource: ResourceName::parse("lookup_bundle").assured("a literal resource name"),
+            latest_version: NonZeroU64::new(2),
+            versions: vec![
+                described_version(1, "lookup table.jsonl"),
+                described_version(2, "lookup table.jsonl"),
+            ],
+            usages: vec![
+                usage(ModelKind::Client, "lookup_store", 2),
+                usage(ModelKind::Lookup, "lookup_by_id", 2),
+            ],
+        }));
 
-        let detail = ResourceDetailView::from_description(completed_outcome(&message));
+        let detail = ResourceDetailView::from_description(outcome);
 
+        assert_eq!(detail.status, "ready");
         let versions = detail
             .versions
             .iter()
-            .map(|version| version.version)
+            .map(|version| version.version.version.get())
             .collect::<Vec<_>>();
         assert_eq!(versions, vec![1, 2]);
         let first = &detail.versions[0];
-        assert_eq!(first.files.len(), 1);
         assert!(first.usages.is_empty());
+        let ResourceVersionEntries::Listed(entries) = &first.version.entries else {
+            panic!("the first version lists its entries");
+        };
+        let summaries = entries
+            .iter()
+            .map(|entry| format!("{} {}", entry.path, resource_entry_summary(entry)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            summaries,
+            vec!["lookup table.jsonl file | 24 bytes | checksum checksum-1"]
+        );
         let second = &detail.versions[1];
-        assert_eq!(second.files.len(), 1);
         let usages = second
             .usages
             .iter()
-            .map(|usage| format!("{} {}", usage.kind, usage.name))
+            .map(|usage| {
+                format!(
+                    "{} {}",
+                    usage.node.kind.keyword_phrase(),
+                    usage.node.identifier.as_str()
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(usages, vec!["CLIENT lookup_store", "HASH MAP lookup_by_id"]);
+        assert_eq!(
+            resource_version_summary(&second.version),
+            "1 files | 24 bytes | from node-1 | 2026-09-10 00:26:40 UTC"
+        );
+    }
+
+    #[test]
+    fn a_resource_description_shows_why_it_has_no_versions() {
+        let mut failed = completed_outcome("resource 'lookup_bundle' does not exist");
+        failed.disposition = CommandDisposition::Failed;
+        let detail = ResourceDetailView::from_description(failed);
+        assert!(detail.versions.is_empty());
+        assert_eq!(detail.status, "resource 'lookup_bundle' does not exist");
+
+        let untyped = completed_outcome("resource: lookup_bundle");
+        let detail = ResourceDetailView::from_description(untyped);
+        assert!(detail.versions.is_empty());
+        assert_eq!(detail.status, MISSING_RESOURCE_DESCRIPTION);
+
+        let entry = ResourceManifestEntry {
+            path: "nested dir".to_string(),
+            content: ResourceEntryContent::Directory,
+        };
+        assert_eq!(resource_entry_summary(&entry), "directory");
     }
 
     #[test]
@@ -7163,6 +9272,30 @@ mod tests {
         ConsoleRequest::Suggest(request)
     }
 
+    fn choice_request(control: ChoiceControl, draft_revision: u64) -> ConsoleRequest {
+        let target = match control {
+            ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
+            ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
+        };
+        ConsoleRequest::Choice {
+            request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),
+            context: ChoiceRequestContext {
+                control,
+                draft_revision,
+                session_generation: 0,
+                append: false,
+            },
+        }
+    }
+
+    fn ready_choice_reply() -> ReplyBody {
+        ReplyBody::Choice(nervix_client_wire::ChoiceOutcome {
+            status: nervix_client_wire::ChoiceStatus::Ready,
+            choices: Vec::new(),
+            page_cursor: None,
+        })
+    }
+
     fn completed_outcome(message: &str) -> CommandOutcome {
         CommandOutcome {
             execution_reference: command_execution_reference(),
@@ -7176,7 +9309,335 @@ mod tests {
             transaction: None,
             transaction_admission: None,
             inspection: None,
+            wasm_state: None,
+            resource: None,
         }
+    }
+
+    #[test]
+    fn create_admission_is_queued_only_while_its_transaction_remains_active() {
+        let mut outcome = completed_outcome("created resource");
+        outcome.transaction_admission = Some(TransactionOperationAdmission {
+            operation: TransactionOperationNumber::from_index(0)
+                .assured("the first transaction operation is addressable"),
+            preview: TransactionPreviewIdentity {
+                transaction_id: "standalone-or-attached".to_string(),
+                position: TransactionPosition::new(1),
+                planning_basis: ImpactPlanningBasis::new([7; 32]),
+            },
+        });
+
+        assert_eq!(queued_transaction_position(&outcome), None);
+
+        outcome.transaction = Some(
+            TransactionStatus::new(
+                "attached".to_string(),
+                domain_name("demo"),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(1),
+                0,
+            )
+            .assured("the open transaction has not applied its accepted operation"),
+        );
+        assert_eq!(queued_transaction_position(&outcome), Some(1));
+
+        outcome.transaction = Some(
+            TransactionStatus::new(
+                "finished".to_string(),
+                domain_name("demo"),
+                TransactionLifecycle::Committed,
+                TransactionPosition::new(1),
+                1,
+            )
+            .assured("the committed transaction applied its accepted operation"),
+        );
+        assert_eq!(queued_transaction_position(&outcome), None);
+    }
+
+    #[test]
+    fn popup_submission_uses_the_shared_command_queue_and_masks_its_prompt() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            let transaction = TransactionStatus::new(
+                "attached".to_string(),
+                domain_name("demo"),
+                TransactionLifecycle::Open,
+                TransactionPosition::new(2),
+                0,
+            )
+            .assured("the test transaction has two accepted, unapplied operations");
+            signals.transaction_status.set(Some(transaction));
+            let (sender, mut receiver) = unbounded();
+            submit_create_request(
+                signals.create,
+                signals.terminal_lines,
+                signals.transaction_status,
+                RwSignal::new(Some(sender)),
+                CreateSubmission {
+                    kind: CreateKind::User,
+                    query: "CREATE USER operator WITH PASSWORD 'actual-secret';".to_string(),
+                    presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                },
+                attempt,
+                revision,
+            );
+            let ConsoleRequest::Command { request, purpose } = receiver
+                .try_recv()
+                .assured("the shared command queue receives the popup command")
+            else {
+                panic!("popup submission sends a command request");
+            };
+            assert!(request.query.contains("actual-secret"));
+            assert_eq!(
+                request.expected_transaction_position,
+                Some(TransactionPosition::new(2))
+            );
+            assert!(matches!(purpose, CommandPurpose::Create(_)));
+            let prompt = &signals.terminal_lines.get_untracked().into_lines()[0]
+                .line
+                .text;
+            assert!(prompt.contains("********"));
+            assert!(!prompt.contains("actual-secret"));
+
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(false);
+            signals.transaction_status.set(None);
+            submit_create_request(
+                signals.create,
+                signals.terminal_lines,
+                signals.transaction_status,
+                RwSignal::new(None),
+                CreateSubmission {
+                    kind: CreateKind::User,
+                    query: "CREATE USER unavailable WITH PASSWORD 'secret';".to_string(),
+                    presentation: "CREATE USER unavailable WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                },
+                attempt,
+                revision,
+            );
+
+            let (closed_sender, closed_receiver) = unbounded();
+            drop(closed_receiver);
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            submit_create_request(
+                signals.create,
+                signals.terminal_lines,
+                signals.transaction_status,
+                RwSignal::new(Some(closed_sender)),
+                CreateSubmission {
+                    kind: CreateKind::User,
+                    query: "CREATE USER closed WITH PASSWORD 'secret';".to_string(),
+                    presentation: "CREATE USER closed WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                },
+                attempt,
+                revision,
+            );
+        });
+    }
+
+    #[test]
+    fn create_outcomes_update_domain_resource_and_retry_state_once() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let mut requests = SessionRequests::new();
+
+            signals.create.open(CreateKind::Domain, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            let created_domain = domain_name("created");
+            show_create_outcome(
+                signals,
+                &mut requests,
+                CreateCommandContext {
+                    attempt,
+                    draft_revision: revision,
+                    kind: CreateKind::Domain,
+                    presentation: "CREATE UNPACED DOMAIN created PLACEMENT NEUTRAL;".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: Some(created_domain.clone()),
+                },
+                completed_outcome("created domain"),
+                None,
+            );
+            assert_eq!(signals.active_domain.get_untracked(), Some(created_domain));
+
+            let scope = domain_name("created");
+            signals
+                .create
+                .open(CreateKind::Resource, Some(scope.clone()), "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            show_create_outcome(
+                signals,
+                &mut requests,
+                CreateCommandContext {
+                    attempt,
+                    draft_revision: revision,
+                    kind: CreateKind::Resource,
+                    presentation: "CREATE RESOURCE bundle;".to_string(),
+                    domain: Some(scope.clone()),
+                    resource: Some("bundle".to_string()),
+                    created_domain: None,
+                },
+                completed_outcome("created resource"),
+                None,
+            );
+            assert_eq!(
+                signals.selected_resource.get_untracked().as_deref(),
+                Some("bundle")
+            );
+            assert!(requests.held.values().any(|request| matches!(
+                request,
+                ConsoleRequest::Command { request, purpose: CommandPurpose::ResourceDescription { resource } }
+                    if request.query == "DESCRIBE RESOURCE bundle;"
+                        && request.domain.as_ref() == Some(&scope)
+                        && resource == "bundle"
+            )));
+
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            let mut failed = completed_outcome("");
+            failed.disposition = CommandDisposition::Failed;
+            show_create_outcome(
+                signals,
+                &mut requests,
+                CreateCommandContext {
+                    attempt,
+                    draft_revision: revision,
+                    kind: CreateKind::User,
+                    presentation: "CREATE USER duplicate WITH PASSWORD '********';".to_string(),
+                    domain: None,
+                    resource: None,
+                    created_domain: None,
+                },
+                failed,
+                None,
+            );
+
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            let context = CreateCommandContext {
+                attempt,
+                draft_revision: revision,
+                kind: CreateKind::User,
+                presentation: "CREATE USER queued WITH PASSWORD '********';".to_string(),
+                domain: None,
+                resource: None,
+                created_domain: None,
+            };
+            show_create_outcome(
+                signals,
+                &mut requests,
+                context.clone(),
+                completed_outcome("queued user"),
+                Some(3),
+            );
+            show_create_outcome(
+                signals,
+                &mut requests,
+                CreateCommandContext {
+                    attempt: 0,
+                    ..context.clone()
+                },
+                completed_outcome("stale completion"),
+                None,
+            );
+
+            let issued = requests.issue(ConsoleRequest::Command {
+                request: CommandRequest {
+                    query: "CREATE USER queued WITH PASSWORD 'secret';".to_string(),
+                    domain: None,
+                    execution_reference: command_execution_reference(),
+                    expected_transaction_position: None,
+                    expected_preview: None,
+                },
+                purpose: CommandPurpose::Create(context),
+            });
+            let IssuedRequest { order, request } = issued;
+            let ConsoleRequest::Command { request, purpose } = request else {
+                panic!("the test issued a create command");
+            };
+            let mut unknown = completed_outcome("leadership moved during admission");
+            unknown.disposition = CommandDisposition::OutcomeUnknown(
+                nervix_client_wire::UnknownOutcomeCause::LeadershipLost,
+            );
+            assert!(matches!(
+                apply_command_outcome(
+                    signals,
+                    &mut requests,
+                    order,
+                    request,
+                    purpose,
+                    unknown,
+                ),
+                SessionStep::Reconnect
+            ));
+        });
+    }
+
+    #[test]
+    fn failed_create_and_choice_requests_update_their_own_surface() {
+        Owner::new().with(|| {
+            let signals = subscription_signals(SubscriptionTabState::Pending);
+            let mut requests = SessionRequests::new();
+            signals.create.open(CreateKind::User, None, "trigger");
+            let (attempt, revision) = signals.create.begin_submission(true);
+            fail_request(
+                signals,
+                &mut requests,
+                ConsoleRequest::Command {
+                    request: CommandRequest {
+                        query: "CREATE USER operator WITH PASSWORD 'secret';".to_string(),
+                        domain: None,
+                        execution_reference: command_execution_reference(),
+                        expected_transaction_position: None,
+                        expected_preview: None,
+                    },
+                    purpose: CommandPurpose::Create(CreateCommandContext {
+                        attempt,
+                        draft_revision: revision,
+                        kind: CreateKind::User,
+                        presentation: "CREATE USER operator WITH PASSWORD '********';".to_string(),
+                        domain: None,
+                        resource: None,
+                        created_domain: None,
+                    }),
+                },
+                "request rejected".to_string(),
+            );
+            assert!(
+                signals
+                    .terminal_lines
+                    .get_untracked()
+                    .into_lines()
+                    .iter()
+                    .any(|entry| entry.line.text.contains("request rejected"))
+            );
+
+            signals.create.open(CreateKind::Domain, None, "trigger");
+            fail_request(
+                signals,
+                &mut requests,
+                choice_request(
+                    ChoiceControl::DomainPace,
+                    revision
+                        .checked_add(1)
+                        .assured("opening the domain form advances the draft revision once"),
+                ),
+                "choice transport ended".to_string(),
+            );
+        });
     }
 
     fn diagnostic(message: &str, start: u32, end: u32) -> Diagnostic {

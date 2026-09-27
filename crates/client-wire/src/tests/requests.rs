@@ -30,20 +30,22 @@ fn every_request_variant_is_sampled() {
         .map(|message| match message.request {
             ClientRequest::Command(_) => 0,
             ClientRequest::Suggest(_) => 1,
-            ClientRequest::ListDomains => 2,
-            ClientRequest::SelectDomain(_) => 3,
-            ClientRequest::AttachTransaction(_) => 4,
-            ClientRequest::InspectTransaction(_) => 5,
-            ClientRequest::Subscribe(_) => 6,
-            ClientRequest::Unsubscribe(_) => 7,
-            ClientRequest::Cancel(_) => 8,
+            ClientRequest::Choice(_) => 2,
+            ClientRequest::ListDomains => 3,
+            ClientRequest::SelectDomain(_) => 4,
+            ClientRequest::AttachTransaction(_) => 5,
+            ClientRequest::InspectTransaction(_) => 6,
+            ClientRequest::Subscribe(_) => 7,
+            ClientRequest::Unsubscribe(_) => 8,
+            ClientRequest::Cancel(_) => 9,
         })
         .collect::<Vec<_>>();
+    sampled.sort_unstable();
     sampled.dedup();
-    assert_eq!(sampled, (0..9).collect::<Vec<_>>());
+    assert_eq!(sampled, (0..10).collect::<Vec<_>>());
     assert_eq!(
         wire::ClientRequest::ENUM_VALUES.len(),
-        10,
+        11,
         "the schema declares NONE and one member per request variant"
     );
 }
@@ -108,7 +110,7 @@ fn a_zero_request_identity_is_refused() {
 fn an_undeclared_request_variant_is_refused_with_its_request_identity() {
     for discriminant in [
         wire::ClientRequest::NONE,
-        wire::ClientRequest(10),
+        wire::ClientRequest(11),
         wire::ClientRequest(255),
     ] {
         let frame = raw_client(list_domains_frame(42, discriminant));
@@ -213,6 +215,8 @@ fn suggest_frame(input: &str, cursor: u32) -> bytes::Bytes {
             input: Some(input),
             cursor,
             domain: None,
+            page_size: 64,
+            continuation: None,
         },
     );
     let root = raw_message(
@@ -263,6 +267,27 @@ fn a_suggestion_cursor_must_fall_on_a_character_boundary() {
             }
         );
     }
+}
+
+#[test]
+fn suggestion_pages_round_trip_with_a_bounded_size_and_continuation() {
+    let request_value = SuggestRequest::new("DROP RELAY ".to_string(), 11, None)
+        .assured("the cursor ends at a character boundary")
+        .with_page(3, Some("42:3:digest".to_string()))
+        .assured("three is a valid page size");
+    let message = ClientMessage {
+        request_id: request(1),
+        request: ClientRequest::Suggest(request_value),
+    };
+    assert_eq!(round_trip_client(&message), message);
+    let invalid = SuggestRequest::new(String::new(), 0, None)
+        .assured("an empty source has a valid cursor")
+        .with_page(101, None)
+        .expect_err("page sizes above the bound fail");
+    assert_eq!(
+        invalid.current_context(),
+        &WireValueError::InvalidCompletionPageSize { size: 101 }
+    );
 }
 
 fn subscribe_frame(subscription_type: Option<wire::SubscriptionType>) -> bytes::Bytes {

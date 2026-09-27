@@ -8,34 +8,6 @@ struct ProcessorInputExpressionContext<'a> {
 }
 
 impl RelayProcessorNode {
-    pub(super) fn source_filter_scope(&self, incoming_relay: &RelayName) -> RuntimeFilterScope {
-        match &self.operation {
-            RelayProcessorOperationNode::Correlator {
-                left_relays,
-                right_relays,
-                ..
-            } if left_relays.contains(incoming_relay) => RuntimeFilterScope::Source {
-                namespace: "left",
-                allow_header_reads: false,
-                allow_metadata: false,
-            },
-            RelayProcessorOperationNode::Correlator { right_relays, .. }
-                if right_relays.contains(incoming_relay) =>
-            {
-                RuntimeFilterScope::Source {
-                    namespace: "right",
-                    allow_header_reads: false,
-                    allow_metadata: false,
-                }
-            }
-            _ => RuntimeFilterScope::Source {
-                namespace: "input",
-                allow_header_reads: false,
-                allow_metadata: false,
-            },
-        }
-    }
-
     pub(super) async fn resolve_materialized_dependencies(
         &self,
         branch: &mut BranchRuntime,
@@ -62,77 +34,37 @@ impl RelayProcessorNode {
             })
     }
 
-    pub(super) fn refresh(
-        &mut self,
-        routing: &DomainRoutingSnapshot,
-        graph: Option<StdArc<ActiveGraph>>,
-    ) {
-        let changed = match (&self.last_graph, &graph) {
-            (Some(previous), Some(current)) => !StdArc::ptr_eq(previous, current),
-            (None, None) => false,
-            _ => true,
+    pub(super) fn refresh(&mut self, routing: &DomainRoutingSnapshot) {
+        let node = NodeRef::new(self.kind, self.processor.clone());
+        let Some(plan) = routing.processor_plans.get(&node) else {
+            warn!(
+                kind = self.kind.as_str(),
+                processor = self.processor.as_str(),
+                "published processor plan is absent"
+            );
+            return;
         };
-        if !changed {
+        if self.applied_revision.is_same_as(&plan.template.revision) {
             return;
         }
-
-        let requires_reinitialization = match (self.last_graph.as_ref(), graph.as_ref()) {
-            (Some(previous), Some(current)) => {
-                previous
-                    .node(self.kind, &self.processor)
-                    .map(|node| node.config.as_ref().clone())
-                    != current
-                        .node(self.kind, &self.processor)
-                        .map(|node| node.config.as_ref().clone())
-            }
-            (None, Some(_)) | (Some(_), None) => true,
-            (None, None) => false,
+        let Some(template) = plan.template.processors.get(&self.processor).cloned() else {
+            warn!(
+                kind = self.kind.as_str(),
+                processor = self.processor.as_str(),
+                "published processor plan does not contain its named processor"
+            );
+            return;
         };
-
-        if requires_reinitialization {
-            if let Some(error) = self.apply_refreshed_graph(routing, graph.as_ref()) {
-                warn!(
-                    kind = self.kind.as_str(),
-                    processor = self.processor.as_str(),
-                    error = %error,
-                    "failed to refresh dynamic processor configuration"
-                );
-                return;
-            }
-            self.applied_generation = self
-                .applied_generation
-                .checked_add(1)
-                .assured("a processor cannot apply 2^64 configuration refreshes");
+        if let Err(error) = self.apply_node_template(template) {
+            warn!(
+                kind = self.kind.as_str(),
+                processor = self.processor.as_str(),
+                error = %format_args!("{error:#}"),
+                "failed to apply published processor plan"
+            );
+            return;
         }
-        self.last_graph = graph;
-    }
-
-    pub(super) fn apply_refreshed_graph(
-        &mut self,
-        routing: &DomainRoutingSnapshot,
-        graph: Option<&StdArc<ActiveGraph>>,
-    ) -> Option<String> {
-        let Some(graph) = graph else {
-            return Some(format!(
-                "{} '{}' is absent from the refreshed graph",
-                self.kind.as_str(),
-                self.processor.as_str()
-            ));
-        };
-        let template = match processor_template_for_graph_node(
-            graph,
-            self.kind,
-            &self.processor,
-            &routing.relay_schemas,
-            Some(&routing.udfs),
-        ) {
-            Ok(template) => template,
-            Err(error) => return Some(error.to_string()),
-        };
-        match self.apply_node_template(template) {
-            Ok(()) => None,
-            Err(error) => Some(format!("{error:#}")),
-        }
+        self.applied_revision = plan.template.revision.clone();
     }
 
     pub(super) fn apply_node_template(
@@ -172,14 +104,10 @@ impl RelayProcessorNode {
             })
             .collect();
 
-        if self.from_where != template.from_where {
-            self.from_where = template.from_where;
-            self.compiled_from_where.clear();
-        }
-        if self.filter_where != template.filter_where {
-            self.filter_where = template.filter_where;
-            self.compiled_filter_where.clear();
-        }
+        self.from_where = template.from_where;
+        self.compiled_from_where = template.compiled_from_where;
+        self.filter_where = template.filter_where;
+        self.compiled_filter_where = template.compiled_filter_where;
         self.error_policies = template.error_policies;
         Ok(())
     }
@@ -250,7 +178,6 @@ impl RelayProcessorNode {
 
     pub(super) fn accept_input<'a>(
         &'a mut self,
-        graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
         incoming_relay: &'a RelayName,
         batch: RelayRecordBatch,
@@ -259,7 +186,7 @@ impl RelayProcessorNode {
         Box::pin(async move {
             let domain_clock = branch.domain_clock.clone();
             let Some(collector) = self.input_collectors.get_mut(incoming_relay) else {
-                self.execute(graph, branch, incoming_relay, batch).await;
+                self.execute(branch, incoming_relay, batch).await;
                 return;
             };
             if !collector.push(batch, &domain_clock, snapshot) {
@@ -269,13 +196,12 @@ impl RelayProcessorNode {
             let Some(batch) = self.concat_collected_input(branch, incoming_relay, batches) else {
                 return;
             };
-            self.execute(graph, branch, incoming_relay, batch).await;
+            self.execute(branch, incoming_relay, batch).await;
         })
     }
 
     pub(super) fn flush_due_collected_inputs<'a>(
         &'a mut self,
-        graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
         snapshot: &'a DomainExecutionSnapshot,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
@@ -313,14 +239,13 @@ impl RelayProcessorNode {
                 let Some(batch) = self.concat_collected_input(branch, &relay, batches) else {
                     continue;
                 };
-                self.execute(graph, branch, &relay, batch).await;
+                self.execute(branch, &relay, batch).await;
             }
         })
     }
 
     pub(super) fn flush_all_collected_inputs<'a>(
         &'a mut self,
-        graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
@@ -337,7 +262,7 @@ impl RelayProcessorNode {
                 let Some(batch) = self.concat_collected_input(branch, &relay, batches) else {
                     continue;
                 };
-                self.execute(graph, branch, &relay, batch).await;
+                self.execute(branch, &relay, batch).await;
             }
         })
     }
@@ -349,6 +274,21 @@ impl RelayProcessorNode {
                     ack.no_ack(reason.to_string());
                 }
             }
+        }
+    }
+
+    /// Begin a new window lifetime without rows or panes from an earlier appearance of its key.
+    /// Eviction also uses this before publishing the final empty checkpoint.
+    pub(super) fn reset_window_state(&mut self) {
+        if let RelayProcessorOperationNode::WindowProcessor {
+            plan,
+            state,
+            replicated_state,
+            ..
+        } = &mut self.operation
+        {
+            *state = WindowProcessorState::new(plan, state.incarnation);
+            replicated_state.generations.mark_live_dirty();
         }
     }
 
@@ -364,117 +304,27 @@ impl RelayProcessorNode {
             materialized_state,
             execution_now,
         } = context;
-        let Some(filter_where) = (match kind {
+        let Some(_filter_where) = (match kind {
             ProcessorInputFilterKind::FromWhere => self.from_where.get(incoming_relay),
             ProcessorInputFilterKind::FilterWhere => self.filter_where.as_ref(),
         }) else {
             return Some(batch);
         };
-        let filter_where = filter_where.clone();
-
-        let needs_compile = match kind {
-            ProcessorInputFilterKind::FromWhere => {
-                !self.compiled_from_where.contains_key(incoming_relay)
-            }
-            ProcessorInputFilterKind::FilterWhere => {
-                !self.compiled_filter_where.contains_key(incoming_relay)
-            }
-        };
-        if needs_compile {
-            let routing = match branch.domain_routing() {
-                Ok(routing) => routing,
-                Err(error) => {
-                    branch.runtime.handle_internal_processor_error_for_acks(
-                        &branch.domain,
-                        self.kind,
-                        &self.processor,
-                        &self.error_policies,
-                        batch.acks.iter(),
-                        error.to_string(),
-                    );
-                    return None;
-                }
-            };
-            let input_schema =
-                match relay_schema_for_routing(routing, &branch.domain, incoming_relay) {
-                    Ok(schema) => schema,
-                    Err(error) => {
-                        branch.runtime.handle_internal_processor_error_for_acks(
-                            &branch.domain,
-                            self.kind,
-                            &self.processor,
-                            &self.error_policies,
-                            batch.acks.iter(),
-                            error.to_string(),
-                        );
-                        return None;
-                    }
-                };
-            let materialized_stream_specs = &routing.materialized_stream_specs;
-            let current_branching = routing
-                .relay_branchings
-                .get(incoming_relay)
-                .cloned()
-                .assured("the validated processor input relay has branch routing");
-            let filter_scope = match kind {
-                ProcessorInputFilterKind::FromWhere => self.source_filter_scope(incoming_relay),
-                ProcessorInputFilterKind::FilterWhere => RuntimeFilterScope::Source {
-                    namespace: "input",
-                    allow_header_reads: false,
-                    allow_metadata: false,
-                },
-            };
-            match compile_scoped_filter_program(
-                RuntimeCompileTarget {
-                    domain: &branch.domain,
-                    identifier: &self.processor,
-                },
-                Some(&filter_where),
-                RuntimeVmSchema {
-                    schema: batch.arrow_schema(),
-                    sensitivity: input_schema.vm_sensitivity(),
-                },
-                kind.error_operation(),
-                RuntimeVmCompileContext {
-                    available_materialized_streams: materialized_stream_specs,
-                    available_lookups: &routing.lookups,
-                    current_branching: &current_branching,
-                    udfs: Some(&routing.udfs),
-                },
-                filter_scope,
-            ) {
-                Ok(Some(program)) => match kind {
-                    ProcessorInputFilterKind::FromWhere => {
-                        self.compiled_from_where
-                            .insert(incoming_relay.clone(), program);
-                    }
-                    ProcessorInputFilterKind::FilterWhere => {
-                        self.compiled_filter_where
-                            .insert(incoming_relay.clone(), program);
-                    }
-                },
-                Ok(None) => {}
-                Err(error) => {
-                    branch.runtime.handle_internal_processor_error_for_acks(
-                        &branch.domain,
-                        self.kind,
-                        &self.processor,
-                        &self.error_policies,
-                        batch.acks.iter(),
-                        format!("{} compile failed: {}", kind.label(), error),
-                    );
-                    return None;
-                }
-            }
-        }
-
         let program = match kind {
             ProcessorInputFilterKind::FromWhere => self.compiled_from_where.get(incoming_relay),
             ProcessorInputFilterKind::FilterWhere => self.compiled_filter_where.get(incoming_relay),
         }
         .cloned();
         let Some(program) = program else {
-            return Some(batch);
+            branch.runtime.handle_internal_processor_error_for_acks(
+                &branch.domain,
+                self.kind,
+                &self.processor,
+                &self.error_policies,
+                batch.acks.iter(),
+                format!("{} has no prepared program", kind.label()),
+            );
+            return None;
         };
         let plan = match plan_filter_map_messages(
             self.kind.as_str(),
@@ -515,14 +365,11 @@ impl RelayProcessorNode {
 
     pub(super) fn execute<'a>(
         &'a mut self,
-        graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
         incoming_relay: &'a RelayName,
         batch: RelayRecordBatch,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let current = graph.load_full();
-            let current = current.as_ref().map(StdArc::clone);
             let routing = match branch.domain_routing() {
                 Ok(routing) => routing,
                 Err(error) => {
@@ -537,7 +384,7 @@ impl RelayProcessorNode {
                     return;
                 }
             };
-            self.refresh(routing, current);
+            self.refresh(routing);
             let execution_snapshot = match branch.runtime.domain_execution_snapshot(&branch.domain)
             {
                 Ok(snapshot) => snapshot,
@@ -601,38 +448,22 @@ impl RelayProcessorNode {
             match &mut self.operation {
                 RelayProcessorOperationNode::Deduplicator {
                     output_routes,
-                    deduplicate_on,
+                    deduplicate_on: _,
                     max_time,
                     compiled_key_program,
                     keyspace,
                 } => {
-                    let input_arrow_schema = batch.arrow_schema();
                     let key_input_batch = batch.batch.clone();
                     let key_input_keys = batch.keys.clone();
-                    if compiled_key_program.is_none() {
-                        let udfs = branch.runtime.udf_executor(&branch.domain);
-                        match compile_deduplicator_key_program(
-                            &self.processor,
-                            &self.input_relays,
-                            deduplicate_on,
-                            input_arrow_schema.clone(),
-                            udfs.as_ref(),
-                        ) {
-                            Ok(program) => *compiled_key_program = Some(Box::new(program)),
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    batch.acks.iter(),
-                                    format!("{error:#}"),
-                                );
-                                return;
-                            }
-                        }
-                    }
                     let Some(key_program) = compiled_key_program.as_ref() else {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind,
+                            &self.processor,
+                            &self.error_policies,
+                            batch.acks.iter(),
+                            "deduplicator has no prepared key program".to_string(),
+                        );
                         return;
                     };
                     let lookup_columns = HashMap::default();
@@ -755,14 +586,11 @@ impl RelayProcessorNode {
 
                     let Some(dispatched_acks) = dispatch_processor_outputs(
                         ProcessorOutputDispatchContext {
-                            graph,
                             branch,
                             node_kind: self.kind,
                             source_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
-                            input_relays: &self.input_relays,
-                            filter_source: ProcessorOutputFilterSource::InputRelays,
                             materialized_state: ProcessorMaterializedState::Admitted(
                                 &materialized_values,
                             ),
@@ -885,11 +713,52 @@ impl RelayProcessorNode {
                     }
                     // Rows are admitted in runs that end where the window fills, so every
                     // emission covers exactly the rows admitted before it.
+                    let mut budget_limited = false;
                     while !pending.is_empty() {
                         tokio::task::consume_budget().await;
-                        let run_len =
-                            state.admission_run_len(&pending, *width_messages, *width_duration);
+                        let run_len = if budget_limited {
+                            1
+                        } else {
+                            state.admission_run_len(&pending, *width_messages, *width_duration)
+                        };
                         let run = pending.drain(..run_len).collect::<Vec<_>>();
+                        if let Err(error) =
+                            state.check_admission(plan, Some(&evaluated.columns), &run)
+                        {
+                            if run.len() > 1 {
+                                // Retry one row at a time so a large batch cannot cause rows
+                                // that individually fit to be refused with the oversized run.
+                                for admission in run.into_iter().rev() {
+                                    pending.push_front(admission);
+                                }
+                                budget_limited = true;
+                                continue;
+                            }
+                            for admission in run {
+                                tokio::task::consume_budget().await;
+                                branch
+                                    .runtime
+                                    .handle_message_error(
+                                        MessageErrorSourceContext {
+                                            domain: &branch.domain,
+                                            node_kind: self.kind,
+                                            node: &self.processor,
+                                            execution_now,
+                                        },
+                                        &self.error_policies,
+                                        admission.message,
+                                        MessageErrorFailure::publish(
+                                            None,
+                                            format!(
+                                                "window processor '{}' cannot admit row: {error:#}",
+                                                self.processor.as_str(),
+                                            ),
+                                        ),
+                                    )
+                                    .await;
+                            }
+                            continue;
+                        }
                         let last_timestamp = run
                             .last()
                             .map(|admission| message_timestamp(&admission.message));
@@ -900,7 +769,6 @@ impl RelayProcessorNode {
                         };
                         let changed = flush_ready_window_processor(
                             WindowFlushContext {
-                                graph,
                                 node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
@@ -928,36 +796,21 @@ impl RelayProcessorNode {
                 }
                 RelayProcessorOperationNode::Reorderer {
                     output_routes,
-                    order_by,
+                    order_by: _,
                     max_time: _,
                     compiled_program,
                     output_buffers,
                     arrival_sequence,
                 } => {
-                    if compiled_program.is_none() {
-                        let udfs = branch.runtime.udf_executor(&branch.domain);
-                        match compile_reorderer_program(
-                            &self.processor,
-                            &self.input_relays,
-                            order_by,
-                            batch.arrow_schema(),
-                            udfs.as_ref(),
-                        ) {
-                            Ok(program) => *compiled_program = Some(Box::new(program)),
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    batch.acks.iter(),
-                                    error.to_string(),
-                                );
-                                return;
-                            }
-                        }
-                    }
                     let Some(program) = compiled_program.as_ref() else {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind,
+                            &self.processor,
+                            &self.error_policies,
+                            batch.acks.iter(),
+                            "reorderer has no prepared ordering program".to_string(),
+                        );
                         return;
                     };
                     let lookup_columns = HashMap::default();
@@ -1123,13 +976,11 @@ impl RelayProcessorNode {
                     for output_index in due_outputs {
                         flush_branch_reorderer_output(
                             ReordererFlushContext {
-                                graph,
                                 branch,
                                 node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
-                                input_relays: &self.input_relays,
                                 materialized_state: &self.materialized_state,
                                 execution_now,
                             },
@@ -1143,7 +994,7 @@ impl RelayProcessorNode {
                     output_routes,
                     left_relays,
                     right_relays,
-                    correlate_where,
+                    correlate_where: _,
                     match_policy,
                     max_time: _,
                     timeout_policy: _,
@@ -1170,103 +1021,15 @@ impl RelayProcessorNode {
                         );
                         return;
                     };
-                    if compiled_where_program.is_none() {
-                        let Some(left_relay) = left_relays.first() else {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                batch.acks.iter(),
-                                format!(
-                                    "correlator '{}' has no LEFT input relays",
-                                    self.processor.as_str()
-                                ),
-                            );
-                            return;
-                        };
-                        let Some(right_relay) = right_relays.first() else {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                batch.acks.iter(),
-                                format!(
-                                    "correlator '{}' has no RIGHT input relays",
-                                    self.processor.as_str()
-                                ),
-                            );
-                            return;
-                        };
-                        let routing = match branch.domain_routing() {
-                            Ok(routing) => routing,
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    batch.acks.iter(),
-                                    error.to_string(),
-                                );
-                                return;
-                            }
-                        };
-                        let left_schema =
-                            match relay_schema_for_routing(routing, &branch.domain, left_relay) {
-                                Ok(schema) => schema,
-                                Err(error) => {
-                                    branch.runtime.handle_internal_processor_error_for_acks(
-                                        &branch.domain,
-                                        self.kind,
-                                        &self.processor,
-                                        &self.error_policies,
-                                        batch.acks.iter(),
-                                        error.to_string(),
-                                    );
-                                    return;
-                                }
-                            };
-                        let right_schema =
-                            match relay_schema_for_routing(routing, &branch.domain, right_relay) {
-                                Ok(schema) => schema,
-                                Err(error) => {
-                                    branch.runtime.handle_internal_processor_error_for_acks(
-                                        &branch.domain,
-                                        self.kind,
-                                        &self.processor,
-                                        &self.error_policies,
-                                        batch.acks.iter(),
-                                        error.to_string(),
-                                    );
-                                    return;
-                                }
-                            };
-                        match compile_correlator_where_program(
-                            &self.processor,
-                            correlate_where,
-                            left_relays,
-                            left_schema.arrow_schema(),
-                            right_relays,
-                            right_schema.arrow_schema(),
-                            branch.runtime.udf_executor(&branch.domain).as_ref(),
-                        ) {
-                            Ok(program) => *compiled_where_program = Some(Box::new(program)),
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    batch.acks.iter(),
-                                    format!("{error:#}"),
-                                );
-                                return;
-                            }
-                        }
-                    }
                     let Some(where_program) = compiled_where_program.as_ref() else {
+                        branch.runtime.handle_internal_processor_error_for_acks(
+                            &branch.domain,
+                            self.kind,
+                            &self.processor,
+                            &self.error_policies,
+                            batch.acks.iter(),
+                            "correlator has no prepared match program".to_string(),
+                        );
                         return;
                     };
                     let messages = match batch.clone().try_into_messages() {
@@ -1347,151 +1110,6 @@ impl RelayProcessorNode {
                         );
                         return;
                     }
-                    let Some(left_relay) = left_relays.first() else {
-                        return;
-                    };
-                    let Some(right_relay) = right_relays.first() else {
-                        return;
-                    };
-                    let routing = match branch.domain_routing() {
-                        Ok(routing) => routing,
-                        Err(error) => {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                correlations.iter().flat_map(|(left, right)| {
-                                    [&left.message.acks, &right.message.acks]
-                                }),
-                                error.to_string(),
-                            );
-                            return;
-                        }
-                    };
-                    let left_schema =
-                        match relay_schema_for_routing(routing, &branch.domain, left_relay) {
-                            Ok(schema) => schema,
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    correlations.iter().flat_map(|(left, right)| {
-                                        [&left.message.acks, &right.message.acks]
-                                    }),
-                                    error.to_string(),
-                                );
-                                return;
-                            }
-                        };
-                    let right_schema =
-                        match relay_schema_for_routing(routing, &branch.domain, right_relay) {
-                            Ok(schema) => schema,
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    correlations.iter().flat_map(|(left, right)| {
-                                        [&left.message.acks, &right.message.acks]
-                                    }),
-                                    error.to_string(),
-                                );
-                                return;
-                            }
-                        };
-                    let current_branching = routing
-                        .relay_branchings
-                        .get(left_relay)
-                        .cloned()
-                        .assured("the validated correlator input relay has branch routing");
-                    for (output_index, compiled_output_program) in compiled_output_programs
-                        .iter_mut()
-                        .enumerate()
-                        .take(output_routes.routes.len())
-                    {
-                        if compiled_output_program.is_some() {
-                            continue;
-                        }
-                        let output = &output_routes.routes[output_index];
-                        if output.construction.assignments.is_empty() {
-                            branch.runtime.handle_internal_processor_error_for_acks(
-                                &branch.domain,
-                                self.kind,
-                                &self.processor,
-                                &self.error_policies,
-                                correlations.iter().flat_map(|(left, right)| {
-                                    [&left.message.acks, &right.message.acks]
-                                }),
-                                format!(
-                                    "correlator '{}' TO output '{}' has no SET assignments",
-                                    self.processor.as_str(),
-                                    output.relay.as_str()
-                                ),
-                            );
-                            return;
-                        }
-                        let output_schema = match relay_schema_for_routing(
-                            routing,
-                            &branch.domain,
-                            &output.relay,
-                        ) {
-                            Ok(schema) => schema,
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    correlations.iter().flat_map(|(left, right)| {
-                                        [&left.message.acks, &right.message.acks]
-                                    }),
-                                    error.to_string(),
-                                );
-                                return;
-                            }
-                        };
-                        let compiled = CorrelatorOutputCompileContext {
-                            processor: &self.processor,
-                            left_schema: left_schema.arrow_schema(),
-                            left_sensitivity: left_schema.vm_sensitivity(),
-                            right_schema: right_schema.arrow_schema(),
-                            right_sensitivity: right_schema.vm_sensitivity(),
-                            output_relay: &output.relay,
-                            output_schema: output_schema.arrow_schema(),
-                            output_sensitivity: output_schema.vm_sensitivity(),
-                            construction: &output.construction,
-                            runtime: RuntimeVmCompileContext {
-                                available_materialized_streams: &routing.materialized_stream_specs,
-                                available_lookups: &routing.lookups,
-                                current_branching: &current_branching,
-                                udfs: Some(&routing.udfs),
-                            },
-                        }
-                        .compile();
-                        match compiled {
-                            Ok(program) => {
-                                *compiled_output_program = Some(Box::new(program));
-                            }
-                            Err(error) => {
-                                branch.runtime.handle_internal_processor_error_for_acks(
-                                    &branch.domain,
-                                    self.kind,
-                                    &self.processor,
-                                    &self.error_policies,
-                                    correlations.iter().flat_map(|(left, right)| {
-                                        [&left.message.acks, &right.message.acks]
-                                    }),
-                                    format!("{error:#}"),
-                                );
-                                return;
-                            }
-                        }
-                    }
-
                     let output_count = output_routes.routes.len();
                     let Some(output_programs) = compiled_output_programs
                         .iter()
@@ -1610,7 +1228,6 @@ impl RelayProcessorNode {
                         }
                         enqueue_correlator_output(
                             CorrelatorOutputContext {
-                                graph,
                                 branch,
                                 node_kind: self.kind,
                                 processor: &self.processor,
@@ -1627,12 +1244,10 @@ impl RelayProcessorNode {
                 RelayProcessorOperationNode::Junction { output_routes } => {
                     flush_branch_junction(
                         JunctionFlushContext {
-                            graph,
                             branch,
                             node_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
-                            input_relays: &self.input_relays,
                             output_routes,
                             materialized_values: &materialized_values,
                             execution_now,
@@ -1741,7 +1356,6 @@ impl RelayProcessorNode {
                     for output_index in due_outputs {
                         flush_branch_inferencer_output(
                             InferencerFlushContext {
-                                graph,
                                 branch,
                                 node_kind: self.kind,
                                 processor: &self.processor,
@@ -1753,7 +1367,6 @@ impl RelayProcessorNode {
                                 inputs,
                                 output_schema,
                                 compiled_input_program,
-                                input_relays: &self.input_relays,
                                 session,
                                 materialized_state: &self.materialized_state,
                                 execution_now,
@@ -1782,7 +1395,6 @@ impl RelayProcessorNode {
                     pending.push(batch);
                     flush_branch_wasm_processor(
                         WasmFlushContext {
-                            graph,
                             branch,
                             node_kind: self.kind,
                             processor: &self.processor,
@@ -1812,24 +1424,19 @@ impl RelayProcessorNode {
 
     pub(super) fn tick<'a>(
         &'a mut self,
-        graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
         snapshot: &'a DomainExecutionSnapshot,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             let now = snapshot.now();
-            self.flush_due_collected_inputs(graph, branch, snapshot)
-                .await;
+            self.flush_due_collected_inputs(branch, snapshot).await;
             flush_due_processor_outputs(
                 ProcessorOutputDispatchContext {
-                    graph,
                     branch,
                     node_kind: self.kind,
                     source_kind: self.kind,
                     processor: &self.processor,
                     error_policies: &self.error_policies,
-                    input_relays: &self.input_relays,
-                    filter_source: ProcessorOutputFilterSource::InputRelays,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
                         &self.materialized_state,
                     ),
@@ -1856,7 +1463,6 @@ impl RelayProcessorNode {
                 } => {
                     let changed = flush_ready_window_processor(
                         WindowFlushContext {
-                            graph,
                             node_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
@@ -1928,13 +1534,11 @@ impl RelayProcessorNode {
                     for output_index in due_outputs {
                         flush_branch_reorderer_output(
                             ReordererFlushContext {
-                                graph,
                                 branch,
                                 node_kind: self.kind,
                                 processor: &self.processor,
                                 error_policies: &self.error_policies,
                                 output_routes,
-                                input_relays: &self.input_relays,
                                 materialized_state: &self.materialized_state,
                                 execution_now: now,
                             },
@@ -1982,7 +1586,6 @@ impl RelayProcessorNode {
                     for (action, message) in timed_out {
                         handle_correlator_timeout_action(
                             CorrelatorTimeoutContext {
-                                graph,
                                 branch,
                                 node_kind: self.kind,
                                 processor: &self.processor,
@@ -2039,7 +1642,6 @@ impl RelayProcessorNode {
                     for output_index in due_outputs {
                         flush_branch_inferencer_output(
                             InferencerFlushContext {
-                                graph,
                                 branch,
                                 node_kind: self.kind,
                                 processor: &self.processor,
@@ -2051,7 +1653,6 @@ impl RelayProcessorNode {
                                 inputs,
                                 output_schema,
                                 compiled_input_program,
-                                input_relays: &self.input_relays,
                                 session,
                                 materialized_state: &self.materialized_state,
                                 execution_now: now,
@@ -2135,13 +1736,11 @@ impl RelayProcessorNode {
                             Ok(outputs) => {
                                 let dispatch = dispatch_wasm_output_envelopes(
                                     WasmOutputContext {
-                                        graph,
                                         branch: &mut *branch,
                                         node_kind: self.kind,
                                         processor: &self.processor,
                                         error_policies: &self.error_policies,
                                         output_routes: &mut *output_routes,
-                                        input_relays: &self.input_relays,
                                         input_schema: &schemas.input,
                                         output_schemas: &schemas.outputs,
                                         key: &output_key,
@@ -2200,7 +1799,6 @@ impl RelayProcessorNode {
 
     pub(super) fn flush_route_buffers<'a>(
         &'a mut self,
-        graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
         execution_now: Timestamp,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
@@ -2208,18 +1806,14 @@ impl RelayProcessorNode {
             let node_kind = self.kind;
             let processor = &self.processor;
             let error_policies = &self.error_policies;
-            let input_relays = &self.input_relays;
             let materialized_state = &self.materialized_state;
             flush_all_processor_outputs(
                 ProcessorOutputDispatchContext {
-                    graph,
                     branch,
                     node_kind,
                     source_kind: node_kind,
                     processor,
                     error_policies,
-                    input_relays,
-                    filter_source: ProcessorOutputFilterSource::InputRelays,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
                         materialized_state,
                     ),
@@ -2239,7 +1833,6 @@ impl RelayProcessorNode {
     /// branch has drained.
     pub(super) fn flush_guest_buffers<'a>(
         &'a mut self,
-        graph: &'a SharedActiveGraph,
         branch: &'a mut BranchRuntime,
         execution_now: Timestamp,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
@@ -2304,13 +1897,11 @@ impl RelayProcessorNode {
                     let output_key = branch.key.clone();
                     let dispatch = dispatch_wasm_output_envelopes(
                         WasmOutputContext {
-                            graph,
                             branch: &mut *branch,
                             node_kind: self.kind,
                             processor: &self.processor,
                             error_policies: &self.error_policies,
                             output_routes,
-                            input_relays: &self.input_relays,
                             input_schema: &schemas.input,
                             output_schemas: &schemas.outputs,
                             key: &output_key,

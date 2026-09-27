@@ -35,16 +35,19 @@ const PCT_ITERATIONS: usize = 1_000;
 const PCT_DEPTH: usize = 3;
 
 /// Explores `invariant` under Shuttle's random scheduler and then under its PCT scheduler.
-fn explore(invariant: fn()) {
-    check_random(invariant, RANDOM_ITERATIONS);
+fn explore<F>(invariant: F)
+where
+    F: Fn() + Clone + Send + Sync + 'static,
+{
+    check_random(invariant.clone(), RANDOM_ITERATIONS);
     check_pct(invariant, PCT_ITERATIONS, PCT_DEPTH);
 }
 
 /// A fence deadline no check outlives, so only a release ends the engagement.
-fn far_future_deadline() -> Instant {
-    Instant::now()
+fn far_future_deadline(anchor: Instant) -> Instant {
+    anchor
         .checked_add(Duration::from_secs(86_400))
-        .assured("the monotonic clock represents one day past its current reading")
+        .assured("the monotonic clock represents one day past the check's anchor")
 }
 
 /// What the gate check tasks hold. A task raises a record after the gate grants what it records
@@ -105,8 +108,9 @@ async fn fence_until_released(
     gate: Arc<RelayDispatchGate>,
     records: Arc<GateRecords>,
     release: oneshot::Receiver<()>,
+    deadline: Instant,
 ) {
-    let mut lease = RelayDispatchGateLease::engage(gate, far_future_deadline(), "shuttle fence");
+    let mut lease = RelayDispatchGateLease::engage(gate, deadline, "shuttle fence");
     assert!(
         lease.wait_quiescent().await,
         "a far-future fence completes once every earlier dispatch drops its permit"
@@ -137,7 +141,7 @@ async fn observe_close_then_open(gate: Arc<RelayDispatchGate>, closed: oneshot::
     );
 }
 
-fn dispatch_permits_never_overlap_a_quiescent_lease() {
+fn dispatch_permits_never_overlap_a_quiescent_lease(deadline: Instant) {
     shuttle::future::block_on(async {
         let gate = Arc::new(RelayDispatchGate::new());
         let records = Arc::new(GateRecords::default());
@@ -150,6 +154,7 @@ fn dispatch_permits_never_overlap_a_quiescent_lease() {
             gate.clone(),
             records.clone(),
             closed_is_reported,
+            deadline,
         ));
 
         first_dispatcher
@@ -176,7 +181,8 @@ fn dispatch_permits_never_overlap_a_quiescent_lease() {
 
 #[test]
 fn shuttle_dispatch_permits_never_overlap_a_quiescent_lease_and_release_frees_every_waiter() {
-    explore(dispatch_permits_never_overlap_a_quiescent_lease);
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || dispatch_permits_never_overlap_a_quiescent_lease(deadline));
 }
 
 /// The signals one of two overlapping fences exchanges with the other.
@@ -191,9 +197,9 @@ async fn fence_overlapping_another(
     gate: Arc<RelayDispatchGate>,
     records: Arc<GateRecords>,
     handshake: FenceHandshake,
+    deadline: Instant,
 ) {
-    let mut lease =
-        RelayDispatchGateLease::engage(gate, far_future_deadline(), "shuttle overlapping fence");
+    let mut lease = RelayDispatchGateLease::engage(gate, deadline, "shuttle overlapping fence");
     assert!(
         lease.wait_quiescent().await,
         "a far-future fence completes once every earlier dispatch drops its permit"
@@ -212,7 +218,7 @@ async fn fence_overlapping_another(
     drop(lease);
 }
 
-fn overlapping_leases_all_release_before_dispatch_resumes() {
+fn overlapping_leases_all_release_before_dispatch_resumes(deadline: Instant) {
     shuttle::future::block_on(async {
         let gate = Arc::new(RelayDispatchGate::new());
         let records = Arc::new(GateRecords::default());
@@ -228,6 +234,7 @@ fn overlapping_leases_all_release_before_dispatch_resumes() {
                 completed: first_completed,
                 other_completed: second_is_completed,
             },
+            deadline,
         ));
         let second_fence = tokio::spawn(fence_overlapping_another(
             gate.clone(),
@@ -236,6 +243,7 @@ fn overlapping_leases_all_release_before_dispatch_resumes() {
                 completed: second_completed,
                 other_completed: first_is_completed,
             },
+            deadline,
         ));
 
         first_dispatcher
@@ -262,7 +270,8 @@ fn overlapping_leases_all_release_before_dispatch_resumes() {
 
 #[test]
 fn shuttle_overlapping_gate_leases_all_release_before_dispatch_resumes() {
-    explore(overlapping_leases_all_release_before_dispatch_resumes);
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || overlapping_leases_all_release_before_dispatch_resumes(deadline));
 }
 
 /// Marks a task whose gate deadline timeouts the check may fire. Shuttle does not model time, so a
@@ -281,7 +290,7 @@ async fn expect_expired_fence(mut lease: RelayDispatchGateLease) {
     );
 }
 
-fn expired_fence_releases_every_waiter_without_reporting_quiescence() {
+fn expired_fence_releases_every_waiter_without_reporting_quiescence(expired_deadline: Instant) {
     // Timeout triggers are thread-local rather than per execution, so every execution starts
     // without the trigger an earlier one registered.
     tokio::time::clear_triggers();
@@ -290,7 +299,6 @@ fn expired_fence_releases_every_waiter_without_reporting_quiescence() {
         let earlier_permit = gate.acquire_dispatch().await;
         // Every later comparison finds this deadline reached, so the engagement expires as soon as
         // a gate operation inspects it, and its fence never waits for the earlier permit.
-        let expired_deadline = Instant::now();
         let lease =
             RelayDispatchGateLease::engage(gate.clone(), expired_deadline, "shuttle expired fence");
 
@@ -350,10 +358,13 @@ fn expired_fence_releases_every_waiter_without_reporting_quiescence() {
 
 #[test]
 fn shuttle_expired_gate_fence_frees_every_waiter_without_reporting_quiescence() {
-    explore(expired_fence_releases_every_waiter_without_reporting_quiescence);
+    let expired_deadline = Instant::now();
+    explore(move || {
+        expired_fence_releases_every_waiter_without_reporting_quiescence(expired_deadline)
+    });
 }
 
-fn canceled_dispatch_releases_its_fence_permit() {
+fn canceled_dispatch_releases_its_fence_permit(deadline: Instant) {
     shuttle::future::block_on(async {
         let gate = Arc::new(RelayDispatchGate::new());
         let dispatcher = tokio::spawn({
@@ -366,8 +377,7 @@ fn canceled_dispatch_releases_its_fence_permit() {
         let fence = tokio::spawn({
             let gate = gate.clone();
             async move {
-                let mut lease =
-                    RelayDispatchGateLease::engage(gate, far_future_deadline(), "shuttle fence");
+                let mut lease = RelayDispatchGateLease::engage(gate, deadline, "shuttle fence");
                 assert!(
                     lease.wait_quiescent().await,
                     "canceling a dispatch returns its permit to a far-future fence"
@@ -399,7 +409,8 @@ fn canceled_dispatch_releases_its_fence_permit() {
 
 #[test]
 fn shuttle_canceled_dispatch_returns_its_permit_to_the_gate_fence() {
-    explore(canceled_dispatch_releases_its_fence_permit);
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || canceled_dispatch_releases_its_fence_permit(deadline));
 }
 
 /// The wake-ups a future receives from other tasks, as distinct from the ones it schedules for
@@ -457,13 +468,12 @@ async fn dispatch_once(gate: Arc<RelayDispatchGate>) {
     drop(permit);
 }
 
-fn dispatches_parked_behind_a_lease_wake_only_on_its_release() {
+fn dispatches_parked_behind_a_lease_wake_only_on_its_release(deadline: Instant) {
     const LEASE_HOLD_YIELDS: usize = 4;
 
     shuttle::future::block_on(async {
         let gate = Arc::new(RelayDispatchGate::new());
-        let mut lease =
-            RelayDispatchGateLease::engage(gate.clone(), far_future_deadline(), "shuttle fence");
+        let mut lease = RelayDispatchGateLease::engage(gate.clone(), deadline, "shuttle fence");
         assert!(
             lease.wait_quiescent().await,
             "no dispatch holds a permit before the check starts"
@@ -515,7 +525,8 @@ fn dispatches_parked_behind_a_lease_wake_only_on_its_release() {
 
 #[test]
 fn shuttle_dispatches_parked_behind_a_lease_wake_only_on_its_release() {
-    explore(dispatches_parked_behind_a_lease_wake_only_on_its_release);
+    let deadline = far_future_deadline(Instant::now());
+    explore(move || dispatches_parked_behind_a_lease_wake_only_on_its_release(deadline));
 }
 
 fn capacity(value: usize) -> NonZeroUsize {

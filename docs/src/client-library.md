@@ -14,6 +14,19 @@ Capabilities:
 - `Client::upload_resource_from_directory(...)`
 - `Client::next_server_event()`, `Client::next_domain_list()` and `Client::leadership()`
 - `Client::suggest(...)` behind the `autocomplete` feature
+- `Client::lookup_choices(...)`
+
+Suggestion pages report `Ready`, `MissingContext`, `StaleContext`, or `LookupFailed`. Every
+candidate carries a UTF-8 byte text edit against the full input and a continuation requests the
+next bounded page. The shared C binding exposes the same result through `nx_session_suggest`,
+`nx_suggestions_at`, and `nx_suggestions_continuation`; its header is
+`crates/client-ffi/include/nervix_client.h`.
+
+Structured choice pages carry typed enum variants or domain, resource, and model references beside
+separate presentation metadata. The request includes typed dependencies, search, and a
+revision-fenced page cursor. `Client::lookup_choices(...)` retries this read-only request across a
+session reconnect and returns its `Ready`, `MissingContext`, `StaleContext`, or `LookupFailed`
+status without interpreting labels.
 
 Every outcome carries a typed `CommandDisposition`: `Completed`, `Failed`, `NotLeader` with the
 leader's endpoints when discovery knows them, `TransactionDetached`, `TransactionTakenOver`,
@@ -133,6 +146,10 @@ latest structured status so an interactive caller can render `Open` and `Committ
 
 ## Inspecting A Transaction
 
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines the report's
+operation contributions, effective step scopes, actual engagement, and retained topology. This
+section describes how the Rust client receives it and fences a later commit.
+
 `DESCRIBE TRANSACTION` answers twice: rendered in the outcome's `message`, as `TEXT` by default or as
 one JSON document with `FORMAT JSON`, and typed in `CommandOutcome::inspection`. The typed
 `TransactionInspection` holds the inspected transaction's status, the selected operation if the
@@ -149,8 +166,38 @@ if let Some(inspection) = &described.inspection {
 }
 ```
 
+The rendered message and `CommandOutcome::inspection` describe the same complete value. The server
+does not paginate or truncate a large report, so callers that inspect transactions with many
+operations or large affected graphs should budget for one response proportional to the expanded
+report. A successful result always includes all operations, execution steps, topology, and recorded
+outcomes.
+
 `CommandOutcome::transaction` keeps describing this session's own binding, so inspecting another
 transaction by id changes neither `transaction_status()` nor the selected domain. An inspection
 consumes no queue position: the next queued statement receives the operation number it would have
-had, and the preview the client fences `COMMIT` with stays the one its last accepted append
-reported. A refused inspection is an unsuccessful outcome whose message names why nothing was read.
+had. An inspection of the attached transaction refreshes the identified preview used by `COMMIT`
+only when its report covers the attached transaction's current accepted-operation position.
+Inspecting another transaction, or receiving an older position, cannot replace that preview. A
+stale-preview refusal leaves the previously reviewed basis in place; inspect the attached
+transaction again before retrying `COMMIT`. A refused inspection is an unsuccessful outcome whose
+message names why nothing was read.
+
+`DESCRIBE RESOURCE <name>` is typed the same way: `CommandOutcome::resource` holds the
+`ResourceDescription` beside the printed text, with the highest completed version as an `Option`,
+every published version with its entries under their exact paths, and the models bound to each
+version.
+
+`DESCRIBE WASM PROCESSOR <name>` is typed too: `CommandOutcome::wasm_state` holds the
+`WasmStateInspection` beside the text or JSON rendering, with the pinned module binding, the default
+guest-state generation, the latest reset with its request reference, scope, phase, and reason, the
+recorded rejected-state recoveries, and each current branch's checkpoint stage, revisions, and
+replica counts under its opaque fingerprint. `RESET WASM PROCESSOR ... STATE` is an ordinary
+command: its success arrives only once the new lifetime is usable, and a retry the client makes
+after an uncertain outcome reuses the same `execution_reference`, so it recovers the original
+reset's outcome rather than starting another. See
+[WASM State And Recovery](./wasm-state.md#observability).
+
+`Client::inspect_transaction(target, operation)` also returns the typed `InspectionOutcome` from
+the API. It follows leader redirects and reconnects with the session client's normal request-ID
+dispatch. A successful read of the attached transaction refreshes the same commit preview; a
+rejected read changes no binding or preview.

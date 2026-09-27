@@ -16,8 +16,10 @@ use nervix_interconnect::{
 use nervix_models::{
     CommandExecutionReference, DomainName, DomainStatus, ModelKind, ModelName, NodeRef,
     WasmRejectedStatePolicy, WasmSavedStateRejection, WasmStateGeneration,
-    WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateResetScope,
+    WasmStateRecoveryAdmission, WasmStateRecoveryOutcome, WasmStateResetReason,
+    WasmStateResetScope,
 };
+use tracing::info;
 
 use super::{AppError, session_service::SessionServiceImpl};
 use crate::runtime::{Runtime, WasmStateRecoveryRequest};
@@ -246,7 +248,14 @@ impl SessionServiceImpl {
         };
 
         let reset = self
-            .reset_wasm_processor_state(domain, processor, request.clone(), target, None)
+            .reset_wasm_processor_state(
+                domain,
+                processor,
+                request.clone(),
+                target,
+                WasmStateResetReason::RejectedSnapshot,
+                None,
+            )
             .await
             .change_context_lazy(|| WasmStateRecoveryError::Reset {
                 processor: processor.clone(),
@@ -388,6 +397,14 @@ impl SessionServiceImpl {
             .replace_domain_schedule(inputs, Some(schedule), None)
             .await
             .change_context_lazy(record)?;
+        info!(
+            domain = domain.as_str(),
+            processor = processor.as_str(),
+            scope = scope.kind(),
+            %generation,
+            %rejection,
+            "WASM rejected-state recovery admitted"
+        );
         Ok(admission)
     }
 
@@ -423,6 +440,14 @@ impl SessionServiceImpl {
             .consensus
             .replace_domain_schedule(inputs, Some(schedule), None)
             .await
-            .change_context_lazy(record)
+            .change_context_lazy(record)?;
+        info!(
+            domain = domain.as_str(),
+            processor = processor.as_str(),
+            scope = scope.kind(),
+            %outcome,
+            "WASM rejected-state recovery settled"
+        );
+        Ok(())
     }
 }

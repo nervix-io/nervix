@@ -11,8 +11,8 @@
 //!   transfers, events and rows the schema describes, the text every client displays a row as,
 //!   the session limits, and how frames travel over gRPC and WebSocket messages.
 //! - **Depends on.** `flatbuffers`, the vocabulary for names, timestamps, schema fields, the
-//!   transaction impact report and the status, inspection envelope and preview identity a session
-//!   exchanges, `serde_json` to write a row's display text, and tonic's codec traits for the gRPC
+//!   transaction impact report, the resource description and the status, inspection envelope and
+//!   preview identity a session exchanges, `serde_json` to write a row's display text, and tonic's codec traits for the gRPC
 //!   transport.
 //! - **Must not know.** The server's registry, runtime or consensus, the parser, Arrow, or any
 //!   client's dispatch, reconnection or subscription state.
@@ -21,6 +21,7 @@ include!(concat!(env!("OUT_DIR"), "/flatbuffers/session_module.rs"));
 
 use generated::nervix::session as wire;
 
+mod choice;
 mod codec;
 mod command;
 mod common;
@@ -33,6 +34,7 @@ mod impact;
 mod limits;
 mod reply;
 mod request;
+mod resource;
 mod row;
 mod row_text;
 mod server;
@@ -42,6 +44,10 @@ mod transfer;
 mod upload;
 pub mod websocket;
 
+pub use choice::{
+    Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
+    ChoiceTarget, ChoiceValue, DomainPaceChoice,
+};
 pub use codec::{WireDecodeError, WireEncodeError};
 pub use command::{
     AttachDisposition, AttachOutcome, CommandDisposition, CommandOutcome,
@@ -66,7 +72,8 @@ pub use limits::{LimitsError, SessionLimitSettings, SessionLimits};
 pub use reply::{
     CancelOutcome, CancelState, CancellationStage, InspectionOutcome, RequestCancelled,
     RequestRejected, RequestRejection, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
-    SuggestOutcome, Suggestion, SuggestionKind, UnsubscribeDisposition, UnsubscribeOutcome,
+    SuggestOutcome, Suggestion, SuggestionKind, SuggestionStatus, TextEdit, UnsubscribeDisposition,
+    UnsubscribeOutcome,
 };
 pub use request::{
     AttachTransactionRequest, CancelRequest, ClientMessage, ClientRequest, CommandRequest,

@@ -30,7 +30,7 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkRecordPosition, SinkStartError, SinkStartResult, client_config_value,
+    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
     client_tls_paths, optional_client_config_value, read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, Timestamp};
@@ -95,7 +95,7 @@ type SqsRecordResult<T> = Result<T, Report<SqsRecordError>>;
 
 #[derive(Debug)]
 struct PreparedSqsRecord {
-    position: SinkRecordPosition,
+    record: SinkRecordId,
     occurred_at: Timestamp,
     body: String,
     attributes: HashMap<String, MessageAttributeValue>,
@@ -109,7 +109,7 @@ impl PreparedSqsRecord {
             "every term counts bytes of a record this node already holds in memory";
 
         let SinkRecord {
-            position,
+            id: record,
             key: _,
             payload,
             headers,
@@ -180,7 +180,7 @@ impl PreparedSqsRecord {
             }));
         }
         Ok(Self {
-            position,
+            record,
             occurred_at,
             body,
             attributes,
@@ -189,8 +189,8 @@ impl PreparedSqsRecord {
         })
     }
 
-    fn rejected(&self, reason: String) -> RejectedSinkRecord {
-        RejectedSinkRecord::external(self.position, self.occurred_at, reason)
+    fn rejected(&self, reason: String) -> RejectedSinkRecord<SinkRecordId> {
+        RejectedSinkRecord::external(self.record, self.occurred_at, reason)
     }
 }
 
@@ -311,7 +311,7 @@ impl SqsSink {
     async fn publish_single(
         &self,
         records: Vec<PreparedSqsRecord>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         for record in records {
             tokio::task::consume_budget().await;
@@ -328,7 +328,7 @@ impl SqsSink {
                 request = request.message_group_id(group_id);
             }
             match request.send().await {
-                Ok(_) => outcome.deliver(record.position),
+                Ok(_) => outcome.deliver(record.record),
                 Err(error)
                     if error
                         .as_service_error()
@@ -349,7 +349,7 @@ impl SqsSink {
     async fn publish_batches(
         &self,
         records: Vec<PreparedSqsRecord>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         for records in Self::batch_chunks(records) {
             tokio::task::consume_budget().await;
@@ -431,7 +431,7 @@ impl SqsSink {
     fn apply_batch_response(
         records: &[PreparedSqsRecord],
         response: &aws_sdk_sqs::operation::send_message_batch::SendMessageBatchOutput,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) -> Option<String> {
         let mut accounted = vec![false; records.len()];
         let mut infrastructure_reasons = Vec::new();
@@ -439,7 +439,7 @@ impl SqsSink {
             match Self::batch_entry_index(success.id(), records.len()) {
                 Some(index) if !accounted[index] => {
                     accounted[index] = true;
-                    outcome.deliver(records[index].position);
+                    outcome.deliver(records[index].record);
                 }
                 Some(index) => infrastructure_reasons.push(format!(
                     "SQS returned duplicate result for batch entry {}",
@@ -631,17 +631,17 @@ impl SinkLifecycle for SqsSink {}
 
 #[async_trait]
 impl RecordSink for SqsSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut prepared = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
+            let record_id = record.id;
             let occurred_at = record.occurred_at;
             match PreparedSqsRecord::new(record) {
                 Ok(record) => prepared.push(record),
                 Err(error) => outcome.reject(RejectedSinkRecord::external(
-                    position,
+                    record_id,
                     occurred_at,
                     error.to_string(),
                 )),
@@ -672,12 +672,9 @@ mod tests {
         ]
     }
 
-    fn record(row_index: usize, payload: Vec<u8>) -> SinkRecord {
+    fn record(index: usize, payload: Vec<u8>) -> SinkRecord {
         SinkRecord::new(
-            SinkRecordPosition {
-                batch_index: 0,
-                row_index,
-            },
+            SinkRecordId::new(index),
             None,
             payload,
             Vec::new(),
@@ -690,13 +687,13 @@ mod tests {
             .expect("test SQS record should be valid")
     }
 
-    fn prepared_in_row(row_index: usize, payload_bytes: usize) -> PreparedSqsRecord {
-        PreparedSqsRecord::new(record(row_index, vec![b'x'; payload_bytes]))
+    fn prepared_as(index: usize, payload_bytes: usize) -> PreparedSqsRecord {
+        PreparedSqsRecord::new(record(index, vec![b'x'; payload_bytes]))
             .expect("test SQS record should be valid")
     }
 
-    fn prepared_in_group(row_index: usize, group: &str) -> PreparedSqsRecord {
-        PreparedSqsRecord::new(record(row_index, vec![b'x']).with_message_group(group.to_string()))
+    fn prepared_in_group(index: usize, group: &str) -> PreparedSqsRecord {
+        PreparedSqsRecord::new(record(index, vec![b'x']).with_message_group(group.to_string()))
             .expect("test SQS FIFO record should be valid")
     }
 
@@ -851,24 +848,24 @@ mod tests {
     #[test]
     fn batch_chunks_respect_entry_and_byte_limits_without_reordering() {
         let mut records = (0..11)
-            .map(|row| prepared_in_row(row, 1))
+            .map(|index| prepared_as(index, 1))
             .collect::<Vec<_>>();
         records.push(prepared(SQS_MAX_REQUEST_BYTES));
         records.push(prepared(2));
 
         let chunks = SqsSink::batch_chunks(records);
-        let positions = chunks
+        let records = chunks
             .iter()
             .flatten()
-            .map(|record| record.position)
+            .map(|record| record.record)
             .collect::<Vec<_>>();
 
         assert_eq!(
             chunks.iter().map(Vec::len).collect::<Vec<_>>(),
             [10, 1, 1, 1]
         );
-        assert_eq!(positions[0].row_index, 0);
-        assert_eq!(positions[10].row_index, 10);
+        assert_eq!(records[0], SinkRecordId::new(0));
+        assert_eq!(records[10], SinkRecordId::new(10));
     }
 
     #[test]
@@ -881,17 +878,17 @@ mod tests {
         ];
 
         let chunks = SqsSink::batch_chunks(records);
-        let rows = chunks
+        let records = chunks
             .iter()
             .map(|chunk| {
                 chunk
                     .iter()
-                    .map(|record| record.position.row_index)
+                    .map(|record| record.record.index())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(rows, [vec![0, 1], vec![2, 3]]);
+        assert_eq!(records, [vec![0, 1], vec![2, 3]]);
     }
 
     #[test]

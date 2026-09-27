@@ -24,12 +24,13 @@ use url::Url;
 
 use super::fixtures::{name, non_zero, operation, reference, request};
 use crate::{
-    AttachTransactionRequest, CancelRequest, CellWriter, ClientMessage, ClientRequest,
-    CommandDisposition, CommandOutcome, CommandRequest, Diagnostic, EncodedFrame,
-    InspectTransactionRequest, LeaderEndpoints, LeaderRedirect, OutcomeOrigin, RowBranch,
-    RowSchema, SelectDomainRequest, ServerFrame, SessionLimits, SourceSpan, StatementDisposition,
-    StatementOutcome, SubscribeRequest, SubscriptionHandle, SubscriptionRowsEncoder,
-    SubscriptionType, SuggestRequest, UnsubscribeRequest, WireEncodeError,
+    AttachTransactionRequest, CancelRequest, CellWriter, ChoiceLookupRequest, ChoiceSelection,
+    ChoiceTarget, ChoiceValue, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
+    CommandRequest, Diagnostic, EncodedFrame, InspectTransactionRequest, LeaderEndpoints,
+    LeaderRedirect, OutcomeOrigin, RowBranch, RowSchema, SelectDomainRequest, ServerFrame,
+    SessionLimits, SourceSpan, StatementDisposition, StatementOutcome, SubscribeRequest,
+    SubscriptionHandle, SubscriptionRowsEncoder, SubscriptionType, SuggestRequest,
+    UnsubscribeRequest, WireEncodeError,
 };
 
 pub(crate) fn leader() -> LeaderEndpoints {
@@ -108,7 +109,9 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
                 13,
                 Some(name("tenant")),
             )
-            .assured("byte 13 starts a character"),
+            .assured("byte 13 starts a character")
+            .with_page(2, Some("page-two".to_string()))
+            .assured("two candidates fit a bounded page"),
         ),
         ClientRequest::Suggest(
             SuggestRequest::new("ü".to_string(), 2, None).assured("the end is a boundary"),
@@ -145,6 +148,17 @@ pub(crate) fn client_messages() -> Vec<ClientMessage> {
         ClientRequest::Cancel(CancelRequest {
             target: request(u64::MAX),
         }),
+        ClientRequest::Choice(
+            ChoiceLookupRequest::new(
+                ChoiceTarget::PlacementPolicy,
+                vec![ChoiceSelection {
+                    value: ChoiceValue::DomainPace(crate::DomainPaceChoice::Paced),
+                }],
+                "co".to_string(),
+            )
+            .with_page(2, Some("choice-page-two".to_string()))
+            .assured("two choices fit a bounded page"),
+        ),
     ];
     requests
         .into_iter()
@@ -191,6 +205,8 @@ pub(crate) fn command_outcome(disposition: CommandDisposition) -> CommandOutcome
             preview: preview(1),
         }),
         inspection: None,
+        wasm_state: None,
+        resource: None,
     }
 }
 

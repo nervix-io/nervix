@@ -1,10 +1,7 @@
-use std::num::NonZeroU64;
-
-use nervix_models::{
-    BranchName, CreateBranch, CreateRelay, ModelIndex, ModelName, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput as ModelProcessorOutput,
-    ProcessorOutputs as ModelProcessorOutputs,
-};
+use error_stack::ResultExt as _;
+use nervix_models::{CreateRelay, ModelIndex, ModelName};
+#[cfg(test)]
+use nervix_models::{ProcessorInputWhere, ProcessorInputs};
 
 use super::*;
 
@@ -75,10 +72,6 @@ pub(in crate::runtime) enum PlanningError {
     },
     #[error("inferencer '{node}' input mappings could not be compiled for relay '{relay}'")]
     InferencerInputCompilation { node: ModelName, relay: RelayName },
-    #[error("{kind:?} '{node}' has no scheduled processor specification")]
-    MissingProcessorSpecification { kind: ModelKind, node: ModelName },
-    #[error("{kind:?} '{node}' did not produce a processor template")]
-    MissingProcessorTemplate { kind: ModelKind, node: ModelName },
     #[error("{kind:?} '{node}' has an invalid branch TTL")]
     InvalidBranchTtl { kind: ModelKind, node: ModelName },
     #[error("{kind:?} '{node}' output route '{route}' has no configured relay")]
@@ -99,417 +92,22 @@ pub(in crate::runtime) enum PlanningError {
         node: ModelName,
         route: RelayName,
     },
-}
-
-fn branched_output(output: &ModelProcessorOutput) -> BranchedProcessorOutputSpec {
-    BranchedProcessorOutputSpec {
-        relay: output.relay.clone(),
-        construction: output.construction.clone(),
-        flush_policy: output.flush_policy.clone(),
-        message_error_policy: output.message_error_policy.clone(),
-    }
-}
-
-fn branched_outputs(outputs: &ModelProcessorOutputs) -> BranchedProcessorOutputsSpec {
-    BranchedProcessorOutputsSpec {
-        routes: outputs.routes.iter().map(branched_output).collect(),
-    }
-}
-
-pub(in crate::runtime) fn processor_input_where_by_relay(
-    from_where: &[ProcessorInputWhere],
-) -> HashMap<RelayName, nervix_models::Expression> {
-    from_where
-        .iter()
-        .map(|source_filter| {
-            (
-                source_filter.relay.clone(),
-                source_filter.where_clause.clone(),
-            )
-        })
-        .collect()
-}
-
-fn processor_input_where_by_inputs(
-    inputs: &ProcessorInputs,
-) -> HashMap<RelayName, nervix_models::Expression> {
-    processor_input_where_by_relay(inputs.where_clauses())
-}
-
-fn processor_input_collect_policies(
-    inputs: &ProcessorInputs,
-) -> HashMap<RelayName, nervix_models::InputCollectPolicy> {
-    let Some(policy) = inputs.collect_policy.as_ref() else {
-        return HashMap::default();
-    };
-    inputs
-        .relays()
-        .iter()
-        .cloned()
-        .map(|relay| (relay, policy.clone()))
-        .collect()
-}
-
-/// The branch a node runs in together with the retention the branch declares. An unbranched node
-/// carries none of the three, which is how absent branch identity is represented.
-struct BranchPolicy {
-    branch: Option<BranchName>,
-    ttl: Option<String>,
-    max_instances: Option<NonZeroU64>,
-}
-
-fn branch_policy(
-    branch_ref: Option<&BranchName>,
-    branches: &HashMap<BranchName, CreateBranch>,
-) -> BranchPolicy {
-    let Some(branch_ref) = branch_ref else {
-        return BranchPolicy {
-            branch: None,
-            ttl: None,
-            max_instances: None,
-        };
-    };
-    let branch = branches.get(branch_ref).verified(
-        "the registry resolved every branch reference before the schedule reached planning",
-    );
-    BranchPolicy {
-        branch: Some(branch_ref.clone()),
-        ttl: Some(branch.ttl.clone()),
-        max_instances: branch
-            .eviction
-            .as_ref()
-            .map(|eviction| eviction.max_instances()),
-    }
-}
-
-fn processor_node_spec(
-    spec: BranchedProcessorSpec,
-    branched_by: &nervix_models::BranchSelection,
-    branches: &HashMap<BranchName, CreateBranch>,
-) -> BranchedProcessorNodeSpec {
-    let policy = branch_policy(branched_by.branch(), branches);
-    BranchedProcessorNodeSpec {
-        spec,
-        branch: policy.branch,
-        branch_ttl: policy.ttl,
-        branch_max_instances: policy.max_instances,
-        wasm_state_reset: None,
-    }
-}
-
-/// One model the planner turns into node specs, named the way the registry registered it.
-pub(in crate::runtime) struct PlannedModel {
-    pub(in crate::runtime) kind: ModelKind,
-    pub(in crate::runtime) identifier: ModelName,
-    pub(in crate::runtime) model: Model,
-}
-
-pub(in crate::runtime) fn branched_node_specs_from_scheduled_nodes(
-    nodes: &ScheduledNodes,
-) -> BranchedNodeSpecs {
-    let resets = nodes
-        .values()
-        .filter_map(|node| {
-            node.wasm_state_reset()
-                .cloned()
-                .map(|reset| (node.identifier.clone(), reset))
-        })
-        .collect::<HashMap<_, _>>();
-    let mut specs = branched_node_specs_from_models(nodes.values().map(|node| PlannedModel {
-        kind: node.kind(),
-        identifier: node.identifier.clone(),
-        model: (*node.config).clone(),
-    }));
-    for processor in &mut specs.processors {
-        processor.wasm_state_reset = resets.get(&processor.spec.processor).cloned();
-    }
-    specs
-}
-
-pub(in crate::runtime) fn branched_node_specs_from_active_graph(
-    graph: &ActiveGraph,
-) -> BranchedNodeSpecs {
-    branched_node_specs_from_models(graph.nodes().into_iter().map(|node| PlannedModel {
-        kind: node.kind,
-        identifier: node.identifier,
-        model: (*node.config).clone(),
-    }))
-}
-
-pub(in crate::runtime) fn branched_node_specs_from_models(
-    nodes: impl Iterator<Item = PlannedModel>,
-) -> BranchedNodeSpecs {
-    let nodes = nodes.collect::<Vec<_>>();
-    let branches = nodes
-        .iter()
-        .filter_map(|planned| {
-            if let Model::Branch(branch) = &planned.model {
-                Some((branch.name.clone(), branch.clone()))
-            } else {
-                None
-            }
-        })
-        .collect::<HashMap<_, _>>();
-    let mut processors = Vec::new();
-    let mut entrypoints = Vec::new();
-
-    for PlannedModel {
-        kind,
-        identifier,
-        model,
-    } in nodes
-    {
-        match &model {
-            Model::Deduplicator(deduplicator) => {
-                if deduplicator.from.first().is_none() {
-                    continue;
-                }
-                let spec = BranchedProcessorSpec {
-                    kind,
-                    processor: identifier,
-                    input_relays: deduplicator.from.relays().to_vec(),
-                    input_collect_policies: processor_input_collect_policies(&deduplicator.from),
-                    mode: deduplicator.mode,
-                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
-                    from_where: processor_input_where_by_inputs(&deduplicator.from),
-                    filter_where: deduplicator.filter_where.clone(),
-                    materialized_state: deduplicator.materialized_state.clone(),
-                    operation: BranchedProcessorOperationSpec::Deduplicator {
-                        output_routes: branched_outputs(&deduplicator.output_routes),
-                        deduplicate_on: deduplicator.deduplicate_on.clone(),
-                        max_time: deduplicator.max_time.clone(),
-                    },
-                };
-                processors.push(processor_node_spec(
-                    spec,
-                    &deduplicator.branched_by,
-                    &branches,
-                ));
-            }
-            Model::Reorderer(reorderer) => {
-                if reorderer.from.first().is_none() {
-                    continue;
-                }
-                let spec = BranchedProcessorSpec {
-                    kind,
-                    processor: identifier,
-                    input_relays: reorderer.from.relays().to_vec(),
-                    input_collect_policies: processor_input_collect_policies(&reorderer.from),
-                    mode: reorderer.mode,
-                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
-                    from_where: processor_input_where_by_inputs(&reorderer.from),
-                    filter_where: reorderer.filter_where.clone(),
-                    materialized_state: reorderer.materialized_state.clone(),
-                    operation: BranchedProcessorOperationSpec::Reorderer {
-                        output_routes: branched_outputs(&reorderer.output_routes),
-                        order_by: reorderer.order_by.clone(),
-                        max_time: reorderer.max_time.clone(),
-                    },
-                };
-                processors.push(processor_node_spec(spec, &reorderer.branched_by, &branches));
-            }
-            Model::Correlator(correlator) => {
-                let mut input_relays = Vec::with_capacity(
-                    correlator.left.relays().len() + correlator.right.relays().len(),
-                );
-                input_relays.extend(correlator.left.relays().iter().cloned());
-                input_relays.extend(correlator.right.relays().iter().cloned());
-                let mut from_where = processor_input_where_by_inputs(&correlator.left);
-                from_where.extend(processor_input_where_by_inputs(&correlator.right));
-                let mut input_collect_policies = processor_input_collect_policies(&correlator.left);
-                input_collect_policies.extend(processor_input_collect_policies(&correlator.right));
-                let spec = BranchedProcessorSpec {
-                    kind,
-                    processor: identifier,
-                    input_relays,
-                    input_collect_policies,
-                    mode: correlator.mode,
-                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
-                    from_where,
-                    filter_where: correlator.filter_where.clone(),
-                    materialized_state: correlator.materialized_state.clone(),
-                    operation: BranchedProcessorOperationSpec::Correlator {
-                        output_routes: branched_outputs(&correlator.output_routes),
-                        left_relays: correlator.left.relays().to_vec(),
-                        right_relays: correlator.right.relays().to_vec(),
-                        correlate_where: correlator.correlate_where.clone(),
-                        match_policy: correlator.match_policy,
-                        max_time: correlator.max_time.clone(),
-                        timeout_policy: correlator.timeout_policy.clone(),
-                    },
-                };
-                processors.push(processor_node_spec(
-                    spec,
-                    &correlator.branched_by,
-                    &branches,
-                ));
-            }
-            Model::WindowProcessor(window_processor) => {
-                if window_processor.from.first().is_none() {
-                    continue;
-                }
-                let spec = BranchedProcessorSpec {
-                    kind,
-                    processor: identifier,
-                    input_relays: window_processor.from.relays().to_vec(),
-                    input_collect_policies: processor_input_collect_policies(
-                        &window_processor.from,
-                    ),
-                    mode: window_processor.mode,
-                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
-                    from_where: processor_input_where_by_inputs(&window_processor.from),
-                    filter_where: window_processor.filter_where.clone(),
-                    materialized_state: window_processor.materialized_state.clone(),
-                    operation: BranchedProcessorOperationSpec::WindowProcessor {
-                        output_routes: branched_outputs(&window_processor.output_routes),
-                        width: window_processor.width.clone(),
-                        step: window_processor.step.clone(),
-                    },
-                };
-                processors.push(processor_node_spec(
-                    spec,
-                    &window_processor.branched_by,
-                    &branches,
-                ));
-            }
-            Model::Junction(junction) => {
-                if junction.from.first().is_none() {
-                    continue;
-                }
-                let spec = BranchedProcessorSpec {
-                    kind,
-                    processor: identifier,
-                    input_relays: junction.from.relays().to_vec(),
-                    input_collect_policies: processor_input_collect_policies(&junction.from),
-                    mode: junction.mode,
-                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
-                    from_where: processor_input_where_by_inputs(&junction.from),
-                    filter_where: junction.filter_where.clone(),
-                    materialized_state: junction.materialized_state.clone(),
-                    operation: BranchedProcessorOperationSpec::Junction {
-                        output_routes: branched_outputs(&junction.output_routes),
-                    },
-                };
-                processors.push(processor_node_spec(spec, &junction.branched_by, &branches));
-            }
-            Model::Inferencer(inferencer) => {
-                if inferencer.from.first().is_none() {
-                    continue;
-                }
-                let spec = BranchedProcessorSpec {
-                    kind,
-                    processor: identifier,
-                    input_relays: inferencer.from.relays().to_vec(),
-                    input_collect_policies: processor_input_collect_policies(&inferencer.from),
-                    mode: inferencer.mode,
-                    error_policies: internal_processor_error_policies(GeneralErrorPolicy::Log),
-                    from_where: processor_input_where_by_inputs(&inferencer.from),
-                    filter_where: inferencer.filter_where.clone(),
-                    materialized_state: inferencer.materialized_state.clone(),
-                    operation: BranchedProcessorOperationSpec::Inferencer {
-                        output_routes: branched_outputs(&inferencer.output_routes),
-                        resource: inferencer.resource.clone(),
-                        resource_version: inferencer.resource_version,
-                        file: inferencer.file.clone(),
-                        inputs: inferencer.inputs.clone(),
-                        output_schema: inferencer.output_schema.clone(),
-                    },
-                };
-                processors.push(processor_node_spec(
-                    spec,
-                    &inferencer.branched_by,
-                    &branches,
-                ));
-            }
-            Model::WasmProcessor(processor) => {
-                if processor.from.first().is_none() {
-                    continue;
-                }
-                let spec = BranchedProcessorSpec {
-                    kind,
-                    processor: identifier,
-                    input_relays: processor.from.relays().to_vec(),
-                    input_collect_policies: processor_input_collect_policies(&processor.from),
-                    mode: processor.mode,
-                    error_policies: internal_processor_error_policies(
-                        processor.global_error_policy.clone(),
-                    ),
-                    from_where: processor_input_where_by_inputs(&processor.from),
-                    filter_where: processor.filter_where.clone(),
-                    materialized_state: processor.materialized_state.clone(),
-                    operation: BranchedProcessorOperationSpec::WasmProcessor {
-                        output_routes: branched_outputs(&processor.output_routes),
-                        resource: processor.resource.clone(),
-                        resource_version: processor.resource_version,
-                        file: processor.file.clone(),
-                        limits: processor.limits,
-                        rejected_state_policy: processor.rejected_state_policy,
-                    },
-                };
-                processors.push(processor_node_spec(spec, &processor.branched_by, &branches));
-            }
-            Model::Ingestor(ingestor) => {
-                for output in ingestor.output_routes.outputs() {
-                    let branch_action = output.branch.as_ref().verified(
-                        "the registry requires every route of these nodes to declare its branch \
-                         behavior",
-                    );
-                    let policy = branch_policy(branch_action.branch(), &branches);
-                    entrypoints.push(BranchedIngestorSpec {
-                        kind,
-                        identifier: identifier.clone(),
-                        root_relay: output.relay.clone(),
-                        branch: policy.branch,
-                        branch_ttl: policy.ttl,
-                        branch_max_instances: policy.max_instances,
-                        output_ack_boundary: BranchInstanceAckBoundary::Preserve,
-                        output_flush_policy: output.flush_policy.clone().verified(
-                            "the registry requires a flush policy on every flush-based output \
-                             route",
-                        ),
-                        error_policies: output_error_policies(
-                            &output.message_error_policy,
-                            ingestor.general_error_policy.clone(),
-                        ),
-                    });
-                }
-            }
-            Model::Reingestor(reingestor) => {
-                for output in reingestor.output_routes.outputs() {
-                    let branch_action = output.branch.as_ref().verified(
-                        "the registry requires every route of these nodes to declare its branch \
-                         behavior",
-                    );
-                    let policy = branch_policy(branch_action.branch(), &branches);
-                    entrypoints.push(BranchedIngestorSpec {
-                        kind,
-                        identifier: identifier.clone(),
-                        root_relay: output.relay.clone(),
-                        branch: policy.branch,
-                        branch_ttl: policy.ttl,
-                        branch_max_instances: policy.max_instances,
-                        output_ack_boundary: BranchInstanceAckBoundary::Reingestor(reingestor.mode),
-                        output_flush_policy: output.flush_policy.clone().verified(
-                            "the registry requires a flush policy on every flush-based output \
-                             route",
-                        ),
-                        error_policies: output_error_policies(
-                            &output.message_error_policy,
-                            GeneralErrorPolicy::Log,
-                        ),
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    processors.sort_by(|left, right| left.spec.processor.cmp(&right.spec.processor));
-
-    BranchedNodeSpecs {
-        entrypoints,
-        processors,
-    }
+    #[error("failed to prepare the bound WASM module for processor '{node}'")]
+    PrepareWasmProcessor { node: ModelName },
+    #[error("{kind:?} '{node}' input relay '{relay}' has no resolved branching")]
+    MissingInputBranching {
+        kind: ModelKind,
+        node: ModelName,
+        relay: RelayName,
+    },
+    #[error("{kind:?} '{node}' output relay '{relay}' has no runtime schema")]
+    MissingOutputSchema {
+        kind: ModelKind,
+        node: ModelName,
+        relay: RelayName,
+    },
+    #[error("failed to bind prepared VM programs for {kind:?} '{node}'")]
+    ProcessorProgramCompilation { kind: ModelKind, node: ModelName },
 }
 
 fn parse_optional_window_duration(
@@ -557,6 +155,7 @@ pub(in crate::runtime) fn materialize_output(
         construction: output.construction.clone(),
         flush_policy,
         message_error_policy: output.message_error_policy.clone(),
+        compiled_program: None,
     })
 }
 
@@ -674,7 +273,9 @@ fn materialize_nodes(
             input_collect_policies,
             error_policies: node.error_policies.clone(),
             from_where: node.from_where.clone(),
+            compiled_from_where: HashMap::default(),
             filter_where: node.filter_where.clone(),
+            compiled_filter_where: HashMap::default(),
             materialized_state: node.materialized_state.clone(),
             operation: match &node.operation {
                 BranchedProcessorOperationSpec::Deduplicator {
@@ -690,11 +291,13 @@ fn materialize_nodes(
                     )?,
                     deduplicate_on: deduplicate_on.clone(),
                     max_time: parse_max_time(node.kind, &node.processor, max_time)?,
+                    compiled_key_program: None,
                 },
                 BranchedProcessorOperationSpec::WindowProcessor {
                     output_routes,
                     width,
                     step,
+                    state_limit,
                 } => {
                     if output_routes.outputs().next().is_none() {
                         return Err(Report::new(PlanningError::MissingWindowOutput {
@@ -742,9 +345,6 @@ fn materialize_nodes(
 
                     // The shared accumulator plan the branch-local window state is built from,
                     // whose demands follow the same written route order as the offsets above.
-                    let plan = WindowAccumulatorPlan::new(
-                        compiled_aggregates.iter().map(|compiled| &compiled.route),
-                    );
                     let aggregate =
                         WindowAggregateProgram::combine_route_programs(&route_aggregates);
 
@@ -772,6 +372,26 @@ fn materialize_nodes(
                         WindowDurationSetting::Step,
                         step.duration.as_deref(),
                     )?;
+                    let sketch_layout = match (width_duration, step_duration) {
+                        (Some(width), Some(step))
+                            if aggregate
+                                .demands()
+                                .iter()
+                                .any(|demand| demand.sketch.is_some()) =>
+                        {
+                            WindowPaneLayout::for_width_and_step(width, step)
+                        }
+                        _ => None,
+                    };
+                    let max_state_bytes = match state_limit {
+                        nervix_models::WindowStateLimit::Unbounded => None,
+                        nervix_models::WindowStateLimit::MaxBytes(bytes) => Some(*bytes),
+                    };
+                    let plan = WindowAccumulatorPlan::new(
+                        compiled_aggregates.iter().map(|compiled| &compiled.route),
+                        sketch_layout,
+                        max_state_bytes,
+                    );
 
                     RelayProcessorOperationTemplate::WindowProcessor {
                         output_routes: materialized_outputs,
@@ -797,6 +417,7 @@ fn materialize_nodes(
                     )?,
                     order_by: order_by.clone(),
                     max_time: parse_max_time(node.kind, &node.processor, max_time)?,
+                    compiled_program: None,
                 },
                 BranchedProcessorOperationSpec::Correlator {
                     output_routes,
@@ -819,6 +440,10 @@ fn materialize_nodes(
                     match_policy: *match_policy,
                     max_time: parse_max_time(node.kind, &node.processor, max_time)?,
                     timeout_policy: timeout_policy.clone(),
+                    compiled_where_program: None,
+                    compiled_output_programs: (0..output_routes.routes.len())
+                        .map(|_| None)
+                        .collect(),
                 },
                 BranchedProcessorOperationSpec::Junction { output_routes } => {
                     RelayProcessorOperationTemplate::Junction {
@@ -905,29 +530,6 @@ fn materialize_nodes(
     Ok(out)
 }
 
-pub(in crate::runtime) fn processor_template_for_graph_node(
-    graph: &ActiveGraph,
-    kind: ModelKind,
-    processor: &ModelName,
-    relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
-    udfs: Option<&UdfExecutor>,
-) -> error_stack::Result<RelayProcessorTemplate, PlanningError> {
-    let specs = branched_node_specs_from_active_graph(graph);
-    let Some(node) = specs.processor(kind, processor) else {
-        return Err(Report::new(PlanningError::MissingProcessorSpecification {
-            kind,
-            node: processor.clone(),
-        }));
-    };
-    let mut templates = materialize_nodes(std::slice::from_ref(&node.spec), relay_schemas, udfs)?;
-    templates.pop().ok_or_else(|| {
-        Report::new(PlanningError::MissingProcessorTemplate {
-            kind,
-            node: processor.clone(),
-        })
-    })
-}
-
 fn parse_branch_ttl_setting(
     ttl: Option<&str>,
     kind: ModelKind,
@@ -1000,6 +602,7 @@ pub(in crate::runtime) fn materialize_ingestor_route_template(
     )?;
     Ok(IngestorRouteTemplate {
         branch: BranchInstanceTemplate {
+            revision: ProcessorPlanRevision::new(),
             source_kind: spec.kind,
             source: RelayName::from(&spec.identifier),
             root_relay: spec.root_relay.clone(),
@@ -1054,6 +657,7 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     let mut processors = HashMap::default();
     processors.insert(spec.processor.clone(), template);
     Ok(BranchInstanceTemplate {
+        revision: ProcessorPlanRevision::new(),
         source_kind: spec.kind,
         source: RelayName::from(&spec.processor),
         root_relay,
@@ -1071,1693 +675,499 @@ pub(in crate::runtime) fn materialize_processor_instance_template(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use std::num::NonZeroU32;
+fn bind_processor_template_programs(
+    domain: &DomainName,
+    template: &mut BranchInstanceTemplate,
+    relay_schemas: &HashMap<RelayName, Arc<CompiledSchema>>,
+    relay_branchings: &HashMap<RelayName, ResolvedBranching>,
+    materialized_stream_specs: &HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    lookups: &HashMap<LookupName, Arc<LookupRuntime>>,
+    udfs: Option<&UdfExecutor>,
+) -> error_stack::Result<(), PlanningError> {
+    for processor in template.processors.values_mut() {
+        let compilation_error = || PlanningError::ProcessorProgramCompilation {
+            kind: processor.kind,
+            node: processor.processor.clone(),
+        };
+        let primary_input = processor.input_relays.first().ok_or_else(|| {
+            Report::new(PlanningError::MissingInputRelay {
+                kind: processor.kind,
+                node: processor.processor.clone(),
+            })
+        })?;
+        let primary_schema = relay_schemas.get(primary_input).ok_or_else(|| {
+            Report::new(PlanningError::MissingInputSchema {
+                kind: processor.kind,
+                node: processor.processor.clone(),
+                relay: primary_input.clone(),
+            })
+        })?;
+        let primary_branching = relay_branchings.get(primary_input).ok_or_else(|| {
+            Report::new(PlanningError::MissingInputBranching {
+                kind: processor.kind,
+                node: processor.processor.clone(),
+                relay: primary_input.clone(),
+            })
+        })?;
 
-    use nervix_models::{
-        BranchSelection, CreateDeduplicator, CreateInferencer, CreateJunction, CreateSchema,
-        CreateWasmProcessor, CreateWindowProcessor, InferencerTensorDeclaration,
-        InferencerTensorDimension, InferencerTensorElementType, InferencerTensorMapping,
-        InferencerTensorRepresentation, InferencerTensorSchema, ParseAsType, ProcessorOutputs,
-        RelayBranching, SchemaField, WindowBound, ZeroMqIngestMode,
-    };
-    use nonzero_ext::nonzero;
-    use triomphe::Arc;
-
-    use super::*;
-
-    fn named<N>(raw: &str) -> N
-    where
-        N: for<'a> TryFrom<&'a str>,
-        for<'a> <N as TryFrom<&'a str>>::Error: std::fmt::Debug,
-    {
-        N::try_from(raw).expect("valid name")
-    }
-
-    fn inferencer_tensor_schema(size: NonZeroU32) -> InferencerTensorSchema {
-        InferencerTensorSchema {
-            representation: InferencerTensorRepresentation::Dense,
-            element_type: InferencerTensorElementType::F32,
-            dimensions: vec![InferencerTensorDimension::Fixed(size)],
-        }
-    }
-
-    fn inferencer_node(input_relays: Vec<RelayName>) -> BranchedProcessorSpec {
-        BranchedProcessorSpec {
-            kind: ModelKind::Inferencer,
-            processor: named("score_model"),
-            input_relays,
-            input_collect_policies: HashMap::default(),
-            mode: AckMode::Attached,
-            error_policies: ErrorPolicies::handled_by_log(),
-            from_where: HashMap::default(),
-            filter_where: None,
-            materialized_state: Vec::new(),
-            operation: BranchedProcessorOperationSpec::Inferencer {
-                output_routes: BranchedProcessorOutputsSpec {
-                    routes: vec![BranchedProcessorOutputSpec {
-                        relay: named("scores"),
-                        construction: RouteConstruction::default(),
-                        flush_policy: Some(FlushPolicy::Immediate),
-                        message_error_policy: MessageErrorPolicy::Log,
-                    }],
+        processor.compiled_from_where.clear();
+        processor.compiled_filter_where.clear();
+        for input_relay in &processor.input_relays {
+            let input_schema = relay_schemas.get(input_relay).ok_or_else(|| {
+                Report::new(PlanningError::MissingInputSchema {
+                    kind: processor.kind,
+                    node: processor.processor.clone(),
+                    relay: input_relay.clone(),
+                })
+            })?;
+            let input_branching = relay_branchings.get(input_relay).ok_or_else(|| {
+                Report::new(PlanningError::MissingInputBranching {
+                    kind: processor.kind,
+                    node: processor.processor.clone(),
+                    relay: input_relay.clone(),
+                })
+            })?;
+            let source_scope = match &processor.operation {
+                RelayProcessorOperationTemplate::Correlator {
+                    left_relays,
+                    right_relays,
+                    ..
+                } if left_relays.contains(input_relay) => RuntimeFilterScope::Source {
+                    namespace: "left",
+                    allow_header_reads: false,
+                    allow_metadata: false,
                 },
-                resource: named("fraud_model"),
-                resource_version: 1,
-                file: "models/fraud.onnx".to_string(),
-                inputs: Vec::new(),
-                output_schema: Vec::new(),
-            },
+                RelayProcessorOperationTemplate::Correlator { right_relays, .. }
+                    if right_relays.contains(input_relay) =>
+                {
+                    RuntimeFilterScope::Source {
+                        namespace: "right",
+                        allow_header_reads: false,
+                        allow_metadata: false,
+                    }
+                }
+                _ => RuntimeFilterScope::Source {
+                    namespace: "input",
+                    allow_header_reads: false,
+                    allow_metadata: false,
+                },
+            };
+            let context = || RuntimeVmCompileContext {
+                available_materialized_streams: materialized_stream_specs,
+                available_lookups: lookups,
+                current_branching: input_branching,
+                udfs,
+            };
+            if let Some(expression) = processor.from_where.get(input_relay)
+                && let Some(program) = compile_scoped_filter_program(
+                    RuntimeCompileTarget {
+                        domain,
+                        identifier: &processor.processor,
+                    },
+                    Some(expression),
+                    RuntimeVmSchema {
+                        schema: input_schema.arrow_schema(),
+                        sensitivity: input_schema.vm_sensitivity(),
+                    },
+                    MessageErrorOperation::SourceWhere,
+                    context(),
+                    source_scope,
+                )
+                .change_context_lazy(compilation_error)?
+            {
+                processor
+                    .compiled_from_where
+                    .insert(input_relay.clone(), program);
+            }
+            if let Some(expression) = processor.filter_where.as_ref()
+                && let Some(program) = compile_scoped_filter_program(
+                    RuntimeCompileTarget {
+                        domain,
+                        identifier: &processor.processor,
+                    },
+                    Some(expression),
+                    RuntimeVmSchema {
+                        schema: input_schema.arrow_schema(),
+                        sensitivity: input_schema.vm_sensitivity(),
+                    },
+                    MessageErrorOperation::FilterWhere,
+                    context(),
+                    RuntimeFilterScope::Source {
+                        namespace: "input",
+                        allow_header_reads: false,
+                        allow_metadata: false,
+                    },
+                )
+                .change_context_lazy(compilation_error)?
+            {
+                processor
+                    .compiled_filter_where
+                    .insert(input_relay.clone(), program);
+            }
         }
-    }
 
-    fn window_node(output_routes: BranchedProcessorOutputsSpec) -> BranchedProcessorSpec {
-        BranchedProcessorSpec {
-            kind: ModelKind::WindowProcessor,
-            processor: named("metric_window"),
-            input_relays: vec![named("metrics")],
-            input_collect_policies: HashMap::default(),
-            mode: AckMode::Attached,
-            error_policies: ErrorPolicies::handled_by_log(),
-            from_where: HashMap::default(),
-            filter_where: None,
-            materialized_state: Vec::new(),
-            operation: BranchedProcessorOperationSpec::WindowProcessor {
+        let output_context = || RuntimeVmCompileContext {
+            available_materialized_streams: materialized_stream_specs,
+            available_lookups: lookups,
+            current_branching: primary_branching,
+            udfs,
+        };
+        match &mut processor.operation {
+            RelayProcessorOperationTemplate::Deduplicator {
                 output_routes,
-                width: WindowBound::of_messages(10),
-                step: WindowBound::of_messages(5),
-            },
+                deduplicate_on,
+                compiled_key_program,
+                ..
+            } => {
+                *compiled_key_program = Some(
+                    compile_deduplicator_key_program(
+                        &processor.processor,
+                        &processor.input_relays,
+                        deduplicate_on,
+                        primary_schema.arrow_schema(),
+                        udfs,
+                    )
+                    .change_context_lazy(compilation_error)?,
+                );
+                bind_transforming_output_programs(
+                    TransformingOutputProgramBinding {
+                        domain,
+                        kind: processor.kind,
+                        processor: &processor.processor,
+                        input_relays: &processor.input_relays,
+                        input_schema: primary_schema,
+                        relay_schemas,
+                    },
+                    output_routes,
+                    output_context,
+                    None,
+                )?;
+            }
+            RelayProcessorOperationTemplate::Reorderer {
+                output_routes,
+                order_by,
+                compiled_program,
+                ..
+            } => {
+                *compiled_program = Some(
+                    compile_reorderer_program(
+                        &processor.processor,
+                        &processor.input_relays,
+                        order_by,
+                        primary_schema.arrow_schema(),
+                        udfs,
+                    )
+                    .change_context_lazy(compilation_error)?,
+                );
+                bind_transforming_output_programs(
+                    TransformingOutputProgramBinding {
+                        domain,
+                        kind: processor.kind,
+                        processor: &processor.processor,
+                        input_relays: &processor.input_relays,
+                        input_schema: primary_schema,
+                        relay_schemas,
+                    },
+                    output_routes,
+                    output_context,
+                    None,
+                )?;
+            }
+            RelayProcessorOperationTemplate::Junction { output_routes } => {
+                bind_transforming_output_programs(
+                    TransformingOutputProgramBinding {
+                        domain,
+                        kind: processor.kind,
+                        processor: &processor.processor,
+                        input_relays: &processor.input_relays,
+                        input_schema: primary_schema,
+                        relay_schemas,
+                    },
+                    output_routes,
+                    output_context,
+                    None,
+                )?;
+            }
+            RelayProcessorOperationTemplate::WindowProcessor { output_routes, .. } => {
+                for output in &mut output_routes.routes {
+                    let output_schema =
+                        relay_schemas.get(&output.output_relay).ok_or_else(|| {
+                            Report::new(PlanningError::MissingOutputSchema {
+                                kind: processor.kind,
+                                node: processor.processor.clone(),
+                                relay: output.output_relay.clone(),
+                            })
+                        })?;
+                    output.compiled_program = compile_finalized_output_filter_program(
+                        domain,
+                        &processor.processor,
+                        output.construction.where_clause.as_ref(),
+                        output_schema.arrow_schema(),
+                        output_schema.vm_sensitivity(),
+                        output_context(),
+                    )
+                    .change_context_lazy(compilation_error)?;
+                }
+            }
+            RelayProcessorOperationTemplate::Inferencer {
+                output_routes,
+                output_schema,
+                ..
+            } => {
+                let tensors = InferencerFilterMapTensors { output_schema };
+                bind_transforming_output_programs(
+                    TransformingOutputProgramBinding {
+                        domain,
+                        kind: processor.kind,
+                        processor: &processor.processor,
+                        input_relays: &processor.input_relays,
+                        input_schema: primary_schema,
+                        relay_schemas,
+                    },
+                    output_routes,
+                    output_context,
+                    Some(tensors),
+                )?;
+            }
+            RelayProcessorOperationTemplate::WasmProcessor { output_routes, .. } => {
+                for output in &mut output_routes.routes {
+                    let output_schema =
+                        relay_schemas.get(&output.output_relay).ok_or_else(|| {
+                            Report::new(PlanningError::MissingOutputSchema {
+                                kind: processor.kind,
+                                node: processor.processor.clone(),
+                                relay: output.output_relay.clone(),
+                            })
+                        })?;
+                    output.compiled_program = compile_wasm_output_filter_map_program(
+                        domain,
+                        &processor.processor,
+                        &output.construction,
+                        output_schema.arrow_schema(),
+                        output_schema.vm_sensitivity(),
+                        output_context(),
+                    )
+                    .map_err(|error| Report::new(compilation_error()).attach_printable(error))?;
+                }
+            }
+            RelayProcessorOperationTemplate::Correlator {
+                output_routes,
+                left_relays,
+                right_relays,
+                correlate_where,
+                compiled_where_program,
+                compiled_output_programs,
+                ..
+            } => {
+                let left_relay = left_relays.first().ok_or_else(|| {
+                    Report::new(PlanningError::MissingInputRelay {
+                        kind: processor.kind,
+                        node: processor.processor.clone(),
+                    })
+                })?;
+                let right_relay = right_relays.first().ok_or_else(|| {
+                    Report::new(PlanningError::MissingInputRelay {
+                        kind: processor.kind,
+                        node: processor.processor.clone(),
+                    })
+                })?;
+                let left_schema = relay_schemas.get(left_relay).ok_or_else(|| {
+                    Report::new(PlanningError::MissingInputSchema {
+                        kind: processor.kind,
+                        node: processor.processor.clone(),
+                        relay: left_relay.clone(),
+                    })
+                })?;
+                let right_schema = relay_schemas.get(right_relay).ok_or_else(|| {
+                    Report::new(PlanningError::MissingInputSchema {
+                        kind: processor.kind,
+                        node: processor.processor.clone(),
+                        relay: right_relay.clone(),
+                    })
+                })?;
+                *compiled_where_program = Some(
+                    compile_correlator_where_program(
+                        &processor.processor,
+                        correlate_where,
+                        left_relays,
+                        left_schema.arrow_schema(),
+                        right_relays,
+                        right_schema.arrow_schema(),
+                        udfs,
+                    )
+                    .change_context_lazy(compilation_error)?,
+                );
+                compiled_output_programs.clear();
+                for output in &output_routes.routes {
+                    let output_schema =
+                        relay_schemas.get(&output.output_relay).ok_or_else(|| {
+                            Report::new(PlanningError::MissingOutputSchema {
+                                kind: processor.kind,
+                                node: processor.processor.clone(),
+                                relay: output.output_relay.clone(),
+                            })
+                        })?;
+                    let program = CorrelatorOutputCompileContext {
+                        processor: &processor.processor,
+                        left_schema: left_schema.arrow_schema(),
+                        left_sensitivity: left_schema.vm_sensitivity(),
+                        right_schema: right_schema.arrow_schema(),
+                        right_sensitivity: right_schema.vm_sensitivity(),
+                        output_relay: &output.output_relay,
+                        output_schema: output_schema.arrow_schema(),
+                        output_sensitivity: output_schema.vm_sensitivity(),
+                        construction: &output.construction,
+                        runtime: output_context(),
+                    }
+                    .compile()
+                    .change_context_lazy(compilation_error)?;
+                    compiled_output_programs.push(Some(program));
+                }
+            }
         }
     }
-
-    #[test]
-    fn planning_parsers_preserve_typed_contract_failures() {
-        let processor = named::<ModelName>("orders_processor");
-        let relay = named::<RelayName>("orders");
-
-        let window_duration = parse_optional_window_duration(
-            &processor,
-            WindowDurationSetting::Width,
-            Some("not-a-duration"),
-        )
-        .expect_err("an invalid window width must fail");
-        assert!(matches!(
-            window_duration.current_context(),
-            PlanningError::InvalidWindowDuration {
-                node,
-                setting: WindowDurationSetting::Width,
-            } if node == &processor
-        ));
-
-        let output = BranchedProcessorOutputSpec {
-            relay: relay.clone(),
-            construction: RouteConstruction::default(),
-            flush_policy: Some(FlushPolicy::Each {
-                interval: "1s".to_string(),
-                max_batch_size: "not-a-size".to_string(),
-            }),
-            message_error_policy: MessageErrorPolicy::Log,
-        };
-        let flush_size = materialize_output(
-            ModelKind::Deduplicator,
-            &processor,
-            &output,
-            FlushPolicyRequirement::Required,
-        )
-        .expect_err("an invalid flush batch size must fail");
-        assert!(matches!(
-            flush_size.current_context(),
-            PlanningError::InvalidFlushMaxBatchSize {
-                kind: ModelKind::Deduplicator,
-                node,
-                route,
-            } if node == &processor && route == &relay
-        ));
-
-        let collect_interval = parse_input_collect_policy(
-            ModelKind::Junction,
-            &processor,
-            &relay,
-            &nervix_models::InputCollectPolicy {
-                collect_for: "not-a-duration".to_string(),
-                max_batch_size: None,
-            },
-        )
-        .expect_err("an invalid collection interval must fail");
-        assert!(matches!(
-            collect_interval.current_context(),
-            PlanningError::InvalidCollectInterval {
-                kind: ModelKind::Junction,
-                node,
-                relay: error_relay,
-            } if node == &processor && error_relay == &relay
-        ));
-
-        let collect_size = parse_input_collect_policy(
-            ModelKind::Junction,
-            &processor,
-            &relay,
-            &nervix_models::InputCollectPolicy {
-                collect_for: "1s".to_string(),
-                max_batch_size: Some("not-a-size".to_string()),
-            },
-        )
-        .expect_err("an invalid collection batch size must fail");
-        assert!(matches!(
-            collect_size.current_context(),
-            PlanningError::InvalidCollectMaxBatchSize {
-                kind: ModelKind::Junction,
-                node,
-                relay: error_relay,
-            } if node == &processor && error_relay == &relay
-        ));
-
-        let unbounded_collection = parse_input_collect_policy(
-            ModelKind::Junction,
-            &processor,
-            &relay,
-            &nervix_models::InputCollectPolicy {
-                collect_for: "1s".to_string(),
-                max_batch_size: None,
-            },
-        )
-        .expect("a collection policy may omit its byte bound");
-        assert_eq!(unbounded_collection.max_batch_size, None);
-
-        let max_time = parse_max_time(ModelKind::Deduplicator, &processor, "not-a-duration")
-            .expect_err("an invalid maximum retention time must fail");
-        assert!(matches!(
-            max_time.current_context(),
-            PlanningError::InvalidMaxTime {
-                kind: ModelKind::Deduplicator,
-                node,
-            } if node == &processor
-        ));
-
-        let branch_ttl =
-            parse_branch_ttl_setting(Some("not-a-duration"), ModelKind::Deduplicator, &processor)
-                .expect_err("an invalid branch TTL must fail");
-        assert!(matches!(
-            branch_ttl.current_context(),
-            PlanningError::InvalidBranchTtl {
-                kind: ModelKind::Deduplicator,
-                node,
-            } if node == &processor
-        ));
-    }
-
-    #[test]
-    fn window_materialization_classifies_output_contract_failures() {
-        let missing_output = materialize_nodes(
-            &[window_node(BranchedProcessorOutputsSpec {
-                routes: Vec::new(),
-            })],
-            &HashMap::default(),
-            None,
-        )
-        .expect_err("a window processor without an output must fail");
-        assert!(matches!(
-            missing_output.current_context(),
-            PlanningError::MissingWindowOutput { node } if node.as_str() == "metric_window"
-        ));
-
-        let inherited = RouteConstruction {
-            inherit: Some(nervix_models::Inheritance::All),
-            ..RouteConstruction::default()
-        };
-        let invalid_construction = materialize_nodes(
-            &[window_node(BranchedProcessorOutputsSpec {
-                routes: vec![BranchedProcessorOutputSpec {
-                    relay: named("metric_summary"),
-                    construction: inherited,
-                    flush_policy: None,
-                    message_error_policy: MessageErrorPolicy::Log,
-                }],
-            })],
-            &HashMap::default(),
-            None,
-        )
-        .expect_err("window output inheritance must fail lowering");
-        assert!(matches!(
-            invalid_construction.current_context(),
-            PlanningError::InvalidWindowConstruction { node, route }
-                if node.as_str() == "metric_window" && route.as_str() == "metric_summary"
-        ));
-
-        let compilation = materialize_nodes(
-            &[window_node(BranchedProcessorOutputsSpec {
-                routes: vec![BranchedProcessorOutputSpec {
-                    relay: named("metric_summary"),
-                    construction: construction("SET count = COUNT(input.value)"),
-                    flush_policy: None,
-                    message_error_policy: MessageErrorPolicy::Log,
-                }],
-            })],
-            &HashMap::default(),
-            None,
-        )
-        .expect_err("window output without runtime schemas must fail compilation");
-        assert!(matches!(
-            compilation.current_context(),
-            PlanningError::WindowOutputCompilation { node, route }
-                if node.as_str() == "metric_window" && route.as_str() == "metric_summary"
-        ));
-    }
-
-    #[test]
-    fn inferencer_materialization_requires_an_input_and_schema() {
-        let missing_input =
-            materialize_nodes(&[inferencer_node(Vec::new())], &HashMap::default(), None)
-                .expect_err("an inferencer without input must fail");
-        assert!(matches!(
-            missing_input.current_context(),
-            PlanningError::MissingInputRelay {
-                kind: ModelKind::Inferencer,
-                node,
-            } if node.as_str() == "score_model"
-        ));
-
-        let missing_schema = materialize_nodes(
-            &[inferencer_node(vec![named("features")])],
-            &HashMap::default(),
-            None,
-        )
-        .expect_err("an inferencer input without a runtime schema must fail");
-        assert!(matches!(
-            missing_schema.current_context(),
-            PlanningError::MissingInputSchema {
-                kind: ModelKind::Inferencer,
-                node,
-                relay,
-            } if node.as_str() == "score_model" && relay.as_str() == "features"
-        ));
-    }
-
-    #[test]
-    fn relay_template_resolution_classifies_each_missing_owner() {
-        let node = named::<ModelName>("orders_junction");
-        let relay = named::<RelayName>("orders");
-        let relay_ids = || std::iter::once(relay.clone()).collect();
-
-        let missing_model = resolve_branch_relay_templates(
-            ModelKind::Junction,
-            &node,
-            relay_ids(),
-            &ModelIndex::default(),
-            &HashMap::default(),
-            &HashMap::default(),
-        )
-        .expect_err("an unconfigured relay must fail planning");
-        assert!(matches!(
-            missing_model.current_context(),
-            PlanningError::MissingRelayModel {
-                kind: ModelKind::Junction,
-                node: error_node,
-                route,
-            } if error_node == &node && route == &relay
-        ));
-
-        let model_index = [Model::Relay(CreateRelay {
-            name: relay.clone(),
-            schema: named("orders_schema"),
-            buffer: nonzero!(1usize),
-            branching: RelayBranching::unbranched(),
-            materialized_state: None,
-        })]
-        .into_iter()
-        .collect::<ModelIndex>();
-        let missing_registry = resolve_branch_relay_templates(
-            ModelKind::Junction,
-            &node,
-            relay_ids(),
-            &model_index,
-            &HashMap::default(),
-            &HashMap::default(),
-        )
-        .expect_err("a relay without a registry must fail planning");
-        assert!(matches!(
-            missing_registry.current_context(),
-            PlanningError::MissingRelayRegistry {
-                kind: ModelKind::Junction,
-                node: error_node,
-                route,
-            } if error_node == &node && route == &relay
-        ));
-
-        let relay_registries = [(relay.clone(), RelayRegistry::new())]
-            .into_iter()
-            .collect();
-        let missing_services = resolve_branch_relay_templates(
-            ModelKind::Junction,
-            &node,
-            relay_ids(),
-            &model_index,
-            &relay_registries,
-            &HashMap::default(),
-        )
-        .expect_err("a relay without boundary services must fail planning");
-        assert!(matches!(
-            missing_services.current_context(),
-            PlanningError::MissingRelayServices {
-                kind: ModelKind::Junction,
-                node: error_node,
-                route,
-            } if error_node == &node && route == &relay
-        ));
-    }
-
-    #[test]
-    fn processor_instance_materialization_requires_an_input_relay() {
-        let node = BranchedProcessorNodeSpec {
-            spec: BranchedProcessorSpec {
-                kind: ModelKind::Junction,
-                processor: named("orders_junction"),
-                input_relays: Vec::new(),
-                input_collect_policies: HashMap::default(),
-                mode: AckMode::Attached,
-                error_policies: ErrorPolicies::handled_by_log(),
-                from_where: HashMap::default(),
-                filter_where: None,
-                materialized_state: Vec::new(),
-                operation: BranchedProcessorOperationSpec::Junction {
-                    output_routes: BranchedProcessorOutputsSpec { routes: Vec::new() },
-                },
-            },
-            branch: None,
-            branch_ttl: None,
-            branch_max_instances: None,
-            wasm_state_reset: None,
-        };
-        let error = materialize_processor_instance_template(
-            &node,
-            &ModelIndex::default(),
-            &HashMap::default(),
-            &HashMap::default(),
-            &HashMap::default(),
-            None,
-        )
-        .expect_err("a processor instance without input must fail planning");
-
-        assert!(matches!(
-            error.current_context(),
-            PlanningError::MissingInputRelay {
-                kind: ModelKind::Junction,
-                node,
-            } if node.as_str() == "orders_junction"
-        ));
-    }
-
-    #[test]
-    fn inferencer_input_mappings_compile_when_template_is_materialized() {
-        let input_relay = named::<RelayName>("features");
-        let processor = named::<ModelName>("score_model");
-        let input_schema = Arc::new(compile_schema(&CreateSchema {
-            name: named("feature_schema"),
-            fields: vec![SchemaField {
-                name: named("vector"),
-                ty: ParseAsType::Array {
-                    element: Box::new(ParseAsType::F32),
-                    len: nonzero!(2u32),
-                },
-                optional: false,
-                sensitive: false,
-            }],
-        }));
-        let node = BranchedProcessorSpec {
-            kind: ModelKind::Inferencer,
-            processor: processor.clone(),
-            input_relays: vec![input_relay.clone()],
-            input_collect_policies: HashMap::default(),
-            mode: AckMode::Attached,
-            error_policies: ErrorPolicies::handled_by_log(),
-            from_where: HashMap::default(),
-            filter_where: None,
-            materialized_state: Vec::new(),
-            operation: BranchedProcessorOperationSpec::Inferencer {
-                output_routes: BranchedProcessorOutputsSpec {
-                    routes: vec![BranchedProcessorOutputSpec {
-                        relay: named("scores"),
-                        construction: RouteConstruction::default(),
-                        flush_policy: Some(FlushPolicy::Immediate),
-                        message_error_policy: MessageErrorPolicy::Log,
-                    }],
-                },
-                resource: named("fraud_model"),
-                resource_version: 1,
-                file: "models/fraud.onnx".to_string(),
-                inputs: vec![InferencerTensorMapping {
-                    tensor: "features".to_string(),
-                    schema: inferencer_tensor_schema(nonzero!(2u32)),
-                    expression: nervix_nspl::parse_expression("input.missing")
-                        .expect("test expression must parse"),
-                }],
-                output_schema: vec![InferencerTensorDeclaration {
-                    tensor: "score".to_string(),
-                    schema: inferencer_tensor_schema(nonzero!(1u32)),
-                }],
-            },
-        };
-        let mut relay_schemas = HashMap::default();
-        relay_schemas.insert(input_relay, input_schema);
-
-        let error = materialize_nodes(&[node], &relay_schemas, None)
-            .expect_err("invalid INPUTS mapping must fail template materialization");
-
-        assert!(matches!(
-            error.current_context(),
-            PlanningError::InferencerInputCompilation { node, relay }
-                if node == &processor && relay.as_str() == "features"
-        ));
-    }
-
-    #[test]
-    fn missing_flush_policy_identifies_the_node_and_route() {
-        let processor = named::<ModelName>("orders_deduplicator");
-        let route = named::<RelayName>("deduplicated_orders");
-        let output = BranchedProcessorOutputSpec {
-            relay: route.clone(),
-            construction: RouteConstruction::default(),
-            flush_policy: None,
-            message_error_policy: MessageErrorPolicy::Log,
-        };
-
-        let error = materialize_output(
-            ModelKind::Deduplicator,
-            &processor,
-            &output,
-            FlushPolicyRequirement::Required,
-        )
-        .expect_err("a flush-based route must declare its flush policy");
-
-        assert!(matches!(
-            error.current_context(),
-            PlanningError::MissingFlushPolicy {
-                kind,
-                node,
-                route: error_route,
-            } if *kind == ModelKind::Deduplicator
-                && node == &processor
-                && error_route == &route
-        ));
-    }
-
-    #[test]
-    fn invalid_flush_interval_identifies_the_node_and_route() {
-        let processor = named::<ModelName>("orders_reorderer");
-        let route = named::<RelayName>("ordered_orders");
-        let output = BranchedProcessorOutputSpec {
-            relay: route.clone(),
-            construction: RouteConstruction::default(),
-            flush_policy: Some(FlushPolicy::Each {
-                interval: "not-a-duration".to_string(),
-                max_batch_size: "1MiB".to_string(),
-            }),
-            message_error_policy: MessageErrorPolicy::Log,
-        };
-
-        let error = materialize_output(
-            ModelKind::Reorderer,
-            &processor,
-            &output,
-            FlushPolicyRequirement::Required,
-        )
-        .expect_err("an invalid flush interval must fail planning");
-
-        assert!(matches!(
-            error.current_context(),
-            PlanningError::InvalidFlushInterval {
-                kind,
-                node,
-                route: error_route,
-            } if *kind == ModelKind::Reorderer
-                && node == &processor
-                && error_route == &route
-        ));
-    }
-
-    #[test]
-    fn branched_node_specs_capture_downstream_processing_tree() {
-        let specs = branched_node_specs_from_models(
-            [
-                branch_model("tenant", "orders", &["tenant"]),
-                branch_model("tenant", "projected_orders", &["tenant"]),
-                PlannedModel {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("orders_ingestor"),
-                    model: nervix_models::Model::Ingestor(CreateIngestor {
-                        name: named("orders_ingestor"),
-                        output_routes: (ProcessorOutputs::single(named("orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(branched_by("orders", &["tenant"])),
-                        decode_using_codec: named("orders_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_client"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
-                        general_error_policy: GeneralErrorPolicy::Log,
-                        filter_where: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_orders"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_orders"),
-                        from: ProcessorInputs::single(named("orders"))
-                            .with_collect_policy("25ms".to_string(), Some("2MiB".to_string())),
-                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("orders", &["tenant"]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_projected_orders"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_projected_orders"),
-                        from: ProcessorInputs::single(named("projected_orders")),
-                        output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("projected_orders", &["tenant"]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Emitter,
-                    identifier: named("orders_emitter"),
-                    model: nervix_models::Model::Emitter(CreateEmitter {
-                        name: named("orders_emitter"),
-                        from: ProcessorInputs::single(named("aggregated_orders")),
-                        encode_using_codec: Some(named("orders_codec")),
-                        sink: Box::new(EmitSink::ZeroMq {
-                            client: named("zmq_client"),
-                        }),
-                        flush_policy: FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        },
-                        mode: AckMode::Attached,
-                        error_policies: ErrorPolicies::handled_by_log(),
-                        publishing_mode: EmitterPublishingMode::NoAck {
-                            retry_policy: RetryPolicy {
-                                backoff: "250ms".to_string(),
-                                max_backoff: "30s".to_string(),
-                            },
-                        },
-                        construction: nervix_models::RouteConstruction::default(),
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 1);
-        let spec = &specs.entrypoints[0];
-        assert_eq!(spec.identifier, named("orders_ingestor"));
-        assert_eq!(spec.root_relay, named("orders"));
-        assert_eq!(spec.branch.as_ref(), Some(&named("by_orders")));
-        assert_eq!(specs.processors.len(), 2);
-        let dedup_orders = &specs.processors[0];
-        assert_eq!(dedup_orders.spec.processor, named("dedup_orders"));
-        assert_eq!(dedup_orders.spec.input_relays, vec![named("orders")]);
-        let collect_policy = dedup_orders
-            .spec
-            .input_collect_policies
-            .get(&RelayName::from(&named::<ModelName>("orders")))
-            .expect("input collection policy must be planned for its source relay");
-        assert_eq!(collect_policy.collect_for, "25ms");
-        assert_eq!(collect_policy.max_batch_size.as_deref(), Some("2MiB"));
-        assert_eq!(dedup_orders.branch.as_ref(), Some(&named("by_orders")));
-        assert_eq!(dedup_orders.branch_ttl.as_deref(), Some("5m"));
-        assert_eq!(dedup_orders.branch_max_instances, None);
-        let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
-            &dedup_orders.spec.operation
-        else {
-            panic!("expected deduplicator output");
-        };
-        let output = output_routes
-            .routes
-            .first()
-            .expect("deduplicator should have output route");
-        assert_eq!(output.relay, named("projected_orders"));
-        let dedup_projected = &specs.processors[1];
-        assert_eq!(
-            dedup_projected.spec.processor,
-            named("dedup_projected_orders")
-        );
-        assert_eq!(
-            dedup_projected.spec.input_relays,
-            vec![named("projected_orders")]
-        );
-        assert_eq!(dedup_projected.branch_ttl.as_deref(), Some("5m"));
-    }
-
-    #[test]
-    fn branched_node_specs_capture_window_processor_as_branch_node() {
-        let specs = branched_node_specs_from_models(
-            [
-                branch_model("host", "metrics", &["host"]),
-                branch_model("host", "metric_summary", &["host"]),
-                PlannedModel {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("metrics_ingestor"),
-                    model: nervix_models::Model::Ingestor(CreateIngestor {
-                        name: named("metrics_ingestor"),
-                        output_routes: (ProcessorOutputs::single(named("metrics")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(branched_by("metrics", &["host"])),
-                        decode_using_codec: named("metrics_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_client"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
-                        general_error_policy: GeneralErrorPolicy::Log,
-                        filter_where: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::WindowProcessor,
-                    identifier: named("metric_window"),
-                    model: nervix_models::Model::WindowProcessor(CreateWindowProcessor {
-                        name: named("metric_window"),
-                        from: ProcessorInputs::single(named("metrics")),
-                        output_routes: window_outputs(
-                            "metric_summary",
-                            "SET count = COUNT(input.latency)",
-                        ),
-                        branched_by: processor_branched_by("metrics", &["host"]),
-                        width: WindowBound {
-                            messages: Some(100),
-                            duration: None,
-                        },
-                        step: WindowBound {
-                            messages: Some(10),
-                            duration: None,
-                        },
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_summary"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_summary"),
-                        from: ProcessorInputs::single(named("metric_summary")),
-                        output_routes: (ProcessorOutputs::single(named("projected_summary")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("metric_summary", &["host"]),
-                        deduplicate_on: vec![expression("input.count")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 1);
-        let spec = &specs.entrypoints[0];
-        assert_eq!(spec.root_relay, named("metrics"));
-        assert_eq!(specs.processors.len(), 2);
-        let window = specs
-            .processors
-            .iter()
-            .find(|node| node.spec.processor == named("metric_window"))
-            .expect("window processor spec must exist");
-        let BranchedProcessorOperationSpec::WindowProcessor {
-            output_routes,
-            width,
-            step,
-        } = &window.spec.operation
-        else {
-            panic!("expected window processor branch node");
-        };
-        let output = output_routes
-            .routes
-            .first()
-            .expect("window processor should have output route");
-        assert_eq!(output.relay, named("metric_summary"));
-        assert_eq!(width.messages, Some(100));
-        assert_eq!(step.messages, Some(10));
-        assert_eq!(output.construction.assignments.len(), 1);
-        assert!(
-            specs
-                .processors
-                .iter()
-                .any(|node| node.spec.processor == named("dedup_summary")
-                    && node.spec.input_relays == vec![named("metric_summary")])
-        );
-    }
-
-    #[test]
-    fn branched_node_specs_capture_inferencer_as_branch_node() {
-        let specs = branched_node_specs_from_models(
-            [
-                branch_model("tenant", "features", &["tenant"]),
-                branch_model("tenant", "scores", &["tenant"]),
-                PlannedModel {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("features_ingestor"),
-                    model: nervix_models::Model::Ingestor(CreateIngestor {
-                        name: named("features_ingestor"),
-                        output_routes: (ProcessorOutputs::single(named("features")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(branched_by("features", &["tenant"])),
-                        decode_using_codec: named("features_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_client"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
-                        general_error_policy: GeneralErrorPolicy::Log,
-                        filter_where: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Inferencer,
-                    identifier: named("score_model"),
-                    model: nervix_models::Model::Inferencer(CreateInferencer {
-                        name: named("score_model"),
-                        from: ProcessorInputs::single(named("features")),
-                        output_routes: (ProcessorOutputs::single(named("scores")))
-                            .with_flush_policy(FlushPolicy::Immediate),
-                        branched_by: processor_branched_by("features", &["tenant"]),
-                        resource: named("fraud_model"),
-                        resource_version: 3,
-                        file: "models/fraud.onnx".to_string(),
-                        inputs: vec![InferencerTensorMapping {
-                            tensor: "features".to_string(),
-                            schema: inferencer_tensor_schema(nonzero!(2u32)),
-                            expression: expression("input.vector"),
-                        }],
-                        output_schema: vec![InferencerTensorDeclaration {
-                            tensor: "score".to_string(),
-                            schema: inferencer_tensor_schema(nonzero!(1u32)),
-                        }],
-                        mode: AckMode::Attached,
-                        filter_where: Some(expression("input.active")),
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_scores"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_scores"),
-                        from: ProcessorInputs::single(named("scores")),
-                        output_routes: (ProcessorOutputs::single(named("projected_scores")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("scores", &["tenant"]),
-                        deduplicate_on: vec![expression("input.score")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 1);
-        let spec = &specs.entrypoints[0];
-        assert_eq!(spec.root_relay, named("features"));
-        assert_eq!(specs.processors.len(), 2);
-        let inferencer = specs
-            .processors
-            .iter()
-            .find(|node| node.spec.processor == named("score_model"))
-            .expect("inferencer spec must exist");
-        let BranchedProcessorOperationSpec::Inferencer {
-            output_routes,
-            resource,
-            resource_version,
-            file,
-            inputs,
-            output_schema,
-            ..
-        } = &inferencer.spec.operation
-        else {
-            panic!("expected inferencer branch node");
-        };
-        let output = output_routes
-            .routes
-            .first()
-            .expect("inferencer should have output route");
-        assert_eq!(output.relay, named("scores"));
-        assert_eq!(resource, &named("fraud_model"));
-        assert_eq!(*resource_version, 3);
-        assert_eq!(file, "models/fraud.onnx");
-        assert_eq!(inputs.len(), 1);
-        assert_eq!(output_schema.len(), 1);
-        assert_eq!(output.flush_policy, Some(FlushPolicy::Immediate));
-        assert_eq!(
-            inferencer.spec.filter_where,
-            Some(expression("input.active"))
-        );
-        assert!(
-            specs
-                .processors
-                .iter()
-                .any(|node| node.spec.processor == named("dedup_scores")
-                    && node.spec.input_relays == vec![named("scores")])
-        );
-    }
-
-    #[test]
-    fn branched_node_specs_capture_reingestor_entrypoint_tree() {
-        let specs = branched_node_specs_from_models(
-            [
-                branch_model("tenant", "tenant_orders", &["tenant"]),
-                PlannedModel {
-                    kind: ModelKind::Reingestor,
-                    identifier: named("tenant_partition"),
-                    model: nervix_models::Model::Reingestor(CreateReingestor {
-                        name: named("tenant_partition"),
-                        from: ProcessorInputs::single(named("orders")),
-                        output_routes: with_inherit_all(ProcessorOutputs::single(named(
-                            "tenant_orders",
-                        )))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        })
-                        .with_branch(branched_by("tenant_orders", &["tenant"])),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_orders"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_orders"),
-                        from: ProcessorInputs::single(named("tenant_orders")),
-                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("tenant_orders", &["tenant"]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 1);
-        let spec = &specs.entrypoints[0];
-        assert_eq!(spec.kind, ModelKind::Reingestor);
-        assert_eq!(spec.identifier, named("tenant_partition"));
-        assert_eq!(spec.root_relay, named("tenant_orders"));
-        assert_eq!(spec.branch.as_ref(), Some(&named("by_tenant_orders")));
-        assert_eq!(specs.processors.len(), 1);
-        assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
-        assert_eq!(
-            specs.processors[0].spec.input_relays,
-            vec![named("tenant_orders")]
-        );
-        assert_eq!(
-            specs.processors[0].branch.as_ref(),
-            Some(&named("by_tenant_orders"))
-        );
-        assert_eq!(specs.processors[0].branch_ttl.as_deref(), Some("5m"));
-    }
-
-    #[test]
-    fn branched_node_specs_capture_processor_output_route_tree() {
-        let specs = branched_node_specs_from_models(
-            [
-                branch_model("tenant", "orders", &["tenant"]),
-                branch_model("tenant", "urgent_orders", &["tenant"]),
-                branch_model("tenant", "default_orders", &["tenant"]),
-                PlannedModel {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("orders_ingestor"),
-                    model: nervix_models::Model::Ingestor(CreateIngestor {
-                        name: named("orders_ingestor"),
-                        output_routes: (ProcessorOutputs::single(named("orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(branched_by("orders", &["tenant"])),
-                        decode_using_codec: named("orders_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_client"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
-                        general_error_policy: GeneralErrorPolicy::Log,
-                        filter_where: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("orders_splitter"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("orders_splitter"),
-                        from: ProcessorInputs::single(named("orders")),
-                        output_routes: (ProcessorOutputs::new(vec![
-                            ProcessorOutput {
-                                relay: named("urgent_orders"),
-                                construction: nervix_nspl::parse_route_construction(
-                                    "WHERE output.urgent",
-                                )
-                                .expect("route construction must parse"),
-                                flush_policy: None,
-                                message_error_policy: MessageErrorPolicy::Log,
-                                branch: None,
-                            },
-                            ProcessorOutput {
-                                relay: named("default_orders"),
-                                construction: nervix_models::RouteConstruction::default(),
-                                flush_policy: None,
-                                message_error_policy: MessageErrorPolicy::Log,
-                                branch: None,
-                            },
-                        ]))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        }),
-                        branched_by: processor_branched_by("orders", &["tenant"]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: Some(expression("input.active")),
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_urgent"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_urgent"),
-                        from: ProcessorInputs::single(named("urgent_orders")),
-                        output_routes: (ProcessorOutputs::single(named("urgent_projected")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("urgent_orders", &["tenant"]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_default"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_default"),
-                        from: ProcessorInputs::single(named("default_orders")),
-                        output_routes: (ProcessorOutputs::single(named("default_projected")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("default_orders", &["tenant"]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 1);
-        assert_eq!(specs.processors.len(), 3);
-        let splitter = specs
-            .processors
-            .iter()
-            .find(|node| node.spec.processor == named("orders_splitter"))
-            .expect("splitter spec must exist");
-        let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
-            &splitter.spec.operation
-        else {
-            panic!("expected deduplicator output routes");
-        };
-        assert_eq!(splitter.spec.filter_where, Some(expression("input.active")));
-        assert_eq!(output_routes.routes.len(), 2);
-        assert_eq!(
-            output_routes.routes[0].construction.where_clause,
-            Some(expression("output.urgent"))
-        );
-        assert_eq!(output_routes.routes[0].relay, named("urgent_orders"));
-        assert_eq!(output_routes.routes[1].relay, named("default_orders"));
-        assert!(
-            specs
-                .processors
-                .iter()
-                .any(|node| node.spec.processor == named("dedup_urgent")
-                    && node.spec.input_relays == vec![named("urgent_orders")])
-        );
-        assert!(
-            specs
-                .processors
-                .iter()
-                .any(|node| node.spec.processor == named("dedup_default")
-                    && node.spec.input_relays == vec![named("default_orders")])
-        );
-    }
-
-    #[test]
-    fn branched_node_specs_capture_junction_as_single_branch_processor() {
-        let specs = branched_node_specs_from_models(
-            [
-                branch_model("tenant", "left_stream", &["tenant"]),
-                branch_model("tenant", "right_stream", &["tenant"]),
-                branch_model("tenant", "joined_stream", &["tenant"]),
-                PlannedModel {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("left_ingestor"),
-                    model: nervix_models::Model::Ingestor(CreateIngestor {
-                        name: named("left_ingestor"),
-                        output_routes: (ProcessorOutputs::single(named("left_stream")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(branched_by("left_stream", &["tenant"])),
-                        decode_using_codec: named("notification_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_client"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
-                        general_error_policy: GeneralErrorPolicy::Log,
-
-                        filter_where: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("right_ingestor"),
-                    model: nervix_models::Model::Ingestor(CreateIngestor {
-                        name: named("right_ingestor"),
-                        output_routes: (ProcessorOutputs::single(named("right_stream")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(branched_by("right_stream", &["tenant"])),
-                        decode_using_codec: named("notification_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_client"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
-                        general_error_policy: GeneralErrorPolicy::Log,
-
-                        filter_where: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Junction,
-                    identifier: named("join_streams"),
-                    model: nervix_models::Model::Junction(CreateJunction {
-                        name: named("join_streams"),
-                        from: ProcessorInputs::new(
-                            vec![named("left_stream"), named("right_stream")],
-                            Vec::new(),
-                        ),
-                        output_routes: (ProcessorOutputs::single(named("joined_stream")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("left_stream", &["tenant"]),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_joined"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_joined"),
-                        from: ProcessorInputs::single(named("joined_stream")),
-                        output_routes: (ProcessorOutputs::single(named("projected_joined")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("joined_stream", &["tenant"]),
-                        deduplicate_on: vec![expression("input.tenant")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 2);
-        assert_eq!(
-            specs
-                .processors
-                .iter()
-                .filter(|node| node.spec.processor == named("join_streams"))
-                .count(),
-            1
-        );
-        let junction = specs
-            .processors
-            .iter()
-            .find(|node| node.spec.processor == named("join_streams"))
-            .expect("junction spec must exist");
-        assert_eq!(
-            junction.spec.input_relays,
-            vec![named("left_stream"), named("right_stream")]
-        );
-        let BranchedProcessorOperationSpec::Junction { output_routes, .. } =
-            &junction.spec.operation
-        else {
-            panic!("expected junction processor");
-        };
-        let output = output_routes
-            .routes
-            .first()
-            .expect("junction should have output route");
-        assert_eq!(output.relay, named("joined_stream"));
-        assert!(
-            specs
-                .processors
-                .iter()
-                .any(|node| node.spec.processor == named("dedup_joined"))
-        );
-    }
-
-    #[test]
-    fn branched_node_specs_capture_single_processor_output_route_tree() {
-        let specs = branched_node_specs_from_models(
-            [
-                branch_model("tenant", "orders", &["tenant"]),
-                branch_model("tenant", "projected_orders", &["tenant"]),
-                PlannedModel {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("orders_ingestor"),
-                    model: nervix_models::Model::Ingestor(CreateIngestor {
-                        name: named("orders_ingestor"),
-                        output_routes: (ProcessorOutputs::single(named("orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(branched_by("orders", &["tenant"])),
-                        decode_using_codec: named("orders_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_client"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
-                        general_error_policy: GeneralErrorPolicy::Log,
-
-                        filter_where: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("orders_filter"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("orders_filter"),
-                        from: ProcessorInputs::new(
-                            vec![named("orders")],
-                            vec![ProcessorInputWhere {
-                                relay: named("orders"),
-                                where_clause: expression("input.active"),
-                            }],
-                        ),
-                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("orders", &["tenant"]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: Some(expression("input.active")),
-                        materialized_state: Vec::new(),
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_projected"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_projected"),
-                        from: ProcessorInputs::single(named("projected_orders")),
-                        output_routes: (ProcessorOutputs::single(named("aggregated_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("projected_orders", &["tenant"]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 1);
-        let orders_filter = specs
-            .processors
-            .iter()
-            .find(|node| node.spec.processor == named("orders_filter"))
-            .expect("orders filter spec must exist");
-        assert_eq!(
-            orders_filter
-                .spec
-                .from_where
-                .get(&RelayName::from(&named::<ModelName>("orders"))),
-            Some(&expression("input.active"))
-        );
-        let BranchedProcessorOperationSpec::Deduplicator { output_routes, .. } =
-            &orders_filter.spec.operation
-        else {
-            panic!("expected processor output routes");
-        };
-        assert_eq!(
-            orders_filter.spec.filter_where,
-            Some(expression("input.active"))
-        );
-        assert_eq!(output_routes.routes.len(), 1);
-        assert_eq!(output_routes.routes[0].relay, named("projected_orders"));
-        assert!(
-            specs
-                .processors
-                .iter()
-                .any(|node| node.spec.processor == named("dedup_projected")
-                    && node.spec.input_relays == vec![named("projected_orders")])
-        );
-    }
-
-    #[test]
-    fn branched_node_specs_include_singleton_branch_for_empty_branching() {
-        let specs = branched_node_specs_from_models(
-            [
-                PlannedModel {
-                    kind: ModelKind::Ingestor,
-                    identifier: named("orders_ingestor"),
-                    model: nervix_models::Model::Ingestor(CreateIngestor {
-                        name: named("orders_ingestor"),
-                        output_routes: (ProcessorOutputs::single(named("orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(OutputBranch::Unbranched),
-                        decode_using_codec: named("orders_codec"),
-                        timestamp_source: None,
-                        source: IngestSource::ZeroMq {
-                            client: named("zmq_client"),
-                            mode: ZeroMqIngestMode::NoAckSequential,
-                            quiesce: nervix_models::IngestQuiesceMode::Suspend,
-                        },
-                        general_error_policy: GeneralErrorPolicy::Log,
-
-                        filter_where: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_orders"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_orders"),
-                        from: ProcessorInputs::single(named("orders")),
-                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: processor_branched_by("orders", &[]),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 1);
-        assert_eq!(specs.entrypoints[0].identifier, named("orders_ingestor"));
-        assert_eq!(specs.entrypoints[0].root_relay, named("orders"));
-        assert_eq!(specs.entrypoints[0].branch, None);
-        assert_eq!(specs.entrypoints[0].branch_ttl, None);
-        assert_eq!(specs.processors.len(), 1);
-        assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
-        assert_eq!(specs.processors[0].branch_ttl, None);
-        assert_eq!(specs.processors[0].branch, None);
-        assert_eq!(specs.processors[0].branch_max_instances, None);
-    }
-
-    #[test]
-    fn branched_processor_specs_do_not_require_an_entrypoint() {
-        let specs = branched_node_specs_from_models(
-            [
-                PlannedModel {
-                    kind: ModelKind::Relay,
-                    identifier: named("orders"),
-                    model: nervix_models::Model::Relay(CreateRelay {
-                        name: named("orders"),
-                        schema: named("order_event"),
-                        buffer: nonzero!(1usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::Deduplicator,
-                    identifier: named("dedup_orders"),
-                    model: nervix_models::Model::Deduplicator(CreateDeduplicator {
-                        name: named("dedup_orders"),
-                        from: ProcessorInputs::single(named("orders")),
-                        output_routes: (ProcessorOutputs::single(named("projected_orders")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            }),
-                        branched_by: BranchSelection::unbranched(),
-                        deduplicate_on: vec![expression("input.order_id")],
-                        max_time: "10m".to_string(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert!(specs.entrypoints.is_empty());
-        assert_eq!(specs.processors.len(), 1);
-        assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
-        assert_eq!(specs.processors[0].spec.input_relays, vec![named("orders")]);
-        assert_eq!(specs.processors[0].branch_ttl, None);
-    }
-
-    #[test]
-    fn branched_wasm_processor_specs_preserve_global_error_policy() {
-        let specs = branched_node_specs_from_models(
-            [
-                PlannedModel {
-                    kind: ModelKind::Relay,
-                    identifier: named("orders"),
-                    model: nervix_models::Model::Relay(CreateRelay {
-                        name: named("orders"),
-                        schema: named("order_event"),
-                        buffer: nonzero!(1usize),
-                        branching: RelayBranching::unbranched(),
-                        materialized_state: None,
-                    }),
-                },
-                PlannedModel {
-                    kind: ModelKind::WasmProcessor,
-                    identifier: named("filter_orders"),
-                    model: nervix_models::Model::WasmProcessor(CreateWasmProcessor {
-                        name: named("filter_orders"),
-                        from: ProcessorInputs::single(named("orders")),
-                        output_routes: ProcessorOutputs::single(named("filtered_orders")),
-                        branched_by: BranchSelection::unbranched(),
-                        resource: named("filter_resource"),
-                        resource_version: 1,
-                        file: "filter.wasm".to_string(),
-                        limits: nervix_models::WasmProcessorLimits {
-                            max_fuel: nonzero!(1_000_000_000u64),
-                            max_memory_bytes: nonzero!(67_108_864u64),
-                        },
-                        global_error_policy: GeneralErrorPolicy::Ignore,
-                        rejected_state_policy: Default::default(),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.processors.len(), 1);
-        assert_eq!(
-            specs.processors[0].spec.error_policies.general,
-            GeneralErrorPolicy::Ignore
-        );
-        assert_eq!(
-            specs.processors[0].spec.error_policies.message,
-            MessageErrorPolicy::Log
-        );
-    }
-
-    #[test]
-    fn branched_node_specs_include_reingestor_with_declared_branching() {
-        let specs = branched_node_specs_from_models(
-            [
-                branch_model("tenant", "tenant_notifications", &["tenant"]),
-                PlannedModel {
-                    kind: ModelKind::Reingestor,
-                    identifier: named("tenant_partition"),
-                    model: nervix_models::Model::Reingestor(CreateReingestor {
-                        name: named("tenant_partition"),
-                        from: ProcessorInputs::single(named("notifications")),
-                        output_routes: (ProcessorOutputs::single(named("tenant_notifications")))
-                            .with_flush_policy(FlushPolicy::Each {
-                                interval: "100ms".to_string(),
-                                max_batch_size: "1MiB".to_string(),
-                            })
-                            .with_branch(branched_by("tenant_notifications", &["tenant"])),
-                        mode: AckMode::Attached,
-                        filter_where: None,
-                        materialized_state: Vec::new(),
-                    }),
-                },
-            ]
-            .into_iter(),
-        );
-
-        assert_eq!(specs.entrypoints.len(), 1);
-        assert_eq!(specs.entrypoints[0].identifier, named("tenant_partition"));
-        assert_eq!(
-            specs.entrypoints[0].root_relay,
-            named("tenant_notifications")
-        );
-    }
-
-    #[test]
-    fn window_route_demands_are_offset_by_the_routes_written_before_them() {
-        let input_relay = named::<RelayName>("metrics");
-        let totals_relay = named::<RelayName>("metric_totals");
-        let extremes_relay = named::<RelayName>("metric_extremes");
-        let metric_schema = Arc::new(compile_schema(&CreateSchema {
-            name: named("metric"),
-            fields: vec![
-                SchemaField {
-                    name: named("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                },
-                SchemaField {
-                    name: named("latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-            ],
-        }));
-        let totals_schema = Arc::new(compile_schema(&CreateSchema {
-            name: named("metric_total"),
-            fields: vec![
-                SchemaField {
-                    name: named("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                },
-                SchemaField {
-                    name: named("sample_count"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                SchemaField {
-                    name: named("first_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                SchemaField {
-                    name: named("total_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-            ],
-        }));
-        let extremes_schema = Arc::new(compile_schema(&CreateSchema {
-            name: named("metric_extreme"),
-            fields: vec![
-                SchemaField {
-                    name: named("tenant"),
-                    ty: ParseAsType::String,
-                    optional: false,
-                    sensitive: false,
-                },
-                SchemaField {
-                    name: named("max_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-                SchemaField {
-                    name: named("min_latency"),
-                    ty: ParseAsType::I64,
-                    optional: false,
-                    sensitive: false,
-                },
-            ],
-        }));
-        let totals_set = "SET tenant = FIRST(input.tenant), sample_count = COUNT(input.latency), \
-                          first_latency = FIRST(input.latency), total_latency = SUM(input.latency)";
-        let extremes_set = "SET tenant = LAST(input.tenant), max_latency = MAX(input.latency), \
-                            min_latency = MIN(input.latency)";
-        let node = BranchedProcessorSpec {
-            kind: ModelKind::WindowProcessor,
-            processor: named("route_scoped_latency"),
-            input_relays: vec![input_relay.clone()],
-            input_collect_policies: HashMap::default(),
-            mode: AckMode::Attached,
-            error_policies: ErrorPolicies::handled_by_log(),
-            from_where: HashMap::default(),
-            filter_where: None,
-            materialized_state: Vec::new(),
-            operation: BranchedProcessorOperationSpec::WindowProcessor {
-                output_routes: BranchedProcessorOutputsSpec {
-                    routes: vec![
-                        BranchedProcessorOutputSpec {
-                            relay: totals_relay.clone(),
-                            construction: construction(totals_set),
-                            flush_policy: Some(FlushPolicy::Immediate),
-                            message_error_policy: MessageErrorPolicy::Log,
-                        },
-                        BranchedProcessorOutputSpec {
-                            relay: extremes_relay.clone(),
-                            construction: construction(extremes_set),
-                            flush_policy: Some(FlushPolicy::Immediate),
-                            message_error_policy: MessageErrorPolicy::Log,
-                        },
-                    ],
-                },
-                width: WindowBound::of_messages(3),
-                step: WindowBound::of_messages(3),
-            },
-        };
-        let mut relay_schemas = HashMap::default();
-        relay_schemas.insert(input_relay, metric_schema);
-        relay_schemas.insert(totals_relay.clone(), totals_schema);
-        relay_schemas.insert(extremes_relay.clone(), extremes_schema);
-
-        let mut templates = materialize_nodes(&[node], &relay_schemas, None)
-            .expect("two-route window processor must materialize");
-
-        let template = templates.pop().expect("one template per spec");
-        let RelayProcessorOperationTemplate::WindowProcessor {
-            output_routes,
-            aggregate,
-            compiled_aggregates,
-            ..
-        } = &template.operation
-        else {
-            panic!("expected a window processor template");
-        };
-
-        // The routes keep their written order, and each compiled program stays aligned with the
-        // route it was compiled for.
-        let route_relays: Vec<_> = output_routes
-            .routes
-            .iter()
-            .map(|route| route.output_relay.clone())
-            .collect();
-        assert_eq!(route_relays, vec![totals_relay, extremes_relay]);
-        assert_eq!(compiled_aggregates.len(), 2);
-
-        // `FIRST(input.tenant)`, `COUNT(input.latency)`, `FIRST(input.latency)` and
-        // `SUM(input.latency)` need four separate structures; `MAX` and `MIN` over the same input
-        // deduplicate into one, so the second route claims two.
-        assert_eq!(compiled_aggregates[0].demand_offset, 0);
-        assert_eq!(compiled_aggregates[1].demand_offset, 4);
-        assert_eq!(aggregate.demands().len(), 6);
-
-        // The compiled programs own the assignments once compilation has run.
-        for route in &output_routes.routes {
-            assert!(route.construction.assignments.is_empty());
-        }
-    }
+    Ok(())
 }
+
+#[derive(Clone, Copy)]
+struct TransformingOutputProgramBinding<'a> {
+    domain: &'a DomainName,
+    kind: ModelKind,
+    processor: &'a ModelName,
+    input_relays: &'a [RelayName],
+    input_schema: &'a CompiledSchema,
+    relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
+}
+
+fn bind_transforming_output_programs<'a>(
+    binding: TransformingOutputProgramBinding<'_>,
+    outputs: &mut RelayProcessorOutputsTemplate,
+    context: impl Fn() -> RuntimeVmCompileContext<'a>,
+    inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
+) -> error_stack::Result<(), PlanningError> {
+    for output in &mut outputs.routes {
+        let output_schema = binding
+            .relay_schemas
+            .get(&output.output_relay)
+            .ok_or_else(|| {
+                Report::new(PlanningError::MissingOutputSchema {
+                    kind: binding.kind,
+                    node: binding.processor.clone(),
+                    relay: output.output_relay.clone(),
+                })
+            })?;
+        let carrier_schema = match inferencer_tensors {
+            Some(tensors) => tensors.output_arrow_schema(),
+            None => binding.input_schema.arrow_schema(),
+        };
+        output.compiled_program = compile_processor_output_filter_map_program(
+            RuntimeCompileTarget {
+                domain: binding.domain,
+                identifier: binding.processor,
+            },
+            binding.input_relays,
+            &output.output_relay,
+            &output.construction,
+            RuntimeVmSchemaPair {
+                input: carrier_schema,
+                input_sensitivity: binding.input_schema.vm_sensitivity(),
+                output: output_schema.arrow_schema(),
+                output_sensitivity: output_schema.vm_sensitivity(),
+            },
+            inferencer_tensors,
+            context(),
+        )
+        .map_err(|error| {
+            Report::new(PlanningError::ProcessorProgramCompilation {
+                kind: binding.kind,
+                node: binding.processor.clone(),
+            })
+            .attach_printable(error)
+        })?;
+    }
+    Ok(())
+}
+
+/// Inputs required to bind one complete node-local processor-plan revision.
+pub(in crate::runtime) struct ProcessorPlanBindingContext<'a> {
+    pub runtime: &'a Runtime,
+    pub domain: &'a DomainName,
+    pub model_index: &'a ModelIndex,
+    pub relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
+    pub relay_registries: &'a HashMap<RelayName, RelayRegistry>,
+    pub relay_services: &'a HashMap<RelayName, Arc<RelayBoundaryServices>>,
+    pub relay_branchings: &'a HashMap<RelayName, ResolvedBranching>,
+    pub materialized_stream_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
+    pub lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
+    pub udfs: Option<&'a UdfExecutor>,
+    pub previous: &'a HashMap<NodeRef, StdArc<PublishedProcessorPlan>>,
+}
+
+/// Binds the node-local artifacts for every locally installed processor before their complete map
+/// is published. An unchanged specification reuses the exact published allocation, including all
+/// prepared VM and WASM artifacts it owns.
+pub(in crate::runtime) async fn bind_published_processor_plans(
+    specs: &[BranchedProcessorNodeSpec],
+    context: ProcessorPlanBindingContext<'_>,
+) -> error_stack::Result<HashMap<NodeRef, StdArc<PublishedProcessorPlan>>, PlanningError> {
+    let ProcessorPlanBindingContext {
+        runtime,
+        domain,
+        model_index,
+        relay_schemas,
+        relay_registries,
+        relay_services,
+        relay_branchings,
+        materialized_stream_specs,
+        lookups,
+        udfs,
+        previous,
+    } = context;
+    let mut plans = HashMap::with_capacity(specs.len());
+    for spec in specs {
+        tokio::task::consume_budget().await;
+        let node = NodeRef::new(spec.spec.kind, spec.spec.processor.clone());
+        if let Some(published) = previous.get(&node)
+            && spec.reuses_prepared_revision(Some(&published.source))
+        {
+            plans.insert(node, published.clone());
+            continue;
+        }
+
+        let mut template = materialize_processor_instance_template(
+            spec,
+            model_index,
+            relay_schemas,
+            relay_registries,
+            relay_services,
+            udfs,
+        )?;
+        bind_processor_template_programs(
+            domain,
+            &mut template,
+            relay_schemas,
+            relay_branchings,
+            materialized_stream_specs,
+            lookups,
+            udfs,
+        )?;
+        template
+            .prepare_wasm_processors(runtime, domain)
+            .await
+            .change_context_lazy(|| PlanningError::PrepareWasmProcessor {
+                node: spec.spec.processor.clone(),
+            })?;
+        plans.insert(
+            node,
+            StdArc::new(PublishedProcessorPlan {
+                source: spec.clone(),
+                template: StdArc::new(template),
+            }),
+        );
+    }
+    Ok(plans)
+}
+
+#[cfg(test)]
+#[path = "planning_tests.rs"]
+mod tests;

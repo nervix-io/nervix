@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use nervix_models::{
     CommandExecutionReference, CoordinationIdentity, DomainName, ModelName, RemoteRuntimeField,
-    WasmSavedStateRejection, WasmStateResetScope,
+    WasmSavedStateRejection, WasmStateResetReason, WasmStateResetScope,
 };
 use rkyv::{Archive, Deserialize, Serialize};
 
@@ -26,6 +26,7 @@ pub enum WasmStateResetRuntimeAction {
     Prepare {
         branch_key: Option<Vec<RemoteRuntimeField>>,
         published: bool,
+        reason: WasmStateResetReason,
     },
     /// Apply the currently committed schedule while the reset gate remains held. Replicas install
     /// the new generation before the execution owner writes its initial checkpoint.
@@ -64,6 +65,7 @@ pub struct CoordinateWasmStateResetRequest {
     pub processor: ModelName,
     pub request: CommandExecutionReference,
     pub target: WasmStateResetTarget,
+    pub reason: WasmStateResetReason,
 }
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]

@@ -23,7 +23,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Domain timing and lifecycle | `Domains And Time` |
 | Administrative durability, storage errors, and recovery of uncertain commits | `Control Plane` → `Durability and recovery` |
 | Internal/wire schemas, schema evolution, codecs, JAQ, Protobuf, and type mapping | `Schemas And Codecs` and `Control Plane` |
-| Expressions, comparisons, membership and range tests, casts, and built-in functions | `Filter-Map Functions` |
+| Expressions, operators, casts, built-in functions, window aggregates, and approximate sketches | `Expression Functions` |
 | Trusted Roto user-defined expression functions | `User-Defined Functions` |
 | Roto language syntax for UDF bodies | `Roto Language Reference` |
 | Branches, relays, capacity, TTL, and materialized state | `Relay` |
@@ -40,6 +40,10 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Full graph examples | `Examples` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
 | Writing Rust WASM guests with the SDK | `Rust WASM Guest SDK` |
+
+For transaction preview scopes, operation and step impact, actual engagement, and retained
+inspection, read [Transaction Quiescence And Impact Inspection](https://docs.nervix.io/transaction-quiescence.html)
+directly. It is an architecture chapter and is outside the curated NSPL index.
 
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
@@ -81,10 +85,10 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    mixed `CREATE`, supported model `ALTER`, and `DROP`. Each statement is preflighted against the
    queued prefix without applying its effect; a rejection can be corrected before commit. Queued
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
-   maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, read-only statements,
-   subscriptions, uploads, and node administration remain outside the transaction. The exception
-   is `DESCRIBE TRANSACTION;`, sent on its own, which reads the open transaction's planned impact
-   before `COMMIT` without becoming content or shifting operation numbers.
+   maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, other read-only statements,
+   subscriptions, uploads, and node administration remain outside the transaction.
+   `DESCRIBE TRANSACTION;` and `SHOW TRANSACTIONS;` run on their own beside an open transaction;
+   they read impact or status without becoming content or shifting operation numbers.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
    paced `START` establishes one replicated clock generation that joining nodes install before
    execution. One committed authority revision identifies the producing node incarnation; owner
@@ -150,7 +154,7 @@ relay. Do not use them to scan across branches.
   schema referenced directly with `FROM SYSLOG`; it has no name or model lifecycle.
 - Every codec explicitly handles any wire/internal datetime or shape difference. Every JAQ-backed
   codec uses `WITH JAQ TRANSFORMATIONS` and declares `ON INGESTION`, `ON EMITTING`, or both in that
-  order. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
+  order; `ON EMITTING BATCH` may follow `ON EMITTING` and yields exactly one value per batch. Every `ON INGESTION` output is an object that fits the internal schema, and a payload that
   unfolds into several messages is decoded, acknowledged, and redelivered as a whole.
 - Every codec using the SYSLOG wire schema uses `FROM SYSLOG` and only the exact fixed fields
   documented in `Common` → `Syslog`; keep the format separate from the `TYPE SYSLOG` transport,
@@ -166,7 +170,21 @@ relay. Do not use them to scan across branches.
 - Every emitter sink declares its transport-supported `MODE` in the documented position and
   supplies the complete retry policy plus the confirmation window and timeout when that mode
   confirms asynchronously. No operational mode variable is inferred.
-- ClickHouse, Postgres, MySQL, and MongoDB emitter sinks declare a positive `WITH MAX BATCH`.
+- ClickHouse, Postgres, MySQL, and MongoDB emitters declare `BATCH MAX MESSAGES <n> MAX SIZE
+  <bytes>` before `FLUSH`; any other emitter may, with `MAX MESSAGES` from 1 to 65,536, a positive
+  whole-unit `MAX SIZE`, at most `256KiB` for SQS, `ON EMITTING BATCH` in a batching Sentry
+  emitter's codec, and `BATCH MESSAGE` in a batching emitter's protobuf codec. A batching Kafka,
+  Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry or Syslog emitter publishes each run of
+  compatible records from successive Arrow carriers in one flush, one source relay and one exact
+  branch (or unbranched source) as one container (array, TOML `batch` key, XML `batch`
+  root, protobuf `BATCH MESSAGE`, one syslog frame) or as its codec's `ON EMITTING BATCH` value, so
+  consumers must read that container. `MAX SIZE` is the exact encoded payload length, including
+  escaping, the container and any transformation expansion; an oversize candidate is halved, and a
+  record that alone exceeds it goes to `ON MESSAGE ERROR` as a `validation` error, so leave headroom
+  for the largest record rather than sizing it to a typical one. A failing `ON EMITTING BATCH`
+  rejects every member of that batch with one shared error reference. A payload whose outcome is
+  unknown is retried with the same bytes and members, so consumers deduplicating a retry see a
+  whole repeated batch, never a regrouped one.
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above
@@ -224,11 +242,12 @@ relay. Do not use them to scan across branches.
   `<stage> failed` diagnostic, and treat only `snapshot envelope decoding` and `application state
   restoration` as a verdict on the saved state, which Nervix keeps unless the processor declares
   `ON REJECTED STATE RESET` and thereby spends that lifetime's single recovery attempt. Owner loss
-  without a surviving
-  checkpoint of the current state generation resets the affected branches; a returning former
-  owner or stale replica never restores older guest state. Treat a WASM processor's input
+  without a surviving checkpoint of the current state generation, or whose recovery the new owner
+  cannot prepare, resets the affected branches; a returning former owner or stale replica never
+  restores the state of a replaced generation. Treat a WASM processor's input
   acknowledgement as released only after the guest-state checkpoint covering it reached the owner's
-  stable storage and every replica the schedule assigns; a failed checkpoint negatively
+  stable storage and every replica the schedule assigns, unless the processor is `DETACHED`, whose
+  input relay fan-out acknowledges upstream; a failed checkpoint negatively
   acknowledges its inputs and recreates the guest from the last completed checkpoint. Output is
   dispatched before its checkpoint completes, so a redelivered input can emit again: the path stays
   at least once, and a guest that must not double-count redelivered input has to recognize it.

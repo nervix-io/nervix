@@ -623,6 +623,8 @@ pub(crate) enum RuntimePersistenceError {
     EncodeState(String),
     #[error("failed to decode runtime state: {0}")]
     DecodeState(String),
+    #[error("failed to seal or restore a window snapshot")]
+    WindowSnapshot,
     #[error("deduplicator snapshot has an invalid format header")]
     InvalidDeduplicatorSnapshotHeader,
     #[error("prepared ownership handoff state is unavailable")]
@@ -945,15 +947,15 @@ impl RuntimeStatePlacement {
     pub(crate) fn from_remote(
         placement: nervix_interconnect::StatePlacementEnvelope,
     ) -> error_stack::Result<Self, RuntimeStatePlacementError> {
-        let branch_key = BranchKey::from_remote_key(placement.branch_key).map_err(|reason| {
-            Report::new(RuntimeStatePlacementError {
-                domain: placement.domain.clone(),
-                state: placement.state.kind(),
-                kind: placement.kind,
-                identifier: placement.identifier.clone(),
-            })
-            .attach_printable(reason)
-        })?;
+        let branch_key =
+            BranchKey::from_remote_key(placement.branch_key).change_context_lazy(|| {
+                RuntimeStatePlacementError {
+                    domain: placement.domain.clone(),
+                    state: placement.state.kind(),
+                    kind: placement.kind,
+                    identifier: placement.identifier.clone(),
+                }
+            })?;
         Ok(Self {
             domain: placement.domain,
             state: placement.state,

@@ -27,3 +27,6 @@ thiserror = { workspace = true }
 triomphe = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+rstest = { workspace = true }

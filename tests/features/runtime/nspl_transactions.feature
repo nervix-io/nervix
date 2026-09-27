@@ -1,3 +1,4 @@
+@transaction_quiesce_qualification
 Feature: NSPL transactions
   @transaction_frozen_plan
   Scenario Outline: Commit admission freezes a plan before later authoritative state changes
@@ -65,6 +66,18 @@ Feature: NSPL transactions
     Then the last command error contains
       """
       schema 'staged_event' does not exist in domain '{{domain}}'
+      """
+    When client "owner" attempts to commit its transaction
+    Then client "owner" commit was refused because its expected preview is stale
+    When client "owner" executes these NSPL commands
+      """
+      DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /transaction/transaction_id = "{{transaction_id}}"
+      /operation = 1
+      /report/position = 1
       """
     When client "owner" executes these NSPL commands
       """
@@ -329,7 +342,7 @@ Feature: NSPL transactions
       """
     Then the last command error contains
       """
-      DESCRIBE TRANSACTION must be executed separately
+      DESCRIBE TRANSACTION and SHOW TRANSACTIONS must be executed separately
       """
     When client "owner" fails to execute these NSPL commands
       """
@@ -386,6 +399,85 @@ Feature: NSPL transactions
       """
     And client "observer" has no transaction
     And client "owner" transaction state is "OPEN"
+
+  @transaction_inspection
+  Scenario Outline: A standalone CLI inspection prints one JSON document and a refusal exits nonzero
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA cli_inspected_event ( user_id U32 );
+      """
+    Then client "owner" transaction id is saved as placeholder "transaction_id"
+    When the CLI successfully executes this JSON inspection
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}' OPERATION 1 FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /transaction/transaction_id = "{{transaction_id}}"
+      /transaction/state = "OPEN"
+      /operation = 1
+      /report/operations/0/number = 1
+      """
+    When the CLI successfully executes this text inspection
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}' OPERATION 1 FORMAT TEXT;
+      """
+    Then the last command output contains
+      """
+      transaction: {{transaction_id}}
+      """
+    And the last command output contains
+      """
+      inspected operation: 1
+      operation 1: CREATE_CONFIGURATION kind=schema name=cli_inspected_event
+      """
+    When the CLI refuses this JSON inspection
+      """
+      DESCRIBE TRANSACTION 'missing-cli-transaction' FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /error/code = "INSPECTION_REFUSED"
+      /error/message = "transaction 'missing-cli-transaction' is unknown"
+      """
+    When the CLI refuses this JSON inspection
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}' OPERATION 2 FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /error/code = "INSPECTION_REFUSED"
+      /error/message = "transaction '{{transaction_id}}' accepted 1 operation(s), so operation 2 does not exist"
+      """
+    When the CLI executes this JSON inspection with a missing CA file
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}' FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /error/code = "CLIENT_CONFIGURATION"
+      """
+    When the CLI executes this JSON inspection with an invalid server URL
+      """
+      DESCRIBE TRANSACTION '{{transaction_id}}' FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /error/code = "CONNECTION_FAILED"
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @standalone_transaction_refresh
   Scenario: An ordinary command refreshes a frozen plan that loses its planning inputs
@@ -1051,7 +1143,6 @@ Feature: NSPL transactions
 
     Examples:
       | statement                                                 | error                                                       |
-      | SHOW TRANSACTIONS;                                        | cannot be queued in a transaction                           |
       | DESCRIBE DOMAIN;                                          | cannot be queued in a transaction                           |
       | CREATE DOMAIN transaction_extra_domain;                   | CREATE DOMAIN cannot be queued in a transaction             |
       | CREATE USER transaction_user WITH PASSWORD 'secret';      | CREATE USER cannot be queued in a transaction               |
@@ -1059,6 +1150,47 @@ Feature: NSPL transactions
       | UPLOAD RESOURCE local_bundle VERSION '/tmp/local_bundle'; | client-local commands are not allowed                       |
       | CORDON NODE node-1;                                       | cannot be queued in a transaction                           |
       | DROP NODE node-1;                                         | cannot be queued in a transaction                           |
+
+  Scenario Outline: SHOW TRANSACTIONS reads the attached transaction without changing its queue
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA inspected_event (
+        value STRING
+      );
+      """
+    When client "owner" executes these NSPL commands
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      domain={{domain}} state=OPEN pending=1
+      """
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA inspected_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA inspected_event (
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @transaction_queue_preflight
   Scenario Outline: Queued statements are preflighted against the transaction prefix

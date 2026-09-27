@@ -95,18 +95,38 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   in-memory hot-path state and are never persisted.
 - Connectors adapt external systems at explicit data-plane boundaries. They do not weaken internal
   schema, branch, error, or sensitivity rules.
+- [Connector Crates And The Connector Contract](docs/src/connector-contract.md) is the authoritative
+  architecture reference for external integrations and the contract between connector crates and
+  their host. Any change to a connector crate, the shared connector contract, connector planning or
+  composition, or host source and sink execution must keep that chapter current in the same change.
+  Its scope includes layer and dependency ownership, source and sink plans and lifecycle, metadata
+  and header semantics, ACK and commit boundaries, host loops and cadence, special integrations,
+  failures, guarantees, limits, and observability.
 - [Cluster Interconnect](docs/src/interconnect.md) is the authoritative architecture reference for
   node-to-node communication. Any change to interconnect code or to a node-to-node operation must
   keep that chapter current in the same change. Its scope includes authentication and identity,
   discovery and topology, wire contracts and exchange forms, pool and quota isolation, limits and
   deadlines, relay delivery and acknowledgements, application health, consensus and bulk traffic,
   connection lifecycle, failure semantics, and observability.
+- [Errors And Diagnostics](docs/src/errors-and-diagnostics.md) is the authoritative architecture
+  reference for typed error ownership, propagation, ordinary outcomes versus failures, validation
+  and planning diagnostics, runtime message errors, cross-node failure classification, public
+  diagnostics, sensitivity, recovery and panic classes, and enforcement. Any change to error types,
+  error or diagnostic propagation, failure classification, or reporting at a layer or public
+  boundary must keep that chapter current in the same change.
 - [Consensus Storage And Replication](docs/src/consensus-storage-and-replication.md) is the
   authoritative architecture reference for Raft persistence and catch-up. Any change to consensus
   durability, replication pacing, log reading or retention, snapshot storage or transfer, or the
   dedicated consensus database must keep that chapter current in the same change. Its scope
   includes durable append and apply boundaries, client acknowledgement, stream and memory bounds,
   learner promotion, recovery, operator tuning, and observability.
+- [Transaction Quiescence And Impact Inspection](docs/src/transaction-quiescence.md) is the
+  authoritative architecture reference for transaction-impact planning, scoped quiescence,
+  execution reporting, inspection, and retention. Any change to transaction operation or step
+  impact, affected topology, preview identity or freshness, actual engagement, report persistence,
+  or inspection presentation must keep that chapter current in the same change. Transaction
+  lifecycle, command completion, domain time, interconnect, and client recovery retain their own
+  documentation owners.
 - [Domain Clock](docs/src/domain-clock.md) is the authoritative architecture reference for domain
   time. Any change to the domain-clock architecture, or to domain architecture that changes how
   time is established, propagated, or consumed, must keep that chapter current in the same change.
@@ -118,7 +138,20 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   change to hot-path state publication, task or branch ownership, delivery or assignment fences,
   or the data-plane lock ratchet must keep that chapter current in the same change. Its scope
   includes the contentionless rule, published and pre-resolved state, mutable execution state,
-  bounded synchronization, and review classification for new lock sites.
+  bounded synchronization, review classification for new lock sites, and deterministic checks of
+  data-plane concurrency protocols.
+- [VM Functions](docs/src/vm-functions.md) is the authoritative architecture reference for the
+  expression VM and its function catalog. Any change to expression lowering, the semantic catalog
+  and function registration, type or sensitivity checking, constant folding or expression sharing,
+  compiled programs and their prepared artifacts, the runtime bridge and execution context, scalar
+  operands, selected-row execution of conditional arms, row and batch errors, kernel selection and
+  SIMD use, function-family implementations, injected functions, or window aggregate and sketch
+  structures must keep that chapter current in the same change. Its scope includes ownership by
+  layer, where programs compile and how long they live, allocation and result bounds, scheduling
+  and execution bounds, branch-local accumulation, bounded sketch state, publication and recovery
+  of window state, measured performance evidence, and the checklist for adding a function.
+  [Expression Functions](docs/src/filter-map-functions.md) remains the owner of every public
+  function contract.
 - [Resource Versions And Bindings](docs/src/resource-versions.md) is the authoritative architecture
   reference for resource versions and the models that bind them. Any change to the resource
   catalog, upload installation or replication, version resolution, how a binding is validated,
@@ -128,6 +161,16 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   resolution, the pinning invariant for every binding kind, rebinding atomicity and rollback, the
   separation of uploads from bindings, the `DYNAMIC` TLS refresh, guarantees and limits, failure
   semantics and recovery, and observability.
+- [WASM State And Recovery](docs/src/wasm-state.md) is the authoritative architecture reference for
+  WASM processor guest state. Any change to what a guest save holds, the checkpoint that completes a
+  guest callback and the acknowledgements it holds back, local or replica durability of guest state,
+  state generations and the events that advance them, ownership fencing or forced recovery of guest
+  state, coordinated, guest-requested, or rejected-state resets, the guest save, restore, and reset
+  ABI, or how rebinding affects guest state must keep that chapter current in the same change. Its
+  scope includes branch ownership and unbranched execution, durable versus volatile state,
+  placements and revisions, failure before and after each durability and authority boundary,
+  stale-node catch-up and why state does not resurrect, quiescence, shutdown and restart, replay and
+  duplicate windows, observability, and limits.
 - [Shutdown And Recovery](docs/src/shutdown.md) is the authoritative architecture reference for
   stopping a node and recovering from a forced ending. Any change to shutdown phases, the shutdown
   or drain deadline, termination signals, terminating placement eligibility, intake stop, graph
@@ -137,6 +180,12 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   commit boundaries, durable versus volatile state, the former-owner startup fence, and
   observability. It is the single canonical shutdown chapter: work that finishes with shutdown
   documentation extends it rather than adding a competing page.
+- [Typed States And Validation Boundaries](docs/src/typed-states.md) is the authoritative
+  architecture reference for absence, distinct semantic states, owning validation boundaries,
+  state identity, private atomic representations, and external encodings. Any change to how a
+  missing value, state variant, required identity, conversion failure, or boundary representation
+  is modeled or validated must keep that chapter current in the same change. Interconnect,
+  domain-clock, and shutdown details remain in their own authoritative chapters.
 
 ## System Layers and Migration
 
@@ -389,10 +438,10 @@ build and the existing tests, and nothing in it changes behavior.
   route-local, the operation, and the relevant fields. They never carry sensitive payload values.
 - Hot-path errors do not allocate a formatted message per row or per batch when the variant already
   names the failure. Formatting belongs at the reporting boundary.
-- `just ratchet` enforces the conversion as two coordinated counts: each conversion lowers
-  `result_string_errors`, while `bare_error_signatures` rejects replacing it with an unreported
-  Nervix error. A conversion must leave every count at or below its baseline; when the string-error
-  count falls, run `just ratchet --update` and commit `debt-baseline.json` in the same change.
+- `Result<_, String>` is rejected outright in product code. `just validate-typed-errors`, part of
+  `just validate`, fails on any occurrence and names the rule; there is no baseline to raise. The
+  `bare_error_signatures` count in `just ratchet` rejects replacing a `String` error with an
+  unreported Nervix error.
 
 ### Panics and recovery
 
@@ -591,6 +640,12 @@ build and the existing tests, and nothing in it changes behavior.
 
 ### Integration coverage
 
+- A lock-free or wait-and-notify protocol on the data plane ships with a Shuttle check over its
+  production owner that names and asserts its invariant. Run it through `just test-shuttle` in CI
+  and preserve a failing schedule for replay. Use Loom only for memory-ordering claims, which
+  Shuttle's sequentially consistent scheduler cannot establish. Concurrency tests have no
+  wall-clock bounds or sleep polls; express deadline choices and progress with scheduler-visible
+  events. A publicly observable outcome still needs its Cucumber scenario.
 - [Integration Test Lifecycle](docs/src/integration-test-lifecycle.md) is the authoritative
   architecture reference for the lifecycle of the Cucumber scenario harness. Any change to how the
   harness starts, observes, diagnoses, or stops in-process nodes, server processes, scenarios, or
@@ -602,6 +657,16 @@ build and the existing tests, and nothing in it changes behavior.
   diagnostics, cluster teardown and forced cleanup, scenario-driven stops, the port pool, server
   processes and test dependencies, the suite watchdog and its CI reserve, exit statuses, and how
   failure reaches CI output.
+- [Deterministic Interconnect Simulation](docs/src/interconnect-simulation.md) is the authoritative
+  architecture reference for the Turmoil simulation of the interconnect. Any change to the `turmoil`
+  build mode or its dependency and scheduler-conflict checks, the socket, certificate-clock,
+  entropy, or CPU-execution seams the simulation plugs into, the runner, the scenario driver,
+  failure records and replay, a simulation scenario or its committed seeds and bounds, the Turmoil
+  recipes, or the CI job that runs them must keep that chapter current in the same change. Its scope
+  includes code ownership and the feature matrix, the simulated host and its time and entropy, host
+  supervision, the fault model, semantic traces and replay rules, seed selection, commands and
+  budgets, the scenario matrix, simulated restart versus real-process evidence, findings and
+  retained regressions, qualification evidence, and the prerequisites for whole-cluster simulation.
 - Unit tests support but do not replace cucumber coverage for behavior observable through an NSPL
   command, HTTP or public API call, cluster state, runtime output, or persisted state. Adding an
   executable statement with application or runtime handling is not parser-only. Do not substitute
@@ -664,10 +729,10 @@ build and the existing tests, and nothing in it changes behavior.
 - Architecture debt is counted and only decreases. `just ratchet` counts oversized files, `as`
   casts outside imports and qualified paths, bare `unwrap` and `expect`, outcomes dropped with
   `let _ =` instead of stating their class, `saturating_*` and `wrapping_*` calls outside the time
-  API, control flow written as `Option` and `Result` combinator chains, `Result<_, String>`,
-  signatures returning a Nervix error without `Report`, node identities carried as `String`, struct
-  fields gated on `cfg(feature = "testing")`, parser references outside the language edges, and
-  `Model` references in the data plane. It also records `data_plane_lock_acquisitions` for lock and
+  API, control flow written as `Option` and `Result` combinator chains, signatures returning a
+  Nervix error without `Report`, node identities carried as `String`, struct fields gated on
+  `cfg(feature = "testing")`, parser references outside the language edges, and `Model` references
+  in the data plane. It also records `data_plane_lock_acquisitions` for lock and
   `DashMap::entry` acquisitions in data-plane files, and `write_once_rwlock_fields` for names and
   shared references held as `RwLock<Option<...>>` fields. CI fails when a count is above
   `debt-baseline.json`. A change may lower a count and never raise one. When a count falls, run

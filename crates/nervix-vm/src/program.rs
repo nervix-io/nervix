@@ -15,9 +15,10 @@ use std::{
 
 use arrow_schema::DataType;
 use meticulous::OptionExt as _;
-use strum::{AsRefStr, EnumString, IntoStaticStr, VariantNames};
+use strum::{AsRefStr, EnumString, IntoEnumIterator as _, IntoStaticStr, VariantNames};
 
 pub use crate::datetime::{DatetimeFormat, DatetimeParser, Zone};
+use crate::json::JsonExtraction;
 
 /// Identifies one semantic operation in a lowered VM program.
 ///
@@ -152,6 +153,12 @@ pub enum Expr {
         low: Box<SpannedExpr>,
         high: Box<SpannedExpr>,
     },
+    /// One extraction from the JSON text `document` holds. Every extraction a program makes from
+    /// one document column is answered by a single parse of each of its documents.
+    Json {
+        document: Box<SpannedExpr>,
+        extraction: JsonExtraction,
+    },
 }
 
 /// What a cast yields for a value its target type cannot hold.
@@ -231,7 +238,8 @@ impl Eq for CaseArm {}
 impl Expr {
     /// Whether evaluating this expression under a conditional arm may leave a null, rather than
     /// its value, on the rows the arm does not select. A call out of the VM is made for the
-    /// selected rows only, and a cast that yields null for a failure may convert only those rows.
+    /// selected rows only, a cast that yields null for a failure may convert only those rows, and
+    /// a JSON extraction parses only their documents.
     /// Every other operation confined to the selected rows can report an error, and an expression
     /// that can report one is never shared in the first place.
     pub(crate) fn may_answer_selected_rows_only(&self) -> bool {
@@ -297,6 +305,8 @@ impl Expr {
                     || low.inner.may_answer_selected_rows_only()
                     || high.inner.may_answer_selected_rows_only()
             }
+            // A scan parses only the documents of the rows its arm selects.
+            Self::Json { .. } => true,
         }
     }
 
@@ -312,6 +322,7 @@ impl Expr {
             Self::Case { .. } => 7,
             Self::Membership { .. } => 8,
             Self::Between { .. } => 9,
+            Self::Json { .. } => 10,
         }
     }
 }
@@ -415,6 +426,18 @@ impl Ord for Expr {
             ) => cmp_spanned(left_operand, right_operand)
                 .then_with(|| cmp_spanned(left_low, right_low))
                 .then_with(|| cmp_spanned(left_high, right_high)),
+            (
+                Self::Json {
+                    document: left_document,
+                    extraction: left_extraction,
+                },
+                Self::Json {
+                    document: right_document,
+                    extraction: right_extraction,
+                },
+            ) => left_extraction
+                .cmp(right_extraction)
+                .then_with(|| cmp_spanned(left_document, right_document)),
             _ => self.discriminant().cmp(&other.discriminant()),
         }
     }
@@ -434,7 +457,7 @@ impl PartialEq for Expr {
 
 impl Eq for Expr {}
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, strum::EnumIter)]
 pub enum FunctionName {
     Now,
     UuidV4,
@@ -448,6 +471,7 @@ pub enum FunctionName {
     Length,
     CharLength,
     BitLength,
+    OctetLength,
     Ascii,
     Coalesce,
     IsNull,
@@ -499,6 +523,13 @@ pub enum FunctionName {
     Round,
     Rpad,
     SplitPart,
+    Split,
+    Join,
+    ConcatWs,
+    Like,
+    ILike,
+    ContainsAny,
+    NormalizeNfc,
     Sqrt,
     Strpos,
     Substr,
@@ -546,14 +577,19 @@ pub enum FunctionName {
     RegexpLike,
     RegexpReplace,
     RegexpSubstr,
+    RegexpExtract,
+    #[strum(disabled)]
     Datetime(DatetimeFunction),
     LeakSensitive,
     LookupHashMap,
     ReadHeader,
     ReadHeaders,
     WriteHeader,
+    #[strum(disabled)]
     WindowAggregate(WindowAggregateInvocation),
+    #[strum(disabled)]
     Udf(String),
+    #[strum(disabled)]
     Unknown(String),
 }
 
@@ -602,7 +638,18 @@ impl DatetimeFunction {
 }
 
 /// The name of a datetime builtin, before its constant arguments are read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, IntoStaticStr, strum::Display)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    EnumString,
+    IntoStaticStr,
+    strum::Display,
+    strum::EnumIter,
+)]
 #[strum(ascii_case_insensitive, serialize_all = "snake_case")]
 pub enum DatetimeFunctionName {
     DatePart,
@@ -836,6 +883,9 @@ impl DateBinWidth {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, AsRefStr, EnumString)]
 #[strum(ascii_case_insensitive, serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum WindowAggregateFunction {
+    ApproxCountDistinct,
+    ApproxQuantile,
+    ApproxTopK,
     ArgMax,
     ArgMin,
     Avg,
@@ -910,6 +960,8 @@ impl WindowAggregateFunction {
     pub const fn expected_arity(self) -> usize {
         match self {
             Self::PercentileLinearHistogram => 6,
+            Self::ApproxQuantile | Self::ApproxTopK => 3,
+            Self::ApproxCountDistinct => 2,
             Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => 2,
             Self::Avg
             | Self::BoolAnd
@@ -934,6 +986,9 @@ impl WindowAggregateFunction {
         match self {
             Self::ArgMax | Self::ArgMin | Self::Corr | Self::CovarPop | Self::CovarSamp => true,
             Self::Avg
+            | Self::ApproxCountDistinct
+            | Self::ApproxQuantile
+            | Self::ApproxTopK
             | Self::BoolAnd
             | Self::BoolOr
             | Self::Count
@@ -953,6 +1008,20 @@ impl WindowAggregateFunction {
 }
 
 impl FunctionName {
+    /// Spellings of scalar builtins available to an ordinary route expression. Injected calls
+    /// and header writes have separate owners and are offered only by those contexts.
+    pub fn ordinary_completion_names() -> Vec<String> {
+        let mut names = Self::iter()
+            .filter(|function| !function.is_injected() && *function != Self::WriteHeader)
+            .map(|function| function.as_str().to_string())
+            .collect::<Vec<_>>();
+        names.extend(DatetimeFunctionName::iter().map(|function| function.to_string()));
+        names.extend(["ceiling", "power", "substring"].map(str::to_string));
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Whether a call to this function is answered by an injected function outside the VM rather
     /// than by a builtin kernel: a header read, a window aggregate or a UDF.
     pub const fn is_injected(&self) -> bool {
@@ -976,6 +1045,7 @@ impl FunctionName {
             "length" => Self::Length,
             "char_length" => Self::CharLength,
             "bit_length" => Self::BitLength,
+            "octet_length" => Self::OctetLength,
             "ascii" => Self::Ascii,
             "coalesce" => Self::Coalesce,
             "is_null" => Self::IsNull,
@@ -1027,6 +1097,13 @@ impl FunctionName {
             "round" => Self::Round,
             "rpad" => Self::Rpad,
             "split_part" => Self::SplitPart,
+            "split" => Self::Split,
+            "join" => Self::Join,
+            "concat_ws" => Self::ConcatWs,
+            "like" => Self::Like,
+            "ilike" => Self::ILike,
+            "contains_any" => Self::ContainsAny,
+            "normalize_nfc" => Self::NormalizeNfc,
             "sqrt" => Self::Sqrt,
             "strpos" => Self::Strpos,
             "substr" | "substring" => Self::Substr,
@@ -1074,6 +1151,7 @@ impl FunctionName {
             "regexp_like" => Self::RegexpLike,
             "regexp_replace" => Self::RegexpReplace,
             "regexp_substr" => Self::RegexpSubstr,
+            "regexp_extract" => Self::RegexpExtract,
             "leak_sensitive" => Self::LeakSensitive,
             "lookup_hash_map" => Self::LookupHashMap,
             "read_header" => Self::ReadHeader,
@@ -1097,6 +1175,7 @@ impl FunctionName {
             Self::Length => "length",
             Self::CharLength => "char_length",
             Self::BitLength => "bit_length",
+            Self::OctetLength => "octet_length",
             Self::Ascii => "ascii",
             Self::Coalesce => "coalesce",
             Self::IsNull => "is_null",
@@ -1148,6 +1227,13 @@ impl FunctionName {
             Self::Round => "round",
             Self::Rpad => "rpad",
             Self::SplitPart => "split_part",
+            Self::Split => "split",
+            Self::Join => "join",
+            Self::ConcatWs => "concat_ws",
+            Self::Like => "like",
+            Self::ILike => "ilike",
+            Self::ContainsAny => "contains_any",
+            Self::NormalizeNfc => "normalize_nfc",
             Self::Sqrt => "sqrt",
             Self::Strpos => "strpos",
             Self::Substr => "substr",
@@ -1195,6 +1281,7 @@ impl FunctionName {
             Self::RegexpLike => "regexp_like",
             Self::RegexpReplace => "regexp_replace",
             Self::RegexpSubstr => "regexp_substr",
+            Self::RegexpExtract => "regexp_extract",
             Self::Datetime(function) => function.name().into(),
             Self::LeakSensitive => "leak_sensitive",
             Self::LookupHashMap => "lookup_hash_map",
@@ -1287,4 +1374,20 @@ pub enum BinaryOp {
 
 pub(crate) fn spanned<T>(inner: T, span: Span) -> SpannedNode<T> {
     SpannedNode { inner, span }
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::FunctionName;
+
+    #[test]
+    fn ordinary_builtin_catalog_excludes_injected_and_header_mutation_calls() {
+        let names = FunctionName::ordinary_completion_names();
+        assert!(names.contains(&"coalesce".to_string()));
+        assert!(names.contains(&"date_add".to_string()));
+        assert!(names.contains(&"ceiling".to_string()));
+        assert!(!names.contains(&"read_header".to_string()));
+        assert!(!names.contains(&"write_header".to_string()));
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+    }
 }

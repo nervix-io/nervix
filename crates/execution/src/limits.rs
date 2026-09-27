@@ -6,8 +6,15 @@ use error_stack::Report;
 use thiserror::Error;
 use ubyte::ByteUnit;
 
-/// A bounded share of admission onto the blocking pool for CPU work, keeping it off the async
-/// workers.
+/// Working memory for one command's normalized state records and the database journal beside it.
+const COMMAND_STATE_STORAGE_RESERVATION_MULTIPLIER: u64 = 16;
+const _: () = assert!(
+    COMMAND_STATE_STORAGE_RESERVATION_MULTIPLIER.is_multiple_of(2),
+    "command state storage splits its reservation evenly between payload and journal",
+);
+
+/// A bounded share of CPU admission onto the blocking pool in production, or onto the simulated
+/// scheduler in the Turmoil test build.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CpuClass {
     /// Control-plane and consensus work. Its share of admission is its own, so saturated data or
@@ -53,33 +60,34 @@ impl MemoryClass {
     }
 }
 
-/// The name one worker pool reports itself under. Both execution kinds resolve to it so the pools
-/// share one implementation without sharing their admission.
+/// The class one worker pool admits. Its kind also selects the simulation execution strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct WorkerClassName(&'static str);
+pub enum WorkerClassName {
+    Cpu(CpuClass),
+    Storage(StorageClass),
+}
 
 impl WorkerClassName {
     pub fn as_str(self) -> &'static str {
-        self.0
+        match self {
+            Self::Cpu(CpuClass::Control) => "control_cpu",
+            Self::Cpu(CpuClass::Data) => "data_cpu",
+            Self::Cpu(CpuClass::Bulk) => "bulk_cpu",
+            Self::Storage(StorageClass::Consensus) => "consensus_storage",
+            Self::Storage(StorageClass::Filesystem) => "filesystem_storage",
+        }
     }
 }
 
 impl From<CpuClass> for WorkerClassName {
     fn from(class: CpuClass) -> Self {
-        Self(match class {
-            CpuClass::Control => "control_cpu",
-            CpuClass::Data => "data_cpu",
-            CpuClass::Bulk => "bulk_cpu",
-        })
+        Self::Cpu(class)
     }
 }
 
 impl From<StorageClass> for WorkerClassName {
     fn from(class: StorageClass) -> Self {
-        Self(match class {
-            StorageClass::Consensus => "consensus_storage",
-            StorageClass::Filesystem => "filesystem_storage",
-        })
+        Self::Storage(class)
     }
 }
 
@@ -224,6 +232,15 @@ impl OperationLimits {
         self.snapshot_section_working_bytes()?
             .checked_add(self.bulk_chunk_bytes.as_u64())
     }
+
+    /// The normalized records and database journal one semantic command may hold while its
+    /// applied state is synchronized. Normalization can turn one report archive into many keyed
+    /// records, so this is wider than the encoded command itself while remaining fixed.
+    pub fn command_state_storage_working_bytes(&self) -> Option<u64> {
+        self.command_bytes
+            .as_u64()
+            .checked_mul(COMMAND_STATE_STORAGE_RESERVATION_MULTIPLIER)
+    }
 }
 
 /// The settings a node's executor is built from.
@@ -278,6 +295,8 @@ pub enum ExecutionConfigError {
     ReplicationBatchBelowCommandPair { batch: u64, command: u64 },
     #[error("the configured replication batch limits do not add up to an addressable size")]
     UnaddressableReplicationBatch,
+    #[error("the configured command storage limits do not add up to an addressable size")]
+    UnaddressableCommandStorage,
 }
 
 impl ExecutionConfig {
@@ -333,12 +352,25 @@ impl ExecutionConfig {
                 ExecutionConfigError::UnaddressableReplicationBatch,
             ));
         };
-        let Some(commands_required) =
+        let Some(replication_required) =
             charged_batches.checked_mul(self.limits.replication_batch_bytes.as_u64())
         else {
             return Err(Report::new(
                 ExecutionConfigError::UnaddressableReplicationBatch,
             ));
+        };
+        let Some(storage_required) = self.limits.command_state_storage_working_bytes() else {
+            return Err(Report::new(
+                ExecutionConfigError::UnaddressableCommandStorage,
+            ));
+        };
+        let (commands_operation, commands_required) = if storage_required >= replication_required {
+            ("normalized command state storage", storage_required)
+        } else {
+            (
+                "resident replication batches beside one being encoded",
+                replication_required,
+            )
         };
         Ok(ValidatedConfig {
             workers: self.workers,
@@ -352,7 +384,7 @@ impl ExecutionConfig {
                 commands: permits(
                     MemoryClass::Commands.as_str(),
                     self.budgets.commands,
-                    "resident replication batches beside one being encoded",
+                    commands_operation,
                     commands_required,
                 )?,
                 relay: permits(

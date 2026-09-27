@@ -8,6 +8,7 @@
 
 use std::{
     collections::BTreeMap,
+    marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
 };
@@ -33,8 +34,8 @@ use crate::{
     SubjectName, SubscriptionName, TableName, Timestamp, TopicName, TransactionInspectionRequest,
     UdfName, UserName, VhostName, WasmProcessorName, WasmSavedStateRejection, WasmStateGeneration,
     WasmStateGenerations, WasmStateRecoveries, WasmStateRecoveryAdmission,
-    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
-    WindowProcessorName, WireSchemaName,
+    WasmStateRecoveryOutcome, WasmStateReset, WasmStateResetPhase, WasmStateResetReason,
+    WasmStateResetScope, WindowProcessorName, WireSchemaName,
 };
 
 #[derive(
@@ -917,6 +918,7 @@ pub struct DescribeWindowProcessor {
 )]
 pub struct DescribeWasmProcessor {
     pub name: WasmProcessorName,
+    pub format: InspectionFormat,
 }
 
 #[derive(
@@ -942,11 +944,11 @@ pub struct DescribePlacement {
 )]
 pub struct DescribeTransaction {
     pub request: TransactionInspectionRequest,
-    pub format: TransactionReportFormat,
+    pub format: InspectionFormat,
 }
 
-/// How `DESCRIBE TRANSACTION` renders the report it read. `TEXT` is the default; both formats
-/// render the same report, and the typed report travels beside either rendering.
+/// How an inspection statement renders the typed facts it read. `TEXT` is the default; the typed
+/// inspection travels beside either rendering.
 #[derive(
     Debug,
     Clone,
@@ -963,7 +965,7 @@ pub struct DescribeTransaction {
     AsRefStr,
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
-pub enum TransactionReportFormat {
+pub enum InspectionFormat {
     #[default]
     Text,
     Json,
@@ -1053,7 +1055,7 @@ impl CreatePlacement {
         to: Vec<ModelName>,
         policy: PlacementPolicy,
         rank: Option<NonZeroU64>,
-    ) -> Result<Self, AlterPlacementError> {
+    ) -> error_stack::Result<Self, AlterPlacementError> {
         let mut placement = Self {
             name,
             from,
@@ -1066,12 +1068,15 @@ impl CreatePlacement {
         Ok(placement)
     }
 
-    pub fn apply_alter(&mut self, alter: &AlterPlacement) -> Result<(), AlterPlacementError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterPlacement,
+    ) -> error_stack::Result<(), AlterPlacementError> {
         if self.name != alter.placement {
-            return Err(AlterPlacementError::PlacementNameMismatch {
+            return Err(Report::new(AlterPlacementError::PlacementNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.placement.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -1093,12 +1098,12 @@ impl CreatePlacement {
         Ok(())
     }
 
-    pub fn validate(&self) -> Result<(), AlterPlacementError> {
+    pub fn validate(&self) -> error_stack::Result<(), AlterPlacementError> {
         if self.from.is_empty() {
-            return Err(AlterPlacementError::EmptyFrom);
+            return Err(Report::new(AlterPlacementError::EmptyFrom));
         }
         if self.to.is_empty() {
-            return Err(AlterPlacementError::EmptyTo);
+            return Err(Report::new(AlterPlacementError::EmptyTo));
         }
         Ok(())
     }
@@ -1378,6 +1383,9 @@ pub struct CreateCodec<Version = u64> {
 pub struct CodecJaqTransformations {
     pub on_ingestion: Option<String>,
     pub on_emitting: Option<String>,
+    /// The program a batch of `on_emitting` outputs passes through, which yields the one value a
+    /// batching emitter publishes. It is only ever present beside `on_emitting`.
+    pub on_emitting_batch: Option<String>,
 }
 
 impl CodecJaqTransformations {
@@ -1490,6 +1498,35 @@ impl CodecWireFormat {
         }
     }
 
+    /// How this format frames the member values of one batch into a single payload.
+    pub fn batch_container(&self) -> CodecBatchContainer<'_> {
+        match self {
+            Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => {
+                CodecBatchContainer::Format {
+                    transformation: None,
+                }
+            }
+            Self::JaqNative {
+                transformations, ..
+            } => CodecBatchContainer::Format {
+                transformation: transformations.on_emitting_batch.as_deref(),
+            },
+            Self::Protobuf(CodecProtobufConfig {
+                batch_message,
+                transformations,
+                ..
+            }) => {
+                let Some(message) = batch_message.as_deref() else {
+                    return CodecBatchContainer::Undeclared;
+                };
+                CodecBatchContainer::ProtobufMessage {
+                    message,
+                    transformation: transformations.on_emitting_batch.as_deref(),
+                }
+            }
+        }
+    }
+
     pub fn supports_encoding(&self) -> bool {
         match self {
             Self::Json { .. } | Self::Cbor { .. } | Self::Avro { .. } | Self::Syslog => true,
@@ -1499,6 +1536,35 @@ impl CodecWireFormat {
             | Self::Protobuf(CodecProtobufConfig {
                 transformations, ..
             }) => transformations.on_emitting.is_some(),
+        }
+    }
+}
+
+/// The container a codec publishes one batch in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecBatchContainer<'a> {
+    /// The format's own container — an array, a sequence, a single-key table, a single root
+    /// element or a syslog `MSG` array — unless an `ON EMITTING BATCH` program replaces it.
+    Format { transformation: Option<&'a str> },
+    /// The protobuf `BATCH MESSAGE`: its single repeated field holds the members, or an
+    /// `ON EMITTING BATCH` program builds an instance of it.
+    ProtobufMessage {
+        message: &'a str,
+        transformation: Option<&'a str>,
+    },
+    /// A protobuf codec that names no `BATCH MESSAGE`. Protobuf has no self-delimiting sequence,
+    /// so such a codec has no container a batch could be published in.
+    Undeclared,
+}
+
+impl CodecBatchContainer<'_> {
+    /// The `ON EMITTING BATCH` program that builds the batch value, when the codec declares one.
+    pub const fn transformation(&self) -> Option<&str> {
+        match self {
+            Self::Format { transformation } | Self::ProtobufMessage { transformation, .. } => {
+                *transformation
+            }
+            Self::Undeclared => None,
         }
     }
 }
@@ -1547,6 +1613,9 @@ pub struct CodecProtobufConfig<Version = u64> {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config: Vec<ClientConfigEntry>,
     pub message: String,
+    /// The message a batch is published as. Without a batch transformation it declares exactly one
+    /// field, `repeated <message>`, which holds the members.
+    pub batch_message: Option<String>,
     pub transformations: CodecJaqTransformations,
 }
 
@@ -1580,9 +1649,11 @@ pub enum CodecEncoding {
 pub struct CreateEmitter {
     pub name: EmitterName,
     pub from: ProcessorInputs,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encode_using_codec: Option<CodecName>,
+    pub body: EmitterBody,
     pub sink: Box<EmitSink>,
+    /// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, absent when the emitter publishes one record per
+    /// message. A sink whose [`EmitSink::batch_requirement`] is required never omits it.
+    pub batch: Option<crate::EmitterBatchPolicy>,
     pub flush_policy: FlushPolicy,
     pub error_policies: ErrorPolicies,
     pub publishing_mode: EmitterPublishingMode,
@@ -1593,27 +1664,93 @@ pub struct CreateEmitter {
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
 }
 
+/// The complete payload selection of an emitter. HTTP distinguishes an encoded body from an
+/// explicit absence of content; direct-value sinks construct their own destination values.
+#[derive(
+    Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Archive, RkyvSerialize, RkyvDeserialize,
+)]
+pub enum EmitterBody {
+    Codec { codec: CodecName },
+    WithoutBody,
+    Values,
+}
+
+impl EmitterBody {
+    pub fn codec(&self) -> Option<&CodecName> {
+        match self {
+            Self::Codec { codec } => Some(codec),
+            Self::WithoutBody | Self::Values => None,
+        }
+    }
+}
+
 impl CreateEmitter {
-    pub fn apply_alter(&mut self, alter: &AlterEmitter) -> Result<(), AlterEmitterError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterEmitter,
+    ) -> error_stack::Result<(), AlterEmitterError> {
         if self.name != alter.emitter {
-            return Err(AlterEmitterError::EmitterNameMismatch {
+            return Err(Report::new(AlterEmitterError::EmitterNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.emitter.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
         for operation in &alter.operations {
             candidate.apply_alter_operation(operation)?;
         }
+        if let Some(violation) = candidate.batch_contract_violation() {
+            return Err(Report::new(AlterEmitterError::Batch(violation)));
+        }
         *self = candidate;
         Ok(())
+    }
+
+    /// Checks the batching clause against what this emitter's sink requires of it: present where
+    /// the sink has no unbounded write, and no larger than a payload the destination can carry.
+    pub fn validate_batch(&self) -> error_stack::Result<(), EmitterBatchContractError> {
+        match self.batch_contract_violation() {
+            Some(violation) => Err(Report::new(violation)),
+            None => Ok(()),
+        }
+    }
+
+    /// The requirement of its sink's batching contract that this emitter's clause breaks, if any.
+    ///
+    /// Both the standalone check and an alteration report a violation from here, each in its own
+    /// error, so neither has to rebuild the other's report.
+    fn batch_contract_violation(&self) -> Option<EmitterBatchContractError> {
+        let sink = self.sink.transport_label();
+        if let EmitSink::Http { .. } = self.sink.as_ref()
+            && self.batch.is_some()
+        {
+            return Some(EmitterBatchContractError::HttpUnsupported);
+        }
+        let Some(batch) = &self.batch else {
+            return match self.sink.batch_requirement() {
+                crate::EmitterBatchRequirement::Optional => None,
+                crate::EmitterBatchRequirement::Required => {
+                    Some(EmitterBatchContractError::Required { sink })
+                }
+            };
+        };
+        if let Some(maximum) = self.sink.batch_size_maximum()
+            && batch.max_size.bytes() > maximum.bytes()
+        {
+            return Some(EmitterBatchContractError::SizeAboveSinkMaximum {
+                sink,
+                declared: batch.max_size,
+                maximum,
+            });
+        }
+        None
     }
 
     fn apply_alter_operation(
         &mut self,
         operation: &AlterEmitterOperation,
-    ) -> Result<(), AlterEmitterError> {
+    ) -> error_stack::Result<(), AlterEmitterError> {
         match operation {
             AlterEmitterOperation::AddFrom {
                 relay,
@@ -1631,7 +1768,7 @@ impl CreateEmitter {
             AlterEmitterOperation::DropFrom { relay } => {
                 let index = self.input_index(relay)?;
                 if self.from.from.len() == 1 {
-                    return Err(AlterEmitterError::CannotDropLastInput);
+                    return Err(Report::new(AlterEmitterError::CannotDropLastInput));
                 }
                 self.from.from.remove(index);
                 self.from
@@ -1665,35 +1802,45 @@ impl CreateEmitter {
                     .iter()
                     .position(|input_where| input_where.relay == *relay)
                 else {
-                    return Err(AlterEmitterError::InputWhereNotConfigured {
+                    return Err(Report::new(AlterEmitterError::InputWhereNotConfigured {
                         relay: relay.clone(),
-                    });
+                    }));
                 };
                 self.from.r#where.remove(index);
             }
             AlterEmitterOperation::SetSink {
                 sink,
                 publishing_mode,
+                body,
             } => {
                 if !sink.accepts_publishing_mode(publishing_mode) {
-                    return Err(AlterEmitterError::PublishingModeUnsupported {
+                    return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
                         sink: sink.transport_label().to_string(),
                         mode: publishing_mode.kind_label().to_string(),
-                    });
+                    }));
                 }
                 self.sink = sink.clone();
                 self.publishing_mode = publishing_mode.clone();
+                if let Some(body) = body {
+                    self.body = body.clone();
+                }
             }
             AlterEmitterOperation::SetClient { client } => {
                 *self.sink.client_mut() = client.clone();
             }
             AlterEmitterOperation::SetEncodeUsing { codec } => {
-                self.encode_using_codec = Some(codec.clone());
+                self.body = EmitterBody::Codec {
+                    codec: codec.clone(),
+                };
             }
             AlterEmitterOperation::DropEncode => {
-                if self.encode_using_codec.take().is_none() {
-                    return Err(AlterEmitterError::EncodeNotConfigured);
+                if let EmitSink::Http { .. } = self.sink.as_ref() {
+                    return Err(Report::new(AlterEmitterError::HttpDropEncode));
                 }
+                if self.body.codec().is_none() {
+                    return Err(Report::new(AlterEmitterError::EncodeNotConfigured));
+                }
+                self.body = EmitterBody::Values;
             }
             AlterEmitterOperation::SetCollect { policy } => {
                 self.from.collect_policy = Some(policy.clone());
@@ -1706,12 +1853,20 @@ impl CreateEmitter {
             }
             AlterEmitterOperation::SetPublishingMode { mode } => {
                 if !self.sink.accepts_publishing_mode(mode) {
-                    return Err(AlterEmitterError::PublishingModeUnsupported {
+                    return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
                         sink: self.sink.transport_label().to_string(),
                         mode: mode.kind_label().to_string(),
-                    });
+                    }));
                 }
                 self.publishing_mode = mode.clone();
+            }
+            AlterEmitterOperation::SetBatch { policy } => {
+                self.batch = Some(*policy);
+            }
+            AlterEmitterOperation::DropBatch => {
+                if self.batch.take().is_none() {
+                    return Err(Report::new(AlterEmitterError::BatchNotConfigured));
+                }
             }
             AlterEmitterOperation::SetFlush { flush_policy } => {
                 self.flush_policy = flush_policy.clone();
@@ -1726,7 +1881,7 @@ impl CreateEmitter {
                     ..
                 } = self.sink.as_mut()
                 else {
-                    return Err(AlterEmitterError::CommitPolicyUnsupported);
+                    return Err(Report::new(AlterEmitterError::CommitPolicyUnsupported));
                 };
                 *current_commit_each = commit_each.clone();
                 *current_max_commit_size = max_commit_size.clone();
@@ -1735,21 +1890,23 @@ impl CreateEmitter {
         Ok(())
     }
 
-    fn input_index(&self, relay: &RelayName) -> Result<usize, AlterEmitterError> {
+    fn input_index(&self, relay: &RelayName) -> error_stack::Result<usize, AlterEmitterError> {
         self.from
             .from
             .iter()
             .position(|candidate| candidate == relay)
-            .ok_or_else(|| AlterEmitterError::InputNotFound {
-                relay: relay.clone(),
+            .ok_or_else(|| {
+                Report::new(AlterEmitterError::InputNotFound {
+                    relay: relay.clone(),
+                })
             })
     }
 
-    fn ensure_input_absent(&self, relay: &RelayName) -> Result<(), AlterEmitterError> {
+    fn ensure_input_absent(&self, relay: &RelayName) -> error_stack::Result<(), AlterEmitterError> {
         if self.from.from.iter().any(|candidate| candidate == relay) {
-            Err(AlterEmitterError::InputAlreadyExists {
+            Err(Report::new(AlterEmitterError::InputAlreadyExists {
                 relay: relay.clone(),
-            })
+            }))
         } else {
             Ok(())
         }
@@ -1785,6 +1942,7 @@ pub enum AlterEmitterOperation {
     SetSink {
         sink: Box<EmitSink>,
         publishing_mode: EmitterPublishingMode,
+        body: Option<EmitterBody>,
     },
     SetClient {
         client: ClientName,
@@ -1803,6 +1961,10 @@ pub enum AlterEmitterOperation {
     SetPublishingMode {
         mode: EmitterPublishingMode,
     },
+    SetBatch {
+        policy: crate::EmitterBatchPolicy,
+    },
+    DropBatch,
     SetFlush {
         flush_policy: FlushPolicy,
     },
@@ -1829,10 +1991,37 @@ pub enum AlterEmitterError {
     CannotDropLastInput,
     #[error("emitter encoding is not configured")]
     EncodeNotConfigured,
+    #[error("HTTP emitters select an absent body with SET TO HTTP ... WITHOUT BODY")]
+    HttpDropEncode,
     #[error("COMMIT policy is only supported by Iceberg emitters")]
     CommitPolicyUnsupported,
     #[error("{sink} emitters do not support publishing mode {mode}")]
     PublishingModeUnsupported { sink: String, mode: String },
+    #[error("emitter batching is not configured")]
+    BatchNotConfigured,
+    #[error(transparent)]
+    Batch(EmitterBatchContractError),
+}
+
+/// Why an emitter's batching clause does not fit the sink it publishes to.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EmitterBatchContractError {
+    #[error("HTTP emitters send one request per record and do not support BATCH")]
+    HttpUnsupported,
+    #[error(
+        "{sink} emitters require BATCH MAX MESSAGES <n> MAX SIZE <bytes>, because every write \
+         carries several rows"
+    )]
+    Required { sink: &'static str },
+    #[error(
+        "{sink} emitters accept BATCH MAX SIZE up to {maximum}, the largest message the \
+         destination carries, found {declared}"
+    )]
+    SizeAboveSinkMaximum {
+        sink: &'static str,
+        declared: crate::PayloadSizeLimit,
+        maximum: crate::PayloadSizeLimit,
+    },
 }
 
 #[derive(
@@ -1882,12 +2071,15 @@ pub enum AlterGeneratorError {
 }
 
 impl CreateGenerator {
-    pub fn apply_alter(&mut self, alter: &AlterGenerator) -> Result<(), AlterGeneratorError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterGenerator,
+    ) -> error_stack::Result<(), AlterGeneratorError> {
         if self.name != alter.generator {
-            return Err(AlterGeneratorError::GeneratorNameMismatch {
+            return Err(Report::new(AlterGeneratorError::GeneratorNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.generator.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -1908,7 +2100,7 @@ impl CreateGenerator {
                 AlterGeneratorOperation::DropRoute { relay } => {
                     let index = candidate.unique_route_index(relay)?;
                     if candidate.output_routes.routes.len() == 1 {
-                        return Err(AlterGeneratorError::CannotDropLastRoute);
+                        return Err(Report::new(AlterGeneratorError::CannotDropLastRoute));
                     }
                     candidate.output_routes.routes.remove(index);
                 }
@@ -1922,7 +2114,10 @@ impl CreateGenerator {
         Ok(())
     }
 
-    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterGeneratorError> {
+    fn unique_route_index(
+        &self,
+        relay: &RelayName,
+    ) -> error_stack::Result<usize, AlterGeneratorError> {
         let mut indexes = self
             .output_routes
             .routes
@@ -1930,14 +2125,14 @@ impl CreateGenerator {
             .enumerate()
             .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
         let Some(index) = indexes.next() else {
-            return Err(AlterGeneratorError::RouteTargetNotFound {
+            return Err(Report::new(AlterGeneratorError::RouteTargetNotFound {
                 relay: relay.clone(),
-            });
+            }));
         };
         if indexes.next().is_some() {
-            return Err(AlterGeneratorError::RouteTargetAmbiguous {
+            return Err(Report::new(AlterGeneratorError::RouteTargetAmbiguous {
                 relay: relay.clone(),
-            });
+            }));
         }
         Ok(index)
     }
@@ -2015,6 +2210,13 @@ impl SinkCapabilities {
     }
 }
 
+/// The SQS message size limit Nervix enforces, 256 KiB, which a batch payload cannot exceed.
+const SQS_MESSAGE_SIZE_MAXIMUM: crate::PayloadSizeLimit =
+    match crate::PayloadSizeLimit::new(nonzero_ext::nonzero!(256u64), crate::ByteSizeUnit::KiB) {
+        Some(maximum) => maximum,
+        None => panic!("256 KiB fits in a 64-bit byte count"),
+    };
+
 #[derive(
     Debug,
     Clone,
@@ -2029,6 +2231,11 @@ impl SinkCapabilities {
 )]
 #[strum(serialize_all = "SCREAMING_SNAKE_CASE")]
 pub enum EmitSink {
+    Http {
+        client: ClientName,
+        method: crate::Expression,
+        path: crate::Expression,
+    },
     Kafka {
         client: ClientName,
         topic: TopicName,
@@ -2082,14 +2289,12 @@ pub enum EmitSink {
         client: ClientName,
         table: TableName,
         values: Vec<ClickHouseValueMapping>,
-        max_batch: NonZeroU64,
     },
     Postgres {
         client: ClientName,
         table: TableName,
         values: Vec<PostgresValueMapping>,
         conflict_action: PostgresConflictAction,
-        max_batch: NonZeroU64,
     },
     #[strum(serialize = "MYSQL")]
     MySql {
@@ -2097,7 +2302,6 @@ pub enum EmitSink {
         table: TableName,
         values: Vec<MySqlValueMapping>,
         conflict_action: MySqlConflictAction,
-        max_batch: NonZeroU64,
     },
     #[strum(serialize = "MONGODB")]
     MongoDb {
@@ -2105,7 +2309,6 @@ pub enum EmitSink {
         collection: CollectionName,
         values: Vec<MongoDbValueMapping>,
         conflict_action: MongoDbConflictAction,
-        max_batch: NonZeroU64,
     },
     Iceberg {
         backend: IcebergStorageBackend,
@@ -2119,26 +2322,74 @@ pub enum EmitSink {
     },
 }
 
-impl EmitSink {
-    pub const fn capabilities(&self) -> SinkCapabilities {
+/// The sink transport class used by capability decisions before an emitter is fully parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EmitSinkKind {
+    Http,
+    Kafka,
+    Pulsar,
+    RabbitMq,
+    Redis,
+    Mqtt,
+    Nats,
+    ZeroMq,
+    Sqs,
+    Sentry,
+    Syslog,
+    Otel,
+    ClickHouse,
+    Postgres,
+    MySql,
+    MongoDb,
+    Iceberg,
+}
+
+impl EmitSinkKind {
+    pub const fn capabilities(self) -> SinkCapabilities {
         match self {
-            Self::Kafka { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Nats { .. }
-            | Self::Sqs { .. } => SinkCapabilities::with_headers(),
-            Self::Redis { .. }
-            | Self::Mqtt { .. }
-            | Self::ZeroMq { .. }
-            | Self::Sentry { .. }
-            | Self::Syslog { .. }
-            | Self::Otel { .. }
-            | Self::ClickHouse { .. }
-            | Self::Postgres { .. }
-            | Self::MySql { .. }
-            | Self::MongoDb { .. }
-            | Self::Iceberg { .. } => SinkCapabilities::without_headers(),
+            Self::Http | Self::Kafka | Self::Pulsar | Self::RabbitMq | Self::Nats | Self::Sqs => {
+                SinkCapabilities::with_headers()
+            }
+            Self::Redis
+            | Self::Mqtt
+            | Self::ZeroMq
+            | Self::Sentry
+            | Self::Syslog
+            | Self::Otel
+            | Self::ClickHouse
+            | Self::Postgres
+            | Self::MySql
+            | Self::MongoDb
+            | Self::Iceberg => SinkCapabilities::without_headers(),
         }
+    }
+}
+
+impl EmitSink {
+    pub const fn transport_kind(&self) -> EmitSinkKind {
+        match self {
+            Self::Http { .. } => EmitSinkKind::Http,
+            Self::Kafka { .. } => EmitSinkKind::Kafka,
+            Self::Pulsar { .. } => EmitSinkKind::Pulsar,
+            Self::RabbitMq { .. } => EmitSinkKind::RabbitMq,
+            Self::Redis { .. } => EmitSinkKind::Redis,
+            Self::Mqtt { .. } => EmitSinkKind::Mqtt,
+            Self::Nats { .. } => EmitSinkKind::Nats,
+            Self::ZeroMq { .. } => EmitSinkKind::ZeroMq,
+            Self::Sqs { .. } => EmitSinkKind::Sqs,
+            Self::Sentry { .. } => EmitSinkKind::Sentry,
+            Self::Syslog { .. } => EmitSinkKind::Syslog,
+            Self::Otel { .. } => EmitSinkKind::Otel,
+            Self::ClickHouse { .. } => EmitSinkKind::ClickHouse,
+            Self::Postgres { .. } => EmitSinkKind::Postgres,
+            Self::MySql { .. } => EmitSinkKind::MySql,
+            Self::MongoDb { .. } => EmitSinkKind::MongoDb,
+            Self::Iceberg { .. } => EmitSinkKind::Iceberg,
+        }
+    }
+
+    pub const fn capabilities(&self) -> SinkCapabilities {
+        self.transport_kind().capabilities()
     }
 
     pub fn transport_label(&self) -> &'static str {
@@ -2147,7 +2398,8 @@ impl EmitSink {
 
     pub fn client(&self) -> &ClientName {
         match self {
-            Self::Kafka { client, .. }
+            Self::Http { client, .. }
+            | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
             | Self::RabbitMq { client, .. }
             | Self::Redis { client, .. }
@@ -2164,6 +2416,25 @@ impl EmitSink {
             | Self::MongoDb { client, .. }
             | Self::Iceberg { client, .. } => client,
         }
+    }
+
+    /// The expressions a direct `VALUES` sink sends across its external boundary, in written order.
+    pub fn direct_value_mappings(&self) -> impl Iterator<Item = &ClickHouseValueMapping> {
+        let (values, attributes, resource): (&[_], &[_], &[_]) = match self {
+            Self::Otel {
+                values,
+                attributes,
+                resource,
+                ..
+            } => (values, attributes, resource),
+            Self::ClickHouse { values, .. }
+            | Self::Postgres { values, .. }
+            | Self::MySql { values, .. }
+            | Self::MongoDb { values, .. }
+            | Self::Iceberg { values, .. } => (values, &[], &[]),
+            _ => (&[], &[], &[]),
+        };
+        values.iter().chain(attributes).chain(resource)
     }
 
     pub fn accepts_publishing_mode(&self, mode: &EmitterPublishingMode) -> bool {
@@ -2191,7 +2462,8 @@ impl EmitSink {
                 mode,
                 EmitterPublishingMode::SqsSingle { .. } | EmitterPublishingMode::SqsBatch { .. }
             ),
-            Self::Sentry { .. }
+            Self::Http { .. }
+            | Self::Sentry { .. }
             | Self::Otel { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
@@ -2205,7 +2477,8 @@ impl EmitSink {
 
     fn client_mut(&mut self) -> &mut ClientName {
         match self {
-            Self::Kafka { client, .. }
+            Self::Http { client, .. }
+            | Self::Kafka { client, .. }
             | Self::Pulsar { client, .. }
             | Self::RabbitMq { client, .. }
             | Self::Redis { client, .. }
@@ -2239,6 +2512,7 @@ impl EmitSink {
 
     pub fn expected_client_type(&self) -> &'static str {
         match self {
+            Self::Http { .. } => "HTTP",
             Self::Kafka { .. } => "KAFKA",
             Self::Pulsar { .. } => "PULSAR",
             Self::RabbitMq { .. } => "RABBITMQ",
@@ -2272,7 +2546,8 @@ impl EmitSink {
     pub fn accepts_client(&self, client: &Model) -> bool {
         matches!(
             (self, client),
-            (Self::Kafka { .. }, Model::ClientKafka(_))
+            (Self::Http { .. }, Model::ClientHttp(_))
+                | (Self::Kafka { .. }, Model::ClientKafka(_))
                 | (Self::Pulsar { .. }, Model::ClientPulsar(_))
                 | (Self::RabbitMq { .. }, Model::ClientRabbitMq(_))
                 | (Self::Redis { .. }, Model::ClientRedis(_))
@@ -2323,12 +2598,85 @@ impl EmitSink {
             | Self::Sqs { .. }
             | Self::Sentry { .. } => true,
             Self::Syslog { .. } => true,
-            Self::Otel { .. }
+            Self::Http { .. }
+            | Self::Otel { .. }
             | Self::ClickHouse { .. }
             | Self::Postgres { .. }
             | Self::MySql { .. }
             | Self::MongoDb { .. }
             | Self::Iceberg { .. } => false,
+        }
+    }
+
+    /// Whether an emitter publishing to this sink may omit the batching clause.
+    pub const fn batch_requirement(&self) -> crate::EmitterBatchRequirement {
+        match self {
+            Self::ClickHouse { .. }
+            | Self::Postgres { .. }
+            | Self::MySql { .. }
+            | Self::MongoDb { .. } => crate::EmitterBatchRequirement::Required,
+            Self::Http { .. }
+            | Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Redis { .. }
+            | Self::Mqtt { .. }
+            | Self::Nats { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sqs { .. }
+            | Self::Sentry { .. }
+            | Self::Syslog { .. }
+            | Self::Otel { .. }
+            | Self::Iceberg { .. } => crate::EmitterBatchRequirement::Optional,
+        }
+    }
+
+    /// True when a batch can only be published through the codec's `ON EMITTING BATCH` value.
+    ///
+    /// A Sentry envelope carries at most one `event` item, so a batch is one event, and only the
+    /// codec's batch transformation can say where in that event the members go.
+    pub const fn requires_batch_transformation(&self) -> bool {
+        match self {
+            Self::Sentry { .. } => true,
+            Self::Http { .. }
+            | Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Redis { .. }
+            | Self::Mqtt { .. }
+            | Self::Nats { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sqs { .. }
+            | Self::Syslog { .. }
+            | Self::Otel { .. }
+            | Self::ClickHouse { .. }
+            | Self::Postgres { .. }
+            | Self::MySql { .. }
+            | Self::MongoDb { .. }
+            | Self::Iceberg { .. } => false,
+        }
+    }
+
+    /// The largest batch payload the destination protocol itself admits, where it fixes one.
+    pub const fn batch_size_maximum(&self) -> Option<crate::PayloadSizeLimit> {
+        match self {
+            Self::Sqs { .. } => Some(SQS_MESSAGE_SIZE_MAXIMUM),
+            Self::Http { .. }
+            | Self::Kafka { .. }
+            | Self::Pulsar { .. }
+            | Self::RabbitMq { .. }
+            | Self::Redis { .. }
+            | Self::Mqtt { .. }
+            | Self::Nats { .. }
+            | Self::ZeroMq { .. }
+            | Self::Sentry { .. }
+            | Self::Syslog { .. }
+            | Self::Otel { .. }
+            | Self::ClickHouse { .. }
+            | Self::Postgres { .. }
+            | Self::MySql { .. }
+            | Self::MongoDb { .. }
+            | Self::Iceberg { .. } => None,
         }
     }
 
@@ -2339,7 +2687,8 @@ impl EmitSink {
                 max_commit_size,
                 ..
             } => Some((commit_each.as_str(), max_commit_size.as_str())),
-            Self::Kafka { .. }
+            Self::Http { .. }
+            | Self::Kafka { .. }
             | Self::Pulsar { .. }
             | Self::RabbitMq { .. }
             | Self::Redis { .. }
@@ -2711,6 +3060,15 @@ impl BranchSelection {
     }
 }
 
+impl std::fmt::Display for BranchSelection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BranchedBy { branch } => write!(formatter, "{branch}"),
+            Self::Unbranched => formatter.write_str("UNBRANCHED"),
+        }
+    }
+}
+
 /// The branch contract after the registry has resolved every referenced model.
 ///
 /// A branched declaration retains both identities and the complete key schema so execution does
@@ -2780,12 +3138,15 @@ pub struct CreateIngestor {
 }
 
 impl CreateIngestor {
-    pub fn apply_alter(&mut self, alter: &AlterIngestor) -> Result<(), AlterIngestorError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterIngestor,
+    ) -> error_stack::Result<(), AlterIngestorError> {
         if self.name != alter.ingestor {
-            return Err(AlterIngestorError::IngestorNameMismatch {
+            return Err(Report::new(AlterIngestorError::IngestorNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.ingestor.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -2799,7 +3160,7 @@ impl CreateIngestor {
     fn apply_alter_operation(
         &mut self,
         operation: &AlterIngestorOperation,
-    ) -> Result<(), AlterIngestorError> {
+    ) -> error_stack::Result<(), AlterIngestorError> {
         match operation {
             AlterIngestorOperation::SetSource { source } => {
                 self.source = source.clone();
@@ -2828,7 +3189,7 @@ impl CreateIngestor {
             AlterIngestorOperation::DropRoute { relay } => {
                 let index = self.unique_route_index(relay)?;
                 if self.output_routes.routes.len() == 1 {
-                    return Err(AlterIngestorError::CannotDropLastRoute);
+                    return Err(Report::new(AlterIngestorError::CannotDropLastRoute));
                 }
                 self.output_routes.routes.remove(index);
             }
@@ -2843,7 +3204,10 @@ impl CreateIngestor {
         Ok(())
     }
 
-    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterIngestorError> {
+    fn unique_route_index(
+        &self,
+        relay: &RelayName,
+    ) -> error_stack::Result<usize, AlterIngestorError> {
         let mut indexes = self
             .output_routes
             .routes
@@ -2851,14 +3215,14 @@ impl CreateIngestor {
             .enumerate()
             .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
         let Some(index) = indexes.next() else {
-            return Err(AlterIngestorError::RouteTargetNotFound {
+            return Err(Report::new(AlterIngestorError::RouteTargetNotFound {
                 relay: relay.clone(),
-            });
+            }));
         };
         if indexes.next().is_some() {
-            return Err(AlterIngestorError::RouteTargetAmbiguous {
+            return Err(Report::new(AlterIngestorError::RouteTargetAmbiguous {
                 relay: relay.clone(),
-            });
+            }));
         }
         Ok(index)
     }
@@ -3124,12 +3488,15 @@ pub enum AlterReingestorError {
 }
 
 impl CreateReingestor {
-    pub fn apply_alter(&mut self, alter: &AlterReingestor) -> Result<(), AlterReingestorError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterReingestor,
+    ) -> error_stack::Result<(), AlterReingestorError> {
         if self.name != alter.reingestor {
-            return Err(AlterReingestorError::ReingestorNameMismatch {
+            return Err(Report::new(AlterReingestorError::ReingestorNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.reingestor.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -3140,7 +3507,7 @@ impl CreateReingestor {
         Ok(())
     }
 
-    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_, AlterReingestorError> {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
@@ -3148,6 +3515,7 @@ impl CreateReingestor {
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
+            rejection: PhantomData,
         }
     }
 }
@@ -3173,7 +3541,9 @@ pub struct CreateInferencer<Version = u64> {
 }
 
 impl CreateInferencer {
-    pub fn execution_mode(&self) -> Result<InferencerExecutionMode, InferencerTensorSchemaError> {
+    pub fn execution_mode(
+        &self,
+    ) -> error_stack::Result<InferencerExecutionMode, InferencerTensorSchemaError> {
         let mut execution_mode = None;
         for (tensor, schema) in self
             .inputs
@@ -3187,14 +3557,18 @@ impl CreateInferencer {
         {
             let batch_axis_count = schema.batch_axis_count();
             if batch_axis_count > 1 {
-                return Err(InferencerTensorSchemaError::MultipleBatchAxes {
-                    tensor: tensor.to_string(),
-                });
+                return Err(Report::new(
+                    InferencerTensorSchemaError::MultipleBatchAxes {
+                        tensor: tensor.to_string(),
+                    },
+                ));
             }
             if schema.fixed_element_count().is_none() {
-                return Err(InferencerTensorSchemaError::ElementCountOverflow {
-                    tensor: tensor.to_string(),
-                });
+                return Err(Report::new(
+                    InferencerTensorSchemaError::ElementCountOverflow {
+                        tensor: tensor.to_string(),
+                    },
+                ));
             }
             let mapping_mode = if batch_axis_count == 1 {
                 InferencerExecutionMode::Batched
@@ -3204,7 +3578,9 @@ impl CreateInferencer {
             if let Some(execution_mode) = execution_mode
                 && execution_mode != mapping_mode
             {
-                return Err(InferencerTensorSchemaError::MixedExecutionModes);
+                return Err(Report::new(
+                    InferencerTensorSchemaError::MixedExecutionModes,
+                ));
             }
             execution_mode = Some(mapping_mode);
         }
@@ -3723,7 +4099,62 @@ pub enum IngestSource {
     },
 }
 
+/// The source transport class used by capability decisions before an ingestor is fully parsed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IngestSourceKind {
+    Http,
+    Kafka,
+    Pulsar,
+    Mqtt,
+    Nats,
+    RabbitMq,
+    RedisPubSub,
+    Prometheus,
+    ZeroMq,
+    Sqs,
+    Endpoint,
+    Websockets,
+    Syslog,
+}
+
+impl IngestSourceKind {
+    pub const fn reads_headers(self) -> bool {
+        match self {
+            Self::Endpoint
+            | Self::Http
+            | Self::Kafka
+            | Self::Nats
+            | Self::Pulsar
+            | Self::RabbitMq
+            | Self::Sqs => true,
+            Self::Mqtt
+            | Self::RedisPubSub
+            | Self::Prometheus
+            | Self::ZeroMq
+            | Self::Websockets
+            | Self::Syslog => false,
+        }
+    }
+}
+
 impl IngestSource {
+    pub const fn transport_kind(&self) -> IngestSourceKind {
+        match self {
+            Self::Http { .. } => IngestSourceKind::Http,
+            Self::Kafka { .. } => IngestSourceKind::Kafka,
+            Self::Pulsar { .. } => IngestSourceKind::Pulsar,
+            Self::Mqtt { .. } => IngestSourceKind::Mqtt,
+            Self::Nats { .. } => IngestSourceKind::Nats,
+            Self::RabbitMq { .. } => IngestSourceKind::RabbitMq,
+            Self::RedisPubSub { .. } => IngestSourceKind::RedisPubSub,
+            Self::Prometheus { .. } => IngestSourceKind::Prometheus,
+            Self::ZeroMq { .. } => IngestSourceKind::ZeroMq,
+            Self::Sqs { .. } => IngestSourceKind::Sqs,
+            Self::Endpoint { .. } => IngestSourceKind::Endpoint,
+            Self::Websockets { .. } => IngestSourceKind::Websockets,
+            Self::Syslog { .. } => IngestSourceKind::Syslog,
+        }
+    }
     pub fn executes_on_every_cluster_node(&self) -> bool {
         match self {
             Self::Endpoint { .. } | Self::Syslog { .. } => true,
@@ -3776,21 +4207,7 @@ impl IngestSource {
     /// This lives in the vocabulary so the registry can validate header reads without naming the
     /// runtime that hosts the source.
     pub const fn reads_headers(&self) -> bool {
-        match self {
-            Self::Endpoint { .. }
-            | Self::Http { .. }
-            | Self::Kafka { .. }
-            | Self::Nats { .. }
-            | Self::Pulsar { .. }
-            | Self::RabbitMq { .. }
-            | Self::Sqs { .. } => true,
-            Self::Mqtt { .. }
-            | Self::RedisPubSub { .. }
-            | Self::Prometheus { .. }
-            | Self::ZeroMq { .. }
-            | Self::Websockets { .. }
-            | Self::Syslog { .. } => false,
-        }
+        self.transport_kind().reads_headers()
     }
 
     /// The acknowledgement this source's delivery mode declares. A source whose statement declares
@@ -3867,12 +4284,15 @@ impl IngestSource {
         }
     }
 
-    pub fn set_quiesce(&mut self, quiesce: IngestQuiesceMode) -> Result<(), AlterIngestorError> {
+    pub fn set_quiesce(
+        &mut self,
+        quiesce: IngestQuiesceMode,
+    ) -> error_stack::Result<(), AlterIngestorError> {
         if !self.supports_quiesce(&quiesce) {
-            return Err(AlterIngestorError::UnsupportedQuiesceMode {
+            return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
                 transport: self.transport_label().to_string(),
                 mode: quiesce.kind_label().to_string(),
-            });
+            }));
         }
         match self {
             Self::Http {
@@ -4396,12 +4816,12 @@ pub struct CreateRelay {
 }
 
 impl CreateRelay {
-    pub fn apply_alter(&mut self, alter: &AlterRelay) -> Result<(), AlterRelayError> {
+    pub fn apply_alter(&mut self, alter: &AlterRelay) -> error_stack::Result<(), AlterRelayError> {
         if self.name != alter.relay {
-            return Err(AlterRelayError::RelayNameMismatch {
+            return Err(Report::new(AlterRelayError::RelayNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.relay.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -4415,7 +4835,7 @@ impl CreateRelay {
     fn apply_alter_operation(
         &mut self,
         operation: &AlterRelayOperation,
-    ) -> Result<(), AlterRelayError> {
+    ) -> error_stack::Result<(), AlterRelayError> {
         match operation {
             AlterRelayOperation::SetCapacity { capacity } => {
                 self.buffer = *capacity;
@@ -4431,7 +4851,7 @@ impl CreateRelay {
             }
             AlterRelayOperation::DropMaterializedState => {
                 if self.materialized_state.take().is_none() {
-                    return Err(AlterRelayError::MaterializedStateNotConfigured);
+                    return Err(Report::new(AlterRelayError::MaterializedStateNotConfigured));
                 }
             }
         }
@@ -4891,7 +5311,11 @@ impl ScheduledNode {
             generations.begin_every_branch();
         }
         self.wasm_state_generations = Some(generations);
-        self.wasm_state_reset = existing.wasm_state_reset.clone();
+        self.wasm_state_reset = if binding_changed {
+            None
+        } else {
+            existing.wasm_state_reset.clone()
+        };
         // A recovery attempt is spent on the lifetime it was admitted for. A changed binding
         // restarts every lifetime, so the attempts recorded against the previous ones no longer
         // name anything this entry can refuse.
@@ -4926,6 +5350,7 @@ impl ScheduledNode {
         &mut self,
         request: CommandExecutionReference,
         scope: WasmStateResetScope,
+        reason: WasmStateResetReason,
     ) -> bool {
         let Some(generations) = self.wasm_state_generations.as_mut() else {
             return false;
@@ -4938,7 +5363,7 @@ impl ScheduledNode {
             return false;
         }
         generations.begin_reset(&scope);
-        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope));
+        self.wasm_state_reset = Some(WasmStateReset::publishing(request, scope, reason));
         true
     }
 
@@ -5107,12 +5532,15 @@ pub enum AlterJunctionError {
 }
 
 impl CreateJunction {
-    pub fn apply_alter(&mut self, alter: &AlterJunction) -> Result<(), AlterJunctionError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterJunction,
+    ) -> error_stack::Result<(), AlterJunctionError> {
         if self.name != alter.junction {
-            return Err(AlterJunctionError::JunctionNameMismatch {
+            return Err(Report::new(AlterJunctionError::JunctionNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.junction.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -5123,7 +5551,7 @@ impl CreateJunction {
         Ok(())
     }
 
-    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_, AlterJunctionError> {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
@@ -5131,6 +5559,7 @@ impl CreateJunction {
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
+            rejection: PhantomData,
         }
     }
 }
@@ -5181,12 +5610,17 @@ pub enum AlterDeduplicatorError {
 }
 
 impl CreateDeduplicator {
-    pub fn apply_alter(&mut self, alter: &AlterDeduplicator) -> Result<(), AlterDeduplicatorError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterDeduplicator,
+    ) -> error_stack::Result<(), AlterDeduplicatorError> {
         if self.name != alter.deduplicator {
-            return Err(AlterDeduplicatorError::DeduplicatorNameMismatch {
-                stored: self.name.clone(),
-                requested: alter.deduplicator.clone(),
-            });
+            return Err(Report::new(
+                AlterDeduplicatorError::DeduplicatorNameMismatch {
+                    stored: self.name.clone(),
+                    requested: alter.deduplicator.clone(),
+                },
+            ));
         }
 
         let mut candidate = self.clone();
@@ -5207,7 +5641,7 @@ impl CreateDeduplicator {
         Ok(())
     }
 
-    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_, AlterDeduplicatorError> {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
@@ -5215,6 +5649,7 @@ impl CreateDeduplicator {
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
+            rejection: PhantomData,
         }
     }
 }
@@ -5322,12 +5757,15 @@ pub enum AlterReordererError {
 }
 
 impl CreateReorderer {
-    pub fn apply_alter(&mut self, alter: &AlterReorderer) -> Result<(), AlterReordererError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterReorderer,
+    ) -> error_stack::Result<(), AlterReordererError> {
         if self.name != alter.reorderer {
-            return Err(AlterReordererError::ReordererNameMismatch {
+            return Err(Report::new(AlterReordererError::ReordererNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.reorderer.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -5348,7 +5786,7 @@ impl CreateReorderer {
         Ok(())
     }
 
-    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_, AlterReordererError> {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
@@ -5356,6 +5794,7 @@ impl CreateReorderer {
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
+            rejection: PhantomData,
         }
     }
 }
@@ -5437,17 +5876,32 @@ pub enum AlterProcessorError {
     BranchingUnsupported,
 }
 
-struct ProcessorAlterTarget<'a> {
+/// The input, route and dependency fields every processor alters the same way, borrowed from the
+/// processor being altered.
+///
+/// `E` is that processor's alteration error. A rejection is reported in it where it is detected, so
+/// the report starts at the failure rather than at a conversion in the processor's `apply_alter`.
+struct ProcessorAlterTarget<'a, E> {
     from: &'a mut ProcessorInputs,
     output_routes: &'a mut ProcessorOutputs,
     branched_by: Option<&'a mut BranchSelection>,
     mode: &'a mut AckMode,
     filter_where: &'a mut Option<crate::Expression>,
     materialized_state: &'a mut Vec<crate::MaterializedStateDependency>,
+    rejection: PhantomData<E>,
 }
 
-impl ProcessorAlterTarget<'_> {
-    fn apply(&mut self, operation: &AlterProcessorOperation) -> Result<(), AlterProcessorError> {
+impl<E> ProcessorAlterTarget<'_, E>
+where
+    E: From<AlterProcessorError> + error_stack::Context,
+{
+    /// Reports `rejection` as the altered processor's own error.
+    #[track_caller]
+    fn reject(rejection: AlterProcessorError) -> Report<E> {
+        Report::new(E::from(rejection))
+    }
+
+    fn apply(&mut self, operation: &AlterProcessorOperation) -> error_stack::Result<(), E> {
         match operation {
             AlterProcessorOperation::AddFrom {
                 relay,
@@ -5465,7 +5919,7 @@ impl ProcessorAlterTarget<'_> {
             AlterProcessorOperation::DropFrom { relay } => {
                 let index = self.input_index(relay)?;
                 if self.from.from.len() == 1 {
-                    return Err(AlterProcessorError::CannotDropLastInput);
+                    return Err(Self::reject(AlterProcessorError::CannotDropLastInput));
                 }
                 self.from.from.remove(index);
                 self.from
@@ -5499,9 +5953,9 @@ impl ProcessorAlterTarget<'_> {
                     .iter()
                     .position(|input_where| input_where.relay == *relay)
                 else {
-                    return Err(AlterProcessorError::InputWhereNotConfigured {
+                    return Err(Self::reject(AlterProcessorError::InputWhereNotConfigured {
                         relay: relay.clone(),
-                    });
+                    }));
                 };
                 self.from.r#where.remove(index);
             }
@@ -5522,7 +5976,7 @@ impl ProcessorAlterTarget<'_> {
             }
             AlterProcessorOperation::SetBranching { branching } => {
                 let Some(branched_by) = self.branched_by.as_deref_mut() else {
-                    return Err(AlterProcessorError::BranchingUnsupported);
+                    return Err(Self::reject(AlterProcessorError::BranchingUnsupported));
                 };
                 *branched_by = branching.clone();
             }
@@ -5532,9 +5986,11 @@ impl ProcessorAlterTarget<'_> {
                     .iter()
                     .any(|existing| existing.relay == dependency.relay)
                 {
-                    return Err(AlterProcessorError::MaterializedStateAlreadyConfigured {
-                        relay: dependency.relay.clone(),
-                    });
+                    return Err(Self::reject(
+                        AlterProcessorError::MaterializedStateAlreadyConfigured {
+                            relay: dependency.relay.clone(),
+                        },
+                    ));
                 }
                 self.materialized_state.push(dependency.clone());
             }
@@ -5552,7 +6008,7 @@ impl ProcessorAlterTarget<'_> {
             AlterProcessorOperation::DropRoute { relay } => {
                 let index = self.unique_route_index(relay)?;
                 if self.output_routes.routes.len() == 1 {
-                    return Err(AlterProcessorError::CannotDropLastRoute);
+                    return Err(Self::reject(AlterProcessorError::CannotDropLastRoute));
                 }
                 self.output_routes.routes.remove(index);
             }
@@ -5564,36 +6020,40 @@ impl ProcessorAlterTarget<'_> {
         Ok(())
     }
 
-    fn input_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
+    fn input_index(&self, relay: &RelayName) -> error_stack::Result<usize, E> {
         self.from
             .from
             .iter()
             .position(|candidate| candidate == relay)
-            .ok_or_else(|| AlterProcessorError::InputNotFound {
-                relay: relay.clone(),
+            .ok_or_else(|| {
+                Self::reject(AlterProcessorError::InputNotFound {
+                    relay: relay.clone(),
+                })
             })
     }
 
-    fn ensure_input_absent(&self, relay: &RelayName) -> Result<(), AlterProcessorError> {
+    fn ensure_input_absent(&self, relay: &RelayName) -> error_stack::Result<(), E> {
         if self.from.from.iter().any(|candidate| candidate == relay) {
-            Err(AlterProcessorError::InputAlreadyExists {
+            Err(Self::reject(AlterProcessorError::InputAlreadyExists {
                 relay: relay.clone(),
-            })
+            }))
         } else {
             Ok(())
         }
     }
 
-    fn materialized_state_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
+    fn materialized_state_index(&self, relay: &RelayName) -> error_stack::Result<usize, E> {
         self.materialized_state
             .iter()
             .position(|dependency| dependency.relay == *relay)
-            .ok_or_else(|| AlterProcessorError::MaterializedStateNotConfigured {
-                relay: relay.clone(),
+            .ok_or_else(|| {
+                Self::reject(AlterProcessorError::MaterializedStateNotConfigured {
+                    relay: relay.clone(),
+                })
             })
     }
 
-    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
+    fn unique_route_index(&self, relay: &RelayName) -> error_stack::Result<usize, E> {
         let mut indexes = self
             .output_routes
             .routes
@@ -5601,14 +6061,14 @@ impl ProcessorAlterTarget<'_> {
             .enumerate()
             .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
         let Some(index) = indexes.next() else {
-            return Err(AlterProcessorError::RouteTargetNotFound {
+            return Err(Self::reject(AlterProcessorError::RouteTargetNotFound {
                 relay: relay.clone(),
-            });
+            }));
         };
         if indexes.next().is_some() {
-            return Err(AlterProcessorError::RouteTargetAmbiguous {
+            return Err(Self::reject(AlterProcessorError::RouteTargetAmbiguous {
                 relay: relay.clone(),
-            });
+            }));
         }
         Ok(index)
     }
@@ -5624,11 +6084,30 @@ pub struct CreateWindowProcessor {
     pub branched_by: BranchSelection,
     pub width: WindowBound,
     pub step: WindowBound,
+    pub state_limit: WindowStateLimit,
     #[serde(default)]
     pub mode: AckMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter_where: Option<crate::Expression>,
     pub materialized_state: Vec<crate::MaterializedStateDependency>,
+}
+
+/// The state allowance of one concrete window branch. Sketch windows require a byte limit.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Archive,
+    RkyvSerialize,
+    RkyvDeserialize,
+)]
+pub enum WindowStateLimit {
+    Unbounded,
+    MaxBytes(NonZeroU64),
 }
 
 #[derive(
@@ -5711,20 +6190,105 @@ mod tests {
         AlterPlacementError, AlterPlacementOperation, AlterProcessorError, AlterProcessorOperation,
         AlterReingestor, AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation,
         AlterReorderer, AlterReordererError, AlterReordererOperation, BranchSelection,
-        ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule, CreateDeduplicator,
-        CreateEmitter, CreateGenerator, CreatePlacement, CreateReingestor, CreateRelay,
-        CreateReorderer, CreateSchema, DomainSchedule, EmitSink, EmitterPublishingMode,
-        ErrorPolicies, FlushPolicy, GeneralErrorPolicy, InferencerTensorDimension,
-        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
-        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, PlacementPolicy,
-        RelayBranching, ResolvedBranching, RetryPolicy, ScheduledNode,
+        ClickHouseValueMapping, ClientPoolBounds, ClientPoolBoundsError, ClusterSchedule,
+        CodecBatchContainer, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        CodecWireFormat, CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement,
+        CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
+        EmitterBatchContractError, EmitterBody, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
+        GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, InferencerExecutionMode,
+        InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+        InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
+        InferencerTensorSchemaError, KafkaPartitionSchedule, MaterializedRelayState, Model,
+        ModelKind, MongoDbConflictAction, MySqlConflictAction, OtelSignal, PlacementPolicy,
+        PostgresConflictAction, RelayBranching, ResolvedBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
-        ClusterNodeName, CreateIngestor, CreateJunction, DomainName, EndpointIngestMode,
-        Expression, IngestQuiesceMode, IngestSource, Literal, MaterializedStateDependency,
-        MaterializedStatePolicy, ParseAsType, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
-        SchemaField, SchemaFingerprint,
+        ClientName, ClusterNodeName, CollectionName, CreateInferencer, CreateIngestor,
+        CreateJunction, DomainName, EndpointIngestMode, Expression, IngestQuiesceMode,
+        IngestSource, Literal, MaterializedStateDependency, MaterializedStatePolicy, ParseAsType,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField, SchemaFingerprint,
+        TableName,
     };
+
+    #[test]
+    fn branch_selection_displays_its_named_or_unbranched_declaration() {
+        let name =
+            crate::BranchName::parse("by_tenant").assured("by_tenant is a valid branch identifier");
+        assert_eq!(BranchSelection::branched_by(name).to_string(), "by_tenant");
+        assert_eq!(BranchSelection::unbranched().to_string(), "UNBRANCHED");
+    }
+
+    #[test]
+    fn direct_value_mappings_cover_all_external_value_sections() {
+        let client: ClientName = named("sink");
+        let table: TableName = named("events");
+        let mapping = |column: &str| ClickHouseValueMapping {
+            column: column.to_owned(),
+            expression: Expression::Literal(Literal::String(column.to_owned())),
+        };
+        let single_value = || vec![mapping("value")];
+        let sinks = [
+            EmitSink::Otel {
+                client: client.clone(),
+                signal: OtelSignal::Logs,
+                values: single_value(),
+                attributes: vec![mapping("attribute")],
+                resource: vec![mapping("resource")],
+                scope: None,
+            },
+            EmitSink::ClickHouse {
+                client: client.clone(),
+                table: table.clone(),
+                values: single_value(),
+            },
+            EmitSink::Postgres {
+                client: client.clone(),
+                table: table.clone(),
+                values: single_value(),
+                conflict_action: PostgresConflictAction::None,
+            },
+            EmitSink::MySql {
+                client: client.clone(),
+                table: table.clone(),
+                values: single_value(),
+                conflict_action: MySqlConflictAction::None,
+            },
+            EmitSink::MongoDb {
+                client: client.clone(),
+                collection: named::<CollectionName>("events"),
+                values: single_value(),
+                conflict_action: MongoDbConflictAction::None,
+            },
+            EmitSink::Iceberg {
+                backend: IcebergStorageBackend::S3,
+                client: client.clone(),
+                table,
+                values: single_value(),
+                location: "s3://bucket/events".to_owned(),
+                catalog: IcebergCatalog::Rest {
+                    client: client.clone(),
+                },
+                commit_each: "1s".to_owned(),
+                max_commit_size: "1MB".to_owned(),
+            },
+        ];
+
+        for (index, sink) in sinks.iter().enumerate() {
+            let columns = sink
+                .direct_value_mappings()
+                .map(|mapping| mapping.column.as_str())
+                .collect::<Vec<_>>();
+            let expected = if index == 0 {
+                vec!["value", "attribute", "resource"]
+            } else {
+                vec!["value"]
+            };
+            assert_eq!(columns, expected, "{sink:?}");
+        }
+
+        let sink_without_values = EmitSink::Sentry { client };
+        assert_eq!(sink_without_values.direct_value_mappings().count(), 0);
+    }
 
     #[test]
     fn pool_bounds_accept_a_minimum_up_to_the_maximum_and_reject_one_above_it() {
@@ -6109,7 +6673,10 @@ mod tests {
                 ],
             })
             .expect_err("the second drop must fail");
-        assert_eq!(error, AlterRelayError::MaterializedStateNotConfigured);
+        assert_eq!(
+            error.current_context(),
+            &AlterRelayError::MaterializedStateNotConfigured
+        );
         assert_eq!(relay, before, "failed ALTER must not partially apply");
     }
 
@@ -6154,8 +6721,8 @@ mod tests {
             })
             .expect_err("duplicate route targets must be ambiguous");
         assert_eq!(
-            error,
-            AlterJunctionError::Processor(AlterProcessorError::RouteTargetAmbiguous {
+            error.current_context(),
+            &AlterJunctionError::Processor(AlterProcessorError::RouteTargetAmbiguous {
                 relay: named("accepted"),
             })
         );
@@ -6307,7 +6874,13 @@ mod tests {
         ];
         for (alter, expected) in cases {
             let mut candidate = relay.clone();
-            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(
+                candidate
+                    .apply_alter(&alter)
+                    .expect_err("the alteration is rejected")
+                    .current_context(),
+                &expected
+            );
             assert_eq!(candidate, relay);
         }
     }
@@ -6435,7 +7008,13 @@ mod tests {
 
         for (alter, expected) in cases {
             let mut candidate = base.clone();
-            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(
+                candidate
+                    .apply_alter(&alter)
+                    .expect_err("the alteration is rejected")
+                    .current_context(),
+                &expected
+            );
             assert_eq!(candidate, base);
         }
 
@@ -6456,10 +7035,13 @@ mod tests {
         let mut emitter = CreateEmitter {
             name: named("event_sink"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("event_codec")),
+            body: EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink_a"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "1s".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -6526,8 +7108,352 @@ mod tests {
                 ],
             })
             .expect_err("the second codec drop must fail");
-        assert_eq!(error, AlterEmitterError::EncodeNotConfigured);
+        assert_eq!(
+            error.current_context(),
+            &AlterEmitterError::EncodeNotConfigured
+        );
         assert_eq!(emitter, before, "failed ALTER must not partially apply");
+    }
+
+    #[test]
+    fn http_emitter_alter_replaces_body_explicitly_and_rejects_drop_encode() {
+        let retry_policy = RetryPolicy {
+            backoff: "250ms".to_string(),
+            max_backoff: "30s".to_string(),
+        };
+        let mut emitter = CreateEmitter {
+            name: named("request_sink"),
+            from: ProcessorInputs::single(named("events")),
+            body: EmitterBody::WithoutBody,
+            sink: Box::new(EmitSink::Http {
+                client: named("api"),
+                method: Expression::Literal(Literal::String("DELETE".to_string())),
+                path: Expression::Literal(Literal::String("/events".to_string())),
+            }),
+            batch: None,
+            flush_policy: FlushPolicy::Immediate,
+            error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::RequestAck {
+                retry_policy: retry_policy.clone(),
+            },
+            mode: AckMode::Attached,
+            construction: crate::RouteConstruction::default(),
+            materialized_state: Vec::new(),
+        };
+        let replacement = AlterEmitter {
+            emitter: named("request_sink"),
+            operations: vec![AlterEmitterOperation::SetSink {
+                sink: Box::new(EmitSink::Http {
+                    client: named("other_api"),
+                    method: Expression::Literal(Literal::String("HEAD".to_string())),
+                    path: Expression::Literal(Literal::String("/health".to_string())),
+                }),
+                publishing_mode: EmitterPublishingMode::RequestAck { retry_policy },
+                body: Some(EmitterBody::WithoutBody),
+            }],
+        };
+        emitter
+            .apply_alter(&replacement)
+            .expect("complete HTTP replacement");
+        assert_eq!(emitter.body, EmitterBody::WithoutBody);
+        assert_eq!(emitter.sink.client(), &named("other_api"));
+        let stored = serde_json::to_vec(&emitter).expect("current emitter should serialize");
+        let restored: CreateEmitter =
+            serde_json::from_slice(&stored).expect("current emitter should deserialize");
+        assert_eq!(restored, emitter);
+
+        let before = emitter.clone();
+        let error = emitter.apply_alter(&AlterEmitter {
+            emitter: named("request_sink"),
+            operations: vec![
+                AlterEmitterOperation::SetClient {
+                    client: named("third_api"),
+                },
+                AlterEmitterOperation::DropEncode,
+            ],
+        });
+        assert_eq!(
+            error
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterEmitterError::HttpDropEncode
+        );
+        assert_eq!(emitter, before);
+
+        let error = emitter
+            .apply_alter(&AlterEmitter {
+                emitter: named("request_sink"),
+                operations: vec![AlterEmitterOperation::SetBatch {
+                    policy: batch_policy(10, "64KiB"),
+                }],
+            })
+            .expect_err("an HTTP emitter sends one request per record");
+        assert_eq!(
+            error.current_context(),
+            &AlterEmitterError::Batch(EmitterBatchContractError::HttpUnsupported)
+        );
+        assert_eq!(emitter, before);
+        let batched = CreateEmitter {
+            batch: Some(batch_policy(10, "64KiB")),
+            ..emitter
+        };
+        assert_eq!(
+            batch_violation(&batched),
+            Some(EmitterBatchContractError::HttpUnsupported)
+        );
+    }
+
+    fn batch_policy(max_messages: u32, max_size: &str) -> crate::EmitterBatchPolicy {
+        crate::EmitterBatchPolicy {
+            max_messages: crate::BatchMessageLimit::try_from(max_messages)
+                .assured("the fixture message limit is within range"),
+            max_size: max_size
+                .parse()
+                .assured("the fixture size is a whole number of bytes"),
+        }
+    }
+
+    fn batching_emitter(sink: EmitSink, batch: Option<crate::EmitterBatchPolicy>) -> CreateEmitter {
+        CreateEmitter {
+            name: named("event_sink"),
+            from: ProcessorInputs::single(named("events")),
+            body: EmitterBody::Values,
+            sink: Box::new(sink),
+            batch,
+            flush_policy: FlushPolicy::Immediate,
+            error_policies: ErrorPolicies::handled_by_log(),
+            publishing_mode: EmitterPublishingMode::NoAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+            mode: AckMode::Attached,
+            construction: crate::RouteConstruction::default(),
+            materialized_state: Vec::new(),
+        }
+    }
+
+    fn postgres_sink() -> EmitSink {
+        EmitSink::Postgres {
+            client: named("db"),
+            table: named("events"),
+            values: Vec::new(),
+            conflict_action: PostgresConflictAction::None,
+        }
+    }
+
+    #[test]
+    fn emitter_alter_sets_replaces_and_drops_the_batch_clause() {
+        let mut emitter = batching_emitter(
+            EmitSink::ZeroMq {
+                client: named("sink"),
+            },
+            None,
+        );
+        let set = |policy| AlterEmitter {
+            emitter: named("event_sink"),
+            operations: vec![AlterEmitterOperation::SetBatch { policy }],
+        };
+
+        emitter
+            .apply_alter(&set(batch_policy(500, "1MiB")))
+            .expect("SET BATCH adds the clause");
+        assert_eq!(emitter.batch, Some(batch_policy(500, "1MiB")));
+        emitter
+            .apply_alter(&set(batch_policy(10, "64KiB")))
+            .expect("SET BATCH replaces the clause");
+        assert_eq!(emitter.batch, Some(batch_policy(10, "64KiB")));
+
+        let drop = AlterEmitter {
+            emitter: named("event_sink"),
+            operations: vec![AlterEmitterOperation::DropBatch],
+        };
+        emitter.apply_alter(&drop).expect("DROP BATCH removes it");
+        assert_eq!(emitter.batch, None);
+        assert_eq!(
+            emitter
+                .apply_alter(&drop)
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterEmitterError::BatchNotConfigured
+        );
+    }
+
+    #[test]
+    fn emitter_alter_keeps_the_batch_clause_a_database_sink_requires() {
+        let base = batching_emitter(postgres_sink(), Some(batch_policy(500, "8MiB")));
+
+        let mut dropped = base.clone();
+        let error = dropped
+            .apply_alter(&AlterEmitter {
+                emitter: named("event_sink"),
+                operations: vec![AlterEmitterOperation::DropBatch],
+            })
+            .expect_err("a Postgres emitter cannot drop its batching clause");
+        assert_eq!(
+            error.current_context(),
+            &AlterEmitterError::Batch(EmitterBatchContractError::Required { sink: "POSTGRES" })
+        );
+        assert_eq!(dropped, base, "a failed ALTER must not partially apply");
+
+        let mut unbatched = batching_emitter(
+            EmitSink::ZeroMq {
+                client: named("sink"),
+            },
+            None,
+        );
+        let to_postgres = |operations| AlterEmitter {
+            emitter: named("event_sink"),
+            operations,
+        };
+        let sink_change = AlterEmitterOperation::SetSink {
+            sink: Box::new(postgres_sink()),
+            body: None,
+            publishing_mode: EmitterPublishingMode::RequestAck {
+                retry_policy: RetryPolicy {
+                    backoff: "250ms".to_string(),
+                    max_backoff: "30s".to_string(),
+                },
+            },
+        };
+        assert_eq!(
+            unbatched
+                .clone()
+                .apply_alter(&to_postgres(vec![sink_change.clone()]))
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterEmitterError::Batch(EmitterBatchContractError::Required { sink: "POSTGRES" })
+        );
+        unbatched
+            .apply_alter(&to_postgres(vec![
+                sink_change,
+                AlterEmitterOperation::SetBatch {
+                    policy: batch_policy(100, "1MiB"),
+                },
+            ]))
+            .expect("one ALTER may change the sink and declare its batching clause together");
+        assert_eq!(unbatched.batch, Some(batch_policy(100, "1MiB")));
+    }
+
+    /// The contract violation `emitter` reports, or none when its batching clause is valid.
+    fn batch_violation(emitter: &CreateEmitter) -> Option<EmitterBatchContractError> {
+        match emitter.validate_batch() {
+            Ok(()) => None,
+            Err(report) => Some(report.current_context().clone()),
+        }
+    }
+
+    #[test]
+    fn batch_size_is_bounded_by_the_largest_sqs_message() {
+        let sqs = || EmitSink::Sqs {
+            client: named("queue_client"),
+            queue: "events".to_string(),
+            fifo_group: None,
+        };
+
+        assert_eq!(
+            batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "256KiB")))),
+            None
+        );
+        assert_eq!(
+            batch_violation(&batching_emitter(sqs(), Some(batch_policy(10, "262145B")))),
+            Some(EmitterBatchContractError::SizeAboveSinkMaximum {
+                sink: "SQS",
+                declared: "262145B".parse().assured("a whole number of bytes"),
+                maximum: "256KiB".parse().assured("a whole number of bytes"),
+            })
+        );
+        let kafka = EmitSink::Kafka {
+            client: named("broker"),
+            topic: named("events"),
+        };
+        assert_eq!(
+            batch_violation(&batching_emitter(kafka, Some(batch_policy(10, "1GiB")))),
+            None
+        );
+    }
+
+    #[test]
+    fn database_sinks_require_the_batch_clause_and_the_others_do_not() {
+        let database_sinks = [
+            EmitSink::ClickHouse {
+                client: named("db"),
+                table: named("events"),
+                values: Vec::new(),
+            },
+            postgres_sink(),
+            EmitSink::MySql {
+                client: named("db"),
+                table: named("events"),
+                values: Vec::new(),
+                conflict_action: MySqlConflictAction::None,
+            },
+            EmitSink::MongoDb {
+                client: named("db"),
+                collection: named("events"),
+                values: Vec::new(),
+                conflict_action: MongoDbConflictAction::None,
+            },
+        ];
+        for sink in database_sinks {
+            let label = sink.transport_label();
+            assert_eq!(
+                batch_violation(&batching_emitter(sink.clone(), None)),
+                Some(EmitterBatchContractError::Required { sink: label })
+            );
+            assert_eq!(
+                batch_violation(&batching_emitter(sink, Some(batch_policy(1, "1B")))),
+                None
+            );
+        }
+        let sentry = EmitSink::Sentry {
+            client: named("sentry"),
+        };
+        assert_eq!(batch_violation(&batching_emitter(sentry, None)), None);
+    }
+
+    #[test]
+    fn codec_batch_containers_name_the_program_and_the_protobuf_message() {
+        let transformations = |batch: Option<&str>| CodecJaqTransformations {
+            on_ingestion: None,
+            on_emitting: Some(".".to_string()),
+            on_emitting_batch: batch.map(str::to_string),
+        };
+        let protobuf = |batch_message: Option<&str>, batch: Option<&str>| {
+            CodecWireFormat::Protobuf(CodecProtobufConfig {
+                resource: named("bundle"),
+                resource_version: 1,
+                config: Vec::new(),
+                message: "nervix.test.Notification".to_string(),
+                batch_message: batch_message.map(str::to_string),
+                transformations: transformations(batch),
+            })
+        };
+
+        assert_eq!(
+            CodecWireFormat::Syslog.batch_container(),
+            CodecBatchContainer::Format {
+                transformation: None
+            }
+        );
+        let jaq = CodecWireFormat::JaqNative {
+            format: CodecJaqFormat::Json,
+            transformations: transformations(Some("{records: .}")),
+        };
+        assert_eq!(jaq.batch_container().transformation(), Some("{records: .}"));
+        assert_eq!(
+            protobuf(None, None).batch_container(),
+            CodecBatchContainer::Undeclared
+        );
+        assert_eq!(
+            protobuf(Some("nervix.test.Batch"), Some("{items: .}")).batch_container(),
+            CodecBatchContainer::ProtobufMessage {
+                message: "nervix.test.Batch",
+                transformation: Some("{items: .}"),
+            }
+        );
+        assert_eq!(CodecBatchContainer::Undeclared.transformation(), None);
     }
 
     #[test]
@@ -6535,10 +7461,13 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("event_sink"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("event_codec")),
+            body: EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {
@@ -6604,10 +7533,65 @@ mod tests {
                 },
                 AlterEmitterError::CannotDropLastInput,
             ),
+            (
+                AlterEmitter {
+                    emitter: named("event_sink"),
+                    operations: vec![AlterEmitterOperation::AlterFromDropWhere {
+                        relay: named("events"),
+                    }],
+                },
+                AlterEmitterError::InputWhereNotConfigured {
+                    relay: named("events"),
+                },
+            ),
+            (
+                AlterEmitter {
+                    emitter: named("event_sink"),
+                    operations: vec![AlterEmitterOperation::SetPublishingMode {
+                        mode: EmitterPublishingMode::SqsSingle {
+                            retry_policy: RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                        },
+                    }],
+                },
+                AlterEmitterError::PublishingModeUnsupported {
+                    sink: "ZEROMQ".to_string(),
+                    mode: "SINGLE".to_string(),
+                },
+            ),
+            (
+                AlterEmitter {
+                    emitter: named("event_sink"),
+                    operations: vec![AlterEmitterOperation::SetSink {
+                        sink: Box::new(EmitSink::ZeroMq {
+                            client: named("other_sink"),
+                        }),
+                        publishing_mode: EmitterPublishingMode::SqsSingle {
+                            retry_policy: RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                        },
+                        body: None,
+                    }],
+                },
+                AlterEmitterError::PublishingModeUnsupported {
+                    sink: "ZEROMQ".to_string(),
+                    mode: "SINGLE".to_string(),
+                },
+            ),
         ];
         for (alter, expected) in cases {
             let mut candidate = emitter.clone();
-            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(
+                candidate
+                    .apply_alter(&alter)
+                    .expect_err("the alteration is rejected")
+                    .current_context(),
+                &expected
+            );
             assert_eq!(candidate, emitter);
         }
     }
@@ -6714,8 +7698,8 @@ mod tests {
             })
             .expect_err("missing route target should fail");
         assert_eq!(
-            error,
-            AlterIngestorError::RouteTargetNotFound {
+            error.current_context(),
+            &AlterIngestorError::RouteTargetNotFound {
                 relay: named("missing")
             }
         );
@@ -6743,26 +7727,32 @@ mod tests {
 
         let mut candidate = base.clone();
         assert_eq!(
-            candidate.apply_alter(&AlterIngestor {
-                ingestor: named("other"),
-                operations: Vec::new(),
-            }),
-            Err(AlterIngestorError::IngestorNameMismatch {
+            candidate
+                .apply_alter(&AlterIngestor {
+                    ingestor: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterIngestorError::IngestorNameMismatch {
                 stored: named("event_source"),
                 requested: named("other"),
-            })
+            }
         );
         assert_eq!(candidate, base);
 
         let mut candidate = base.clone();
         assert_eq!(
-            candidate.apply_alter(&AlterIngestor {
-                ingestor: named("event_source"),
-                operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: named("events"),
-                }],
-            }),
-            Err(AlterIngestorError::CannotDropLastRoute)
+            candidate
+                .apply_alter(&AlterIngestor {
+                    ingestor: named("event_source"),
+                    operations: vec![AlterIngestorOperation::DropRoute {
+                        relay: named("events"),
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterIngestorError::CannotDropLastRoute
         );
         assert_eq!(candidate, base);
 
@@ -6770,15 +7760,18 @@ mod tests {
         ambiguous.output_routes.routes.push(route);
         let before = ambiguous.clone();
         assert_eq!(
-            ambiguous.apply_alter(&AlterIngestor {
-                ingestor: named("event_source"),
-                operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: named("events"),
-                }],
-            }),
-            Err(AlterIngestorError::RouteTargetAmbiguous {
+            ambiguous
+                .apply_alter(&AlterIngestor {
+                    ingestor: named("event_source"),
+                    operations: vec![AlterIngestorOperation::DropRoute {
+                        relay: named("events"),
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterIngestorError::RouteTargetAmbiguous {
                 relay: named("events"),
-            })
+            }
         );
         assert_eq!(ambiguous, before);
     }
@@ -6901,38 +7894,55 @@ mod tests {
         let mut deduplicator = deduplicator();
         let original = deduplicator.clone();
         assert_eq!(
-            deduplicator.apply_alter(&AlterDeduplicator {
-                deduplicator: named("dedup_events"),
-                operations: vec![
-                    AlterDeduplicatorOperation::SetMaxTime {
-                        max_time: "1s".to_string(),
-                    },
-                    AlterDeduplicatorOperation::Processor(Box::new(
-                        AlterProcessorOperation::DropRoute {
-                            relay: named("missing"),
+            deduplicator
+                .apply_alter(&AlterDeduplicator {
+                    deduplicator: named("dedup_events"),
+                    operations: vec![
+                        AlterDeduplicatorOperation::SetMaxTime {
+                            max_time: "1s".to_string(),
                         },
-                    )),
-                ],
-            }),
-            Err(AlterDeduplicatorError::Processor(
-                AlterProcessorError::RouteTargetNotFound {
-                    relay: named("missing"),
-                }
-            ))
+                        AlterDeduplicatorOperation::Processor(Box::new(
+                            AlterProcessorOperation::DropRoute {
+                                relay: named("missing"),
+                            },
+                        )),
+                    ],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterDeduplicatorError::Processor(AlterProcessorError::RouteTargetNotFound {
+                relay: named("missing"),
+            })
         );
         assert_eq!(deduplicator, original);
+        assert_eq!(
+            deduplicator
+                .apply_alter(&AlterDeduplicator {
+                    deduplicator: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration names another deduplicator")
+                .current_context(),
+            &AlterDeduplicatorError::DeduplicatorNameMismatch {
+                stored: named("dedup_events"),
+                requested: named("other"),
+            }
+        );
 
         let mut reorderer = reorderer();
         let original = reorderer.clone();
         assert_eq!(
-            reorderer.apply_alter(&AlterReorderer {
-                reorderer: named("other"),
-                operations: Vec::new(),
-            }),
-            Err(AlterReordererError::ReordererNameMismatch {
+            reorderer
+                .apply_alter(&AlterReorderer {
+                    reorderer: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterReordererError::ReordererNameMismatch {
                 stored: named("order_events"),
                 requested: named("other"),
-            })
+            }
         );
         assert_eq!(reorderer, original);
     }
@@ -6970,22 +7980,36 @@ mod tests {
 
         let before = reingestor.clone();
         assert_eq!(
-            reingestor.apply_alter(&AlterReingestor {
-                reingestor: named("repartition"),
-                operations: vec![
-                    AlterProcessorOperation::SetMode {
-                        mode: AckMode::Attached,
-                    },
-                    AlterProcessorOperation::SetBranching {
-                        branching: BranchSelection::unbranched(),
-                    },
-                ],
-            }),
-            Err(AlterReingestorError::Processor(
-                AlterProcessorError::BranchingUnsupported
-            ))
+            reingestor
+                .apply_alter(&AlterReingestor {
+                    reingestor: named("repartition"),
+                    operations: vec![
+                        AlterProcessorOperation::SetMode {
+                            mode: AckMode::Attached,
+                        },
+                        AlterProcessorOperation::SetBranching {
+                            branching: BranchSelection::unbranched(),
+                        },
+                    ],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterReingestorError::Processor(AlterProcessorError::BranchingUnsupported)
         );
         assert_eq!(reingestor, before, "failed ALTER must not partially apply");
+        assert_eq!(
+            reingestor
+                .apply_alter(&AlterReingestor {
+                    reingestor: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration names another reingestor")
+                .current_context(),
+            &AlterReingestorError::ReingestorNameMismatch {
+                stored: named("repartition"),
+                requested: named("other"),
+            }
+        );
     }
 
     #[test]
@@ -7029,50 +8053,72 @@ mod tests {
 
         let before = generator.clone();
         assert_eq!(
-            generator.apply_alter(&AlterGenerator {
-                generator: named("synth"),
-                operations: vec![
-                    AlterGeneratorOperation::SetEach {
-                        each: "10ms"
-                            .parse()
-                            .assured("the fixture cadence is a positive duration"),
-                    },
-                    AlterGeneratorOperation::DropRoute {
-                        relay: named("missing"),
-                    },
-                ],
-            }),
-            Err(AlterGeneratorError::RouteTargetNotFound {
+            generator
+                .apply_alter(&AlterGenerator {
+                    generator: named("synth"),
+                    operations: vec![
+                        AlterGeneratorOperation::SetEach {
+                            each: "10ms"
+                                .parse()
+                                .assured("the fixture cadence is a positive duration"),
+                        },
+                        AlterGeneratorOperation::DropRoute {
+                            relay: named("missing"),
+                        },
+                    ],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterGeneratorError::RouteTargetNotFound {
                 relay: named("missing")
-            })
+            }
         );
         assert_eq!(generator, before, "failed ALTER must not partially apply");
+        assert_eq!(
+            generator
+                .apply_alter(&AlterGenerator {
+                    generator: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration names another generator")
+                .current_context(),
+            &AlterGeneratorError::GeneratorNameMismatch {
+                stored: named("synth"),
+                requested: named("other"),
+            }
+        );
 
         let mut single = CreateGenerator {
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
             ..generator
         };
         assert_eq!(
-            single.apply_alter(&AlterGenerator {
-                generator: named("synth"),
-                operations: vec![AlterGeneratorOperation::DropRoute {
-                    relay: named("outgoing"),
-                }],
-            }),
-            Err(AlterGeneratorError::CannotDropLastRoute)
+            single
+                .apply_alter(&AlterGenerator {
+                    generator: named("synth"),
+                    operations: vec![AlterGeneratorOperation::DropRoute {
+                        relay: named("outgoing"),
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterGeneratorError::CannotDropLastRoute
         );
 
         single.output_routes.routes.push(route);
         assert_eq!(
-            single.apply_alter(&AlterGenerator {
-                generator: named("synth"),
-                operations: vec![AlterGeneratorOperation::DropRoute {
-                    relay: named("outgoing"),
-                }],
-            }),
-            Err(AlterGeneratorError::RouteTargetAmbiguous {
+            single
+                .apply_alter(&AlterGenerator {
+                    generator: named("synth"),
+                    operations: vec![AlterGeneratorOperation::DropRoute {
+                        relay: named("outgoing"),
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterGeneratorError::RouteTargetAmbiguous {
                 relay: named("outgoing")
-            })
+            }
         );
     }
 
@@ -7133,17 +8179,180 @@ mod tests {
 
         let before = placement.clone();
         assert_eq!(
-            placement.apply_alter(&AlterPlacement {
-                placement: named("other"),
-                operations: vec![AlterPlacementOperation::SetPolicy {
-                    policy: PlacementPolicy::Neutral,
-                }],
-            }),
-            Err(AlterPlacementError::PlacementNameMismatch {
+            placement
+                .apply_alter(&AlterPlacement {
+                    placement: named("other"),
+                    operations: vec![AlterPlacementOperation::SetPolicy {
+                        policy: PlacementPolicy::Neutral,
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterPlacementError::PlacementNameMismatch {
                 stored: named("critical"),
                 requested: named("other"),
-            })
+            }
         );
         assert_eq!(placement, before, "failed ALTER must not partially apply");
+    }
+
+    #[test]
+    fn a_placement_without_members_on_either_side_is_refused() {
+        let error = CreatePlacement::new(
+            named("corridor"),
+            Vec::new(),
+            vec![named("emit")],
+            PlacementPolicy::Neutral,
+            None,
+        )
+        .expect_err("a placement needs a FROM member");
+        assert_eq!(error.current_context(), &AlterPlacementError::EmptyFrom);
+
+        let error = CreatePlacement::new(
+            named("corridor"),
+            vec![named("ingest")],
+            Vec::new(),
+            PlacementPolicy::Neutral,
+            None,
+        )
+        .expect_err("a placement needs a TO member");
+        assert_eq!(error.current_context(), &AlterPlacementError::EmptyTo);
+
+        let mut placement = CreatePlacement::new(
+            named("corridor"),
+            vec![named("ingest")],
+            vec![named("emit")],
+            PlacementPolicy::Neutral,
+            None,
+        )
+        .expect("placement should be valid");
+        let before = placement.clone();
+        let error = placement
+            .apply_alter(&AlterPlacement {
+                placement: named("corridor"),
+                operations: vec![
+                    AlterPlacementOperation::SetPolicy {
+                        policy: PlacementPolicy::RequireColocation,
+                    },
+                    AlterPlacementOperation::SetMembers {
+                        from: vec![named("source")],
+                        to: Vec::new(),
+                    },
+                ],
+            })
+            .expect_err("an alteration may not empty the TO members");
+        assert_eq!(error.current_context(), &AlterPlacementError::EmptyTo);
+        assert_eq!(placement, before, "failed ALTER must not partially apply");
+    }
+
+    fn tensor(dimensions: Vec<InferencerTensorDimension>) -> InferencerTensorSchema {
+        InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions,
+        }
+    }
+
+    fn inferencer(
+        input: Vec<InferencerTensorDimension>,
+        output: Vec<InferencerTensorDimension>,
+    ) -> CreateInferencer {
+        CreateInferencer {
+            name: named("scorer"),
+            from: ProcessorInputs::single(named("features")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("scores"))]),
+            branched_by: BranchSelection::unbranched(),
+            resource: named("models"),
+            resource_version: 1,
+            file: "score.onnx".to_string(),
+            inputs: vec![InferencerTensorMapping {
+                tensor: "input".to_string(),
+                schema: tensor(input),
+                expression: Expression::Literal(Literal::Bool(true)),
+            }],
+            output_schema: vec![InferencerTensorDeclaration {
+                tensor: "output".to_string(),
+                schema: tensor(output),
+            }],
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn inferencer_execution_mode_follows_the_batch_axes_of_every_tensor() {
+        let one = InferencerTensorDimension::Fixed(nonzero!(1u32));
+        let batch = InferencerTensorDimension::Batch;
+
+        let per_message = inferencer(vec![one], vec![one]);
+        assert_eq!(
+            per_message
+                .execution_mode()
+                .expect("no tensor declares a batch axis"),
+            InferencerExecutionMode::PerMessage
+        );
+        let batched = inferencer(vec![batch, one], vec![batch, one]);
+        assert_eq!(
+            batched
+                .execution_mode()
+                .expect("every tensor declares one batch axis"),
+            InferencerExecutionMode::Batched
+        );
+
+        let widest = InferencerTensorDimension::Fixed(nonzero!(4_294_967_295u32));
+        let cases = [
+            (
+                inferencer(vec![batch, batch], vec![one]),
+                InferencerTensorSchemaError::MultipleBatchAxes {
+                    tensor: "input".to_string(),
+                },
+            ),
+            (
+                inferencer(vec![one], vec![widest, widest, widest]),
+                InferencerTensorSchemaError::ElementCountOverflow {
+                    tensor: "output".to_string(),
+                },
+            ),
+            (
+                inferencer(vec![batch, one], vec![one]),
+                InferencerTensorSchemaError::MixedExecutionModes,
+            ),
+        ];
+        for (processor, expected) in cases {
+            let error = processor
+                .execution_mode()
+                .expect_err("the tensor schemas admit no execution mode");
+            assert_eq!(error.current_context(), &expected);
+        }
+    }
+
+    #[test]
+    fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
+        let buffer = IngestQuiesceMode::EndpointBuffer {
+            max_size: "1MiB".to_string(),
+        };
+        let mut source = IngestSource::Endpoint {
+            endpoint: named("ingress"),
+            mode: EndpointIngestMode::NoAckSequential,
+            quiesce: buffer.clone(),
+        };
+
+        let error = source
+            .set_quiesce(IngestQuiesceMode::Suspend)
+            .expect_err("an endpoint cannot suspend its callers");
+
+        assert_eq!(
+            error.current_context(),
+            &AlterIngestorError::UnsupportedQuiesceMode {
+                transport: "ENDPOINT".to_string(),
+                mode: "SUSPEND".to_string(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+        );
+        assert_eq!(source.quiesce(), &buffer);
     }
 }

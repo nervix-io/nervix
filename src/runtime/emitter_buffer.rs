@@ -1,8 +1,9 @@
 //! The batches an emitter holds between receiving and publishing them.
 //!
 //! Layer: data plane.
-//! - **Owns.** The emitter's buffer of released batches, their message and byte accounting, the
-//!   delivery state of every row they carry, and the flush cadence that releases them.
+//! - **Owns.** The emitter's buffer of released batches with their source relay and branch,
+//!   message and byte accounting, where every row stands in its publication, the batch payloads
+//!   retained for the rows they carry, and flush cadence.
 //! - **Depends on.** Relay batches and their acknowledgements, the emitter's flush policy, and the
 //!   domain clock its cadence is resolved against.
 //! - **Must not know.** Which connector publishes the batches, how their rows are encoded or
@@ -59,11 +60,30 @@ impl Default for EmitterBufferedMessages {
 
 #[derive(Clone)]
 pub(super) struct EmitterPublishBatch {
-    pub(super) batch: RelayRecordBatch,
-    pub(super) execution_now: Timestamp,
+    /// A relay has one fixed named branch declaration, so this name and `batch.key` together
+    /// identify the exact source branch even when another relay has an equal concrete key.
+    source_relay: RelayName,
+    batch: RelayRecordBatch,
+    execution_now: Timestamp,
     headers: Option<Vec<EmitterHeaders>>,
-    pub(super) sqs_message_groups: Vec<Result<Option<String>, SqsMessageGroupError>>,
-    pub(super) delivered: Vec<bool>,
+    /// The ordering group of every row, absent when the emitter declares none.
+    ordering_groups: Option<OrderingGroups>,
+    /// Where every row stands in its publication.
+    rows: Vec<BufferedRow>,
+}
+
+/// Where one buffered row stands between the emitter receiving it and the emitter owning nothing
+/// of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BufferedRow {
+    /// No attempt has prepared the row for its sink yet, or the attempt that did left it for the
+    /// next one.
+    Pending,
+    /// A batch payload the emitter retains carries the row, so only the sink's answer for that
+    /// payload resolves it.
+    Prepared,
+    /// The row was delivered, or rejected once its message error was delivered.
+    Resolved,
 }
 
 /// The bound every byte estimate in this module relies on: each term counts bytes of a batch,
@@ -73,18 +93,24 @@ const BYTES_IN_MEMORY: &str =
     "every term counts bytes of a value this node already holds in memory";
 
 impl EmitterPublishBatch {
-    pub(super) fn from_batch(batch: RelayRecordBatch, execution_now: Timestamp) -> Self {
+    pub(super) fn from_input(
+        source_relay: RelayName,
+        batch: RelayRecordBatch,
+        execution_now: Timestamp,
+    ) -> Self {
         let row_count = batch.batch.batch().num_rows();
         Self {
+            source_relay,
             batch,
             execution_now,
             headers: None,
-            sqs_message_groups: vec![Ok(None); row_count],
-            delivered: vec![false; row_count],
+            ordering_groups: None,
+            rows: vec![BufferedRow::Pending; row_count],
         }
     }
 
     pub(super) fn new(
+        source_relay: RelayName,
         batch: RelayRecordBatch,
         headers: Option<Vec<EmitterHeaders>>,
         execution_now: Timestamp,
@@ -99,56 +125,87 @@ impl EmitterPublishBatch {
             }));
         }
         Ok(Self {
+            source_relay,
             batch,
             execution_now,
             headers,
-            sqs_message_groups: vec![Ok(None); row_count],
-            delivered: vec![false; row_count],
+            ordering_groups: None,
+            rows: vec![BufferedRow::Pending; row_count],
         })
     }
 
-    pub(super) fn with_sqs_message_groups(
+    #[cfg(test)]
+    pub(super) fn from_batch(batch: RelayRecordBatch, execution_now: Timestamp) -> Self {
+        Self::from_input(
+            RelayName::parse("test_relay")
+                .assured("the fixed test relay name satisfies the name grammar"),
+            batch,
+            execution_now,
+        )
+    }
+
+    /// This batch with the ordering group of each of its rows.
+    pub(super) fn with_ordering_groups(
         mut self,
-        groups: Vec<Result<Option<String>, SqsMessageGroupError>>,
+        groups: OrderingGroups,
     ) -> EmitterRuntimeResult<Self> {
         let row_count = self.batch.batch.batch().num_rows();
-        if groups.len() != row_count {
-            return Err(Report::new(EmitterRuntimeError::SqsGroupCountMismatch {
-                group_count: groups.len(),
-                row_count,
-            }));
+        if let Some(group_count) = groups.row_count()
+            && group_count != row_count
+        {
+            return Err(Report::new(
+                EmitterRuntimeError::OrderingGroupCountMismatch {
+                    group_count,
+                    row_count,
+                },
+            ));
         }
-        self.sqs_message_groups = groups;
+        self.ordering_groups = Some(groups);
         Ok(self)
     }
 
+    /// The ordering group row `row` is published under, absent when the emitter declares none, or
+    /// why the row has none.
+    pub(super) fn ordering_group(
+        &self,
+        row: usize,
+    ) -> EmitterRuntimeResult<Result<Option<String>, OrderingGroupError>> {
+        let Some(groups) = &self.ordering_groups else {
+            return Ok(Ok(None));
+        };
+        match groups.group(row) {
+            Some(Ok(group)) => Ok(Ok(Some(group.to_string()))),
+            Some(Err(failure)) => Ok(Err(failure.clone())),
+            None => Err(
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "emitter batch row {row} has no ordering group entry"
+                )),
+            ),
+        }
+    }
+
     fn estimated_bytes(&self) -> u64 {
+        let header_bytes = self
+            .headers
+            .iter()
+            .flatten()
+            .flatten()
+            .map(|(name, value)| {
+                let name_len: u64 = name.len().arch_into();
+                let value_len: u64 = value.len().arch_into();
+                name_len.checked_add(value_len).assured(BYTES_IN_MEMORY)
+            })
+            .try_fold(0_u64, u64::checked_add)
+            .assured(BYTES_IN_MEMORY);
+        let group_bytes = match &self.ordering_groups {
+            Some(groups) => groups.estimated_bytes(),
+            None => 0,
+        };
         self.batch
             .estimated_bytes()
-            .checked_add(
-                self.headers
-                    .iter()
-                    .flatten()
-                    .flatten()
-                    .map(|(name, value)| {
-                        let name_len: u64 = name.len().arch_into();
-                        let value_len: u64 = value.len().arch_into();
-                        name_len.checked_add(value_len).assured(BYTES_IN_MEMORY)
-                    })
-                    .try_fold(0_u64, u64::checked_add)
-                    .assured(BYTES_IN_MEMORY),
-            )
+            .checked_add(header_bytes)
             .assured(BYTES_IN_MEMORY)
-            .checked_add(
-                self.sqs_message_groups
-                    .iter()
-                    .map(|group| match group {
-                        Ok(Some(group)) => group.len().arch_into(),
-                        Ok(None) | Err(_) => 0,
-                    })
-                    .try_fold(0_u64, u64::checked_add)
-                    .assured(BYTES_IN_MEMORY),
-            )
+            .checked_add(group_bytes)
             .assured(BYTES_IN_MEMORY)
     }
 
@@ -160,6 +217,30 @@ impl EmitterPublishBatch {
             None if row < self.batch.keys.len() => Some(&EMPTY),
             None => None,
         }
+    }
+
+    pub(super) fn source_relay(&self) -> &RelayName {
+        &self.source_relay
+    }
+
+    pub(super) fn relay_batch(&self) -> &RelayRecordBatch {
+        &self.batch
+    }
+
+    pub(super) fn into_relay_batch(self) -> RelayRecordBatch {
+        self.batch
+    }
+
+    pub(super) fn execution_now(&self) -> Timestamp {
+        self.execution_now
+    }
+
+    /// Whether each row is resolved, so a failure that takes the batch back routes only the rest.
+    pub(super) fn resolved_rows(&self) -> Vec<bool> {
+        self.rows
+            .iter()
+            .map(|row| *row == BufferedRow::Resolved)
+            .collect()
     }
 
     pub(super) fn message_count(&self) -> u64 {
@@ -174,48 +255,71 @@ impl EmitterPublishBatch {
         self.batch.merged_acks()
     }
 
-    pub(super) fn is_delivered(&self, row: usize) -> bool {
-        self.delivered.get(row).copied().unwrap_or(false)
-    }
-
+    /// Resolves `row` as delivered. A row resolves once, so delivering it again changes nothing
+    /// and never resolves its acknowledgement a second time.
     pub(super) fn mark_delivered(
         &mut self,
         row: usize,
         acknowledgements: DeliveredAcknowledgements,
     ) -> EmitterRuntimeResult<()> {
-        let delivered_rows = self.delivered.len();
-        let delivered = self.delivered.get_mut(row).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::DeliveryRowOutOfBounds {
+        let row_count = self.rows.len();
+        let state = self.rows.get_mut(row).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::DeliveryRowOutOfBounds { row, row_count })
+        })?;
+        if *state == BufferedRow::Resolved {
+            return Ok(());
+        }
+        let ack_rows = self.batch.acks.len();
+        let acks = self.batch.acks.get(row).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::AcknowledgementRowOutOfBounds {
                 row,
-                row_count: delivered_rows,
+                row_count: ack_rows,
             })
         })?;
-        if !*delivered {
-            let ack_rows = self.batch.acks.len();
-            let acks = self.batch.acks.get(row).ok_or_else(|| {
-                Report::new(EmitterRuntimeError::AcknowledgementRowOutOfBounds {
-                    row,
-                    row_count: ack_rows,
-                })
-            })?;
-            match acknowledgements {
-                DeliveredAcknowledgements::Host => acks.ack_success(),
-                DeliveredAcknowledgements::Sink => {}
-            }
-            *delivered = true;
+        match acknowledgements {
+            DeliveredAcknowledgements::Host => acks.ack_success(),
+            DeliveredAcknowledgements::Sink => {}
         }
+        *state = BufferedRow::Resolved;
         Ok(())
     }
 
     fn mark_rejected(&mut self, row: usize) -> EmitterRuntimeResult<()> {
-        let delivered_rows = self.delivered.len();
-        let delivered = self.delivered.get_mut(row).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::RejectionRowOutOfBounds {
-                row,
-                row_count: delivered_rows,
-            })
+        let row_count = self.rows.len();
+        let state = self.rows.get_mut(row).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::RejectionRowOutOfBounds { row, row_count })
         })?;
-        *delivered = true;
+        *state = BufferedRow::Resolved;
+        Ok(())
+    }
+
+    /// Records that a retained batch payload carries `row`, which only the sink's answer for that
+    /// payload resolves from now on.
+    pub(super) fn mark_prepared(&mut self, row: usize) -> EmitterRuntimeResult<()> {
+        let row_count = self.rows.len();
+        let state = self.rows.get_mut(row).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::PreparedRowOutOfBounds { row, row_count })
+        })?;
+        if *state != BufferedRow::Pending {
+            return Err(Report::new(EmitterRuntimeError::RowAlreadyPrepared { row }));
+        }
+        *state = BufferedRow::Prepared;
+        Ok(())
+    }
+
+    /// Returns a row whose payload the sink definitively rejected to the rows still pending, until
+    /// its own message error is delivered.
+    ///
+    /// No payload carries the row any more, so a delivery the emitter's stop deadline cuts short
+    /// leaves it for the next attempt to prepare again rather than for a payload that is gone.
+    pub(super) fn release_prepared(&mut self, row: usize) -> EmitterRuntimeResult<()> {
+        let row_count = self.rows.len();
+        let state = self.rows.get_mut(row).ok_or_else(|| {
+            Report::new(EmitterRuntimeError::RejectionRowOutOfBounds { row, row_count })
+        })?;
+        if *state == BufferedRow::Prepared {
+            *state = BufferedRow::Pending;
+        }
         Ok(())
     }
 
@@ -228,10 +332,29 @@ impl EmitterPublishBatch {
         self.mark_rejected(row)
     }
 
+    /// Every unresolved row in row order, as batch packing reads them: a pending row it may pack,
+    /// or a row a retained payload carries, which a payload packed now must not span.
+    pub(super) fn rows_to_pack(&self) -> Vec<RowToPack> {
+        let mut rows = Vec::with_capacity(self.rows.len());
+        for (row, state) in self.rows.iter().enumerate() {
+            match state {
+                BufferedRow::Pending => rows.push(RowToPack::Pending(row)),
+                BufferedRow::Prepared => rows.push(RowToPack::Retained),
+                BufferedRow::Resolved => {}
+            }
+        }
+        rows
+    }
+
+    /// The rows no attempt has prepared yet and nothing has resolved.
     pub(super) fn pending_record_rows(&self) -> Vec<usize> {
-        (0..self.batch.batch.batch().num_rows())
-            .filter(|row| !self.delivered.get(*row).copied().unwrap_or(false))
-            .collect()
+        let mut pending = Vec::with_capacity(self.rows.len());
+        for (row, state) in self.rows.iter().enumerate() {
+            if *state == BufferedRow::Pending {
+                pending.push(row);
+            }
+        }
+        pending
     }
 
     /// The acknowledgements of `rows`, for a sink that takes them with the write.
@@ -241,6 +364,15 @@ impl EmitterPublishBatch {
                 .filter_map(|row| self.batch.acks.get(*row).cloned()),
         )
     }
+}
+
+/// One unresolved row of a buffered batch, as batch packing reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RowToPack {
+    /// A row no payload carries yet, by its index in the batch.
+    Pending(usize),
+    /// A row a retained payload carries.
+    Retained,
 }
 
 /// Who resolves the acknowledgements of the rows one write delivered.
@@ -293,14 +425,27 @@ impl PublishReport {
 /// else. Retry backoff and acknowledgement keepalive are owned by [`EmitterRetrySchedule`], so a
 /// failed publish attempt leaves this buffer's pending batches, acknowledgements and cadence
 /// deadline exactly as they were.
+///
+/// The buffer is the one owner of everything a failed attempt leaves behind: the batches, whose
+/// acknowledgements the retry keeps alive, where each of their rows stands, and the batch payloads
+/// an attempt already offered to the sink without learning their outcome. Its connector may be
+/// reopened between attempts, so none of that lives with the connector.
 #[derive(Default)]
 pub(super) struct EmitterBatchBuffer {
-    pub(super) flush_policy: Option<RuntimeFlushPolicy>,
-    pub(super) pending: Vec<EmitterPublishBatch>,
+    flush_policy: Option<RuntimeFlushPolicy>,
+    pending: Vec<EmitterPublishBatch>,
+    prepared: PreparedPayloads,
     pending_messages: u64,
     pending_bytes: u64,
     cadence: BranchBufferTimer,
     buffered_messages: Arc<EmitterBufferedMessages>,
+}
+
+/// What one flush hands the emitter's sink: the buffered batches, and the batch payloads earlier
+/// attempts prepared from their rows and retained.
+pub(super) struct EmitterPublication<'a> {
+    pub(super) batches: &'a mut [EmitterPublishBatch],
+    pub(super) prepared: &'a mut PreparedPayloads,
 }
 
 impl EmitterBatchBuffer {
@@ -312,6 +457,7 @@ impl EmitterBatchBuffer {
         Self {
             flush_policy: context.parse_flush_policy("emitter", flush_policy),
             pending: Vec::new(),
+            prepared: PreparedPayloads::default(),
             pending_messages: 0,
             pending_bytes: 0,
             cadence: BranchBufferTimer::default(),
@@ -366,6 +512,41 @@ impl EmitterBatchBuffer {
 
     pub(super) fn is_empty(&self) -> bool {
         self.pending.is_empty()
+    }
+
+    pub(super) fn publication_mut(&mut self) -> EmitterPublication<'_> {
+        EmitterPublication {
+            batches: self.pending.as_mut_slice(),
+            prepared: &mut self.prepared,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn pending(&self) -> &[EmitterPublishBatch] {
+        self.pending.as_slice()
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_flush_policy(&mut self, flush_policy: RuntimeFlushPolicy) {
+        self.flush_policy = Some(flush_policy);
+    }
+
+    /// An empty buffer flushing on `flush_policy` that reports what it holds to
+    /// `buffered_messages`, as the node's drain reads it.
+    #[cfg(all(test, feature = "shuttle"))]
+    pub(super) fn reporting_to(
+        buffered_messages: Arc<EmitterBufferedMessages>,
+        flush_policy: RuntimeFlushPolicy,
+    ) -> Self {
+        Self {
+            flush_policy: Some(flush_policy),
+            pending: Vec::new(),
+            prepared: PreparedPayloads::default(),
+            pending_messages: 0,
+            pending_bytes: 0,
+            cadence: BranchBufferTimer::default(),
+            buffered_messages,
+        }
     }
 
     pub(super) fn deadline(&self) -> Option<BranchBufferDeadline> {
@@ -440,8 +621,11 @@ impl EmitterBatchBuffer {
         AckSet::merged(self.pending.iter().map(EmitterPublishBatch::merged_acks))
     }
 
+    /// Takes every batch back, together with the rows the retained payloads carry, which are still
+    /// unresolved in the batches returned.
     pub(super) fn drain_pending(&mut self) -> Vec<EmitterPublishBatch> {
         let pending = std::mem::take(&mut self.pending);
+        self.prepared.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
         self.cadence.clear();
@@ -451,6 +635,7 @@ impl EmitterBatchBuffer {
 
     pub(super) fn clear(&mut self) {
         self.pending.clear();
+        self.prepared.clear();
         self.pending_messages = 0;
         self.pending_bytes = 0;
         self.cadence.clear();
@@ -486,8 +671,9 @@ impl Drop for EmitterBatchBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::test_fixtures::{
-        input_batch, input_batch_with, input_schema, named, sink_context,
+    use crate::runtime::{
+        emitter_ordering_group::EvaluatedOrderingGroups,
+        test_fixtures::{input_batch, input_batch_with, input_schema, named, sink_context},
     };
 
     #[tokio::test]
@@ -523,8 +709,9 @@ mod tests {
             .is_err(),
             "the simulated message-error delivery must remain pending"
         );
-        assert!(
-            !batch.delivered[0],
+        assert_eq!(
+            batch.rows[0],
+            BufferedRow::Pending,
             "cancelling message-error delivery must leave the poison record retryable"
         );
 
@@ -532,7 +719,7 @@ mod tests {
             .mark_rejected_after_delivery(0, std::future::ready(()))
             .await
             .expect("completed message-error delivery must account for the record");
-        assert!(batch.delivered[0]);
+        assert_eq!(batch.rows[0], BufferedRow::Resolved);
     }
 
     #[tokio::test]
@@ -591,6 +778,7 @@ mod tests {
 
         let headers = vec![vec![("route".to_string(), "fast".to_string())]];
         let with_headers = EmitterPublishBatch::new(
+            named("test_relay"),
             batch.clone(),
             Some(headers.clone()),
             Timestamp::from_unix_nanos(100),
@@ -604,6 +792,7 @@ mod tests {
         );
 
         let error = match EmitterPublishBatch::new(
+            named("test_relay"),
             batch,
             Some(Vec::new()),
             Timestamp::from_unix_nanos(100),
@@ -624,14 +813,15 @@ mod tests {
     fn publish_batch_rejects_misaligned_groups_and_row_updates() {
         let groups =
             match EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100))
-                .with_sqs_message_groups(Vec::new())
-            {
-                Ok(_) => panic!("SQS groups must stay aligned with source rows"),
+                .with_ordering_groups(OrderingGroups::Evaluated(
+                    EvaluatedOrderingGroups::from_rows([]),
+                )) {
+                Ok(_) => panic!("ordering groups must stay aligned with source rows"),
                 Err(error) => error,
             };
         assert_eq!(
             *groups.current_context(),
-            EmitterRuntimeError::SqsGroupCountMismatch {
+            EmitterRuntimeError::OrderingGroupCountMismatch {
                 group_count: 0,
                 row_count: 1,
             }
@@ -676,6 +866,149 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_row_resolves_once_however_often_it_is_answered() {
+        let (root, mut completion) = AckSet::root();
+        let mut batch = EmitterPublishBatch::from_batch(
+            input_batch_with(1, 0, root.attached()),
+            Timestamp::from_unix_nanos(100),
+        );
+        batch
+            .mark_prepared(0)
+            .expect("a pending row can be prepared");
+        let error = batch
+            .mark_prepared(0)
+            .expect_err("a prepared row cannot be prepared again");
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::RowAlreadyPrepared { row: 0 }
+        );
+        assert!(batch.pending_record_rows().is_empty());
+
+        batch
+            .mark_delivered(0, DeliveredAcknowledgements::Host)
+            .expect("a prepared row can be delivered");
+        batch
+            .mark_delivered(0, DeliveredAcknowledgements::Host)
+            .expect("delivering a resolved row changes nothing");
+        batch
+            .release_prepared(0)
+            .expect("releasing a resolved row changes nothing");
+
+        assert_eq!(batch.resolved_rows(), vec![true]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), completion.wait_for_progress())
+                .await
+                .is_err(),
+            "a second delivery must not resolve the row's share of the root again"
+        );
+        root.ack_success();
+        assert_eq!(completion.wait().await, AckOutcome::Ack);
+        let error = batch
+            .mark_prepared(1)
+            .expect_err("preparing needs a row of the batch");
+        assert_eq!(
+            *error.current_context(),
+            EmitterRuntimeError::PreparedRowOutOfBounds {
+                row: 1,
+                row_count: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn packing_reads_a_retained_row_as_a_boundary_and_skips_a_resolved_one() {
+        let mut batch = EmitterPublishBatch::from_batch(
+            RelayRecordBatch::from_messages(
+                input_schema(),
+                (1..=4)
+                    .map(|value| RelayMessage {
+                        key: None,
+                        record: test_runtime_row([("value".to_string(), RuntimeValue::I64(value))]),
+                        acks: AckSet::empty(),
+                    })
+                    .collect(),
+            )
+            .expect("valid four-row emitter batch"),
+            Timestamp::from_unix_nanos(100),
+        );
+        batch
+            .mark_prepared(1)
+            .expect("a pending row can be prepared");
+        batch
+            .mark_delivered(3, DeliveredAcknowledgements::Host)
+            .expect("a pending row can be delivered");
+
+        assert_eq!(
+            batch.rows_to_pack(),
+            vec![
+                RowToPack::Pending(0),
+                RowToPack::Retained,
+                RowToPack::Pending(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_released_row_waits_for_the_next_attempt() {
+        let mut batch =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        batch
+            .mark_prepared(0)
+            .expect("a pending row can be prepared");
+        batch
+            .release_prepared(0)
+            .expect("a prepared row can be released");
+
+        assert_eq!(batch.pending_record_rows(), vec![0]);
+        assert_eq!(batch.resolved_rows(), vec![false]);
+    }
+
+    #[test]
+    fn publish_batch_reads_each_row_group_only_where_the_emitter_declares_one() {
+        let undeclared =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100));
+        assert_eq!(
+            undeclared
+                .ordering_group(0)
+                .expect("an emitter without a group reads none"),
+            Ok(None)
+        );
+
+        let batch = input_batch();
+        let batch_bytes = batch.estimated_bytes();
+        let evaluated = EmitterPublishBatch::from_batch(batch, Timestamp::from_unix_nanos(100))
+            .with_ordering_groups(OrderingGroups::Evaluated(
+                EvaluatedOrderingGroups::from_rows([Ok("tenant-a")]),
+            ))
+            .expect("one group for one row must attach");
+        assert_eq!(
+            evaluated
+                .ordering_group(0)
+                .expect("the row has a group entry"),
+            Ok(Some("tenant-a".to_string()))
+        );
+        let group_bytes: u64 = "tenant-a".len().arch_into();
+        assert_eq!(evaluated.estimated_bytes(), batch_bytes + group_bytes);
+        let error = evaluated
+            .ordering_group(1)
+            .expect_err("a row outside the batch has no group entry");
+        assert_eq!(*error.current_context(), EmitterRuntimeError::EncodeBatch);
+
+        let unavailable =
+            EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100))
+                .with_ordering_groups(OrderingGroups::Unavailable(
+                    OrderingGroupError::UnbranchedRecord,
+                ))
+                .expect("a group every row shares attaches to any batch");
+        assert_eq!(
+            unavailable
+                .ordering_group(0)
+                .expect("the row has a group entry"),
+            Err(OrderingGroupError::UnbranchedRecord)
+        );
+        assert_eq!(unavailable.estimated_bytes(), batch_bytes);
+    }
     #[tokio::test]
     async fn publish_batch_ack_helpers_preserve_and_complete_all_roots() {
         let (acks, completion) = AckSet::root();
@@ -741,6 +1074,7 @@ mod tests {
         )
         .expect("valid multi-row emitter input batch");
         let second = EmitterPublishBatch::new(
+            named("test_relay"),
             second_batch,
             Some(vec![
                 vec![("name".to_string(), "value".to_string())],

@@ -18,7 +18,7 @@ use std::{
         Arc as StdArc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use bytes::Bytes;
@@ -33,17 +33,13 @@ use nervix_execution::{
     sync::{ArcSwap, CancellationToken, DashMap},
 };
 use nervix_models::{
-    ClusterNodeName, CoordinationIdentity, RemoteAckOutcome, RemoteAckRegistration,
+    ClusterNodeName, CoordinationIdentity, NodeEndpoint, RemoteAckOutcome, RemoteAckRegistration,
 };
-use rand_core::{OsRng, RngCore as _};
-use rustls::pki_types::ServerName;
 use strum::EnumCount as _;
 use tokio::{
-    net::{TcpListener, TcpStream},
     sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc},
     time::{Instant, sleep, sleep_until, timeout},
 };
-use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_util::task::TaskTracker;
 use tracing::{debug, warn};
 use triomphe::Arc;
@@ -52,7 +48,7 @@ use super::{
     ControlEnvelope, CoordinationIdentityAllocationError, Envelope, PeerTarget, PoolClass,
     RELAY_GRANT_LIFETIME, ReceivedEnvelope, RelayAdmissionDecision, RelayAdmissionStatus,
     RelayDelivery, RelayPayload, RequestSubquota, TlsConfigBundle, TransportError,
-    TransportOptions, wire,
+    TransportIdentity, TransportOptions, wire,
 };
 use crate::{
     identity::CertificateIdentity,
@@ -61,17 +57,20 @@ use crate::{
         TransportObservations, TransportSnapshot,
     },
     request::RequestAdmission,
+    socket::{PeerResolver, TcpListener, TcpStream},
     wire::{
         ConnectionAccepted, ConnectionHello, RelayAdmissionRequest, RelayAdmissionResponse,
         RelayGrantDisposition, RelayGrantRequest, RelayGrantResponse, WIRE_CONTRACT_FINGERPRINT,
     },
 };
 
+mod dial;
 mod duplex;
 mod relay;
 mod stream;
 pub(crate) mod stream_slots;
 
+use dial::{DialedStream, OutboundDial, SetupBudget};
 pub(crate) use duplex::FrameReader;
 pub use duplex::{
     ChargedItem, DuplexItems, DuplexReceiver, DuplexResponses, DuplexSendProgress, DuplexSender,
@@ -98,10 +97,10 @@ const RESPONSE_LIMIT: u64 = 1024 * 1024;
 const BODY_CHUNK_BYTES: usize = 16 * 1024;
 const RESET_LIMIT: usize = 128;
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 struct ConnectionSlotKey {
     node_id: ClusterNodeName,
-    target: PeerTarget,
+    endpoint: NodeEndpoint,
     class: PoolClass,
     slot: usize,
 }
@@ -151,28 +150,45 @@ impl Drop for CancelOnDrop {
 /// One registered outbound endpoint of a peer, with the key of every connection slot it can hold.
 ///
 /// The keys are built once when the endpoint is registered, so leasing a stream finds its slots
-/// and connections by reference instead of assembling a key for every operation.
+/// and connections by reference instead of assembling a key for every operation. The keys name the
+/// endpoint, not an address, so a new DNS answer for the same endpoint changes only where the next
+/// connection is dialled and never retires a connection that is already established.
 struct OutboundTarget {
-    target: PeerTarget,
+    endpoint: NodeEndpoint,
+    dial: OutboundDial,
     slot_keys: [Box<[ConnectionSlotKey]>; PoolClass::COUNT],
 }
 
 impl OutboundTarget {
-    fn new(node_id: &ClusterNodeName, target: PeerTarget) -> Self {
-        let slot_keys = PoolClass::ALL.map(|class| Self::class_slot_keys(node_id, &target, class));
-        Self { target, slot_keys }
+    fn new(node_id: &ClusterNodeName, endpoint: NodeEndpoint, dial: OutboundDial) -> Self {
+        let slot_keys =
+            PoolClass::ALL.map(|class| Self::class_slot_keys(node_id, &endpoint, class));
+        Self {
+            endpoint,
+            dial,
+            slot_keys,
+        }
+    }
+
+    /// The same endpoint and slots, dialled through `dial`.
+    fn with_dial(&self, dial: OutboundDial) -> Self {
+        Self {
+            endpoint: self.endpoint.clone(),
+            dial,
+            slot_keys: self.slot_keys.clone(),
+        }
     }
 
     fn class_slot_keys(
         node_id: &ClusterNodeName,
-        target: &PeerTarget,
+        endpoint: &NodeEndpoint,
         class: PoolClass,
     ) -> Box<[ConnectionSlotKey]> {
         let mut keys = Vec::with_capacity(class.connections_per_peer());
         for slot in 0..class.connections_per_peer() {
             keys.push(ConnectionSlotKey {
                 node_id: node_id.clone(),
-                target: target.clone(),
+                endpoint: endpoint.clone(),
                 class,
                 slot,
             });
@@ -233,6 +249,10 @@ impl PublishedTls {
 
 struct ClientConnection {
     key: ConnectionSlotKey,
+    /// The address this connection reached, one of the answers its endpoint resolved to.
+    peer_addr: SocketAddr,
+    /// The endpoint's host as the authority of every request on this connection writes it.
+    request_host: String,
     sender: client::SendRequest<Bytes>,
     stream_slots: StreamSlotQuotas,
     peer_epoch: u64,
@@ -667,6 +687,7 @@ pub(crate) struct TransportStateInner {
     process_epoch: u64,
     next_coordination_sequence: AtomicU64,
     local_addr: SocketAddr,
+    resolver: PeerResolver,
     tls: PublishedTls,
     tls_changed: Notify,
     targets: DashMap<ClusterNodeName, Arc<OutboundTarget>, RandomState>,
@@ -710,24 +731,29 @@ impl Deref for TransportState {
 impl TransportState {
     pub(crate) async fn bind(
         listen_addr: SocketAddr,
-        advertised_host: String,
-        cluster_id: String,
-        node_id: ClusterNodeName,
+        identity: TransportIdentity,
         tls: TlsConfigBundle,
         options: TransportOptions,
         executor: Executor,
+        resolver: PeerResolver,
     ) -> Result<(Self, mpsc::Receiver<ReceivedEnvelope>), TransportError> {
+        let TransportIdentity {
+            cluster_id,
+            node_id,
+            advertised_host,
+        } = identity;
         options.validate()?;
         tls.certificate
             .validate_local(&cluster_id, &node_id, &advertised_host)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        ensure_current(&tls.certificate)
+        tls.clock
+            .ensure_current(&tls.certificate)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
 
         let listener = TcpListener::bind(listen_addr).await?;
         let local_addr = listener.local_addr()?;
         let (incoming_tx, incoming_rx) = mpsc::channel(options.incoming_queue_capacity);
-        let process_epoch = OsRng.next_u64();
+        let process_epoch = options.entropy.next_u64();
         let management_connection_reserve = options
             .max_peers
             .checked_mul(2)
@@ -745,6 +771,7 @@ impl TransportState {
                 process_epoch,
                 next_coordination_sequence: AtomicU64::new(1),
                 local_addr,
+                resolver,
                 tls: PublishedTls::new(tls),
                 tls_changed: Notify::new(),
                 targets: DashMap::default(),
@@ -812,6 +839,14 @@ impl TransportState {
 
     pub(crate) fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    pub(crate) fn resolver(&self) -> &PeerResolver {
+        &self.resolver
+    }
+
+    pub(crate) fn connection_setup_timeout(&self) -> Duration {
+        self.options.connection_setup_timeout
     }
 
     pub(crate) fn node_id(&self) -> &ClusterNodeName {
@@ -919,29 +954,29 @@ impl TransportState {
 
     pub(crate) fn replace_outbound_targets(
         &self,
-        targets: &BTreeMap<ClusterNodeName, BTreeSet<PeerTarget>>,
+        endpoints: &BTreeMap<ClusterNodeName, NodeEndpoint>,
     ) {
-        let accepted = targets
+        let accepted = endpoints
             .iter()
             .take(self.options.max_peers)
-            .filter_map(|(node, choices)| {
-                choices.first().map(|target| (node.clone(), target.clone()))
-            })
+            .map(|(node, endpoint)| (node.clone(), endpoint.clone()))
             .collect::<BTreeMap<_, _>>();
 
+        // Retire in node order, not map order, so the cancellations a replacement causes happen in
+        // the same sequence in every process.
         let removed = self
             .targets
             .iter()
-            .filter(|entry| accepted.get(entry.key()) != Some(&entry.value().target))
+            .filter(|entry| accepted.get(entry.key()) != Some(&entry.value().endpoint))
             .map(|entry| entry.key().clone())
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
         for node in removed {
             self.targets.remove(&node);
             self.cancel_slots_for_node(&node);
         }
 
-        for (node, target) in accepted {
-            let outbound = self.install_outbound_target(node, target);
+        for (node, endpoint) in accepted {
+            let outbound = self.install_outbound_target(node, endpoint, OutboundDial::Advertised);
             self.ensure_preconnected_slots(&outbound);
         }
     }
@@ -949,34 +984,68 @@ impl TransportState {
     pub(crate) fn register_outbound_target(
         &self,
         node_id: ClusterNodeName,
-        target: PeerTarget,
+        endpoint: NodeEndpoint,
     ) -> Result<(), TransportError> {
-        if !self.targets.contains_key(&node_id) && self.targets.len() >= self.options.max_peers {
+        if !self.has_room_for(&node_id) {
             return Err(TransportError::PoolExhausted);
         }
-        let outbound = self.install_outbound_target(node_id, target);
+        let outbound = self.install_outbound_target(node_id, endpoint, OutboundDial::Advertised);
         self.ensure_preconnected_slots(&outbound);
         Ok(())
     }
 
-    /// Make `target` the endpoint `node_id` is reached at, and return its registration. A different
-    /// endpoint replaces the registered one and cancels the slots that belonged to it.
-    fn install_outbound_target(
+    /// Install the address a bootstrap exchange authenticated as `node_id`. An endpoint the node
+    /// already has keeps how it is dialled, so a later bootstrap never narrows an advertised
+    /// endpoint down to one of its addresses.
+    fn install_authenticated_target(
         &self,
         node_id: ClusterNodeName,
         target: PeerTarget,
+    ) -> Arc<OutboundTarget> {
+        let endpoint = target.endpoint();
+        let current = self
+            .targets
+            .get(&node_id)
+            .map(|current| Arc::clone(current.value()));
+        if let Some(current) = current
+            && current.endpoint == endpoint
+        {
+            return current;
+        }
+        self.install_outbound_target(node_id, endpoint, OutboundDial::Authenticated(target.addr))
+    }
+
+    /// Whether `node_id` fits the topology limit: a node that already has a target always does.
+    fn has_room_for(&self, node_id: &ClusterNodeName) -> bool {
+        self.targets.contains_key(node_id) || self.targets.len() < self.options.max_peers
+    }
+
+    /// Make `endpoint` the endpoint `node_id` is reached at, dialled through `dial`, and return its
+    /// registration. A different endpoint replaces the registered one and cancels the slots that
+    /// belonged to it. The same endpoint keeps its slots and connections, and only a different
+    /// `dial` changes where the next connection goes.
+    fn install_outbound_target(
+        &self,
+        node_id: ClusterNodeName,
+        endpoint: NodeEndpoint,
+        dial: OutboundDial,
     ) -> Arc<OutboundTarget> {
         let current = self
             .targets
             .get(&node_id)
             .map(|current| Arc::clone(current.value()));
         if let Some(current) = current
-            && current.target == target
+            && current.endpoint == endpoint
         {
-            return current;
+            if current.dial == dial {
+                return current;
+            }
+            let redialled = Arc::new(current.with_dial(dial));
+            self.targets.insert(node_id, Arc::clone(&redialled));
+            return redialled;
         }
         self.cancel_slots_for_node(&node_id);
-        let outbound = Arc::new(OutboundTarget::new(&node_id, target));
+        let outbound = Arc::new(OutboundTarget::new(&node_id, endpoint, dial));
         self.targets.insert(node_id, Arc::clone(&outbound));
         outbound
     }
@@ -1006,19 +1075,10 @@ impl TransportState {
             let tcp = TcpStream::connect(target.addr).await?;
             tcp.set_nodelay(true)?;
             let tls = self.tls.current().bundle;
-            ensure_current(&tls.certificate)
-                .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-            let server_name = ServerName::try_from(target.server_name.clone())
-                .map_err(|_| TransportError::InvalidServerName(target.server_name.clone()))?;
-            let stream = TlsConnector::from(tls.client_config.clone())
-                .connect(server_name, tcp)
+            let session = tls
+                .connect(tcp, &target.server_name, &self.cluster_id, None)
                 .await?;
-            let identity = validate_tls_session(
-                stream.get_ref().1.alpn_protocol(),
-                stream.get_ref().1.peer_certificates(),
-                &self.cluster_id,
-                None,
-            )?;
+            let identity = session.peer;
             if !identity.matches_endpoint(&target.server_name) {
                 return Err(TransportError::InvalidHandshake(format!(
                     "peer certificate does not identify bootstrap endpoint '{}'",
@@ -1026,13 +1086,17 @@ impl TransportState {
                 )));
             }
             let node_id = identity.node_id;
-            self.register_outbound_target(node_id.clone(), target)?;
+            if !self.has_room_for(&node_id) {
+                return Err(TransportError::PoolExhausted);
+            }
+            let outbound = self.install_authenticated_target(node_id.clone(), target);
+            self.ensure_preconnected_slots(&outbound);
             Ok(node_id)
         };
         match timeout(self.options.connection_setup_timeout, setup).await {
             Ok(result) => result,
             Err(_) => Err(TransportError::ConnectionSetupTimeout {
-                peer: peer_addr,
+                peer: NodeEndpoint::from(peer_addr),
                 timeout: self.options.connection_setup_timeout,
             }),
         }
@@ -1044,7 +1108,7 @@ impl TransportState {
             .iter()
             .filter(|target| !live_nodes.contains(target.key()))
             .map(|target| target.key().clone())
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
         for node in departed {
             self.targets.remove(&node);
             self.cancel_slots_for_node(&node);
@@ -1095,7 +1159,7 @@ impl TransportState {
             .iter()
             .filter(|slot| &slot.key().node_id == node_id)
             .map(|slot| (slot.key().clone(), slot.cancel.clone()))
-            .collect::<Vec<_>>();
+            .collect::<BTreeMap<_, _>>();
         for (key, cancel) in slots {
             self.retire_slot(&key, &cancel);
         }
@@ -1169,12 +1233,14 @@ impl TransportState {
                     }
                 }
                 Err(error) => {
-                    self.observations
-                        .connection_failed(key.class, ConnectionFailureReason::of(&error));
+                    self.observations.connection_failed(
+                        key.class,
+                        ConnectionFailureReason::of(error.current_context()),
+                    );
                     debug!(
                         ?error,
                         node = %key.node_id,
-                        target = %key.target.addr,
+                        endpoint = %key.endpoint,
                         class = ?key.class,
                         slot = key.slot,
                         "interconnect pool connection failed"
@@ -1292,33 +1358,35 @@ impl TransportState {
         &self,
         key: &ConnectionSlotKey,
         slot_cancel: &CancellationToken,
-    ) -> Result<Arc<ClientConnection>, TransportError> {
+    ) -> Result<Arc<ClientConnection>, Report<TransportError>> {
+        let budget = SetupBudget::start(self.options.connection_setup_timeout);
         let setup = async {
-            let tcp = TcpStream::connect(key.target.addr).await?;
-            tcp.set_nodelay(true)?;
+            let DialedStream {
+                stream: tcp,
+                addr: peer_addr,
+            } = self.dial(key, &budget).await?;
+            tcp.set_nodelay(true).map_err(TransportError::from)?;
             let ActiveTls {
                 generation,
                 bundle: tls,
             } = self.tls.current();
-            ensure_current(&tls.certificate)
-                .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-            let server_name = ServerName::try_from(key.target.server_name.clone())
-                .map_err(|_| TransportError::InvalidServerName(key.target.server_name.clone()))?;
-            let stream = TlsConnector::from(tls.client_config.clone())
-                .connect(server_name, tcp)
+            let session = tls
+                .connect(
+                    tcp,
+                    key.endpoint.host(),
+                    &self.cluster_id,
+                    Some(&key.node_id),
+                )
                 .await?;
-            let peer_identity = validate_tls_session(
-                stream.get_ref().1.alpn_protocol(),
-                stream.get_ref().1.peer_certificates(),
-                &self.cluster_id,
-                Some(&key.node_id),
-            )?;
-            let certificate_expires_at =
-                certificate_expiration_deadline([&tls.certificate, &peer_identity])?;
+            let stream = session.stream;
+            let certificate_expires_at = session.expires_at;
 
             let mut builder = client::Builder::new();
             configure_client_builder(&mut builder, &self.options, key.class)?;
-            let (sender, connection) = builder.handshake(stream).await?;
+            let (sender, connection) = builder
+                .handshake(stream)
+                .await
+                .map_err(TransportError::from)?;
             let cancel = CancellationToken::new();
             let closed = CancellationToken::new();
             let driver_cancel = cancel.clone();
@@ -1340,6 +1408,8 @@ impl TransportState {
             let driver_setup_guard = CancelOnDrop::new(cancel.clone());
             let connection = Arc::new(ClientConnection {
                 key: key.clone(),
+                peer_addr,
+                request_host: key.endpoint.url_host(),
                 sender,
                 stream_slots: StreamSlotQuotas::new(key.class),
                 peer_epoch: 0,
@@ -1385,12 +1455,14 @@ impl TransportState {
             .into_value();
             if accepted.fingerprint != WIRE_CONTRACT_FINGERPRINT || accepted.node_id != key.node_id
             {
-                return Err(TransportError::InvalidHandshake(
+                return Err(Report::new(TransportError::InvalidHandshake(
                     "wire fingerprint or addressed node identity differs".to_string(),
-                ));
+                )));
             }
             let connection = Arc::new(ClientConnection {
                 key: connection.key.clone(),
+                peer_addr: connection.peer_addr,
+                request_host: connection.request_host.clone(),
                 sender: connection.sender.clone(),
                 stream_slots: connection.stream_slots.clone(),
                 peer_epoch: accepted.process_epoch,
@@ -1401,17 +1473,17 @@ impl TransportState {
             let current_generation = self.tls.generation();
             if current_generation != generation || slot_cancel.is_cancelled() {
                 connection.cancel.cancel();
-                return Err(TransportError::Closed(key.target.addr));
+                return Err(Report::new(TransportError::Closed(key.endpoint.clone())));
             }
             driver_setup_guard.disarm();
-            Ok(connection)
+            Ok::<_, Report<TransportError>>(connection)
         };
         match timeout(self.options.connection_setup_timeout, setup).await {
             Ok(result) => result,
-            Err(_) => Err(TransportError::ConnectionSetupTimeout {
-                peer: key.target.addr,
+            Err(_) => Err(Report::new(TransportError::ConnectionSetupTimeout {
+                peer: key.endpoint.clone(),
                 timeout: self.options.connection_setup_timeout,
-            }),
+            })),
         }
     }
 
@@ -1760,26 +1832,17 @@ impl TransportState {
             generation,
             bundle: tls,
         } = self.tls.current();
-        ensure_current(&tls.certificate)
-            .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        let stream = timeout(
-            self.options.connection_setup_timeout,
-            TlsAcceptor::from(tls.server_config.clone()).accept(tcp),
-        )
-        .await
-        .map_err(|_| TransportError::ConnectionSetupTimeout {
-            peer: peer_addr,
-            timeout: self.options.connection_setup_timeout,
-        })?
-        .map_err(TransportError::from)?;
-        let peer_identity = validate_tls_session(
-            stream.get_ref().1.alpn_protocol(),
-            stream.get_ref().1.peer_certificates(),
-            &self.cluster_id,
-            None,
-        )?;
-        let certificate_expires_at =
-            certificate_expiration_deadline([&tls.certificate, &peer_identity])?;
+        let session = tls
+            .accept(
+                tcp,
+                peer_addr,
+                self.options.connection_setup_timeout,
+                &self.cluster_id,
+            )
+            .await?;
+        let stream = session.stream;
+        let peer_identity = session.peer;
+        let certificate_expires_at = session.expires_at;
         let mut builder = server::Builder::new();
         configure_server_builder(&mut builder, &self.options)?;
         let mut connection = timeout(
@@ -1788,14 +1851,14 @@ impl TransportState {
         )
         .await
         .map_err(|_| TransportError::ConnectionSetupTimeout {
-            peer: peer_addr,
+            peer: NodeEndpoint::from(peer_addr),
             timeout: self.options.connection_setup_timeout,
         })?
         .map_err(TransportError::from)?;
         let first = timeout(self.options.connection_setup_timeout, connection.accept())
             .await
             .map_err(|_| TransportError::ConnectionSetupTimeout {
-                peer: peer_addr,
+                peer: NodeEndpoint::from(peer_addr),
                 timeout: self.options.connection_setup_timeout,
             })?
             .ok_or_else(|| {
@@ -2408,7 +2471,8 @@ impl TransportState {
         tls.certificate
             .validate_local(&self.cluster_id, &self.node_id, &self.advertised_host)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-        ensure_current(&tls.certificate)
+        tls.clock
+            .ensure_current(&tls.certificate)
             .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
         let next_generation =
             self.tls
@@ -2423,9 +2487,9 @@ impl TransportState {
         let targets = self
             .targets
             .iter()
-            .map(|entry| Arc::clone(entry.value()))
-            .collect::<Vec<_>>();
-        for target in targets {
+            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+            .collect::<BTreeMap<_, _>>();
+        for target in targets.into_values() {
             self.ensure_preconnected_slots(&target);
         }
         Ok(())
@@ -2436,7 +2500,7 @@ impl TransportState {
             .slots
             .iter()
             .map(|entry| (entry.key().clone(), entry.cancel.clone()))
-            .collect::<Vec<_>>();
+            .collect::<BTreeMap<_, _>>();
         for (key, cancel) in slots {
             self.retire_slot(&key, &cancel);
         }
@@ -2471,7 +2535,9 @@ impl ClientConnection {
         request: RawRequest<'_>,
     ) -> Result<(RecvStream, u64), Report<TransportError>> {
         if self.closed.is_cancelled() {
-            return Err(Report::new(TransportError::Closed(self.key.target.addr)));
+            return Err(Report::new(TransportError::Closed(
+                self.key.endpoint.clone(),
+            )));
         }
         let RawRequest {
             path,
@@ -2486,10 +2552,8 @@ impl ClientConnection {
             let mut request_url = url::Url::parse("https://localhost/")
                 .assured("the fixed HTTPS request base is a valid URL");
             request_url
-                .set_host(Some(&self.key.target.server_name))
-                .map_err(|_| {
-                    TransportError::InvalidServerName(self.key.target.server_name.clone())
-                })?;
+                .set_host(Some(&self.request_host))
+                .map_err(|_| TransportError::InvalidServerName(self.request_host.clone()))?;
             request_url.set_path(path);
             let mut builder = Request::builder()
                 .method(Method::POST)
@@ -2567,7 +2631,7 @@ impl ClientConnection {
         request: RawRequest<'_>,
     ) -> Result<ChargedBytes, TransportError> {
         if self.closed.is_cancelled() {
-            return Err(TransportError::Closed(self.key.target.addr));
+            return Err(TransportError::Closed(self.key.endpoint.clone()));
         }
         let RawRequest {
             path,
@@ -2582,10 +2646,8 @@ impl ClientConnection {
             let mut request_url = url::Url::parse("https://localhost/")
                 .assured("the fixed HTTPS request base is a valid URL");
             request_url
-                .set_host(Some(&self.key.target.server_name))
-                .map_err(|_| {
-                    TransportError::InvalidServerName(self.key.target.server_name.clone())
-                })?;
+                .set_host(Some(&self.request_host))
+                .map_err(|_| TransportError::InvalidServerName(self.request_host.clone()))?;
             request_url.set_path(path);
             let mut builder = Request::builder()
                 .method(Method::POST)
@@ -2855,99 +2917,6 @@ async fn read_body_into(
             .write_all(&chunk)
             .map_err(|error| TransportError::Decode(error.to_string()))?;
         body.flow_control().release_capacity(chunk.len())?;
-    }
-    Ok(())
-}
-
-fn validate_tls_session(
-    alpn: Option<&[u8]>,
-    certificates: Option<&[rustls::pki_types::CertificateDer<'static>]>,
-    cluster_id: &str,
-    expected_node: Option<&ClusterNodeName>,
-) -> Result<CertificateIdentity, TransportError> {
-    if alpn != Some(b"h2".as_slice()) {
-        return Err(TransportError::InvalidHandshake(
-            "TLS did not negotiate ALPN h2".to_string(),
-        ));
-    }
-    let Some(certificates) = certificates else {
-        return Err(TransportError::InvalidHandshake(
-            "peer did not present a certificate".to_string(),
-        ));
-    };
-    let Some(certificate) = certificates.first() else {
-        return Err(TransportError::InvalidHandshake(
-            "peer did not present a certificate".to_string(),
-        ));
-    };
-    let identity = CertificateIdentity::from_certificate(certificate)
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    ensure_current(&identity)
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    if identity.cluster_id != cluster_id {
-        return Err(TransportError::InvalidHandshake(format!(
-            "peer certificate identifies cluster '{}', expected '{}'",
-            identity.cluster_id, cluster_id
-        )));
-    }
-    if let Some(expected_node) = expected_node
-        && &identity.node_id != expected_node
-    {
-        return Err(TransportError::InvalidHandshake(format!(
-            "peer certificate identifies node '{}', expected '{}'",
-            identity.node_id, expected_node
-        )));
-    }
-    Ok(identity)
-}
-
-fn certificate_expiration_deadline<'a>(
-    identities: impl IntoIterator<Item = &'a CertificateIdentity>,
-) -> Result<Instant, TransportError> {
-    let expires_at = identities
-        .into_iter()
-        .map(|identity| identity.not_after_unix_seconds)
-        .min()
-        .ok_or_else(|| {
-            TransportError::InvalidHandshake(
-                "a connection has no certificate expiration".to_string(),
-            )
-        })?;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    let now = i64::try_from(now.as_secs())
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    let remaining = expires_at
-        .checked_sub(now)
-        .ok_or_else(|| TransportError::InvalidHandshake("certificate has expired".to_string()))?;
-    if remaining <= 0 {
-        return Err(TransportError::InvalidHandshake(
-            "certificate has expired".to_string(),
-        ));
-    }
-    let remaining = u64::try_from(remaining)
-        .map_err(|error| TransportError::InvalidHandshake(error.to_string()))?;
-    Instant::now()
-        .checked_add(Duration::from_secs(remaining))
-        .ok_or_else(|| {
-            TransportError::InvalidHandshake(
-                "certificate expiration exceeds the monotonic clock range".to_string(),
-            )
-        })
-}
-
-fn ensure_current(identity: &CertificateIdentity) -> Result<(), super::TlsConfigError> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| super::TlsConfigError::InvalidCertificate(error.to_string()))?;
-    let now = i64::try_from(now.as_secs())
-        .map_err(|error| super::TlsConfigError::InvalidCertificate(error.to_string()))?;
-    if identity.not_before_unix_seconds > now {
-        return Err(super::TlsConfigError::NotYetValid);
-    }
-    if identity.not_after_unix_seconds <= now {
-        return Err(super::TlsConfigError::Expired);
     }
     Ok(())
 }

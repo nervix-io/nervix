@@ -20,7 +20,7 @@ CREATE IF NOT EXISTS SCHEMA notification (
 Schemas must declare at least one field.
 
 Field names used in expressions are subject to the
-[conditional reserved-word rule](filter-map-functions.md#conditional-expressions).
+[reserved-word rule](filter-map-functions.md#reserved-words).
 
 These types are the values Nervix stores in runtime records and uses for subscription matching and processor logic. `BYTES` may be a deduplication or reordering key, ordered lexicographically by octet, but branch key schemas cannot contain `BYTES`, including nested `ARRAY` or `VEC` elements.
 
@@ -214,6 +214,15 @@ a canonical RFC 4648 standard base64 string with padding; malformed or unpadded 
 error. AVRO `BYTES` fields use Avro's native byte sequence. A wire `STRING` field cannot bind an
 internal `BYTES` field. Nested `ARRAY` and `VEC` byte elements use the same representation.
 
+Live `WIRE JSON` ingestion copies each connector-owned payload into mutable scratch retained by
+the open ingest group, then parses it with simd-json using parser buffers retained beside that
+scratch. The decoder walks simd-json's borrowed values directly into the batch's typed Arrow
+builders. It resolves schema field hashes and Arrow data types when the codec and batch are built,
+parses each datetime once, and streams base64 output into the binary builder. It does not construct
+a serde JSON tree or a row map. Strict and loose field behavior, optional nulls, exact integer
+ranges, nested sequence shapes, invalid UTF-8 and malformed escape rejection remain the public
+wire-schema contract.
+
 JAQ-native codecs parse a transport payload in a jaq-supported format and run explicitly directed
 JAQ transformations. An ingestion transformation turns every value the payload holds into zero
 or more JSON objects, and each object is decoded into the internal schema as one message
@@ -247,6 +256,25 @@ CREATE IF NOT EXISTS CODEC notification_proto
 The resource contains the `.proto` files. `USING RESOURCE` requires `VERSION <n>` or
 `VERSION LATEST`, and the codec compiles its descriptors from the one version it stores.
 `CONFIG` declares compile parameters; `file`/`files` select source files and `include`/`includes` select import roots, all relative to the resource root. If no file is listed, all `.proto` files in the resource are compiled.
+
+A protobuf codec that a [batching emitter](emitters.md#batching) encodes through names the message
+a batch is published as, after `MESSAGE`:
+
+```nspl,ignore
+CREATE CODEC notification_proto
+  FROM PROTOBUF
+  USING RESOURCE proto_bundle VERSION 1
+  CONFIG {'file' = 'notification.proto', 'include' = '.'}
+  MESSAGE 'nervix.test.Notification'
+  BATCH MESSAGE 'nervix.test.NotificationBatch'
+  TO SCHEMA notification
+  WITH JAQ TRANSFORMATIONS ON EMITTING '{user_id: .user_id, action: .action}';
+```
+
+`BATCH MESSAGE` names a message in the same compiled descriptors, and the domain build fails when it
+does not exist. Without an `ON EMITTING BATCH` transformation it must declare exactly one field,
+`repeated <MESSAGE>`, which holds the members. With one, it may have any shape the
+transformation's output is a valid instance of.
 
 Current schemaful codec wire formats are:
 
@@ -289,16 +317,93 @@ Semantics:
 
 - no-wire codecs must use `FROM JSON|YAML|TOML|XML|CBOR ... WITH JAQ ...`
 - protobuf codecs must use
-  `FROM PROTOBUF USING RESOURCE ... VERSION <n> | LATEST CONFIG {...} MESSAGE ... WITH JAQ ...`
+  `FROM PROTOBUF USING RESOURCE ... VERSION <n> | LATEST CONFIG {...} MESSAGE ... [BATCH MESSAGE ...] WITH JAQ ...`
 - codecs using declared wire schemas must use `FROM WIRE JSON|CBOR|AVRO SCHEMA ...` and do not
   carry JAQ transforms
 - codecs using the predefined SYSLOG wire schema must use `FROM SYSLOG TO SCHEMA ...` and do not
   carry JAQ transformations or field encoding rules
-- `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order
+- `WITH JAQ TRANSFORMATIONS` requires `ON INGESTION`, `ON EMITTING`, or both in that order, and
+  `ON EMITTING` may be followed by `ON EMITTING BATCH` ([Batch Transformations](#batch-transformations))
 - `ON INGESTION` runs on every value the parsed native or protobuf payload holds and may yield zero or more JSON objects, each of which becomes one message compatible with the internal schema ([Unfolding Payloads](#unfolding-payloads))
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 
 JAQ-backed encode/decode is dispatched to blocking workers so expensive transforms do not stall async ingestor or emitter tasks.
+JAQ JSON output intentionally preserves object member declaration order. The serde JSON
+`preserve_order` feature exists for that public JAQ behavior; schemaful `WIRE JSON` ingestion does
+not depend on serde JSON object storage.
+
+### Batch Transformations
+
+A JAQ-backed codec — JAQ-native or protobuf — may declare a third transformation for emitters that
+declare a [batching clause](emitters.md#batching):
+
+```nspl
+CREATE IF NOT EXISTS CODEC notification_envelope
+  FROM JSON
+  TO SCHEMA notification
+  WITH JAQ TRANSFORMATIONS
+    ON EMITTING '{id: .user_id, action: .action}'
+    ON EMITTING BATCH '{schema_version: 2, count: length, records: .}';
+```
+
+`ON EMITTING BATCH` is written only after `ON EMITTING`, because its input is built from that
+transformation's outputs: one array holding the member values of a batch, in publication order. It
+must yield exactly one value, valid in the codec's format; for a protobuf codec, a valid instance of
+the declared `BATCH MESSAGE`. The program compiles with the codec, so a program that cannot compile
+fails the domain build. A batching Sentry emitter requires its codec to declare this
+transformation. `ON EMITTING` keeps its meaning exactly: it runs per record and yields one value per
+record.
+
+The transformation replaces the format's [batch container](#batch-containers), so an array mapping,
+an envelope and a larger value are all ordinary uses:
+
+```nspl,ignore
+ON EMITTING BATCH '.'
+ON EMITTING BATCH 'map({id: .user_id})'
+ON EMITTING BATCH '{count: length, records: .}'
+```
+
+Its output is written by the codec's format writer and measured against the emitter's `MAX SIZE`
+like any container. Whatever it reports as a count, Nervix still counts, acknowledges and limits the
+source records that went in. It sees only the member values, never the source row, materialized
+state or headers, so it cannot reach a sensitive value that construction did not already leak.
+
+### Batch Containers
+
+An emitter that declares a [batching clause](emitters.md#batch-payloads) publishes several records
+as one payload. Each record contributes one member value, exactly the value it would have been
+published as alone: the wire object for `WIRE JSON`, `WIRE CBOR` and `WIRE AVRO` codecs, the
+`ON EMITTING` output for JAQ-native and protobuf codecs, and the complete RFC 5424 message for
+`SYSLOG`. Without an `ON EMITTING BATCH` transformation the members are written in the format's own
+container, by the same writer, with the same whitespace and number formatting, that writes one
+record:
+
+| Format | Container | Three members |
+| --- | --- | --- |
+| `WIRE JSON` | Array | `[{"seq":1},{"seq":2},{"seq":3}]` |
+| JAQ-native `JSON` | Array | `[{"seq": 1}, {"seq": 2}, {"seq": 3}]` |
+| `WIRE CBOR`, JAQ-native `CBOR` | Definite-length array | Major type 4 with the member count, then the members |
+| `YAML` | One document holding a sequence | `[{seq: 1}, {seq: 2}, {seq: 3}]` |
+| `WIRE AVRO` | One datum of type `array` whose items are the codec's record schema | One block: the member count, the members, then the terminating zero |
+| `TOML` | One document with a single key, `batch` | `[[batch]]` sections, one per member |
+| `XML` | One root element, `batch`, whose children are the members | `<batch><event seq="1"/><event seq="2"/><event seq="3"/></batch>` |
+| `PROTOBUF` | One instance of the codec's `BATCH MESSAGE` | The members in its single `repeated <MESSAGE>` field |
+| `SYSLOG` | One RFC 5424 message | The members' common header, the first member's timestamp, and a `MSG` that is the JSON array of the members' own messages |
+
+TOML and XML have no top-level sequence, so their containers use the single key and the single root
+element; an XML member must therefore be an element. A `SYSLOG` frame can say its header once only
+for members that share it, so records whose `PRI`, `HOSTNAME`, `APP-NAME`, `PROCID`, `MSGID` or
+`STRUCTURED-DATA` differ are published in separate frames, while each member keeps its own timestamp
+inside the array:
+
+```text
+<134>1 2026-09-24T10:15:00Z app-01 checkout - - - ["<134>1 2026-09-24T10:15:00Z app-01 checkout - - - order accepted","<134>1 2026-09-24T10:15:01Z app-01 checkout - - - order shipped"]
+```
+
+A consumer reads a container back with the same codec: a JAQ-native codec whose `ON INGESTION`
+unfolds the array, such as `'.[]'`, yields the members as separate messages within the
+[unfolding limit](#unfolding-payloads), and a protobuf codec whose `MESSAGE` is the batch message can
+unfold its repeated field, such as `'.events[]'`.
 
 ### Unfolding Payloads
 

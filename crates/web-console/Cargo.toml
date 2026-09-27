@@ -12,6 +12,7 @@ workspace = true
 base64 = { workspace = true }
 bytes = { workspace = true }
 console_error_panic_hook = { workspace = true }
+error-stack = { workspace = true }
 futures-channel = { workspace = true }
 futures-util = { workspace = true }
 gloo-net = { workspace = true, features = ["http", "websocket"] }
@@ -24,8 +25,10 @@ nervix-dataflow-graph = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
+thiserror = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["js", "v7"] }
+
 wasm-bindgen = { workspace = true }
 wasm-bindgen-futures = { workspace = true }
 web-sys = { workspace = true, features = [
@@ -36,6 +39,7 @@ web-sys = { workspace = true, features = [
   "File",
   "FileList",
   "FormData",
+  "HtmlElement",
   "HtmlDivElement",
   "HtmlInputElement",
   "Location",
@@ -44,3 +48,7 @@ web-sys = { workspace = true, features = [
   "Response",
   "Window",
 ] }
+
+[dev-dependencies]
+any_spawner = { workspace = true, features = ["futures-executor"] }
+leptos = { workspace = true, features = ["ssr"] }

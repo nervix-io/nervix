@@ -149,6 +149,10 @@ pub(in crate::registry) fn visit_model_expressions(
                     visitor(argument);
                 }
             }
+            if let EmitSink::Http { method, path, .. } = model.sink.as_ref() {
+                visitor(method);
+                visitor(path);
+            }
             if let EmitSink::Otel {
                 values,
                 attributes,
@@ -183,22 +187,6 @@ pub(in crate::registry) fn visit_model_expressions(
                 visitor(&assignment.value);
             }
         }
-    }
-}
-
-fn lookup_hash_map_literal_arg(args: &[SpannedExpr], index: usize) -> Result<&str, String> {
-    let Some(arg) = args.get(index) else {
-        return Err(format!(
-            "LOOKUP_HASH_MAP expects 3 arguments, found {}",
-            args.len()
-        ));
-    };
-    match &arg.inner {
-        Expr::Literal(Literal::String(value)) => Ok(value.as_str()),
-        _ => Err(format!(
-            "LOOKUP_HASH_MAP argument {} must be a string literal",
-            index + 1
-        )),
     }
 }
 
@@ -354,9 +342,18 @@ fn rewrite_lookup_hash_map_expr(
             data_type: data_type.clone(),
             on_failure: *on_failure,
         },
+        Expr::Json {
+            document,
+            extraction,
+        } => Expr::Json {
+            document: Box::new(rewrite_lookup_hash_map_expr(
+                domain, identifier, models, document, calls, next_field,
+            )?),
+            extraction: extraction.clone(),
+        },
         Expr::Call { function, args } => {
             if let FunctionName::LookupHashMap = function {
-                if args.len() != 3 {
+                let [lookup_arg, key_arg, field_arg] = args.as_slice() else {
                     return Err(Report::new(RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
                         identifier: identifier.as_str().to_string(),
@@ -365,14 +362,14 @@ fn rewrite_lookup_hash_map_expr(
                             args.len()
                         ),
                     }));
-                }
-                let lookup_name = lookup_hash_map_literal_arg(args, 0).map_err(|reason| {
-                    Report::new(RegistryError::InvalidModel {
-                        domain: domain.as_str().to_string(),
-                        identifier: identifier.as_str().to_string(),
-                        reason,
-                    })
-                })?;
+                };
+                let Expr::Literal(Literal::String(lookup_name)) = &lookup_arg.inner else {
+                    return Err(Report::new(RegistryError::LookupHashMapLiteralArgument {
+                        domain: domain.clone(),
+                        identifier: identifier.clone(),
+                        argument: 1,
+                    }));
+                };
                 let lookup = LookupName::parse(lookup_name).map_err(|error| {
                     Report::new(RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
@@ -382,13 +379,13 @@ fn rewrite_lookup_hash_map_expr(
                         ),
                     })
                 })?;
-                let raw_lookup_field = lookup_hash_map_literal_arg(args, 2).map_err(|reason| {
-                    Report::new(RegistryError::InvalidModel {
-                        domain: domain.as_str().to_string(),
-                        identifier: identifier.as_str().to_string(),
-                        reason,
-                    })
-                })?;
+                let Expr::Literal(Literal::String(raw_lookup_field)) = &field_arg.inner else {
+                    return Err(Report::new(RegistryError::LookupHashMapLiteralArgument {
+                        domain: domain.clone(),
+                        identifier: identifier.clone(),
+                        argument: 3,
+                    }));
+                };
                 let lookup_field = FieldName::parse(raw_lookup_field).change_context(
                     RegistryError::InvalidModel {
                         domain: domain.as_str().to_string(),
@@ -414,7 +411,7 @@ fn rewrite_lookup_hash_map_expr(
                 };
                 // Matches the runtime's identity for the same call: the key expression itself,
                 // compared without its source spans.
-                let key = args[1].inner.clone();
+                let key = key_arg.inner.clone();
                 let data_type = arrow_data_type_for_parse_as(&schema_field.ty);
                 let existing = calls.iter().find(|call| {
                     call.lookup == lookup && call.lookup_field == lookup_field && call.key == key
@@ -522,7 +519,7 @@ fn collect_expr_field_refs(expr: &SpannedExpr, refs: &mut Vec<(String, String)>)
         Expr::FieldRef(field_ref) => {
             refs.push((field_ref.relay.clone(), field_ref.field.clone()));
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             collect_expr_field_refs(expr, refs);
         }
         Expr::Binary { left, right, .. } => {
@@ -564,7 +561,9 @@ fn expr_uses_header_read(expr: &SpannedExpr) -> bool {
                 || expr_uses_header_read(low)
                 || expr_uses_header_read(high)
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => expr_uses_header_read(expr),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
+            expr_uses_header_read(expr)
+        }
         Expr::Binary { left, right, .. } => {
             expr_uses_header_read(left) || expr_uses_header_read(right)
         }
@@ -650,4 +649,115 @@ pub(in crate::registry) fn add_udf_dependency_edges(
         graph.add_edge(udf, consumer, EdgeKind::RequiredBy);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use meticulous::ResultExt as _;
+    use nervix_models::{JsonPath, ModelName};
+    use nervix_vm::{
+        JsonExtraction, JsonOutput,
+        program::{Expr, FieldRef, FunctionName, SpannedExpr, SpannedNode},
+    };
+
+    use super::{collect_expr_field_refs, expr_uses_header_read};
+    use crate::registry::{
+        error::RegistryError,
+        storage::Registry,
+        test_fixtures::{example_graph_models, temp_db_path},
+    };
+
+    fn spanned(inner: Expr) -> SpannedExpr {
+        SpannedNode {
+            inner,
+            span: (0..1).into(),
+        }
+    }
+
+    fn json_exists(document: Expr) -> SpannedExpr {
+        spanned(Expr::Json {
+            document: Box::new(spanned(document)),
+            extraction: JsonExtraction {
+                path: triomphe::Arc::new(JsonPath::parse("$.a").assured("the path is valid")),
+                output: JsonOutput::Exists,
+            },
+        })
+    }
+
+    #[test]
+    fn walkers_reach_the_document_of_a_json_extraction() {
+        let field = json_exists(Expr::FieldRef(FieldRef {
+            relay: "input".to_string(),
+            field: "doc".to_string(),
+        }));
+        let mut refs = Vec::new();
+        collect_expr_field_refs(&field, &mut refs);
+        assert_eq!(refs, [("input".to_string(), "doc".to_string())]);
+        assert!(!expr_uses_header_read(&field));
+
+        let header = json_exists(Expr::Call {
+            function: FunctionName::ReadHeader,
+            args: Vec::new(),
+        });
+        assert!(expr_uses_header_read(&header));
+    }
+
+    #[test]
+    fn apply_batch_rejects_lookup_hash_map_arguments_that_are_not_string_literals() {
+        for (call, argument) in [
+            ("LOOKUP_HASH_MAP(input.source, input.source, \"city\")", 1),
+            ("LOOKUP_HASH_MAP(\"cities\", input.source, input.source)", 3),
+        ] {
+            let (domain, models) = example_graph_models(
+                "lookup hash map argument literals",
+                &format!(
+                    r#"
+                    CREATE SCHEMA metric (
+                      value I64,
+                      source STRING
+                    );
+
+                    CREATE SCHEMA located_metric (
+                      value I64,
+                      source STRING,
+                      city STRING OPTIONAL
+                    );
+
+                    CREATE RELAY raw_metrics SCHEMA metric UNBRANCHED;
+                    CREATE RELAY located_metrics SCHEMA located_metric UNBRANCHED;
+
+                    CREATE DEDUPLICATOR locate_metrics
+                      FROM raw_metrics
+                      DEDUPLICATE ON input.source
+                      MAX TIME 10m
+                      UNBRANCHED
+                      TO located_metrics
+                        INHERIT ALL
+                        SET city = {call}
+                        FLUSH IMMEDIATE
+                        ON MESSAGE ERROR LOG;
+                    "#
+                ),
+            );
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry should open");
+
+            let err = registry
+                .apply_batch(&domain, models)
+                .expect_err("a LOOKUP_HASH_MAP name argument must be a string literal");
+
+            assert_eq!(
+                err.current_context(),
+                &RegistryError::LookupHashMapLiteralArgument {
+                    domain: domain.clone(),
+                    identifier: ModelName::parse("locate_metrics").expect("valid identifier"),
+                    argument,
+                }
+            );
+
+            let _ = fs::remove_dir_all(path);
+        }
+    }
 }

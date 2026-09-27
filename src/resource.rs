@@ -25,7 +25,10 @@ use meticulous::{OptionExt as _, ResultExt as _};
 #[cfg(test)]
 use nervix_execution::CpuClass;
 use nervix_execution::{Cancellation, ChargedBytes, Executor, MemoryClass, StorageClass};
-use nervix_models::{ClusterNodeName, ResourceId, ResourceVersion, Timestamp};
+use nervix_models::{
+    ClusterNodeName, ResourceEntryContent, ResourceId, ResourceManifestEntry, ResourceVersion,
+    Timestamp,
+};
 use serde::{Deserialize, Serialize};
 use tar::{
     Archive as TarArchive, Builder as TarBuilder, EntryType as TarEntryType, Header as TarHeader,
@@ -43,36 +46,6 @@ const DEFAULT_MAX_RESOURCE_FILE_COUNT: u64 = 1_000_000;
 pub struct ResourceManifest {
     pub resource: ResourceVersion,
     pub entries: Vec<ResourceManifestEntry>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResourceManifestEntry {
-    pub path: String,
-    pub content: ResourceEntryContent,
-}
-
-/// What one manifest entry names inside a version.
-///
-/// A directory has no bytes of its own, so it carries neither a size nor a checksum. A file
-/// carries both, and they always describe the same bytes because they are written together.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResourceEntryContent {
-    Directory,
-    File { size: u64, checksum: String },
-}
-
-impl ResourceEntryContent {
-    /// The bytes this entry contributes to its version's total. A directory contributes none.
-    pub fn size(&self) -> u64 {
-        match self {
-            Self::Directory => 0,
-            Self::File { size, .. } => *size,
-        }
-    }
-
-    pub fn is_file(&self) -> bool {
-        matches!(self, Self::File { .. })
-    }
 }
 
 #[derive(Debug, Clone)]

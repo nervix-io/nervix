@@ -78,12 +78,11 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
     transport_a.shutdown().await;
     let (replacement_a, _replacement_incoming) = Transport::bind(
         "127.0.0.1:0".parse().expect("test address should be valid"),
-        "localhost",
-        "test-cluster",
-        node_a.clone(),
+        localhost_identity("test-cluster", node_a.clone()),
         authority.issue("test-cluster", &node_a),
         TransportOptions::default(),
         Executor::default(),
+        test_resolver().await,
     )
     .await
     .expect("replacement coordinator transport should bind");
@@ -91,7 +90,7 @@ async fn coordination_identity_is_unique_and_bound_to_the_authenticated_process(
     replacement_a
         .register_outbound_target(
             node_b.clone(),
-            PeerTarget::new(transport_b.local_addr(), "localhost"),
+            NodeEndpoint::new("localhost", transport_b.local_addr().port()),
         )
         .expect("replacement coordinator target should register");
     let replacement = replacement_a
@@ -189,4 +188,38 @@ async fn typed_rkyv_requests_reuse_an_authenticated_http2_pool() {
 
     transport_a.shutdown().await;
     transport_b.shutdown().await;
+}
+
+#[tokio::test]
+async fn process_epoch_comes_from_the_configured_entropy() {
+    let authority = TestCertificateAuthority::new();
+    let node = ClusterNodeName::parse("node-entropy").expect("test node name should be valid");
+    let draws = StdArc::new(AtomicUsize::new(0));
+    let entropy = TransportEntropy::from_source({
+        let draws = StdArc::clone(&draws);
+        move || {
+            draws.fetch_add(1, Ordering::SeqCst);
+            0x5eed_0001
+        }
+    });
+    let (transport, _incoming) = Transport::bind(
+        "127.0.0.1:0".parse().expect("test address should be valid"),
+        localhost_identity("test-cluster", node.clone()),
+        authority.issue("test-cluster", &node),
+        TransportOptions {
+            entropy,
+            ..TransportOptions::default()
+        },
+        Executor::default(),
+        test_resolver().await,
+    )
+    .await
+    .expect("transport with configured entropy should bind");
+
+    let identity = transport
+        .next_coordination_identity()
+        .expect("the transport should allocate an identity");
+    assert_eq!(identity.process_epoch(), 0x5eed_0001);
+    assert_eq!(draws.load(Ordering::SeqCst), 1);
+    transport.shutdown().await;
 }

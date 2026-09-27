@@ -1,18 +1,13 @@
-use std::{
-    collections::VecDeque,
-    num::{NonZeroU64, NonZeroUsize},
-    sync::Arc as StdArc,
-    time::Duration,
-};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc as StdArc, time::Duration};
 
-use ahash::{HashMap, HashSet};
+use ahash::HashMap;
 use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckMode, Assignment, AssignmentTarget, BranchName, CorrelationTimeoutAction,
-    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, ErrorPolicies, FieldName, FlushPolicy,
-    InferencerTensorDeclaration, InferencerTensorMapping, MessageErrorPolicy, ModelKind, ModelName,
-    RelayName, ResourceName, RouteConstruction, StructuredMessageError, Timestamp, WindowBound,
+    Assignment, AssignmentTarget, BranchName, CorrelationTimeoutPolicy, CorrelatorMatchPolicy,
+    ErrorPolicies, FieldName, InferencerTensorDeclaration, InferencerTensorMapping,
+    MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName, RouteConstruction,
+    StructuredMessageError, Timestamp,
 };
 use nervix_roto::UdfExecutor;
 use nervix_vm::{
@@ -33,12 +28,12 @@ use super::{
     DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch,
     RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
     ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
-    RuntimeInputCollectPolicy, RuntimeInputCollector, SharedActiveGraph, WasmGuestStateResetFence,
-    WasmLiveInstance, WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
+    RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence, WasmLiveInstance,
+    WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
     inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
 };
 use crate::{
-    registry::ActiveGraph,
+    registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
     runtime_ack::AckSet,
     runtime_schema::{
         CompiledSchema, RuntimeRecordBatch, RuntimeRecordMetadata, RuntimeValue, arrow_data_type,
@@ -46,6 +41,38 @@ use crate::{
 };
 
 pub(super) type WasmAckMap = HashMap<u64, WasmAckContext>;
+
+/// Identity of one bound processor configuration. Cloning preserves the identity; binding any
+/// changed specification creates a new identity. Branch tasks compare only this typed token and
+/// never reopen the semantic graph to decide whether their configuration changed.
+#[derive(Clone)]
+pub(super) struct ProcessorPlanRevision(StdArc<()>);
+
+impl std::fmt::Debug for ProcessorPlanRevision {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("ProcessorPlanRevision")
+            .field(&StdArc::as_ptr(&self.0))
+            .finish()
+    }
+}
+
+impl ProcessorPlanRevision {
+    pub(super) fn new() -> Self {
+        Self(StdArc::new(()))
+    }
+
+    pub(super) fn is_same_as(&self, other: &Self) -> bool {
+        StdArc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// One fully bound node plan published as part of a complete domain routing revision.
+#[derive(Debug, Clone)]
+pub(super) struct PublishedProcessorPlan {
+    pub(super) source: BranchedProcessorNodeSpec,
+    pub(super) template: StdArc<BranchInstanceTemplate>,
+}
 
 #[derive(Debug, Clone)]
 pub(super) struct WasmAckContext {
@@ -56,169 +83,8 @@ pub(super) struct WasmAckContext {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct BranchedIngestorSpec {
-    pub(super) kind: ModelKind,
-    pub(super) identifier: ModelName,
-    pub(super) root_relay: RelayName,
-    pub(super) branch: Option<BranchName>,
-    pub(super) branch_ttl: Option<String>,
-    pub(super) branch_max_instances: Option<NonZeroU64>,
-    pub(super) output_ack_boundary: BranchInstanceAckBoundary,
-    pub(super) output_flush_policy: FlushPolicy,
-    pub(super) error_policies: ErrorPolicies,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct BranchedProcessorNodeSpec {
-    pub(super) spec: BranchedProcessorSpec,
-    pub(super) branch: Option<BranchName>,
-    pub(super) branch_ttl: Option<String>,
-    pub(super) branch_max_instances: Option<NonZeroU64>,
-    pub(super) wasm_state_reset: Option<nervix_models::WasmStateReset>,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct BranchedNodeSpecs {
-    pub(super) entrypoints: Vec<BranchedIngestorSpec>,
-    pub(super) processors: Vec<BranchedProcessorNodeSpec>,
-}
-
-impl BranchedNodeSpecs {
-    pub(super) fn processor(
-        &self,
-        kind: ModelKind,
-        identifier: &ModelName,
-    ) -> Option<&BranchedProcessorNodeSpec> {
-        self.processors
-            .iter()
-            .find(|node| node.spec.kind == kind && &node.spec.processor == identifier)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BranchInstanceAckBoundary {
-    Preserve,
-    Reingestor(AckMode),
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct BranchedProcessorSpec {
-    pub(super) kind: ModelKind,
-    pub(super) processor: ModelName,
-    pub(super) input_relays: Vec<RelayName>,
-    pub(super) input_collect_policies: HashMap<RelayName, nervix_models::InputCollectPolicy>,
-    pub(super) mode: AckMode,
-    pub(super) error_policies: ErrorPolicies,
-    pub(super) from_where: HashMap<RelayName, nervix_models::Expression>,
-    pub(super) filter_where: Option<nervix_models::Expression>,
-    pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
-    pub(super) operation: BranchedProcessorOperationSpec,
-}
-
-#[derive(Debug, Clone)]
-pub(super) enum BranchedProcessorOperationSpec {
-    Deduplicator {
-        output_routes: BranchedProcessorOutputsSpec,
-        deduplicate_on: Vec<nervix_models::Expression>,
-        max_time: String,
-    },
-    WindowProcessor {
-        output_routes: BranchedProcessorOutputsSpec,
-        width: WindowBound,
-        step: WindowBound,
-    },
-    Reorderer {
-        output_routes: BranchedProcessorOutputsSpec,
-        order_by: Vec<nervix_models::Expression>,
-        max_time: String,
-    },
-    Correlator {
-        output_routes: BranchedProcessorOutputsSpec,
-        left_relays: Vec<RelayName>,
-        right_relays: Vec<RelayName>,
-        correlate_where: nervix_models::Expression,
-        match_policy: CorrelatorMatchPolicy,
-        max_time: String,
-        timeout_policy: CorrelationTimeoutPolicy,
-    },
-    Junction {
-        output_routes: BranchedProcessorOutputsSpec,
-    },
-    Inferencer {
-        output_routes: BranchedProcessorOutputsSpec,
-        resource: ResourceName,
-        resource_version: u64,
-        file: String,
-        inputs: Vec<InferencerTensorMapping>,
-        output_schema: Vec<InferencerTensorDeclaration>,
-    },
-    WasmProcessor {
-        output_routes: BranchedProcessorOutputsSpec,
-        resource: ResourceName,
-        resource_version: u64,
-        file: String,
-        limits: nervix_models::WasmProcessorLimits,
-        rejected_state_policy: nervix_models::WasmRejectedStatePolicy,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct BranchedProcessorOutputsSpec {
-    pub(super) routes: Vec<BranchedProcessorOutputSpec>,
-}
-
-impl BranchedProcessorOutputsSpec {
-    pub(super) fn outputs(&self) -> impl Iterator<Item = &BranchedProcessorOutputSpec> {
-        self.routes.iter()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct BranchedProcessorOutputSpec {
-    pub(super) relay: RelayName,
-    pub(super) construction: nervix_models::RouteConstruction,
-    pub(super) flush_policy: Option<FlushPolicy>,
-    pub(super) message_error_policy: MessageErrorPolicy,
-}
-
-impl BranchedProcessorSpec {
-    pub(super) fn output_relays(&self) -> HashSet<RelayName> {
-        let mut relays = HashSet::default();
-        match &self.operation {
-            BranchedProcessorOperationSpec::Deduplicator { output_routes, .. }
-            | BranchedProcessorOperationSpec::Reorderer { output_routes, .. }
-            | BranchedProcessorOperationSpec::WindowProcessor { output_routes, .. }
-            | BranchedProcessorOperationSpec::Junction { output_routes, .. }
-            | BranchedProcessorOperationSpec::Inferencer { output_routes, .. }
-            | BranchedProcessorOperationSpec::WasmProcessor { output_routes, .. } => {
-                relays.extend(output_routes.outputs().map(|output| output.relay.clone()));
-            }
-            BranchedProcessorOperationSpec::Correlator {
-                output_routes,
-                timeout_policy,
-                ..
-            } => {
-                relays.extend(output_routes.outputs().map(|output| output.relay.clone()));
-                if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.left {
-                    relays.insert(relay.clone());
-                }
-                if let CorrelationTimeoutAction::SendTo { relay } = &timeout_policy.right {
-                    relays.insert(relay.clone());
-                }
-            }
-        }
-        relays
-    }
-
-    pub(super) fn relay_ids(&self) -> HashSet<RelayName> {
-        let mut relays = self.output_relays();
-        relays.extend(self.input_relays.iter().cloned());
-        relays
-    }
-}
-
-#[derive(Debug, Clone)]
 pub(super) struct BranchInstanceTemplate {
+    pub(super) revision: ProcessorPlanRevision,
     pub(super) source_kind: ModelKind,
     pub(super) source: RelayName,
     pub(super) root_relay: RelayName,
@@ -252,7 +118,9 @@ pub(super) struct RelayProcessorTemplate {
     pub(super) input_collect_policies: HashMap<RelayName, RuntimeInputCollectPolicy>,
     pub(super) error_policies: ErrorPolicies,
     pub(super) from_where: HashMap<RelayName, nervix_models::Expression>,
+    pub(super) compiled_from_where: HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     pub(super) filter_where: Option<nervix_models::Expression>,
+    pub(super) compiled_filter_where: HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     pub(super) materialized_state: Vec<nervix_models::MaterializedStateDependency>,
     pub(super) operation: RelayProcessorOperationTemplate,
 }
@@ -263,6 +131,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         output_routes: RelayProcessorOutputsTemplate,
         deduplicate_on: Vec<nervix_models::Expression>,
         max_time: Duration,
+        compiled_key_program: Option<CompiledDeduplicatorKeyProgram>,
     },
     WindowProcessor {
         output_routes: RelayProcessorOutputsTemplate,
@@ -280,6 +149,7 @@ pub(super) enum RelayProcessorOperationTemplate {
         output_routes: RelayProcessorOutputsTemplate,
         order_by: Vec<nervix_models::Expression>,
         max_time: Duration,
+        compiled_program: Option<CompiledReordererProgram>,
     },
     Correlator {
         output_routes: RelayProcessorOutputsTemplate,
@@ -289,6 +159,8 @@ pub(super) enum RelayProcessorOperationTemplate {
         match_policy: CorrelatorMatchPolicy,
         max_time: Duration,
         timeout_policy: CorrelationTimeoutPolicy,
+        compiled_where_program: Option<CompiledCorrelatorWhereProgram>,
+        compiled_output_programs: Vec<Option<CompiledCorrelatorOutputProgram>>,
     },
     Junction {
         output_routes: RelayProcessorOutputsTemplate,
@@ -324,6 +196,7 @@ pub(super) struct RelayProcessorOutputTemplate {
     pub(super) construction: nervix_models::RouteConstruction,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
     pub(super) message_error_policy: MessageErrorPolicy,
+    pub(super) compiled_program: Option<CompiledProgramWithMaterializedInterest>,
 }
 
 #[derive(Debug)]
@@ -340,8 +213,7 @@ pub(super) struct RelayProcessorNode {
     pub(super) pending_materialized: VecDeque<PendingMaterializedBatch>,
     pub(super) compiled_filter_where: HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
     pub(super) operation: RelayProcessorOperationNode,
-    pub(super) last_graph: Option<StdArc<ActiveGraph>>,
-    pub(super) applied_generation: u64,
+    pub(super) applied_revision: ProcessorPlanRevision,
 }
 
 #[derive(Debug)]
@@ -1104,7 +976,6 @@ pub(super) struct WindowBounds {
 }
 
 pub(super) struct WindowFlushContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
@@ -1115,12 +986,10 @@ pub(super) struct WindowFlushContext<'a> {
 }
 
 pub(super) struct JunctionFlushContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) input_relays: &'a [RelayName],
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
     /// Resolved when the junction admitted this batch; a junction flushes within the same
     /// execution, so its routes read that snapshot rather than resolving again.
@@ -1129,7 +998,6 @@ pub(super) struct JunctionFlushContext<'a> {
 }
 
 pub(super) struct InferencerFlushContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
@@ -1141,14 +1009,12 @@ pub(super) struct InferencerFlushContext<'a> {
     pub(super) inputs: &'a [InferencerTensorMapping],
     pub(super) output_schema: &'a [InferencerTensorDeclaration],
     pub(super) compiled_input_program: &'a CompiledInferencerInputProgram,
-    pub(super) input_relays: &'a [RelayName],
     pub(super) session: &'a mut Option<OnnxInferencerSession>,
     pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
     pub(super) execution_now: Timestamp,
 }
 
 pub(super) struct WasmFlushContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
@@ -1255,5 +1121,37 @@ mod tests {
             &negated_cast,
             &sensitivity
         ));
+    }
+
+    /// A value read from a JSON document is as sensitive as the document it reads.
+    #[test]
+    fn json_extractions_keep_the_sensitivity_of_their_document() {
+        let sensitivity = VmSchemaSensitivity::from_sensitive_fields(["secret"]);
+        let path = nervix_models::JsonPath::parse("$.a").assured("the path is valid");
+        for document in ["secret", "reading"] {
+            let extractions = [
+                Expression::JsonValue {
+                    document: Box::new(input_field(document)),
+                    path: path.clone(),
+                    target: ParseAsType::F32,
+                },
+                Expression::TryJsonValue {
+                    document: Box::new(input_field(document)),
+                    path: path.clone(),
+                    target: ParseAsType::F32,
+                },
+                Expression::JsonExists {
+                    document: Box::new(input_field(document)),
+                    path: path.clone(),
+                },
+            ];
+            for extraction in extractions {
+                assert_eq!(
+                    expression_reads_sensitive_source(&extraction, &sensitivity),
+                    document == "secret",
+                    "{extraction:?}"
+                );
+            }
+        }
     }
 }

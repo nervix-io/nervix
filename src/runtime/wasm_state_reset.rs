@@ -67,6 +67,7 @@ pub(crate) struct WasmStateResetPreparation {
     pub(super) scope: WasmStateResetScope,
     pub(super) branch_key: Option<BranchKey>,
     pub(super) published: bool,
+    pub(super) reason: nervix_models::WasmStateResetReason,
 }
 
 impl WasmStateResetPreparation {
@@ -76,18 +77,19 @@ impl WasmStateResetPreparation {
         scope: WasmStateResetScope,
         branch_key: Option<Vec<RemoteRuntimeField>>,
         published: bool,
+        reason: nervix_models::WasmStateResetReason,
     ) -> error_stack::Result<Self, WasmStateResetRuntimeError> {
-        let branch_key = BranchKey::from_remote_key(branch_key).map_err(|reason| {
-            Report::new(WasmStateResetRuntimeError::InvalidBranchKey {
+        let branch_key = BranchKey::from_remote_key(branch_key).change_context_lazy(|| {
+            WasmStateResetRuntimeError::InvalidBranchKey {
                 processor: processor.clone(),
-            })
-            .attach_printable(reason)
+            }
         })?;
         Ok(Self {
             request,
             scope,
             branch_key,
             published,
+            reason,
         })
     }
 }
@@ -131,7 +133,8 @@ impl BranchInstanceTemplate {
             processor: processor.clone(),
         };
         let mut branch = self
-            .instantiate(runtime, domain, key.clone())
+            .instantiate(runtime, domain, key.clone(), 1)
+            .await
             .change_context_lazy(fresh)?
             .into_inner();
         branch.refresh_domain_routing().change_context_lazy(fresh)?;
@@ -230,11 +233,10 @@ impl Runtime {
         processor: &ModelName,
         fields: Vec<RemoteRuntimeField>,
     ) -> error_stack::Result<WasmStateResetScope, WasmStateResetRuntimeError> {
-        let branch = BranchKey::from_remote_key(Some(fields)).map_err(|reason| {
-            Report::new(WasmStateResetRuntimeError::InvalidBranchKey {
+        let branch = BranchKey::from_remote_key(Some(fields)).change_context_lazy(|| {
+            WasmStateResetRuntimeError::InvalidBranchKey {
                 processor: processor.clone(),
-            })
-            .attach_printable(reason)
+            }
         })?;
         let branch = branch.verified("a present remote key decodes to a present branch key");
         Ok(WasmStateResetScope::Branch(branch.fingerprint()))

@@ -10,9 +10,14 @@
 //! - **Must not know.** Relays, branches, schedules or the registry. A codec converts a payload and
 //!   answers; it decides nothing about where the result goes.
 
-use std::{borrow::Cow, fmt, io::Cursor, num::NonZeroU32, sync::Arc as StdArc};
+use std::{
+    fmt,
+    io::{self, Cursor, Write as _},
+    num::{NonZeroU32, NonZeroUsize},
+    sync::Arc as StdArc,
+};
 
-use ahash::{HashMap, HashSet};
+use ahash::HashMap;
 use apache_avro::{
     Schema as AvroSchema, from_avro_datum, to_avro_datum,
     types::{Value as AvroValue, ValueKind as AvroValueKind},
@@ -40,23 +45,25 @@ use arrow_select::{
     filter::{filter as filter_arrow_array, filter_record_batch},
     take::take,
 };
+use base64_simd::AsOut as _;
 use bytes::Bytes;
 use chrono::{DateTime, FixedOffset};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::ApproxInto;
+use nervix_bounded_write::{BoundedWrite, BoundedWriter};
 use nervix_jaq::{CompiledJaqProgram, JaqNativeFormat};
 use nervix_models::{
-    AvroType, CodecJaqTransformations, CreateCodec, CreateSchema, CreateWireSchema, JsonType,
-    ModelName, ParseAsType, RemoteRuntimeElementValue, RemoteRuntimeField, RemoteRuntimeRecord,
-    RemoteRuntimeRecordMetadata, RemoteRuntimeValue, ResolvedCodecWireFormat, Timestamp,
-    WireSchemaField, WireSchemaStrictness,
+    AvroType, CodecEncodingRule, CodecJaqTransformations, CodecName, CreateCodec, CreateSchema,
+    CreateWireSchema, JsonType, ModelName, ParseAsType, PayloadSizeLimit,
+    RemoteRuntimeElementValue, RemoteRuntimeRecordMetadata, RemoteRuntimeValue,
+    ResolvedCodecWireFormat, Timestamp, WireSchemaField, WireSchemaStrictness,
 };
 use nervix_wasm::{WasmProcessorField, WasmProcessorSchema, WasmProcessorType};
 use ordered_float::OrderedFloat;
 use prost::Message as ProstMessage;
 use prost_reflect::{
-    DescriptorPool, DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage,
+    DescriptorPool, DeserializeOptions as ProtobufDeserializeOptions, DynamicMessage, Kind,
     MessageDescriptor, SerializeOptions as ProtobufSerializeOptions,
 };
 use serde::{
@@ -64,13 +71,18 @@ use serde::{
     ser::{SerializeMap, SerializeSeq},
 };
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
+use simd_json::{BorrowedValue, KnownKey, prelude::*};
 use thiserror::Error;
 use triomphe::Arc;
 
 mod arrow_body;
+mod batch_container;
 mod jaq_unfold;
 mod syslog;
 
+pub(crate) use batch_container::{
+    BatchContainerError, BatchMember, BatchMemberEncoding, BoundedBatchEncoding,
+};
 pub use jaq_unfold::UnfoldPosition;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -109,10 +121,42 @@ enum CompiledWireSchema {
     Syslog,
 }
 
+impl CompiledWireSchema {
+    /// The encoding this wire schema writes, as diagnostics name it.
+    fn encoding_name(&self) -> &'static str {
+        match self {
+            Self::Json(_) => "JSON",
+            Self::Cbor(_) => "CBOR",
+            Self::Avro(_) => "AVRO",
+            Self::JaqNative(native) => native.format.name(),
+            Self::Protobuf(_) => "PROTOBUF",
+            Self::Syslog => "SYSLOG",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CompiledJsonWireSchema {
     strictness: WireSchemaStrictness,
     fields: HashMap<String, CompiledJsonWireField>,
+    decode_fields: Vec<CompiledJsonDecodeField>,
+}
+
+#[derive(Debug, Clone)]
+struct CompiledJsonDecodeField {
+    key: KnownKey<'static>,
+    wire: Option<CompiledJsonWireField>,
+}
+
+/// Reusable storage for schemaful JSON ingestion.
+///
+/// simd-json mutates its input and keeps parser working buffers. An ingest group owns one decoder,
+/// so borrowed connector payloads are copied into the same allocation and every payload reuses the
+/// same stage-one and stage-two parser buffers.
+#[derive(Default)]
+pub(crate) struct JsonDecoder {
+    input: Vec<u8>,
+    buffers: simd_json::Buffers,
 }
 
 #[derive(Debug, Clone)]
@@ -131,11 +175,12 @@ struct CompiledJaqNativeCodec {
 struct CompiledJaqTransformations {
     on_ingestion: Option<Arc<CompiledJaqProgram>>,
     on_emitting: Option<Arc<CompiledJaqProgram>>,
+    on_emitting_batch: Option<Arc<CompiledJaqProgram>>,
 }
 
 impl CompiledJaqTransformations {
     fn compile(
-        codec: &CreateCodec,
+        codec: &CodecName,
         transformations: &CodecJaqTransformations,
     ) -> Result<Self, CodecError> {
         let compile = |program: Option<&str>| {
@@ -144,7 +189,7 @@ impl CompiledJaqTransformations {
                     CompiledJaqProgram::compile(program)
                         .map(Arc::new)
                         .map_err(|error| CodecError::InvalidJaqTransformation {
-                            codec: codec.name.as_str().to_string(),
+                            codec: codec.as_str().to_string(),
                             reason: error.to_string(),
                         })
                 })
@@ -153,6 +198,7 @@ impl CompiledJaqTransformations {
         Ok(Self {
             on_ingestion: compile(transformations.on_ingestion.as_deref())?,
             on_emitting: compile(transformations.on_emitting.as_deref())?,
+            on_emitting_batch: compile(transformations.on_emitting_batch.as_deref())?,
         })
     }
 }
@@ -160,7 +206,35 @@ impl CompiledJaqTransformations {
 #[derive(Debug, Clone)]
 struct CompiledProtobufCodec {
     message: MessageDescriptor,
+    batch_message: Option<MessageDescriptor>,
     transformations: CompiledJaqTransformations,
+}
+
+impl CompiledProtobufCodec {
+    /// True when `batch_message` declares exactly one field, `repeated <message>`, which is the
+    /// shape a batch is published in without a batch transformation.
+    fn repeats_members(&self, batch_message: &MessageDescriptor) -> bool {
+        let mut fields = batch_message.fields();
+        let Some(field) = fields.next() else {
+            return false;
+        };
+        if fields.next().is_some() || !field.is_list() {
+            return false;
+        }
+        let Kind::Message(member) = field.kind() else {
+            return false;
+        };
+        member.full_name() == self.message.full_name()
+    }
+}
+
+/// The descriptors a protobuf codec is compiled against, resolved from the resource version it
+/// pins: the message one record encodes to, and the message a batch is published as when the
+/// codec names one.
+#[derive(Debug, Clone)]
+pub struct ProtobufCodecDescriptors {
+    pub message: MessageDescriptor,
+    pub batch_message: Option<MessageDescriptor>,
 }
 
 /// A protobuf descriptor pool compiled from a resource version.
@@ -306,19 +380,13 @@ pub enum CodecError {
     JsonDecode {
         codec: String,
         #[source]
-        source: serde_json::Error,
+        source: simd_json::Error,
     },
     #[error("failed to encode json payload for codec '{codec}': {source}")]
     JsonEncode {
         codec: String,
         #[source]
         source: serde_json::Error,
-    },
-    #[error("failed to parse json payload for codec '{codec}': {source}")]
-    SimdJsonDecode {
-        codec: String,
-        #[source]
-        source: simd_json::Error,
     },
     #[error("failed to encode json payload for codec '{codec}': {source}")]
     SimdJsonEncode {
@@ -354,6 +422,12 @@ pub enum CodecError {
         format: &'static str,
         reason: String,
     },
+    #[error("failed to write the encoded payload for codec '{codec}': {source}")]
+    PayloadWrite {
+        codec: String,
+        #[source]
+        source: io::Error,
+    },
     #[error("failed to parse protobuf payload for codec '{codec}': {reason}")]
     ProtobufDecode { codec: String, reason: String },
     #[error("failed to encode protobuf payload for codec '{codec}': {reason}")]
@@ -366,6 +440,19 @@ pub enum CodecError {
     ExpectedObject { codec: String },
     #[error("codec '{codec}' has invalid jaq transformation: {reason}")]
     InvalidJaqTransformation { codec: String, reason: String },
+    #[error(
+        "protobuf codec '{codec}' declares no BATCH MESSAGE, which a batching emitter publishes in"
+    )]
+    ProtobufBatchMessageUndeclared { codec: String },
+    #[error(
+        "protobuf codec '{codec}' declares no ON EMITTING BATCH transformation, so its BATCH \
+         MESSAGE '{batch_message}' must declare exactly one field, repeated {message}"
+    )]
+    ProtobufBatchMessageShape {
+        codec: String,
+        batch_message: String,
+        message: String,
+    },
     #[error("codec '{codec}' jaq transformation failed: {reason}")]
     JaqTransform { codec: String, reason: String },
     #[error("codec '{codec}' ON INGESTION program evaluation failed")]
@@ -485,47 +572,6 @@ impl CompiledSchema {
             builder.finish_row()?;
         }
         builder.finish()
-    }
-
-    /// Rebuild one row from the scalar-field form window-processor state is still persisted in.
-    ///
-    /// Materialized relay snapshots no longer travel this way; they carry Arrow columns. Window
-    /// entries have not been converted yet, so this conversion remains for them alone.
-    pub(crate) fn runtime_row_from_remote(
-        &self,
-        record: &RemoteRuntimeRecord,
-    ) -> error_stack::Result<RuntimeRow, RuntimeSchemaError> {
-        let metadata = RuntimeRecordMetadata::from_remote(record.metadata.clone());
-        let mut seen = HashSet::default();
-        for field in &record.fields {
-            if !seen.insert(field.name.as_str()) {
-                return Err(Report::new(RuntimeSchemaError::DuplicateField {
-                    record: RuntimeRecordSource::Persisted,
-                    field: field.name.clone(),
-                }));
-            }
-            if !self
-                .fields
-                .iter()
-                .any(|expected| expected.name == field.name)
-            {
-                return Err(Report::new(RuntimeSchemaError::UnknownField {
-                    record: RuntimeRecordSource::Persisted,
-                    field: field.name.clone(),
-                }));
-            }
-        }
-        let mut builder = self.batch_builder(1);
-        for expected in &self.fields {
-            let value = record
-                .fields
-                .iter()
-                .find(|field| field.name == expected.name)
-                .map(|field| RuntimeValue::from_remote(field.value.clone()));
-            builder.append(value.as_ref())?;
-        }
-        builder.finish_row()?;
-        builder.finish()?.runtime_row(0, metadata)
     }
 
     fn validate_arrow_batch(
@@ -676,6 +722,32 @@ impl CompiledCodec {
         }
     }
 
+    /// Checks that this codec has a container a batching emitter can publish one batch in.
+    ///
+    /// Every format but protobuf derives its container, or has a batch transformation build one.
+    /// A protobuf batch is an instance of the codec's `BATCH MESSAGE`, which either a batch
+    /// transformation builds or whose single repeated field holds the members.
+    pub(crate) fn check_batch_container(&self) -> error_stack::Result<(), CodecError> {
+        let CompiledWireSchema::Protobuf(protobuf) = &self.wire_schema else {
+            return Ok(());
+        };
+        let Some(batch_message) = &protobuf.batch_message else {
+            return Err(Report::new(CodecError::ProtobufBatchMessageUndeclared {
+                codec: self.name.as_str().to_string(),
+            }));
+        };
+        if protobuf.transformations.on_emitting_batch.is_some()
+            || protobuf.repeats_members(batch_message)
+        {
+            return Ok(());
+        }
+        Err(Report::new(CodecError::ProtobufBatchMessageShape {
+            codec: self.name.as_str().to_string(),
+            batch_message: batch_message.full_name().to_string(),
+            message: protobuf.message.full_name().to_string(),
+        }))
+    }
+
     pub(crate) fn requires_blocking_encode(&self) -> bool {
         match &self.wire_schema {
             CompiledWireSchema::JaqNative(native) => native.transformations.on_emitting.is_some(),
@@ -704,86 +776,184 @@ impl CompiledCodec {
 }
 
 impl CompiledCodecBatchEncoder<'_> {
+    /// Encodes row `row_index` into `payload`, replacing what it held.
     pub(crate) fn encode_row_into(
         &self,
         row_index: usize,
         payload: &mut Vec<u8>,
-    ) -> Result<(), CodecError> {
-        if row_index >= self.batch.batch.num_rows() {
-            return Err(CodecError::InvalidCodec {
-                codec: self.codec.name.as_str().to_string(),
-                reason: format!(
-                    "columnar encode row {row_index} is outside batch with {} rows",
-                    self.batch.batch.num_rows()
-                ),
-            });
-        }
+    ) -> error_stack::Result<(), CodecError> {
         payload.clear();
+        self.write_row(row_index, payload)
+    }
+
+    /// Encodes row `row_index` under `limit`, abandoning the encoding at the first write that
+    /// would take it past the limit.
+    ///
+    /// The size a completed encoding reports is its exact length. An encoding that reached the
+    /// limit is an outcome rather than a failure: the caller decides what an oversize payload
+    /// means for the records it carries.
+    pub(crate) fn encode_row_within(
+        &self,
+        row_index: usize,
+        limit: PayloadSizeLimit,
+    ) -> error_stack::Result<BoundedRowEncoding, CodecError> {
+        let limit_bytes = NonZeroUsize::try_from(limit.bytes())
+            .assured("Nervix builds for 64-bit targets only, where usize holds every u64");
+        let written =
+            BoundedWriter::write_with(limit_bytes, |writer| self.write_row(row_index, writer))?;
+        match written {
+            BoundedWrite::Complete(payload) => Ok(BoundedRowEncoding::Encoded(payload)),
+            BoundedWrite::LimitReached => Ok(BoundedRowEncoding::Oversize(PayloadLimitExceeded {
+                codec: self.codec.name.clone(),
+                encoding: self.codec.wire_schema.encoding_name(),
+                limit,
+            })),
+        }
+    }
+
+    /// Fails when `row_index` names no row of the batch being encoded.
+    fn check_row(&self, row_index: usize) -> error_stack::Result<(), CodecError> {
+        let row_count = self.batch.batch.num_rows();
+        if row_index < row_count {
+            return Ok(());
+        }
+        Err(Report::new(CodecError::InvalidCodec {
+            codec: self.codec.name.as_str().to_string(),
+            reason: format!(
+                "columnar encode row {row_index} is outside batch with {row_count} rows"
+            ),
+        }))
+    }
+
+    /// Writes the encoding of row `row_index` into `output`, piece by piece as the format
+    /// produces it.
+    ///
+    /// Schemaful JSON, CBOR and the jaq-native formats stream straight into `output`. Avro,
+    /// protobuf and syslog first build the one record's encoding as a working value and then write
+    /// it whole, so `output` still decides whether it fits.
+    fn write_row<W: io::Write>(
+        &self,
+        row_index: usize,
+        output: &mut W,
+    ) -> error_stack::Result<(), CodecError> {
+        let codec = self.codec.name.as_str();
+        self.check_row(row_index)?;
         let row = ArrowCodecRow::new(self.codec, self.batch, row_index);
         match &self.codec.wire_schema {
             CompiledWireSchema::Json(_) => {
-                simd_json::to_writer(&mut *payload, &row).map_err(|source| {
-                    CodecError::SimdJsonEncode {
-                        codec: self.codec.name.as_str().to_string(),
+                simd_json::to_writer(&mut *output, &row).map_err(|source| {
+                    Report::new(CodecError::SimdJsonEncode {
+                        codec: codec.to_string(),
                         source,
-                    }
+                    })
                 })?;
             }
             CompiledWireSchema::Cbor(_) => {
-                ciborium::into_writer(&row, &mut *payload).map_err(|source| {
-                    CodecError::CborEncode {
-                        codec: self.codec.name.as_str().to_string(),
+                ciborium::into_writer(&row, &mut *output).map_err(|source| {
+                    Report::new(CodecError::CborEncode {
+                        codec: codec.to_string(),
                         reason: source.to_string(),
-                    }
+                    })
                 })?;
             }
             CompiledWireSchema::Avro(wire_schema) => {
                 let value = row.to_avro_record(wire_schema)?;
-                *payload = to_avro_datum(&wire_schema.schema, value).map_err(|source| {
-                    CodecError::AvroEncode {
-                        codec: self.codec.name.as_str().to_string(),
+                let datum = to_avro_datum(&wire_schema.schema, value).map_err(|source| {
+                    Report::new(CodecError::AvroEncode {
+                        codec: codec.to_string(),
                         source,
-                    }
+                    })
                 })?;
+                write_payload(codec, output, &datum)?;
             }
             CompiledWireSchema::JaqNative(native) => {
                 let Some(program) = native.transformations.on_emitting.as_deref() else {
-                    return Err(CodecError::InvalidCodec {
-                        codec: self.codec.name.as_str().to_string(),
+                    return Err(Report::new(CodecError::InvalidCodec {
+                        codec: codec.to_string(),
                         reason: "JAQ-native codec used for encoding must declare ON EMITTING \
                                  transformation"
                             .to_string(),
-                    });
+                    }));
                 };
                 let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
-                *payload = native.format.write_value(value).map_err(|error| {
-                    CodecError::JaqNativeEncode {
-                        codec: self.codec.name.as_str().to_string(),
-                        format: native.format.name(),
-                        reason: error.to_string(),
-                    }
-                })?;
+                native
+                    .format
+                    .write_value_into(&value, output)
+                    .map_err(|error| {
+                        Report::new(CodecError::JaqNativeEncode {
+                            codec: codec.to_string(),
+                            format: native.format.name(),
+                            reason: error.to_string(),
+                        })
+                    })?;
             }
             CompiledWireSchema::Protobuf(protobuf) => {
                 let Some(program) = protobuf.transformations.on_emitting.as_deref() else {
-                    return Err(CodecError::InvalidCodec {
-                        codec: self.codec.name.as_str().to_string(),
+                    return Err(Report::new(CodecError::InvalidCodec {
+                        codec: codec.to_string(),
                         reason: "protobuf codec used for encoding must declare ON EMITTING \
                                  transformation"
                             .to_string(),
-                    });
+                    }));
                 };
                 let value = run_jaq_transformation(self.codec, program, row.to_json_value()?)?;
-                *payload = encode_protobuf_payload(&protobuf.message, &value).map_err(|error| {
-                    CodecError::ProtobufEncode {
-                        codec: self.codec.name.as_str().to_string(),
-                        reason: error.to_string(),
-                    }
-                })?;
+                let encoded =
+                    encode_protobuf_payload(&protobuf.message, &value).map_err(|error| {
+                        Report::new(CodecError::ProtobufEncode {
+                            codec: codec.to_string(),
+                            reason: error.to_string(),
+                        })
+                    })?;
+                write_payload(codec, output, &encoded)?;
             }
-            CompiledWireSchema::Syslog => syslog::encode_row(&row, payload)?,
+            CompiledWireSchema::Syslog => syslog::encode_row(&row, output)?,
         }
         Ok(())
+    }
+}
+
+/// Writes an encoding that was built whole into `output`.
+fn write_payload(
+    codec: &str,
+    output: &mut impl io::Write,
+    encoded: &[u8],
+) -> error_stack::Result<(), CodecError> {
+    output.write_all(encoded).map_err(|source| {
+        Report::new(CodecError::PayloadWrite {
+            codec: codec.to_string(),
+            source,
+        })
+    })
+}
+
+/// One row encoded under a payload size limit.
+#[derive(Debug)]
+pub(crate) enum BoundedRowEncoding {
+    /// The complete encoding, whose length is its exact size.
+    Encoded(Vec<u8>),
+    /// The encoding reached the limit and was abandoned there.
+    Oversize(PayloadLimitExceeded),
+}
+
+/// An encoding abandoned because it would have exceeded the emitter's `MAX SIZE`.
+///
+/// It names the codec, the encoding and the declared limit, and never a payload value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PayloadLimitExceeded {
+    codec: ModelName,
+    encoding: &'static str,
+    limit: PayloadSizeLimit,
+}
+
+impl fmt::Display for PayloadLimitExceeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "codec '{}' {} payload exceeds MAX SIZE {}",
+            self.codec.as_str(),
+            self.encoding,
+            self.limit
+        )
     }
 }
 
@@ -1309,6 +1479,10 @@ impl RuntimeRow {
         &self.batch
     }
 
+    pub(crate) fn row_index(&self) -> usize {
+        self.row
+    }
+
     #[cfg(test)]
     pub(crate) fn arrow_schema(&self) -> StdArc<ArrowSchema> {
         self.batch.schema()
@@ -1361,24 +1535,6 @@ impl RuntimeRow {
     ) -> error_stack::Result<String, RuntimeSchemaError> {
         self.batch.row_to_json_string_masking(self.row, sensitivity)
     }
-
-    /// Render this row in the scalar-field form window-processor state is still persisted in.
-    /// See [`CompiledSchema::runtime_row_from_remote`] for why it remains.
-    pub(crate) fn to_remote(&self) -> error_stack::Result<RemoteRuntimeRecord, RuntimeSchemaError> {
-        let mut fields = Vec::with_capacity(self.batch.schema_ref().fields().len());
-        for (column_index, field) in self.batch.schema_ref().fields().iter().enumerate() {
-            if let Some(value) = self.value_at(column_index)? {
-                fields.push(RemoteRuntimeField {
-                    name: field.name().clone(),
-                    value: value.to_remote(),
-                });
-            }
-        }
-        Ok(RemoteRuntimeRecord {
-            fields,
-            metadata: self.metadata.to_remote(),
-        })
-    }
 }
 
 impl RuntimeRecordBatchBuilder {
@@ -1393,6 +1549,7 @@ impl RuntimeRecordBatchBuilder {
         Ok(index)
     }
 
+    #[cfg(any(test, feature = "benchmarks"))]
     pub(crate) fn append(
         &mut self,
         value: Option<&RuntimeValue>,
@@ -1438,8 +1595,34 @@ impl RuntimeRecordBatchBuilder {
     ) -> error_stack::Result<(), RuntimeSchemaError> {
         let index = self.next_field_index()?;
         let field = &self.fields[index];
+        let expected = self.schema.field(index).data_type();
         let location = RuntimeValueLocationRef::CodecField { field: &field.name };
-        append_json_value_to_arrow(self.builders[index].as_mut(), &field.ty, value, &location)?;
+        append_json_value_to_arrow(
+            self.builders[index].as_mut(),
+            &field.ty,
+            expected,
+            value,
+            &location,
+        )?;
+        self.next_column += 1;
+        Ok(())
+    }
+
+    fn append_borrowed_json_value(
+        &mut self,
+        value: &BorrowedValue<'_>,
+    ) -> error_stack::Result<(), RuntimeSchemaError> {
+        let index = self.next_field_index()?;
+        let field = &self.fields[index];
+        let expected = self.schema.field(index).data_type();
+        let location = RuntimeValueLocationRef::CodecField { field: &field.name };
+        append_borrowed_json_value_to_arrow(
+            self.builders[index].as_mut(),
+            &field.ty,
+            expected,
+            value,
+            &location,
+        )?;
         self.next_column += 1;
         Ok(())
     }
@@ -1776,14 +1959,12 @@ pub enum JsonValueKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeRecordSource {
     TestRow(usize),
-    Persisted,
 }
 
 impl fmt::Display for RuntimeRecordSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::TestRow(row) => write!(formatter, "test Arrow row {row}"),
-            Self::Persisted => formatter.write_str("persisted runtime record"),
         }
     }
 }
@@ -2447,27 +2628,35 @@ pub fn compile_codec(
     schema: Arc<CompiledSchema>,
     wire_format: ResolvedCodecWireFormat<'_>,
 ) -> Result<Arc<CompiledCodec>, CodecError> {
-    compile_codec_with_protobuf(codec, schema, wire_format, None)
+    compile_codec_spec_with_protobuf(
+        &codec.name,
+        &codec.encoding_rules,
+        schema,
+        wire_format,
+        None,
+    )
 }
 
-pub fn compile_codec_with_protobuf(
-    codec: &CreateCodec,
+/// Compile a codec whose schema and wire reference were resolved by the decision layer.
+pub(crate) fn compile_codec_spec_with_protobuf(
+    name: &CodecName,
+    encoding_rules: &[CodecEncodingRule],
     schema: Arc<CompiledSchema>,
     wire_format: ResolvedCodecWireFormat<'_>,
-    protobuf_descriptor: Option<MessageDescriptor>,
+    protobuf_descriptors: Option<ProtobufCodecDescriptors>,
 ) -> Result<Arc<CompiledCodec>, CodecError> {
     let wire_schema = match wire_format {
         ResolvedCodecWireFormat::Json(schema_def) => {
-            CompiledWireSchema::Json(compile_json_wire_schema(schema_def))
+            CompiledWireSchema::Json(compile_json_wire_schema(schema_def, &schema))
         }
         ResolvedCodecWireFormat::Cbor(schema_def) => {
-            CompiledWireSchema::Cbor(compile_json_wire_schema(schema_def))
+            CompiledWireSchema::Cbor(compile_json_wire_schema(schema_def, &schema))
         }
         ResolvedCodecWireFormat::Avro(schema_def) => {
             let schema_json = avro_schema_json(schema_def, schema.fields());
             let parsed =
                 AvroSchema::parse_str(&schema_json).map_err(|source| CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
+                    codec: name.as_str().to_string(),
                     reason: source.to_string(),
                 })?;
             let fields = schema_def
@@ -2496,48 +2685,52 @@ pub fn compile_codec_with_protobuf(
         } => {
             if !transformations.has_any() {
                 return Err(CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
+                    codec: name.as_str().to_string(),
                     reason: "JAQ-native codec must declare a JAQ transformation".to_string(),
                 });
             }
             CompiledWireSchema::JaqNative(CompiledJaqNativeCodec {
                 format: JaqNativeFormat::from(format),
-                transformations: CompiledJaqTransformations::compile(codec, transformations)?,
+                transformations: CompiledJaqTransformations::compile(name, transformations)?,
             })
         }
         ResolvedCodecWireFormat::Protobuf(config) => {
             if !config.transformations.has_any() {
                 return Err(CodecError::InvalidCodec {
-                    codec: codec.name.as_str().to_string(),
+                    codec: name.as_str().to_string(),
                     reason: "protobuf codec must declare a JAQ transformation".to_string(),
                 });
             }
-            let message = protobuf_descriptor.ok_or_else(|| CodecError::InvalidCodec {
-                codec: codec.name.as_str().to_string(),
+            let descriptors = protobuf_descriptors.ok_or_else(|| CodecError::InvalidCodec {
+                codec: name.as_str().to_string(),
                 reason: "protobuf codec is missing compiled descriptor".to_string(),
             })?;
             CompiledWireSchema::Protobuf(CompiledProtobufCodec {
-                message,
+                message: descriptors.message,
+                batch_message: descriptors.batch_message,
                 transformations: CompiledJaqTransformations::compile(
-                    codec,
+                    name,
                     &config.transformations,
                 )?,
             })
         }
         ResolvedCodecWireFormat::Syslog => {
-            syslog::validate_compiled_schema(codec, &schema)?;
+            syslog::validate_compiled_schema(name, encoding_rules, &schema)?;
             CompiledWireSchema::Syslog
         }
     };
 
     Ok(Arc::new(CompiledCodec {
-        name: ModelName::from(&codec.name),
+        name: ModelName::from(name),
         schema,
         wire_schema,
     }))
 }
 
-fn compile_json_wire_schema(schema_def: &CreateWireSchema<JsonType>) -> CompiledJsonWireSchema {
+fn compile_json_wire_schema(
+    schema_def: &CreateWireSchema<JsonType>,
+    schema: &CompiledSchema,
+) -> CompiledJsonWireSchema {
     let fields = schema_def
         .fields
         .iter()
@@ -2550,10 +2743,19 @@ fn compile_json_wire_schema(schema_def: &CreateWireSchema<JsonType>) -> Compiled
                 },
             )
         })
+        .collect::<HashMap<_, _>>();
+    let decode_fields = schema
+        .fields()
+        .iter()
+        .map(|field| CompiledJsonDecodeField {
+            key: KnownKey::from(field.name.clone()),
+            wire: fields.get(&field.name).copied(),
+        })
         .collect();
     CompiledJsonWireSchema {
         strictness: schema_def.strictness,
         fields,
+        decode_fields,
     }
 }
 
@@ -2565,21 +2767,23 @@ fn compile_json_wire_schema(schema_def: &CreateWireSchema<JsonType>) -> Compiled
 /// exactly as it was: every row it had started is closed and dropped, and the error names the
 /// payload that produced it.
 ///
-/// A caller that already owns its payload hands it over, which is what lets JSON parse in place.
+/// `decoder` belongs to the ingest group and reuses both the mutable input copy and simd-json's
+/// parser buffers across every schemaful JSON payload in that group.
 pub(crate) fn decode_with_codec(
     codec: &CompiledCodec,
-    mut payload: Cow<'_, [u8]>,
+    payload: &[u8],
+    decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
 ) -> Result<usize, CodecError> {
     let appended = match &codec.wire_schema {
         CompiledWireSchema::Json(wire_schema) => {
-            decode_json(codec, wire_schema, &mut payload, builder)
+            decode_json(codec, wire_schema, payload, decoder, builder)
         }
-        CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, &payload, builder),
-        CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, &payload, builder),
-        CompiledWireSchema::Syslog => syslog::decode(codec, &payload, builder),
+        CompiledWireSchema::Cbor(wire_schema) => decode_cbor(codec, wire_schema, payload, builder),
+        CompiledWireSchema::Avro(wire_schema) => decode_avro(codec, wire_schema, payload, builder),
+        CompiledWireSchema::Syslog => syslog::decode(codec, payload, builder),
         CompiledWireSchema::JaqNative(_) | CompiledWireSchema::Protobuf(_) => {
-            let unfolded = codec.unfold_on_ingestion(Bytes::from(payload.into_owned()))?;
+            let unfolded = codec.unfold_on_ingestion(Bytes::copy_from_slice(payload))?;
             return unfolded.append_to(codec, builder);
         }
     };
@@ -3101,27 +3305,95 @@ impl Serialize for ArrowCodecSequence<'_> {
 fn decode_json(
     codec: &CompiledCodec,
     wire_schema: &CompiledJsonWireSchema,
-    payload: &mut Cow<'_, [u8]>,
+    payload: &[u8],
+    decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
 ) -> Result<(), CodecError> {
-    // An owned payload is scratch space the parser may overwrite, which is what simd-json needs.
-    let value = match payload {
-        Cow::Owned(payload) => simd_json::from_slice::<JsonValue>(payload).map_err(|source| {
-            CodecError::SimdJsonDecode {
-                codec: codec.name.as_str().to_string(),
-                source,
-            }
-        })?,
-        Cow::Borrowed(payload) => {
-            serde_json::from_slice::<JsonValue>(payload).map_err(|source| {
-                CodecError::JsonDecode {
-                    codec: codec.name.as_str().to_string(),
-                    source,
-                }
-            })?
-        }
+    decoder.input.clear();
+    decoder.input.extend_from_slice(payload);
+    let value = simd_json::to_borrowed_value_with_buffers(
+        decoder.input.as_mut_slice(),
+        &mut decoder.buffers,
+    )
+    .map_err(|source| CodecError::JsonDecode {
+        codec: codec.name.as_str().to_string(),
+        source,
+    })?;
+    let Some(object) = value.as_object() else {
+        return Err(CodecError::ExpectedObject {
+            codec: codec.name.as_str().to_string(),
+        });
     };
-    decode_json_value(codec, &value, Some(wire_schema), builder)
+
+    if !wire_schema.strictness.allows_unknown_fields() {
+        for field in object.keys() {
+            if !wire_schema.fields.contains_key(field.as_ref()) {
+                return Err(CodecError::UnexpectedField {
+                    codec: codec.name.as_str().to_string(),
+                    field: field.to_string(),
+                });
+            }
+        }
+    }
+
+    for (field, decode_field) in codec.schema.fields().iter().zip(&wire_schema.decode_fields) {
+        let Some(wire_field) = decode_field.wire else {
+            return Err(CodecError::InvalidCodec {
+                codec: codec.name.as_str().to_string(),
+                reason: format!("missing wire field '{}'", field.name),
+            });
+        };
+        let Some(value) = decode_field.key.map_lookup(object) else {
+            if field.optional && wire_field.optional {
+                builder
+                    .append_null()
+                    .map_err(|reason| CodecError::InvalidCodec {
+                        codec: codec.name.as_str().to_string(),
+                        reason: reason.to_string(),
+                    })?;
+                continue;
+            }
+            return Err(CodecError::MissingField {
+                codec: codec.name.as_str().to_string(),
+                field: field.name.clone(),
+            });
+        };
+        if value.is_null() {
+            if field.optional && wire_field.optional {
+                builder
+                    .append_null()
+                    .map_err(|reason| CodecError::InvalidCodec {
+                        codec: codec.name.as_str().to_string(),
+                        reason: reason.to_string(),
+                    })?;
+                continue;
+            }
+            return Err(CodecError::ParseField {
+                codec: codec.name.as_str().to_string(),
+                field: field.name.clone(),
+                reason: "null is incompatible with required field".to_string(),
+            });
+        }
+        if !borrowed_json_value_matches_wire_type(value, wire_field.ty) {
+            return Err(CodecError::ParseField {
+                codec: codec.name.as_str().to_string(),
+                field: field.name.clone(),
+                reason: format!(
+                    "expected {:?}, found a JSON {}",
+                    wire_field.ty,
+                    borrowed_json_value_kind(value)
+                ),
+            });
+        }
+        builder
+            .append_borrowed_json_value(value)
+            .map_err(|reason| CodecError::ParseField {
+                codec: codec.name.as_str().to_string(),
+                field: field.name.clone(),
+                reason: reason.to_string(),
+            })?;
+    }
+    Ok(())
 }
 
 fn decode_cbor(
@@ -3406,6 +3678,7 @@ fn decode_avro(
 fn append_json_value_to_arrow(
     builder: &mut dyn ArrayBuilder,
     ty: &ParseAsType,
+    expected: &ArrowDataType,
     value: &JsonValue,
     location: &RuntimeValueLocationRef<'_>,
 ) -> error_stack::Result<(), RuntimeSchemaError> {
@@ -3420,8 +3693,7 @@ fn append_json_value_to_arrow(
     macro_rules! append_primitive {
         ($builder:ty, $parsed:expr) => {{
             let parsed = ($parsed).ok_or_else(&incompatible)?;
-            typed_arrow_builder::<$builder>(builder, &arrow_data_type(ty), location)?
-                .append_value(parsed);
+            typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
             Ok(())
         }};
     }
@@ -3464,7 +3736,7 @@ fn append_json_value_to_arrow(
                         location: location.to_runtime_location(),
                     })
                 })?;
-            typed_arrow_builder::<BinaryBuilder>(builder, &arrow_data_type(ty), location)?
+            typed_arrow_builder::<BinaryBuilder>(builder, expected, location)?
                 .append_value(decoded);
             Ok(())
         }
@@ -3493,10 +3765,9 @@ fn append_json_value_to_arrow(
                     },
                 ));
             }
+            let element_expected = sequence_element_data_type(expected, ty, location)?;
             let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
-                builder,
-                &arrow_data_type(ty),
-                location,
+                builder, expected, location,
             )?;
             for (index, value) in values.iter().enumerate() {
                 let element_location = RuntimeValueLocationRef::Element {
@@ -3506,6 +3777,7 @@ fn append_json_value_to_arrow(
                 if let Err(error) = append_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
+                    element_expected,
                     value,
                     &element_location,
                 ) {
@@ -3518,10 +3790,9 @@ fn append_json_value_to_arrow(
         }
         ParseAsType::Vec { element } => {
             let values = value.as_array().ok_or_else(&incompatible)?;
+            let element_expected = sequence_element_data_type(expected, ty, location)?;
             let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
-                builder,
-                &arrow_data_type(ty),
-                location,
+                builder, expected, location,
             )?;
             for (index, value) in values.iter().enumerate() {
                 let element_location = RuntimeValueLocationRef::Element {
@@ -3531,6 +3802,7 @@ fn append_json_value_to_arrow(
                 append_json_value_to_arrow(
                     builder.values().as_mut(),
                     element,
+                    element_expected,
                     value,
                     &element_location,
                 )?;
@@ -3538,6 +3810,178 @@ fn append_json_value_to_arrow(
             builder.append(true);
             Ok(())
         }
+    }
+}
+
+fn append_borrowed_json_value_to_arrow(
+    builder: &mut dyn ArrayBuilder,
+    ty: &ParseAsType,
+    expected: &ArrowDataType,
+    value: &BorrowedValue<'_>,
+    location: &RuntimeValueLocationRef<'_>,
+) -> error_stack::Result<(), RuntimeSchemaError> {
+    let incompatible = || {
+        Report::new(RuntimeSchemaError::JsonValueTypeMismatch {
+            location: location.to_runtime_location(),
+            expected: ty.clone(),
+            found: borrowed_json_value_kind(value),
+        })
+    };
+
+    macro_rules! append_primitive {
+        ($builder:ty, $parsed:expr) => {{
+            let parsed = ($parsed).ok_or_else(&incompatible)?;
+            typed_arrow_builder::<$builder>(builder, expected, location)?.append_value(parsed);
+            Ok(())
+        }};
+    }
+
+    match ty {
+        ParseAsType::U8 => append_primitive!(
+            UInt8Builder,
+            value.as_u64().and_then(|value| u8::try_from(value).ok())
+        ),
+        ParseAsType::I8 => append_primitive!(
+            Int8Builder,
+            value.as_i64().and_then(|value| i8::try_from(value).ok())
+        ),
+        ParseAsType::U16 => append_primitive!(
+            UInt16Builder,
+            value.as_u64().and_then(|value| u16::try_from(value).ok())
+        ),
+        ParseAsType::I16 => append_primitive!(
+            Int16Builder,
+            value.as_i64().and_then(|value| i16::try_from(value).ok())
+        ),
+        ParseAsType::U32 => append_primitive!(
+            UInt32Builder,
+            value.as_u64().and_then(|value| u32::try_from(value).ok())
+        ),
+        ParseAsType::I32 => append_primitive!(
+            Int32Builder,
+            value.as_i64().and_then(|value| i32::try_from(value).ok())
+        ),
+        ParseAsType::U64 => append_primitive!(UInt64Builder, value.as_u64()),
+        ParseAsType::I64 => append_primitive!(Int64Builder, value.as_i64()),
+        ParseAsType::Bool => append_primitive!(BooleanBuilder, value.as_bool()),
+        ParseAsType::String => append_primitive!(StringBuilder, value.as_str()),
+        ParseAsType::Bytes => {
+            let encoded = value.as_str().ok_or_else(&incompatible)?;
+            let builder = typed_arrow_builder::<BinaryBuilder>(builder, expected, location)?;
+            append_base64_to_binary_builder(builder, encoded.as_bytes(), location)?;
+            Ok(())
+        }
+        ParseAsType::Datetime => {
+            let value = value.as_str().ok_or_else(&incompatible)?;
+            let value = DateTime::parse_from_rfc3339(value).map_err(|_| incompatible())?;
+            let value = value.timestamp_nanos_opt().ok_or_else(&incompatible)?;
+            typed_arrow_builder::<TimestampNanosecondBuilder>(builder, expected, location)?
+                .append_value(value);
+            Ok(())
+        }
+        ParseAsType::F32 => append_primitive!(
+            Float32Builder,
+            value.cast_f64().map(ApproxInto::approx_into)
+        ),
+        ParseAsType::F64 => append_primitive!(Float64Builder, value.cast_f64()),
+        ParseAsType::Array { element, len } => {
+            let values = value.as_array().ok_or_else(&incompatible)?;
+            if values.len() != len.get().arch_into() {
+                return Err(Report::new(
+                    RuntimeSchemaError::RuntimeArrayLengthMismatch {
+                        location: location.to_runtime_location(),
+                        expected: *len,
+                        found: values.len(),
+                    },
+                ));
+            }
+            let element_expected = sequence_element_data_type(expected, ty, location)?;
+            let builder = typed_arrow_builder::<FixedSizeListBuilder<Box<dyn ArrayBuilder>>>(
+                builder, expected, location,
+            )?;
+            for (index, value) in values.iter().enumerate() {
+                let element_location = RuntimeValueLocationRef::Element {
+                    parent: location,
+                    index,
+                };
+                if let Err(error) = append_borrowed_json_value_to_arrow(
+                    builder.values().as_mut(),
+                    element,
+                    element_expected,
+                    value,
+                    &element_location,
+                ) {
+                    close_partial_fixed_size_list(builder, element, len.get().arch_into());
+                    return Err(error);
+                }
+            }
+            builder.append(true);
+            Ok(())
+        }
+        ParseAsType::Vec { element } => {
+            let values = value.as_array().ok_or_else(&incompatible)?;
+            let element_expected = sequence_element_data_type(expected, ty, location)?;
+            let builder = typed_arrow_builder::<ListBuilder<Box<dyn ArrayBuilder>>>(
+                builder, expected, location,
+            )?;
+            for (index, value) in values.iter().enumerate() {
+                let element_location = RuntimeValueLocationRef::Element {
+                    parent: location,
+                    index,
+                };
+                append_borrowed_json_value_to_arrow(
+                    builder.values().as_mut(),
+                    element,
+                    element_expected,
+                    value,
+                    &element_location,
+                )?;
+            }
+            builder.append(true);
+            Ok(())
+        }
+    }
+}
+
+fn append_base64_to_binary_builder(
+    builder: &mut BinaryBuilder,
+    encoded: &[u8],
+    location: &RuntimeValueLocationRef<'_>,
+) -> error_stack::Result<(), RuntimeSchemaError> {
+    base64_simd::STANDARD.check(encoded).map_err(|_| {
+        Report::new(RuntimeSchemaError::InvalidBytesEncoding {
+            location: location.to_runtime_location(),
+        })
+    })?;
+
+    const ENCODED_CHUNK: usize = 4_096;
+    const DECODED_CHUNK: usize = ENCODED_CHUNK / 4 * 3;
+    let mut decoded = [0_u8; DECODED_CHUNK];
+    for chunk in encoded.chunks(ENCODED_CHUNK) {
+        let decoded = base64_simd::STANDARD
+            .decode(chunk, decoded.as_mut_slice().as_out())
+            .assured("the complete base64 value was validated before its aligned chunks decode");
+        builder
+            .write_all(decoded)
+            .assured("Arrow's in-memory binary builder accepts every decoded byte");
+    }
+    builder.append_value(b"");
+    Ok(())
+}
+
+fn sequence_element_data_type<'a>(
+    expected: &'a ArrowDataType,
+    ty: &ParseAsType,
+    location: &RuntimeValueLocationRef<'_>,
+) -> error_stack::Result<&'a ArrowDataType, RuntimeSchemaError> {
+    match (ty, expected) {
+        (ParseAsType::Array { .. }, ArrowDataType::FixedSizeList(field, _))
+        | (ParseAsType::Vec { .. }, ArrowDataType::List(field)) => Ok(field.data_type()),
+        _ => Err(Report::new(RuntimeSchemaError::ExactTypeMismatch {
+            location: location.to_runtime_location(),
+            expected: arrow_data_type(ty),
+            found: expected.clone(),
+        })),
     }
 }
 
@@ -4202,6 +4646,60 @@ fn json_value_kind(value: &JsonValue) -> JsonValueKind {
     }
 }
 
+fn borrowed_json_value_kind(value: &BorrowedValue<'_>) -> JsonValueKind {
+    if value.is_null() {
+        JsonValueKind::Null
+    } else if value.as_bool().is_some() {
+        JsonValueKind::Boolean
+    } else if value.cast_f64().is_some() {
+        JsonValueKind::Number
+    } else if value.as_str().is_some() {
+        JsonValueKind::String
+    } else if value.as_array().is_some() {
+        JsonValueKind::Array
+    } else {
+        JsonValueKind::Object
+    }
+}
+
+fn borrowed_json_value_matches_wire_type(value: &BorrowedValue<'_>, ty: JsonType) -> bool {
+    match ty {
+        JsonType::String | JsonType::Bytes | JsonType::Datetime => value.as_str().is_some(),
+        JsonType::Number | JsonType::F32 | JsonType::F64 => value.cast_f64().is_some(),
+        JsonType::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
+        JsonType::Object => value.as_object().is_some(),
+        JsonType::Array => value.as_array().is_some(),
+        JsonType::Boolean => value.as_bool().is_some(),
+        JsonType::Null => value.is_null(),
+        JsonType::U8 => value
+            .as_u64()
+            .and_then(|value| u8::try_from(value).ok())
+            .is_some(),
+        JsonType::I8 => value
+            .as_i64()
+            .and_then(|value| i8::try_from(value).ok())
+            .is_some(),
+        JsonType::U16 => value
+            .as_u64()
+            .and_then(|value| u16::try_from(value).ok())
+            .is_some(),
+        JsonType::I16 => value
+            .as_i64()
+            .and_then(|value| i16::try_from(value).ok())
+            .is_some(),
+        JsonType::U32 => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .is_some(),
+        JsonType::I32 => value
+            .as_i64()
+            .and_then(|value| i32::try_from(value).ok())
+            .is_some(),
+        JsonType::U64 => value.as_u64().is_some(),
+        JsonType::I64 => value.as_i64().is_some(),
+    }
+}
+
 fn json_value_matches_wire_type(value: &JsonValue, ty: JsonType) -> bool {
     match ty {
         JsonType::String | JsonType::Bytes => value.is_string(),
@@ -4330,11 +4828,14 @@ fn avro_type_name(ty: AvroType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use chrono::{DateTime, Datelike, Utc};
     use nervix_models::{
-        CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig, CodecWireFormat,
-        CreateAvroWireSchema, CreateCborWireSchema, CreateCodec, CreateJsonWireSchema,
-        CreateSchema, CreateWireSchema, SchemaField, WireSchemaLookup, WireSchemaName,
+        ByteSizeUnit, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
+        CodecWireFormat, CreateAvroWireSchema, CreateCborWireSchema, CreateCodec,
+        CreateJsonWireSchema, CreateSchema, CreateWireSchema, SchemaField, WireSchemaLookup,
+        WireSchemaName,
     };
     use nonzero_ext::nonzero;
     use rstest::{fixture, rstest};
@@ -4925,6 +5426,7 @@ mod tests {
                 transformations: CodecJaqTransformations {
                     on_ingestion: on_ingestion.map(str::to_string),
                     on_emitting: on_emitting.map(str::to_string),
+                    on_emitting_batch: None,
                 },
             },
             schema: named(schema),
@@ -5015,9 +5517,11 @@ mod tests {
                     value: "notification.proto".to_string(),
                 }],
                 message: "nervix.test.Notification".to_string(),
+                batch_message: None,
                 transformations: CodecJaqTransformations {
                     on_ingestion: on_ingestion.map(str::to_string),
                     on_emitting: on_emitting.map(str::to_string),
+                    on_emitting_batch: None,
                 },
             }),
             schema: named("protobuf_notification"),
@@ -5247,7 +5751,8 @@ mod tests {
     /// Decodes one payload into a batch of its own, for a test that asserts on one message.
     fn decode_one(codec: &CompiledCodec, payload: &[u8]) -> Result<RuntimeRecordBatch, CodecError> {
         let mut builder = codec.schema.batch_builder(1);
-        decode_with_codec(codec, Cow::Borrowed(payload), &mut builder)?;
+        let mut decoder = JsonDecoder::default();
+        decode_with_codec(codec, payload, &mut decoder, &mut builder)?;
         builder.finish().map_err(|reason| CodecError::InvalidCodec {
             codec: codec.name.as_str().to_string(),
             reason: reason.to_string(),
@@ -5266,7 +5771,7 @@ mod tests {
     fn encode_arrow_record(
         codec: &CompiledCodec,
         record: &RuntimeRow,
-    ) -> Result<Vec<u8>, CodecError> {
+    ) -> error_stack::Result<Vec<u8>, CodecError> {
         let batch = record
             .one_row_batch()
             .project(codec.schema.arrow_schema())
@@ -5283,7 +5788,7 @@ mod tests {
     fn encode_test_fields(
         codec: &CompiledCodec,
         fields: impl IntoIterator<Item = (String, RuntimeValue)>,
-    ) -> Result<Vec<u8>, CodecError> {
+    ) -> error_stack::Result<Vec<u8>, CodecError> {
         let batch = codec
             .schema
             .batch_from_test_rows([fields])
@@ -5818,7 +6323,9 @@ mod tests {
         ));
         let error =
             encode_test_fields(&codec, invalid_header).expect_err("header spaces must be rejected");
-        assert!(matches!(error, CodecError::EncodeField { ref field, .. } if field == "hostname"));
+        assert!(
+            matches!(error.current_context(), CodecError::EncodeField { field, .. } if field == "hostname")
+        );
 
         let mut invalid_sd = common();
         invalid_sd.push((
@@ -5828,7 +6335,7 @@ mod tests {
         let error = encode_test_fields(&codec, invalid_sd)
             .expect_err("malformed structured data must be rejected");
         assert!(
-            matches!(error, CodecError::EncodeField { ref field, .. } if field == "structured_data")
+            matches!(error.current_context(), CodecError::EncodeField { field, .. } if field == "structured_data")
         );
 
         let mut duplicate_sd = common();
@@ -5839,7 +6346,7 @@ mod tests {
         let error = encode_test_fields(&codec, duplicate_sd)
             .expect_err("duplicate structured-data IDs must be rejected");
         assert!(
-            matches!(error, CodecError::EncodeField { ref field, .. } if field == "structured_data")
+            matches!(error.current_context(), CodecError::EncodeField { field, .. } if field == "structured_data")
         );
 
         let mut duplicate_parameter = common();
@@ -5850,14 +6357,16 @@ mod tests {
         let error = encode_test_fields(&codec, duplicate_parameter)
             .expect_err("duplicate structured-data parameter names must be rejected");
         assert!(
-            matches!(error, CodecError::EncodeField { ref field, .. } if field == "structured_data")
+            matches!(error.current_context(), CodecError::EncodeField { field, .. } if field == "structured_data")
         );
 
         let mut invalid_priority = common();
         invalid_priority[0] = ("facility".to_string(), RuntimeValue::U8(24));
         let error = encode_test_fields(&codec, invalid_priority)
             .expect_err("facility above 23 must be rejected");
-        assert!(matches!(error, CodecError::EncodeField { ref field, .. } if field == "facility"));
+        assert!(
+            matches!(error.current_context(), CodecError::EncodeField { field, .. } if field == "facility")
+        );
     }
 
     #[test]
@@ -5902,7 +6411,10 @@ mod tests {
         let error = encoder
             .encode_row_into(2, &mut second_payload)
             .expect_err("an out-of-bounds row must fail");
-        assert!(matches!(error, CodecError::InvalidCodec { .. }));
+        assert!(matches!(
+            error.current_context(),
+            CodecError::InvalidCodec { .. }
+        ));
     }
 
     #[test]
@@ -5993,7 +6505,10 @@ mod tests {
             .encode_row_into(1, &mut payload)
             .expect_err("the overflowing second row should fail only when requested");
 
-        assert!(matches!(error, CodecError::EncodeField { .. }));
+        assert!(matches!(
+            error.current_context(),
+            CodecError::EncodeField { .. }
+        ));
     }
 
     #[test]
@@ -6166,6 +6681,57 @@ mod tests {
     }
 
     #[test]
+    fn json_bytes_stream_multiple_decode_chunks_into_arrow() {
+        let schema = CreateSchema {
+            name: named("binary_payload"),
+            fields: vec![SchemaField {
+                name: named("payload"),
+                ty: ParseAsType::Bytes,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let wire = CreateWireSchema {
+            name: named("binary_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("payload"),
+                ty: JsonType::Bytes,
+                optional: false,
+            }],
+        };
+        let model = CreateCodec {
+            name: named("binary_json"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: wire.name.clone(),
+            },
+            schema: schema.name.clone(),
+            encoding_rules: Vec::new(),
+        };
+        let codec = compile_codec(
+            &model,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Json(&wire),
+        )
+        .assured("the BYTES schemas are compatible");
+        let expected = (0_u16..5_000)
+            .map(|value| value.to_le_bytes()[0])
+            .collect::<Vec<_>>();
+        let encoded = base64_simd::STANDARD.encode_to_string(&expected);
+        let payload = format!(r#"{{"payload":"{encoded}"}}"#);
+
+        let decoded = decode_one(&codec, payload.as_bytes())
+            .assured("the multi-chunk base64 payload is valid");
+        let bytes = decoded
+            .batch()
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .verified("the compiled BYTES schema owns a Binary Arrow column");
+        assert_eq!(bytes.value(0), expected);
+    }
+
+    #[test]
     fn bytes_list_elements_round_trip_through_cbor_codec() {
         let schema = CreateSchema {
             name: named("binary_list"),
@@ -6320,15 +6886,18 @@ mod tests {
         .expect("array codec fixture should compile");
 
         let mut builder = schema.batch_builder(3);
+        let mut decoder = JsonDecoder::default();
         decode_with_codec(
             &codec,
-            Cow::Borrowed(br#"{"cpu_last_64":[1.0,2.5,3.25],"labels":["prod"]}"#),
+            br#"{"cpu_last_64":[1.0,2.5,3.25],"labels":["prod"]}"#,
+            &mut decoder,
             &mut builder,
         )
         .expect("the first payload should decode");
         let rejected = decode_with_codec(
             &codec,
-            Cow::Borrowed(br#"{"cpu_last_64":[1.0,"two",3.25],"labels":["api"]}"#),
+            br#"{"cpu_last_64":[1.0,"two",3.25],"labels":["api"]}"#,
+            &mut decoder,
             &mut builder,
         )
         .expect_err("an array element of the wrong type should be rejected");
@@ -6338,7 +6907,8 @@ mod tests {
         );
         decode_with_codec(
             &codec,
-            Cow::Borrowed(br#"{"cpu_last_64":[4.0,5.0,6.0],"labels":["batch"]}"#),
+            br#"{"cpu_last_64":[4.0,5.0,6.0],"labels":["batch"]}"#,
+            &mut decoder,
             &mut builder,
         )
         .expect("the payload after the rejected one should decode");
@@ -6407,16 +6977,17 @@ mod tests {
         .expect("multidimensional JSON codec should compile");
 
         let mut builder = schema.batch_builder(2);
+        let mut decoder = JsonDecoder::default();
         for payload in [
             br#"{"matrix":[[1.0,2.0,3.0],[4.0,"five",6.0]],"samples":[[1.0,2.0]]}"#.as_slice(),
             br#"{"matrix":[[1.0,2.0,3.0],[4.0,5.0,6.0]],"samples":[[7.0,"eight"]]}"#.as_slice(),
         ] {
-            decode_with_codec(&codec, Cow::Borrowed(payload), &mut builder)
+            decode_with_codec(&codec, payload, &mut decoder, &mut builder)
                 .expect_err("an element of the wrong type should be rejected");
         }
         let expected = multidimensional_array_record();
         let payload = encode_arrow_record(&codec, &expected).expect("must encode nested arrays");
-        decode_with_codec(&codec, Cow::Borrowed(&payload), &mut builder)
+        decode_with_codec(&codec, &payload, &mut decoder, &mut builder)
             .expect("the payload after the rejected ones should decode");
 
         assert_eq!(builder.rows(), 1);
@@ -6442,16 +7013,11 @@ mod tests {
         .expect("array codec fixture should compile");
 
         let mut builder = schema.batch_builder(3);
+        let mut decoder = JsonDecoder::default();
         for label in ["prod", "api", "batch"] {
-            decode_with_codec(
-                &codec,
-                Cow::Owned(
-                    format!(r#"{{"cpu_last_64":[1.0,2.5,3.25],"labels":["{label}"]}}"#)
-                        .into_bytes(),
-                ),
-                &mut builder,
-            )
-            .expect("every payload should decode");
+            let payload = format!(r#"{{"cpu_last_64":[1.0,2.5,3.25],"labels":["{label}"]}}"#);
+            decode_with_codec(&codec, payload.as_bytes(), &mut decoder, &mut builder)
+                .expect("every payload should decode");
         }
 
         builder.abandon_rows_after(1);
@@ -6627,6 +7193,151 @@ mod tests {
     }
 
     #[test]
+    fn schemaful_json_preserves_integer_shape_and_range() {
+        let schema = CreateSchema {
+            name: named("small_integer"),
+            fields: vec![SchemaField {
+                name: named("value"),
+                ty: ParseAsType::U8,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let wire = CreateWireSchema {
+            name: named("small_integer_wire"),
+            strictness: WireSchemaStrictness::Strict,
+            fields: vec![WireSchemaField {
+                name: named("value"),
+                ty: JsonType::Integer,
+                optional: false,
+            }],
+        };
+        let codec = compile_codec(
+            &CreateCodec {
+                name: named("small_integer_codec"),
+                wire_format: CodecWireFormat::Json {
+                    wire_schema: wire.name.clone(),
+                },
+                schema: schema.name.clone(),
+                encoding_rules: Vec::new(),
+            },
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Json(&wire),
+        )
+        .expect("codec should compile");
+
+        let decoded = decode_one(&codec, br#"{"value":255}"#)
+            .expect("the exact U8 upper bound should decode");
+        assert_eq!(
+            single_batch_value(&decoded, "value"),
+            Some(RuntimeValue::U8(u8::MAX))
+        );
+        for payload in [
+            br#"{"value":256}"#.as_slice(),
+            br#"{"value":-1}"#.as_slice(),
+            br#"{"value":1.0}"#.as_slice(),
+        ] {
+            assert!(matches!(
+                decode_one(&codec, payload),
+                Err(CodecError::ParseField { field, .. }) if field == "value"
+            ));
+        }
+    }
+
+    #[test]
+    fn schemaful_json_honors_every_typed_integer_wire_bound() {
+        let cases = [
+            (
+                ParseAsType::U8,
+                JsonType::U8,
+                "255",
+                RuntimeValue::U8(u8::MAX),
+            ),
+            (
+                ParseAsType::I8,
+                JsonType::I8,
+                "-128",
+                RuntimeValue::I8(i8::MIN),
+            ),
+            (
+                ParseAsType::U16,
+                JsonType::U16,
+                "65535",
+                RuntimeValue::U16(u16::MAX),
+            ),
+            (
+                ParseAsType::I16,
+                JsonType::I16,
+                "-32768",
+                RuntimeValue::I16(i16::MIN),
+            ),
+            (
+                ParseAsType::U32,
+                JsonType::U32,
+                "4294967295",
+                RuntimeValue::U32(u32::MAX),
+            ),
+            (
+                ParseAsType::I32,
+                JsonType::I32,
+                "-2147483648",
+                RuntimeValue::I32(i32::MIN),
+            ),
+            (
+                ParseAsType::U64,
+                JsonType::U64,
+                "18446744073709551615",
+                RuntimeValue::U64(u64::MAX),
+            ),
+            (
+                ParseAsType::I64,
+                JsonType::I64,
+                "-9223372036854775808",
+                RuntimeValue::I64(i64::MIN),
+            ),
+        ];
+
+        for (internal_type, wire_type, literal, expected) in cases {
+            let schema = CreateSchema {
+                name: named("typed_integer"),
+                fields: vec![SchemaField {
+                    name: named("value"),
+                    ty: internal_type,
+                    optional: false,
+                    sensitive: false,
+                }],
+            };
+            let wire = CreateWireSchema {
+                name: named("typed_integer_wire"),
+                strictness: WireSchemaStrictness::Strict,
+                fields: vec![WireSchemaField {
+                    name: named("value"),
+                    ty: wire_type,
+                    optional: false,
+                }],
+            };
+            let codec = compile_codec(
+                &CreateCodec {
+                    name: named("typed_integer_codec"),
+                    wire_format: CodecWireFormat::Json {
+                        wire_schema: wire.name.clone(),
+                    },
+                    schema: schema.name.clone(),
+                    encoding_rules: Vec::new(),
+                },
+                Arc::new(compile_schema(&schema)),
+                ResolvedCodecWireFormat::Json(&wire),
+            )
+            .expect("typed integer codec should compile");
+            let payload = format!(r#"{{"value":{literal}}}"#);
+
+            let decoded = decode_one(&codec, payload.as_bytes())
+                .expect("the exact typed integer boundary should decode");
+            assert_eq!(single_batch_value(&decoded, "value"), Some(expected));
+        }
+    }
+
+    #[test]
     fn strict_json_wire_schema_rejects_unknown_fields() {
         let compiled_schema = Arc::new(compile_schema(&schema()));
         let compiled_codec = compile_codec(
@@ -6662,6 +7373,89 @@ mod tests {
             single_batch_value(&decoded, "user_id"),
             Some(RuntimeValue::U32(42))
         );
+    }
+
+    #[test]
+    fn schemaful_json_decoder_reuses_input_and_parser_storage() {
+        let compiled_schema = Arc::new(compile_schema(&schema()));
+        let compiled_codec = compile_codec(
+            &codec("json_codec"),
+            compiled_schema.clone(),
+            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+        )
+        .expect("codec should compile");
+        let mut decoder = JsonDecoder::default();
+        let mut builder = compiled_schema.batch_builder(2);
+        let large_tenant = "x".repeat(8_192);
+        let large_payload = format!(
+            r#"{{"user_id":42,"tenant":"{large_tenant}","created_at":"2025-01-02T03:04:05+00:00","latency":12.5,"active":true}}"#
+        );
+
+        decode_with_codec(
+            &compiled_codec,
+            large_payload.as_bytes(),
+            &mut decoder,
+            &mut builder,
+        )
+        .expect("the first payload should decode");
+        let input_allocation = decoder.input.as_ptr();
+        let input_capacity = decoder.input.capacity();
+        let structural_allocation = decoder.buffers.structural_indexes().as_ptr();
+
+        decode_with_codec(
+            &compiled_codec,
+            br#"{"user_id":7,"tenant":"b","created_at":"2025-01-02T03:04:06+00:00","latency":1,"active":false}"#,
+            &mut decoder,
+            &mut builder,
+        )
+        .expect("the second payload should decode into reused storage");
+
+        assert_eq!(decoder.input.as_ptr(), input_allocation);
+        assert_eq!(decoder.input.capacity(), input_capacity);
+        assert_eq!(
+            decoder.buffers.structural_indexes().as_ptr(),
+            structural_allocation
+        );
+        assert_eq!(builder.rows(), 2);
+    }
+
+    #[test]
+    fn schemaful_json_decoder_reports_invalid_utf8_and_escapes_then_recovers() {
+        let compiled_schema = Arc::new(compile_schema(&schema()));
+        let compiled_codec = compile_codec(
+            &codec("json_codec"),
+            compiled_schema.clone(),
+            ResolvedCodecWireFormat::Json(&json_wire_schema()),
+        )
+        .expect("codec should compile");
+        let mut decoder = JsonDecoder::default();
+        let mut builder = compiled_schema.batch_builder(1);
+        let valid = br#"{"user_id":42,"tenant":"acme","created_at":"2025-01-02T03:04:05+00:00","latency":12.5,"active":true}"#;
+        let mut invalid_utf8 = valid.to_vec();
+        let invalid_position = invalid_utf8
+            .windows(4)
+            .position(|window| window == b"acme")
+            .verified("the JSON fixture contains its tenant marker");
+        invalid_utf8[invalid_position] = 0xff;
+
+        for payload in [
+            invalid_utf8.as_slice(),
+            br#"{"user_id":42,"tenant":"bad\q","created_at":"2025-01-02T03:04:05+00:00","latency":12.5,"active":true}"#,
+        ] {
+            let error = decode_with_codec(
+                &compiled_codec,
+                payload,
+                &mut decoder,
+                &mut builder,
+            )
+            .expect_err("malformed JSON text must be rejected");
+            assert!(matches!(error, CodecError::JsonDecode { .. }));
+            assert_eq!(builder.rows(), 0);
+        }
+
+        decode_with_codec(&compiled_codec, valid, &mut decoder, &mut builder)
+            .expect("the decoder should recover on the next payload");
+        assert_eq!(builder.rows(), 1);
     }
 
     #[test]
@@ -6987,11 +7781,15 @@ mod tests {
     fn protobuf_codec_applies_transformation_on_ingestion_before_decoding() {
         let codec = protobuf_codec("protobuf_ingest", Some("."), None);
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
+        let compiled_codec = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema,
             self_describing(&codec.wire_format),
-            Some(protobuf_descriptor()),
+            Some(ProtobufCodecDescriptors {
+                message: protobuf_descriptor(),
+                batch_message: None,
+            }),
         )
         .expect("codec should compile");
         assert!(compiled_codec.requires_blocking_decode());
@@ -7024,19 +7822,24 @@ mod tests {
             None,
         );
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
+        let compiled_codec = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema,
             self_describing(&codec.wire_format),
-            Some(protobuf_descriptor()),
+            Some(ProtobufCodecDescriptors {
+                message: protobuf_descriptor(),
+                batch_message: None,
+            }),
         )
         .expect("codec should compile");
         let payload = [
             0x08, 42, 0x12, 4, b'a', b'c', b'm', b'e', 0x1a, 5, b'h', b'e', b'l', b'l', b'o',
         ];
         let mut builder = compiled_codec.schema.batch_builder(2);
+        let mut decoder = JsonDecoder::default();
 
-        let decoded = decode_with_codec(&compiled_codec, Cow::Borrowed(&payload), &mut builder)
+        let decoded = decode_with_codec(&compiled_codec, &payload, &mut decoder, &mut builder)
             .expect("the message should unfold");
 
         assert_eq!(decoded, 2);
@@ -7055,11 +7858,15 @@ mod tests {
     fn protobuf_codec_applies_transformation_on_emitting_before_encoding() {
         let codec = protobuf_codec("protobuf_emit", None, Some("."));
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let compiled_codec = compile_codec_with_protobuf(
-            &codec,
+        let compiled_codec = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema,
             self_describing(&codec.wire_format),
-            Some(protobuf_descriptor()),
+            Some(ProtobufCodecDescriptors {
+                message: protobuf_descriptor(),
+                batch_message: None,
+            }),
         )
         .expect("codec should compile");
         assert!(!compiled_codec.requires_blocking_decode());
@@ -7086,12 +7893,148 @@ mod tests {
         );
     }
 
+    fn protobuf_batch_descriptors(batch_message: Option<&str>) -> ProtobufCodecDescriptors {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let proto_path = dir.path().join("notification.proto");
+        std::fs::write(
+            &proto_path,
+            r#"
+                syntax = "proto3";
+                package nervix.test;
+
+                message Notification {
+                  uint32 user_id = 1;
+                  string tenant = 2;
+                  string payload = 3;
+                }
+
+                message NotificationBatch {
+                  repeated Notification notifications = 1;
+                }
+
+                message NotificationEnvelope {
+                  uint32 count = 1;
+                  repeated Notification notifications = 2;
+                }
+
+                message Tenants {
+                  repeated string tenants = 1;
+                }
+            "#,
+        )
+        .expect("proto file should be written");
+        let file_descriptor_set =
+            protox::compile([proto_path], [dir.path()]).expect("proto should compile");
+        let pool = ProtobufDescriptorPool::from_file_descriptor_set(file_descriptor_set)
+            .expect("descriptor pool should be built");
+        ProtobufCodecDescriptors {
+            message: pool
+                .message("nervix.test.Notification")
+                .expect("the member message is declared"),
+            batch_message: batch_message
+                .map(|name| pool.message(name).expect("the batch message is declared")),
+        }
+    }
+
+    #[test]
+    fn protobuf_batch_container_needs_a_repeated_member_field_or_a_batch_transformation() {
+        let compile = |batch_message: Option<&str>, on_emitting_batch: Option<&str>| {
+            let mut codec = protobuf_codec("protobuf_batch", None, Some("."));
+            if let CodecWireFormat::Protobuf(config) = &mut codec.wire_format {
+                config.batch_message = batch_message.map(str::to_string);
+                config.transformations.on_emitting_batch = on_emitting_batch.map(str::to_string);
+            }
+            compile_codec_spec_with_protobuf(
+                &codec.name,
+                &codec.encoding_rules,
+                Arc::new(compile_schema(&protobuf_schema())),
+                self_describing(&codec.wire_format),
+                Some(protobuf_batch_descriptors(batch_message)),
+            )
+            .expect("codec should compile")
+        };
+
+        compile(Some("nervix.test.NotificationBatch"), None)
+            .check_batch_container()
+            .expect("a single repeated member field holds the batch");
+        compile(
+            Some("nervix.test.NotificationEnvelope"),
+            Some("{count: length, notifications: .}"),
+        )
+        .check_batch_container()
+        .expect("a batch transformation builds any batch message");
+        let undeclared = compile(None, None)
+            .check_batch_container()
+            .expect_err("a protobuf codec without BATCH MESSAGE has no batch container");
+        assert!(matches!(
+            undeclared.current_context(),
+            CodecError::ProtobufBatchMessageUndeclared { codec } if codec == "protobuf_batch"
+        ));
+        for batch_message in ["nervix.test.NotificationEnvelope", "nervix.test.Tenants"] {
+            let error = compile(Some(batch_message), None)
+                .check_batch_container()
+                .expect_err("the batch message does not hold the members alone");
+            assert!(
+                matches!(
+                    error.current_context(),
+                    CodecError::ProtobufBatchMessageShape { batch_message: declared, message, .. }
+                        if declared == batch_message && message == "nervix.test.Notification"
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_protobuf_codecs_derive_their_batch_container() {
+        let codec = jaq_native_codec(
+            "json_batch",
+            CodecJaqFormat::Json,
+            "notification",
+            None,
+            Some("."),
+        );
+        let compiled = compile_codec(
+            &codec,
+            Arc::new(compile_schema(&schema())),
+            self_describing(&codec.wire_format),
+        )
+        .expect("codec should compile");
+
+        compiled
+            .check_batch_container()
+            .expect("a JSON codec writes its batch as an array");
+    }
+
+    #[test]
+    fn jaq_native_codec_rejects_invalid_emitting_batch_jaq_program() {
+        let mut codec = jaq_native_codec(
+            "json_with_bad_batch_jaq",
+            CodecJaqFormat::Json,
+            "notification",
+            None,
+            Some("."),
+        );
+        if let CodecWireFormat::JaqNative {
+            transformations, ..
+        } = &mut codec.wire_format
+        {
+            transformations.on_emitting_batch = Some(". | ".to_string());
+        }
+        let wire_format = self_describing(&codec.wire_format);
+        let err = compile_codec(&codec, Arc::new(compile_schema(&schema())), wire_format)
+            .expect_err("invalid jaq must fail");
+
+        assert!(matches!(err, CodecError::InvalidJaqTransformation { .. }));
+    }
+
     #[test]
     fn protobuf_codec_requires_compiled_descriptor() {
         let codec = protobuf_codec("protobuf_missing_descriptor", Some("."), None);
         let compiled_schema = Arc::new(compile_schema(&protobuf_schema()));
-        let err = compile_codec_with_protobuf(
-            &codec,
+        let err = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
             compiled_schema,
             self_describing(&codec.wire_format),
             None,
@@ -7124,5 +8067,376 @@ mod tests {
             String::from_utf8(payload).expect("xml must be utf8"),
             "<notification><user_id>42</user_id><tenant>acme</tenant></notification>"
         );
+    }
+
+    fn byte_limit(bytes: usize) -> PayloadSizeLimit {
+        let count = NonZeroU64::new(bytes.arch_into()).assured("every sweep limit is positive");
+        PayloadSizeLimit::new(count, ByteSizeUnit::B).assured("a byte count fits in 64 bits")
+    }
+
+    /// Encodes `record` under every limit around its exact size and checks the contract a bounded
+    /// encoding keeps: it completes exactly when the unbounded encoding fits, it then yields those
+    /// same bytes, and it never yields more bytes than its limit. Returns the exact size, which is
+    /// also the measured size, so the reported size is never looser than the payload.
+    fn assert_bounded_encoding_is_exact(codec: &CompiledCodec, record: &RuntimeRow) -> usize {
+        let batch = record
+            .one_row_batch()
+            .project(codec.schema.arrow_schema())
+            .expect("fixture record must project onto the codec schema");
+        assert_bounded_batch_encoding_is_exact(codec, &batch)
+    }
+
+    fn assert_bounded_batch_encoding_is_exact(
+        codec: &CompiledCodec,
+        batch: &RuntimeRecordBatch,
+    ) -> usize {
+        let encoder = codec
+            .batch_encoder(batch)
+            .expect("fixture batch must fit the codec");
+        let mut unbounded = Vec::new();
+        encoder
+            .encode_row_into(0, &mut unbounded)
+            .expect("fixture record must encode");
+        let exact = unbounded.len();
+        // Every limit from 64 bytes below the exact size to two above it, plus the smallest.
+        let lowest = match exact.checked_sub(64) {
+            Some(lowest) if lowest > 0 => lowest,
+            _ => 1,
+        };
+        let highest = exact
+            .checked_add(2)
+            .assured("a fixture encoding is a few hundred bytes");
+        let mut limits = vec![1];
+        limits.extend(lowest..=highest);
+        for limit in limits {
+            let encoded = encoder
+                .encode_row_within(0, byte_limit(limit))
+                .expect("a fixture record never fails to encode");
+            match encoded {
+                BoundedRowEncoding::Encoded(payload) => {
+                    assert!(
+                        exact <= limit,
+                        "codec '{}' completed an encoding of {exact} bytes under a limit of \
+                         {limit}",
+                        codec.name.as_str()
+                    );
+                    assert!(payload.len() <= limit);
+                    assert_eq!(
+                        payload, unbounded,
+                        "a bounded encoding must be the same bytes"
+                    );
+                }
+                BoundedRowEncoding::Oversize(exceeded) => {
+                    assert!(
+                        exact > limit,
+                        "codec '{}' abandoned an encoding of {exact} bytes under a limit of \
+                         {limit}",
+                        codec.name.as_str()
+                    );
+                    assert_eq!(exceeded.limit, byte_limit(limit));
+                }
+            }
+        }
+        exact
+    }
+
+    /// Tenants that move a format across an escaping, Unicode or length-prefix boundary.
+    fn boundary_tenants() -> Vec<String> {
+        let mut tenants = vec![
+            String::new(),
+            "acme".to_string(),
+            "quote\" back\\ slash / nl\n tab\t cr\r bell\u{7} del\u{7f}".to_string(),
+            "é中😀 mixed widths".to_string(),
+            "<xml & 'entities'>".to_string(),
+        ];
+        // CBOR text headers grow at 24 and 256 bytes, Avro and protobuf length varints at 64
+        // and 128 bytes respectively.
+        for length in [23, 24, 63, 64, 127, 128, 255, 256] {
+            tenants.push("t".repeat(length));
+        }
+        tenants
+    }
+
+    /// User ids that move an integer across a CBOR, Avro zigzag or protobuf varint boundary.
+    fn boundary_user_ids() -> [u32; 10] {
+        [0, 23, 24, 63, 64, 127, 128, 255, 256, u32::MAX]
+    }
+
+    fn assert_notification_codec_is_exact(codec: &CompiledCodec) {
+        for tenant in boundary_tenants() {
+            assert_bounded_encoding_is_exact(codec, &record_with(42, &tenant));
+        }
+        for user_id in boundary_user_ids() {
+            assert_bounded_encoding_is_exact(codec, &record_with(user_id, "acme"));
+        }
+    }
+
+    #[test]
+    fn schemaful_codecs_measure_every_encoding_exactly() {
+        let schema = Arc::new(compile_schema(&schema()));
+        for case in [
+            NotificationCodecCase::Json,
+            NotificationCodecCase::Avro,
+            NotificationCodecCase::SchemafulCbor,
+        ] {
+            assert_notification_codec_is_exact(&case.compile(schema.clone()));
+        }
+    }
+
+    #[test]
+    fn jaq_native_codecs_measure_every_encoding_exactly() {
+        let schema = Arc::new(compile_schema(&schema()));
+        let formats = [
+            (CodecJaqFormat::Json, "."),
+            (CodecJaqFormat::Yaml, "."),
+            (CodecJaqFormat::Toml, "."),
+            (CodecJaqFormat::Cbor, "."),
+            (
+                CodecJaqFormat::Xml,
+                r#"{t: "notification", a: {id: (.user_id | tostring)}, c: [{t: "tenant", c: [.tenant]}]}"#,
+            ),
+        ];
+        for (format, program) in formats {
+            let codec = jaq_native_codec("bounded", format, "notification", None, Some(program));
+            let wire_format = self_describing(&codec.wire_format);
+            let compiled =
+                compile_codec(&codec, schema.clone(), wire_format).expect("codec should compile");
+            assert_notification_codec_is_exact(&compiled);
+        }
+    }
+
+    /// A transformation that expands a record is measured after it runs, never from the record.
+    #[test]
+    fn a_jaq_transformation_is_measured_by_its_output() {
+        let compiled_schema = Arc::new(compile_schema(&schema()));
+        let expanding = jaq_native_codec(
+            "expanding",
+            CodecJaqFormat::Json,
+            "notification",
+            None,
+            Some("{copies: [range(64) as $copy | .tenant]}"),
+        );
+        let wire_format = self_describing(&expanding.wire_format);
+        let compiled =
+            compile_codec(&expanding, compiled_schema, wire_format).expect("codec should compile");
+        let exact = assert_bounded_encoding_is_exact(&compiled, &record());
+        let record_bytes = encode_arrow_record(
+            &compile_codec(
+                &codec("json_codec"),
+                Arc::new(compile_schema(&schema())),
+                ResolvedCodecWireFormat::Json(&json_wire_schema()),
+            )
+            .expect("codec should compile"),
+            &record(),
+        )
+        .expect("record must encode")
+        .len();
+        assert!(exact > record_bytes);
+    }
+
+    #[test]
+    fn a_protobuf_codec_measures_every_encoding_exactly() {
+        let codec = protobuf_codec("bounded_protobuf", None, Some("."));
+        let compiled = compile_codec_spec_with_protobuf(
+            &codec.name,
+            &codec.encoding_rules,
+            Arc::new(compile_schema(&protobuf_schema())),
+            self_describing(&codec.wire_format),
+            Some(ProtobufCodecDescriptors {
+                message: protobuf_descriptor(),
+                batch_message: None,
+            }),
+        )
+        .expect("codec should compile");
+        for tenant in boundary_tenants() {
+            for user_id in boundary_user_ids() {
+                let record = test_runtime_row([
+                    ("user_id".to_string(), RuntimeValue::U32(user_id)),
+                    ("tenant".to_string(), RuntimeValue::String(tenant.clone())),
+                    (
+                        "payload".to_string(),
+                        RuntimeValue::String("payload".to_string()),
+                    ),
+                ]);
+                assert_bounded_encoding_is_exact(&compiled, &record);
+            }
+        }
+    }
+
+    #[test]
+    fn a_syslog_codec_measures_every_encoding_exactly() {
+        let codec = compiled_syslog_codec();
+        for message in boundary_tenants() {
+            let record = vec![
+                ("facility".to_string(), RuntimeValue::U8(23)),
+                ("severity".to_string(), RuntimeValue::U8(7)),
+                (
+                    "timestamp".to_string(),
+                    RuntimeValue::Datetime(
+                        DateTime::parse_from_rfc3339("2025-01-02T03:04:05.123+00:00")
+                            .expect("valid timestamp"),
+                    ),
+                ),
+                (
+                    "hostname".to_string(),
+                    RuntimeValue::String("host".to_string()),
+                ),
+                ("message".to_string(), RuntimeValue::String(message)),
+            ];
+            let batch = codec
+                .schema
+                .batch_from_test_rows([record])
+                .expect("absent optional fields are typed nulls");
+            assert_bounded_batch_encoding_is_exact(&codec, &batch);
+        }
+    }
+
+    #[test]
+    fn nested_arrays_and_nulls_are_measured_exactly() {
+        let arrays = Arc::new(compile_schema(&primitive_arrays_schema()));
+        for case in [
+            PrimitiveArrayCodecCase::Avro,
+            PrimitiveArrayCodecCase::Cbor,
+            PrimitiveArrayCodecCase::Toml,
+        ] {
+            assert_bounded_encoding_is_exact(
+                &case.compile(arrays.clone()),
+                &primitive_arrays_record(),
+            );
+        }
+        let nested = Arc::new(compile_schema(&multidimensional_array_schema()));
+        let nested_codec = compile_codec(
+            &array_codec("avro_nested_codec"),
+            nested,
+            ResolvedCodecWireFormat::Avro(&multidimensional_avro_wire_schema()),
+        )
+        .expect("codec should compile");
+        assert_bounded_encoding_is_exact(&nested_codec, &multidimensional_array_record());
+
+        let optional = Arc::new(compile_schema(&optional_schema()));
+        for (name, wire_format) in [
+            (
+                "json_optional",
+                ResolvedCodecWireFormat::Json(&optional_json_wire_schema()),
+            ),
+            (
+                "avro_optional",
+                ResolvedCodecWireFormat::Avro(&optional_avro_wire_schema()),
+            ),
+        ] {
+            let codec = compile_codec(&optional_codec(name), optional.clone(), wire_format)
+                .expect("codec should compile");
+            for nickname in [None, Some("nick")] {
+                let mut fields = vec![("user_id".to_string(), RuntimeValue::U32(7))];
+                if let Some(nickname) = nickname {
+                    fields.push((
+                        "nickname".to_string(),
+                        RuntimeValue::String(nickname.to_string()),
+                    ));
+                }
+                let batch = codec
+                    .schema
+                    .batch_from_test_rows([fields])
+                    .expect("an absent nickname is a typed null");
+                assert_bounded_batch_encoding_is_exact(&codec, &batch);
+            }
+        }
+    }
+
+    /// Base64 grows by four characters for every three bytes, with padding in between, so every
+    /// length through two full groups crosses each padding case.
+    #[test]
+    fn base64_bytes_are_measured_exactly() {
+        let schema = CreateSchema {
+            name: named("blob_event"),
+            fields: vec![SchemaField {
+                name: named("blob"),
+                ty: ParseAsType::Bytes,
+                optional: false,
+                sensitive: false,
+            }],
+        };
+        let wire_schema = CreateWireSchema {
+            name: named("blob_wire"),
+            strictness: Default::default(),
+            fields: vec![WireSchemaField {
+                name: named("blob"),
+                ty: JsonType::String,
+                optional: false,
+            }],
+        };
+        let codec = CreateCodec {
+            name: named("blob_codec"),
+            wire_format: CodecWireFormat::Json {
+                wire_schema: named("blob_wire"),
+            },
+            schema: named("blob_event"),
+            encoding_rules: Vec::new(),
+        };
+        let compiled = compile_codec(
+            &codec,
+            Arc::new(compile_schema(&schema)),
+            ResolvedCodecWireFormat::Json(&wire_schema),
+        )
+        .expect("codec should compile");
+        let arrow_schema = compiled.schema.arrow_schema();
+        let mut sizes = Vec::new();
+        for length in 0..=7_u8 {
+            let blob = (0..length).collect::<Vec<u8>>();
+            let column: ArrayRef = StdArc::new(BinaryArray::from_vec(vec![blob.as_slice()]));
+            let batch = RecordBatch::try_new(arrow_schema.clone(), vec![column])
+                .expect("one binary column matches the blob schema");
+            let batch = RuntimeRecordBatch::from_record_batch(arrow_schema.clone(), batch)
+                .expect("the batch was built from the codec schema");
+            sizes.push(assert_bounded_batch_encoding_is_exact(&compiled, &batch));
+        }
+        // `{"blob":""}` is 11 bytes; each started group of three adds four characters.
+        assert_eq!(sizes, vec![11, 15, 15, 15, 19, 19, 19, 23]);
+    }
+
+    #[test]
+    fn an_oversize_encoding_names_its_codec_encoding_and_limit() {
+        let compiled = NotificationCodecCase::Json.compile(Arc::new(compile_schema(&schema())));
+        let batch = record()
+            .one_row_batch()
+            .project(compiled.schema.arrow_schema())
+            .expect("fixture record must project");
+        let encoder = compiled
+            .batch_encoder(&batch)
+            .expect("fixture batch must fit");
+        let limit = PayloadSizeLimit::new(nonzero!(1_u64), ByteSizeUnit::KB)
+            .assured("one kilobyte fits in 64 bits");
+        assert!(matches!(
+            encoder.encode_row_within(0, limit),
+            Ok(BoundedRowEncoding::Encoded(_))
+        ));
+        let Ok(BoundedRowEncoding::Oversize(exceeded)) =
+            encoder.encode_row_within(0, byte_limit(8))
+        else {
+            panic!("an eight-byte limit is below any encoded notification");
+        };
+        assert_eq!(
+            exceeded.to_string(),
+            "codec 'json_codec' JSON payload exceeds MAX SIZE 8B"
+        );
+    }
+
+    #[test]
+    fn a_row_outside_the_batch_fails_under_a_limit_too() {
+        let compiled = NotificationCodecCase::Json.compile(Arc::new(compile_schema(&schema())));
+        let batch = record()
+            .one_row_batch()
+            .project(compiled.schema.arrow_schema())
+            .expect("fixture record must project");
+        let encoder = compiled
+            .batch_encoder(&batch)
+            .expect("fixture batch must fit");
+        let error = encoder
+            .encode_row_within(1, byte_limit(64))
+            .expect_err("a row outside the batch must fail");
+        assert!(matches!(
+            error.current_context(),
+            CodecError::InvalidCodec { .. }
+        ));
     }
 }

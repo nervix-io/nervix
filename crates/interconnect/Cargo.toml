@@ -40,6 +40,7 @@ futures-util = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 meticulous = { workspace = true }
+nervix-dns = { workspace = true }
 nervix-execution = { workspace = true }
 nervix-models = { workspace = true }
 nervix-recovery = { workspace = true }
@@ -67,6 +68,13 @@ x509-parser = { workspace = true }
 
 [dev-dependencies]
 alloc_count = { workspace = true }
+arrow-array = { workspace = true }
+arrow-ipc = { workspace = true }
+arrow-schema = { workspace = true }
+humantime = { workspace = true }
 rcgen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 ubyte = { workspace = true }

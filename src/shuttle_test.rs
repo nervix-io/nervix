@@ -6,17 +6,28 @@
 //! - **Depends on.** Shuttle's schedulers and runner.
 //! - **Must not know.** Product configuration or runtime state outside the model under test.
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc as StdArc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use shuttle::{
-    Config, FailurePersistence, Runner,
-    scheduler::{DfsScheduler, PctScheduler, RandomScheduler, ReplayScheduler, Scheduler},
+    Config, FailurePersistence, MaxSteps, Runner,
+    scheduler::{
+        DfsScheduler, PctScheduler, RandomScheduler, ReplayScheduler, Scheduler,
+        UncontrolledNondeterminismCheckScheduler,
+    },
 };
 
 // Shuttle executes each modeled thread on a coroutine stack. The server test binary's allocator
 // instrumentation and debug frames can exceed Shuttle's 60 KiB default before the model reaches
 // its first scheduling point, which the guard page reports as SIGSEGV rather than a Rust panic.
 const SERVER_MODEL_STACK_SIZE: usize = 1_048_576;
+const MAX_SCHEDULE_STEPS: usize = 10_000;
+const NONDETERMINISM_ITERATIONS: usize = 100;
 
 /// Schedules the random scheduler runs when `check_interleavings` explores one invariant, each
 /// choosing a random runnable thread at every scheduling point.
@@ -78,6 +89,17 @@ where
 {
     let mut config = Config::new();
     config.stack_size = SERVER_MODEL_STACK_SIZE;
+    config.max_steps = MaxSteps::FailAfter(MAX_SCHEDULE_STEPS);
+    let highest_steps = StdArc::new(AtomicUsize::new(0));
+    let measured_steps = StdArc::clone(&highest_steps);
+
+    let measured_invariant = move || {
+        invariant();
+        measured_steps.fetch_max(shuttle::current::context_switches(), Ordering::Relaxed);
+        if std::env::var_os("SHUTTLE_FORCE_FAILURE").is_some() {
+            panic!("forced Shuttle schedule replay verification");
+        }
+    };
 
     if let Some(schedule) = std::env::var_os("SHUTTLE_TRACE_FILE") {
         let scheduler = match ReplayScheduler::new_from_file(&schedule) {
@@ -87,7 +109,7 @@ where
                 PathBuf::from(schedule).display()
             ),
         };
-        Runner::new(scheduler, config).run(invariant);
+        Runner::new(scheduler, config).run(measured_invariant);
         return;
     }
 
@@ -102,5 +124,19 @@ where
         config.failure_persistence = FailurePersistence::File(Some(trace_directory));
     }
 
-    Runner::new(scheduler, config).run(invariant);
+    if std::env::var_os("SHUTTLE_CHECK_NONDETERMINISM").is_some() {
+        let scheduler = UncontrolledNondeterminismCheckScheduler::new(RandomScheduler::new(
+            NONDETERMINISM_ITERATIONS,
+        ));
+        Runner::new(scheduler, config).run(measured_invariant);
+    } else {
+        Runner::new(scheduler, config).run(measured_invariant);
+    }
+
+    if std::env::var_os("SHUTTLE_REPORT_STEPS").is_some() {
+        eprintln!(
+            "Shuttle maximum steps: {}",
+            highest_steps.load(Ordering::Relaxed)
+        );
+    }
 }

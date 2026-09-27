@@ -21,22 +21,26 @@ mod error;
 mod events;
 mod exchange;
 mod outcome;
+mod subscriptions;
 mod upload;
 
 pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectOptions, TlsRequirement};
 pub use error::{ClientError, EventStreamKind, RequestKind};
+use error_stack::ResultExt as _;
 pub use events::{
-    AutocompleteSuggestion, ServerEvent, SubscriptionEvent, SubscriptionRequest,
-    SubscriptionRowsEvent,
+    AutocompleteOutcome, AutocompleteSuggestion, ServerEvent, SubscriptionEvent,
+    SubscriptionRequest, SubscriptionRowsEvent,
 };
 pub use nervix_client_wire as wire;
 pub use nervix_client_wire::{
-    CommandDisposition, Diagnostic, DomainInfo, ExecutionReferenceConflict, LeaderEndpoints,
-    LeaderRedirect, Leadership, NoticeLevel, OutcomeOrigin, RowConformanceError, RowSchema,
-    SourceSpan, StatementDisposition, StatementOutcome, SubscriptionDeliveryLost,
-    SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRows,
-    SubscriptionRowsSkipped, SuggestionKind, UnknownOutcomeCause, UploadFailure,
+    Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
+    ChoiceTarget, ChoiceValue, CommandDisposition, Diagnostic, DomainInfo, DomainPaceChoice,
+    ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect, Leadership, NoticeLevel,
+    OutcomeOrigin, RowConformanceError, RowSchema, SourceSpan, StatementDisposition,
+    StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle,
+    SubscriptionOpened, SubscriptionRows, SubscriptionRowsSkipped, SuggestionKind,
+    SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
     CommandExecutionReference, DomainName, ImpactPlanningBasis, ResourceUploadIdentity,
@@ -45,28 +49,22 @@ pub use nervix_models::{
     TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
+pub use subscriptions::{SubscriptionInterruption, SubscriptionLifecycle};
 use thiserror::Error;
 
+/// A statement batch that could not be split, over the language's report of why it was rejected.
 #[derive(Debug, Error)]
-#[error("failed to parse the statement batch: {message}")]
-pub struct QuerySplitError {
-    message: String,
-}
+#[error("failed to parse the statement batch")]
+pub struct QuerySplitError;
 
 /// Splits a batch into the exact NSPL source slices that should be submitted separately.
 pub fn split_query_statements(query: &str) -> error_stack::Result<Vec<&str>, QuerySplitError> {
-    nervix_nspl::client_statement::parse_client_statement_sources(query)
-        .map(|statements| {
-            statements
-                .iter()
-                .map(|statement| statement.source(query))
-                .collect()
-        })
-        .map_err(|error| {
-            error_stack::Report::new(QuerySplitError {
-                message: error.to_string(),
-            })
-        })
+    let statements = nervix_nspl::client_statement::parse_client_statement_sources(query)
+        .change_context(QuerySplitError)?;
+    Ok(statements
+        .iter()
+        .map(|statement| statement.source(query))
+        .collect())
 }
 
 #[cfg(test)]

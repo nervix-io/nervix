@@ -14,7 +14,7 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         ParseError, boxed_choice, field_ref, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, lex_input, schema_name, suggest_from, tok, wire_schema_name,
+        kw_phrase2, lex_input, schema_field_ref, schema_name, suggest_from, tok, wire_schema_name,
     },
 };
 
@@ -206,10 +206,10 @@ fn alter_schema_operation<'src>()
         .ignore_then(internal_schema_field())
         .map(|field| AlterSchemaOperation::AddField { field });
     let drop = kw_phrase2(Identifier::Drop, Identifier::Field)
-        .ignore_then(field_ref())
+        .ignore_then(schema_field_ref())
         .map(|field| AlterSchemaOperation::DropField { field });
     let rename = kw_phrase2(Identifier::Rename, Identifier::Field)
-        .ignore_then(field_ref())
+        .ignore_then(schema_field_ref())
         .then_ignore(kw(Identifier::To))
         .then(field_ref())
         .map(|(field, to)| AlterSchemaOperation::RenameField { field, to });
@@ -224,7 +224,7 @@ fn alter_schema_operation<'src>()
             .to(InternalFieldAlter::Sensitive(false)),
     );
     let alter = kw_phrase2(Identifier::Alter, Identifier::Field)
-        .ignore_then(field_ref())
+        .ignore_then(schema_field_ref())
         .then(field_alter)
         .map(|(field, alter)| match alter {
             InternalFieldAlter::Type(ty) => AlterSchemaOperation::SetFieldType { field, ty },
@@ -276,10 +276,10 @@ where
         .ignore_then(wire_schema_field(native_type.clone()))
         .map(|field| AlterWireSchemaOperation::AddField { field });
     let drop = kw_phrase2(Identifier::Drop, Identifier::Field)
-        .ignore_then(field_ref())
+        .ignore_then(schema_field_ref())
         .map(|field| AlterWireSchemaOperation::DropField { field });
     let rename = kw_phrase2(Identifier::Rename, Identifier::Field)
-        .ignore_then(field_ref())
+        .ignore_then(schema_field_ref())
         .then_ignore(kw(Identifier::To))
         .then(field_ref())
         .map(|(field, to)| AlterWireSchemaOperation::RenameField { field, to });
@@ -291,7 +291,7 @@ where
         kw_phrase2(Identifier::Drop, Identifier::Optional).to(WireFieldAlter::Optional(false)),
     );
     let alter = kw_phrase2(Identifier::Alter, Identifier::Field)
-        .ignore_then(field_ref())
+        .ignore_then(schema_field_ref())
         .then(field_alter)
         .map(|(field, alter)| match alter {
             WireFieldAlter::Type(ty) => AlterWireSchemaOperation::SetFieldType { field, ty },
@@ -492,7 +492,9 @@ pub fn parse_create_schema_tokens(
     }
 }
 
-pub fn parse_create_wire_schema(input: &str) -> Result<Statement, ParseFromSourceError> {
+pub fn parse_create_wire_schema(
+    input: &str,
+) -> error_stack::Result<Statement, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -504,7 +506,7 @@ pub fn parse_create_wire_schema(input: &str) -> Result<Statement, ParseFromSourc
 
 pub fn parse_create_schema(
     input: &str,
-) -> Result<CreateStatement<CreateSchema>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateSchema>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -514,7 +516,7 @@ pub fn parse_create_schema(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_schema(input: &str) -> Result<AlterSchema, ParseFromSourceError> {
+pub fn parse_alter_schema(input: &str) -> error_stack::Result<AlterSchema, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -524,7 +526,9 @@ pub fn parse_alter_schema(input: &str) -> Result<AlterSchema, ParseFromSourceErr
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_wire_schema(input: &str) -> Result<Statement, ParseFromSourceError> {
+pub fn parse_alter_wire_schema(
+    input: &str,
+) -> error_stack::Result<Statement, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

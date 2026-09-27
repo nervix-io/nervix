@@ -23,11 +23,12 @@ use nervix_interconnect::{
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainName, DomainSchedule, DomainStatus,
     ModelKind, ModelName, NodeRef, RelayName, RemoteRuntimeField, ResetWasmState,
-    ResolvedBranching, ResolvedResetWasmStateScope, WasmStateResetPhase, WasmStateResetScope,
+    ResolvedBranching, ResolvedResetWasmStateScope, WasmStateResetPhase, WasmStateResetReason,
+    WasmStateResetScope,
 };
 #[cfg(feature = "testing")]
 use nervix_recovery::NoReceiver as _;
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::{AppError, entity_gate::ClusterEntityGate, session_service::SessionServiceImpl};
 use crate::runtime::{GuestWasmStateResetRequest, Runtime, WasmStateResetPreparation};
@@ -81,6 +82,7 @@ struct WasmStateResetPlan {
     relays: Vec<RelayName>,
     entity: NodeRef,
     scope: WasmStateResetScope,
+    reason: WasmStateResetReason,
     branch_key: Option<Vec<RemoteRuntimeField>>,
     published: bool,
     ready: bool,
@@ -138,6 +140,7 @@ impl SessionServiceImpl {
             &processor,
             request.clone(),
             target,
+            WasmStateResetReason::Transaction,
             transaction.domain_mutation(),
         )
         .await
@@ -185,6 +188,7 @@ impl SessionServiceImpl {
                             &request.processor,
                             request.request,
                             request.target,
+                            request.reason,
                             None,
                         )
                         .await
@@ -257,9 +261,15 @@ impl SessionServiceImpl {
         let failed = || crate::fault_injection::WasmStateResetRequestError::ResetFailed {
             processor: processor.clone(),
         };
-        self.coordinate_wasm_state_reset(&domain, &processor, reference, target)
-            .await
-            .change_context_lazy(failed)
+        self.coordinate_wasm_state_reset(
+            &domain,
+            &processor,
+            reference,
+            target,
+            WasmStateResetReason::Operator,
+        )
+        .await
+        .change_context_lazy(failed)
     }
 
     /// Run one reset where it is coordinated: on the leader, which serializes it with every other
@@ -270,6 +280,7 @@ impl SessionServiceImpl {
         processor: &ModelName,
         request: CommandExecutionReference,
         target: WasmStateResetTarget,
+        reason: WasmStateResetReason,
     ) -> error_stack::Result<(), WasmStateResetError> {
         let uncoordinated = || WasmStateResetError::Coordinator {
             processor: processor.clone(),
@@ -287,6 +298,7 @@ impl SessionServiceImpl {
                         processor: processor.clone(),
                         request,
                         target,
+                        reason,
                     },
                 )
                 .await
@@ -298,7 +310,7 @@ impl SessionServiceImpl {
                 .map_err(Report::new)
                 .change_context_lazy(uncoordinated);
         }
-        self.reset_wasm_processor_state(domain, processor, request, target, None)
+        self.reset_wasm_processor_state(domain, processor, request, target, reason, None)
             .await
     }
 
@@ -349,6 +361,7 @@ impl SessionServiceImpl {
                 request.processor(),
                 request.reference(),
                 request.target(),
+                WasmStateResetReason::Guest,
             )
             .await;
         if let Err(error) = result {
@@ -392,6 +405,7 @@ impl SessionServiceImpl {
         processor: &ModelName,
         request: CommandExecutionReference,
         target: WasmStateResetTarget,
+        reason: WasmStateResetReason,
         mutation: Option<&DomainMutationLease>,
     ) -> error_stack::Result<(), WasmStateResetError> {
         let Some(_alter_guard) = self.inner.runtime.try_begin_domain_alter(domain) else {
@@ -400,7 +414,7 @@ impl SessionServiceImpl {
             }));
         };
         let mut plan = self
-            .plan_wasm_state_reset(domain, processor, &request, target.clone())
+            .plan_wasm_state_reset(domain, processor, &request, target.clone(), reason)
             .await?;
         // A Publishing schedule whose owner failed its initial checkpoint cannot pass the normal
         // cluster-wide application barrier: that same owner is the node the barrier is waiting
@@ -414,7 +428,7 @@ impl SessionServiceImpl {
                     processor: processor.clone(),
                 })?;
             plan = self
-                .plan_wasm_state_reset(domain, processor, &request, target)
+                .plan_wasm_state_reset(domain, processor, &request, target, reason)
                 .await?;
         }
         let purpose = EntityGatePurpose::WasmStateReset(plan.scope);
@@ -454,6 +468,7 @@ impl SessionServiceImpl {
         processor: &ModelName,
         request: &CommandExecutionReference,
         target: WasmStateResetTarget,
+        reason: WasmStateResetReason,
     ) -> error_stack::Result<WasmStateResetPlan, WasmStateResetError> {
         let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
         let Some(state) = inputs.state() else {
@@ -495,7 +510,7 @@ impl SessionServiceImpl {
         let mut ready = false;
         if let Some(current) = node.wasm_state_reset() {
             if current.request() == request {
-                if current.scope() != &scope {
+                if current.scope() != &scope || current.reason() != reason {
                     return Err(Report::new(WasmStateResetError::RequestConflict {
                         processor: processor.clone(),
                         request: request.clone(),
@@ -524,6 +539,7 @@ impl SessionServiceImpl {
             relays,
             entity,
             scope,
+            reason,
             branch_key,
             published,
             ready,
@@ -584,6 +600,7 @@ impl SessionServiceImpl {
         gate: &ClusterEntityGate,
         mutation: Option<&DomainMutationLease>,
     ) -> error_stack::Result<(), WasmStateResetError> {
+        let reason = plan.reason;
         if plan.ready {
             return self
                 .activate_wasm_state_reset_schedule(
@@ -608,6 +625,7 @@ impl SessionServiceImpl {
             RemoteWasmStateResetRuntimeAction::Prepare {
                 branch_key: plan.branch_key.clone(),
                 published: plan.published,
+                reason,
             },
         )
         .await
@@ -621,7 +639,7 @@ impl SessionServiceImpl {
                 .nodes
                 .get_mut(&plan.entity)
                 .verified("the reset plan retained the WASM node it resolved");
-            let began = node.begin_wasm_state_reset(request.clone(), plan.scope);
+            let began = node.begin_wasm_state_reset(request.clone(), plan.scope, reason);
             if !began {
                 self.abort_unpublished_wasm_state_reset(
                     &plan.owner,
@@ -635,6 +653,10 @@ impl SessionServiceImpl {
                     processor: processor.clone(),
                 }));
             }
+            let generation = node
+                .wasm_state_generations()
+                .verified("the reset began on a scheduled WASM processor")
+                .of_reset_scope(&plan.scope);
             #[cfg(feature = "testing")]
             if self
                 .inner
@@ -685,6 +707,14 @@ impl SessionServiceImpl {
                 }
             } else {
                 plan.published = true;
+                info!(
+                    domain = domain.as_str(),
+                    processor = processor.as_str(),
+                    scope = plan.scope.kind(),
+                    reason = reason.as_ref(),
+                    %generation,
+                    "WASM guest-state reset generation published"
+                );
             }
         }
 
@@ -755,7 +785,15 @@ impl SessionServiceImpl {
             .await
             .change_context_lazy(|| WasmStateResetError::CommittedNotUsable {
                 processor: processor.clone(),
-            })
+            })?;
+        info!(
+            domain = domain.as_str(),
+            processor = processor.as_str(),
+            scope = plan.scope.kind(),
+            reason = reason.as_ref(),
+            "WASM guest-state reset became usable"
+        );
+        Ok(())
     }
 
     fn schedule_has_wasm_reset(
@@ -857,6 +895,7 @@ impl SessionServiceImpl {
                 RemoteWasmStateResetRuntimeAction::Prepare {
                     branch_key,
                     published,
+                    reason,
                 } => {
                     let preparation = WasmStateResetPreparation::from_remote(
                         processor,
@@ -864,6 +903,7 @@ impl SessionServiceImpl {
                         scope,
                         branch_key,
                         published,
+                        reason,
                     )
                     .change_context_lazy(|| WasmStateResetError::Prepare {
                         processor: processor.clone(),
@@ -954,6 +994,7 @@ impl SessionServiceImpl {
             RemoteWasmStateResetRuntimeAction::Prepare {
                 branch_key,
                 published,
+                reason,
             } => {
                 let preparation = WasmStateResetPreparation::from_remote(
                     &request.processor,
@@ -961,6 +1002,7 @@ impl SessionServiceImpl {
                     request.scope,
                     branch_key,
                     published,
+                    reason,
                 );
                 match preparation {
                     Ok(preparation) => self

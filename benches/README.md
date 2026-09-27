@@ -165,6 +165,75 @@ hands the decision back to the 50 ms interval and the batches grow:
 
 ## Comparing two local builds (A/B)
 
+### Expression VM function workbench
+
+`just bench-vm` runs the existing Criterion VM harness. Its `execute_program_batch_size` group
+measures complete expression plans at 1, 8, 64, 256, 1,024, 4,096, 16,384, and 65,536 rows.
+`numeric_kernels`, `calendar_kernels`, `string_search`, `json_extraction`, and the other focused
+groups retain their failure, null, pattern-cardinality, and function-specific cases. The
+`vm_workload_shape` group holds programs fixed while varying contiguous versus sliced Arrow
+arrays, fixed versus ragged lists, ASCII versus UTF-8 text, short versus long text, half-null
+columns, and `repeat` output growth. Its 1,025-row case crosses the VM's 1,024-row inline limit
+to show the executor offload cost beside 1- and 8-row batches.
+
+Run timing with the ordinary allocator build. Criterion reports time and rows per second; the
+filter keeps a comparison short enough to repeat on an idle machine. Run the first command on the
+baseline revision, then the second on the candidate with the same Criterion target directory:
+
+```bash
+just bench-vm 'string_search/dynamic_1/32' --sample-size 20 --warm-up-time 2 --measurement-time 4 --save-baseline before
+just bench-vm 'string_search/dynamic_1/32' --sample-size 20 --warm-up-time 2 --measurement-time 4 --baseline before
+just bench-vm vm_workload_shape --sample-size 20 --warm-up-time 2 --measurement-time 4
+```
+
+`just bench-vm-alloc vm_workload_shape --test` builds the **same harness** with a one-shot System
+allocator probe. Each `vm_allocation_evidence` line counts successful allocation and reallocation
+calls and their requested bytes during one VM execution. `output_column_bytes` is the memory size
+of all Arrow output columns, including projected input columns, so it is a size observation rather
+than an allocation count. The probe is excluded from the ordinary timing build. It counts all
+threads for that execution, including the blocking-pool worker above 1,024 rows. An isolated run
+avoids counting unrelated allocator activity.
+
+The microbenchmarks isolate VM execution, so they cannot establish full-stream throughput or
+delivery latency. Use the serialized `benchmark-ab` recipe below for that claim. To make the
+`hot-path-processor` workload exercise the dynamic pattern path while preserving its nonempty
+input and one-output-per-input contract, pass this expression to **both** A/B arms through the
+current harness:
+
+```bash
+just benchmark-ab origin/main 3 hot-path-processor --partitions 1 --duration-seconds 30 \
+  --parameter "'transform_expression=CASE WHEN contains_any(input.value, vec(input.value)) THEN upper(input.value) ELSE input.value END'"
+just benchmark-ab origin/main 3 kafka-dedup-window --partitions 1 --duration-seconds 30 \
+  --parameter sketch_enabled=true --parameter sketch_precision=10
+```
+
+The manifest keeps `upper(input.value)` as its default. Record the exact baseline and candidate
+SHAs, `rustc -Vv`, `lscpu` or the AArch64 CPU model, `Cargo.lock` revision, Criterion time and
+throughput intervals, allocation probe output, and A/B throughput. The A/B run retains resolved
+input parameters and wire bytes per message in its
+artifacts. Use `/usr/bin/time -v` around an isolated Criterion filter to capture user and system
+CPU time and peak RSS; these are process totals for the filter, not per-row CPU or allocation
+measurements. The retained `nervix-metrics.prom` contains delivery latency histogram buckets;
+derive a bounded p99 from those buckets for each run and relay target. Linux `perf` counters and
+disassembly can refine a SIMD claim where the host grants profiling access. A run that fills its
+configured backlog cap is a bounded-pressure result, not maximum throughput.
+
+The window workload's optional sketch leaves `record_count` as the parity field and adds an
+`APPROX_COUNT_DISTINCT(input.key, precision)` result to each summary. Its default remains the
+existing exact-count workload. Change `--partitions` to change aggregate keyspace across lanes,
+and `--parameter window_messages=N` to change the number of candidate keys per window. Compare
+precision 4, 10, and 16 to expose the sketch's bounded-memory cost and its estimate error against
+the known generated key counts; do not treat its estimate as an exact parity count.
+
+VM numeric buffer loops may be widened by LLVM, while string search uses Aho-Corasick over Arrow
+columns and JSON extraction uses `simd-json`'s runtime-dispatched SIMD parser. The dynamic-pattern
+cache change measured here uses borrowed Arrow strings for its lookup; it does not add an explicit
+SIMD path or change numeric results. The 1,024-row offload boundary remains unchanged. Exact
+types, nulls, per-row errors, sensitivity, and caller-supplied domain time remain the contract to
+check with the unit suite and the one- and three-node Cucumber scenarios after a tuning change.
+
+### End-to-end A/B workflow
+
 Performance claims are established locally on identical hardware. CI benchmark comments compare
 Nervix and Vector within one run on whatever worker the job landed on, so they are a smoke signal
 only, never a perf claim. Before merging a performance change, A/B it on an otherwise idle

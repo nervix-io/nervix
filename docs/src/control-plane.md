@@ -38,6 +38,10 @@ its final log position, membership, transaction progress, and revision. Recovery
 complete applied range or replays its committed entries; it never reconstructs an acknowledged
 command from a partial state-machine update.
 
+[Errors And Diagnostics](./errors-and-diagnostics.md) owns how validation and planning failures
+accumulate context and become client diagnostics. This chapter owns the command's durability and
+transaction outcome.
+
 Consensus uses a dedicated database and journal under `<db-path>/consensus`. Registry and runtime
 state remain in the node database at `<db-path>`, so consensus synchronization does not flush or
 wait behind data-plane journal writes. The full durability boundary, append-stream pacing, log
@@ -95,7 +99,7 @@ Only the bound domain's replicated configuration effects may be queued:
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
 - `ALTER DOMAIN`, `START`, and `STOP`;
-- `CREATE RESOURCE`.
+- `CREATE RESOURCE` and `RESET WASM PROCESSOR ... STATE`.
 
 Completion on the bound session resolves identifiers against the configuration the queued
 statements produce, applied in written order, so a client is offered the models and resources its
@@ -173,6 +177,10 @@ no paused subgraph and no rebuilt node.
 Commit uses the gate plan and schedule delta captured for this report, so execution cannot silently
 widen the planned scope with a second decision.
 
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) is the full reference
+for the operation, execution-step, and transaction report levels; typed pause scopes; topology and
+attribution; preview freshness; actual engagement; and retained inspection.
+
 An accumulated model run that already forms a complete graph receives the full registry, binding,
 UDF, and scheduling preflight. Cross-model completeness may remain provisional only for the
 unfinished final model run. An intermediate schema/codec mismatch or temporarily referenced model
@@ -209,6 +217,13 @@ executable statement payload, so clearing statements at a terminal outcome does 
 an inspection reads. Reports use keyed header, operation, and step records. Topology graphs are
 content-addressed, stored as bounded node and edge records, and shared by every report revision that
 names the same content instead of being copied into one growing transaction value.
+
+Those storage bounds do not narrow the public report. Raft log readers and snapshot transfer read
+large stored ranges in bounded chunks, while inspection reconstructs every referenced operation,
+step, node, and edge before returning one typed result. Text and JSON responses are not paginated or
+silently truncated, including when an expanded report is larger than one Raft replication batch. A
+client therefore budgets one response proportional to the accepted operation count and affected
+graph; an encoding or transport failure yields no successful partial inspection.
 
 Actual quiescence is an ordered engagement history, distinct from the frozen plan. Each attempt
 records its request and then whether engagement was confirmed, definitively failed, or remained
@@ -278,6 +293,8 @@ attach reports the exact outcome and aggregate commit output; after removal the 
 `SHOW TRANSACTIONS;`
 can be served by any node from locally applied replicated state and lists the id, owner, domain,
 state, pending count, progress, age, and idle time for live transactions and retained tombstones.
+It also runs on its own beside an attached transaction without entering its queue or changing its
+session binding.
 
 An unbound `OPEN` transaction expires after its idle timeout; a bound transaction does not, and a
 `COMMITTING` transaction never expires. Defaults and server settings are:
@@ -300,9 +317,9 @@ Data-plane records remain outside this control-plane atomicity.
 Each node publishes application-health observations independently as its probes complete. The
 scheduler reads the current observation snapshot and applies the configured node-unavailability
 policy. A peer leaves the live scheduling set only after a current sequence of application probe
-failures has lasted for that policy's interval. A stale or unscheduled observation is unknown, and
-probe-capacity exhaustion remains distinct from a peer failure, so none of those conditions alone
-makes a healthy node unavailable.
+failures has lasted for that policy's interval. A stale observation is unknown, and probe-capacity
+exhaustion remains distinct from a peer failure, so neither condition alone makes a healthy node
+unavailable.
 
 Automatic scheduling runs independently of the health-probe sweep, resource downloads, and Raft
 learner catch-up. It does not wait for any of them to finish. Slow health responses, learner
@@ -464,9 +481,11 @@ reset is committed but not usable and leaves the scope fenced. Repeating the sam
 reference resumes the same generation and missing durability work; it does not start another
 lifetime. Restart, leadership change, and owner recovery read the published phase and follow the
 same path. Offline replicas catch up under the new generation, and a stale former owner, replica, or
-handoff preparation cannot reinstall bytes from the generation that was replaced. The control-plane
-operation is the single owner that later administrative, SDK, or restore interfaces call; it is not
-currently a separate NSPL graph statement.
+handoff preparation cannot reinstall bytes from the generation that was replaced. This one
+operation serves every trigger: the `RESET WASM PROCESSOR ... STATE` statement, which a transaction
+records as an ordered effect rather than a model mutation, a guest's request for a new lifetime of
+its own branch, and `ON REJECTED STATE RESET`. See
+[Coordinated Reset](./wasm-state.md#coordinated-reset).
 
 ## Planned Ownership Handoffs And Failover
 
@@ -589,6 +608,13 @@ volatile buffers disappear immediately, attached work is negatively acknowledged
 promotes a live replica or chooses a fresh owner. Failover does not wait for the planned handoff gate.
 If a former owner disappears while a planned hold is active, that hold aborts without publishing its
 candidate; ordinary failover then relocates from the last committed schedule.
+
+Failover acts on a voter that gossip no longer reports live. A leader whose reconciliation has just
+started, as the first node to lead after a whole cluster restarts does, can reach a quorum before
+gossip has heard from the other voters. For its first ten seconds, it therefore makes no automatic
+scheduling decision while any voter is neither reported live nor declared dead. A voter that is
+still starting rejoins and keeps its work and the state that node holds; a voter that has not
+appeared by the end of the grace is failed over as before.
 
 Forced recovery stages the destination's checkpoint inventory under the destination process
 incarnation and the complete target-schedule fingerprint. Applying staged checkpoints accepts only

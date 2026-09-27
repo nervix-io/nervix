@@ -211,6 +211,12 @@ fn transaction_planning_basis(
 pub(in crate::application) fn transaction_planning_error_message(
     error: &Report<TransactionPlanningError>,
 ) -> String {
+    if error
+        .downcast_ref::<super::model_validation::ModelBindingValidationError>()
+        .is_some()
+    {
+        return format!("{error:#}");
+    }
     let context = error.to_string();
     match error.downcast_ref::<String>() {
         Some(message) => format!("{context}: {message}"),
@@ -346,13 +352,38 @@ pub(in crate::application) enum SessionTransactionBindingError {
     TakenOver { id: String },
     #[error("transaction '{id}' is not attached to this leader; attach it before continuing")]
     Detached { id: String },
+    #[error("transaction '{id}' is attached but no domain is selected")]
+    MissingSelectedDomain { id: String },
+    #[error("transaction domain '{transaction}' differs from selected domain '{selected}'")]
+    DomainMismatch {
+        selected: DomainName,
+        transaction: DomainName,
+    },
+}
+
+#[derive(Debug, Error)]
+pub(in crate::application) enum TransactionDomainError {
+    #[error("no active domain selected")]
+    NoActiveDomain,
+    #[error("domain '{domain}' does not exist")]
+    DomainNotFound { domain: DomainName },
+}
+
+#[derive(Debug, Error)]
+pub(in crate::application) enum TransactionPreflightError {
+    #[error("transaction statement failed preflight")]
+    Plan,
+    #[error("transaction statement failed preflight report creation")]
+    Report,
+    #[error("transaction statement failed report archival")]
+    Archive,
 }
 
 impl SessionTransactionBindingError {
     pub(in crate::application) fn into_command_result(self) -> CommandResult {
         let mut result = command_error(self.to_string());
         match self {
-            Self::Unbound => {}
+            Self::Unbound | Self::DomainMismatch { .. } | Self::MissingSelectedDomain { .. } => {}
             Self::TakenOver { id } => {
                 result.disposition =
                     CommandDisposition::TransactionTakenOver { transaction_id: id };
@@ -680,25 +711,34 @@ impl SessionServiceImpl {
     }
 
     /// The configuration this session's bound transaction has queued for `domain`. Queued
-    /// configuration follows the binding, so a session that holds no transaction, one displaced by
-    /// a takeover, one whose transaction this node does not hold, and one whose transaction
-    /// configures another domain all fall back to committed configuration alone.
+    /// configuration follows the binding; a stale or mismatched binding is a reported failure.
     pub(in crate::application) async fn queued_configuration(
         &self,
         binding: SessionBinding<'_>,
         domain: Option<&DomainName>,
-    ) -> QueuedConfiguration {
-        let (Some(domain), Some(id)) = (domain, binding.transaction_id) else {
-            return QueuedConfiguration::default();
+    ) -> error_stack::Result<QueuedConfiguration, SessionTransactionBindingError> {
+        let Some(id) = binding.transaction_id else {
+            return Ok(QueuedConfiguration::default());
         };
-        if self.validate_session_transaction_binding(binding).is_err() {
-            return QueuedConfiguration::default();
-        }
+        self.validate_session_transaction_binding(binding)
+            .map_err(Report::new)?;
+        let Some(domain) = domain else {
+            return Err(Report::new(
+                SessionTransactionBindingError::MissingSelectedDomain { id: id.to_string() },
+            ));
+        };
         let Some(transaction) = self.inner.consensus.current_transaction(id).await else {
-            return QueuedConfiguration::default();
+            return Err(Report::new(SessionTransactionBindingError::Detached {
+                id: id.to_string(),
+            }));
         };
         if &transaction.domain != domain {
-            return QueuedConfiguration::default();
+            return Err(Report::new(
+                SessionTransactionBindingError::DomainMismatch {
+                    selected: domain.clone(),
+                    transaction: transaction.domain.clone(),
+                },
+            ));
         }
 
         let mut queued = QueuedConfiguration::default();
@@ -717,7 +757,7 @@ impl SessionServiceImpl {
                 queued.resources.insert(create.identifier.clone());
             }
         }
-        queued
+        Ok(queued)
     }
 
     pub(in crate::application) async fn transaction_consensus_error_response(
@@ -927,12 +967,14 @@ impl SessionServiceImpl {
     pub(in crate::application) async fn resolve_transaction_domain(
         &self,
         request_domain: Option<&DomainName>,
-    ) -> Result<DomainName, String> {
+    ) -> error_stack::Result<DomainName, TransactionDomainError> {
         let Some(domain) = request_domain.cloned() else {
-            return Err("no active domain selected".to_string());
+            return Err(Report::new(TransactionDomainError::NoActiveDomain));
         };
         if self.inner.consensus.current_domain(&domain).await.is_none() {
-            return Err(format!("domain '{}' does not exist", domain.as_str()));
+            return Err(Report::new(TransactionDomainError::DomainNotFound {
+                domain,
+            }));
         }
         Ok(domain)
     }
@@ -1084,7 +1126,7 @@ impl SessionServiceImpl {
                 .await
             {
                 Ok(admission) => admission,
-                Err(error) => return command_error(error),
+                Err(error) => return command_error(format!("{error:#}")),
             };
             prepared = Some(prepared_admission);
             if let Err(error) = self
@@ -1157,7 +1199,7 @@ impl SessionServiceImpl {
                                 .await
                             {
                                 Ok(admission) => admission,
-                                Err(error) => return command_error(error),
+                                Err(error) => return command_error(format!("{error:#}")),
                             }
                         }
                     };
@@ -1375,19 +1417,13 @@ impl SessionServiceImpl {
             };
             self.validate_changed_model_bindings(domain, domain_state.config.pace, planned)
                 .await
-                .map_err(|message| {
-                    Report::new(TransactionPlanningError::ExternalModelValidation {
-                        operation: step.impact.operations().first(),
-                    })
-                    .attach(message)
+                .change_context(TransactionPlanningError::ExternalModelValidation {
+                    operation: step.impact.operations().first(),
                 })?;
             self.prepare_planned_domain_udfs(planned)
                 .await
-                .map_err(|message| {
-                    Report::new(TransactionPlanningError::UdfPreparation {
-                        operation: step.impact.operations().first(),
-                    })
-                    .attach(message)
+                .change_context(TransactionPlanningError::UdfPreparation {
+                    operation: step.impact.operations().first(),
                 })?;
         }
         Ok(CapturedTransactionPlan {
@@ -1492,7 +1528,7 @@ impl SessionServiceImpl {
         &self,
         transaction: &ReplicatedTransaction,
         candidate: &TransactionStatementRequest,
-    ) -> Result<PreparedTransactionAdmission, String> {
+    ) -> error_stack::Result<PreparedTransactionAdmission, TransactionPreflightError> {
         let mut statements = transaction
             .statements
             .iter()
@@ -1514,18 +1550,13 @@ impl SessionServiceImpl {
                 true,
             )
             .await
-            .map_err(|error| {
-                format!(
-                    "transaction statement failed preflight: {}",
-                    transaction_planning_error_message(&error)
-                )
-            })?;
+            .change_context(TransactionPreflightError::Plan)?;
         let report = captured
             .plan
             .report()
-            .map_err(|error| format!("transaction statement failed preflight: {error}"))?;
+            .change_context(TransactionPreflightError::Report)?;
         let report = TransactionReportArchive::new(transaction.id.clone(), report)
-            .map_err(|error| format!("transaction statement failed report archival: {error}"))?;
+            .change_context(TransactionPreflightError::Archive)?;
         let result = Self::transaction_admission_result(
             &candidate.statement,
             &captured.plan,

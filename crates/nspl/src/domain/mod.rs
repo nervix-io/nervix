@@ -151,7 +151,7 @@ pub fn stop_domain_parser<'src>()
 
 pub fn parse_create_domain(
     input: &str,
-) -> Result<CreateStatement<CreateDomain>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateDomain>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -258,8 +258,10 @@ mod tests {
             panic!("expected alter domain");
         };
         assert_eq!(alter.policy, PlacementPolicy::Neutral);
-        parse_statement("ALTER DOMAIN prod SET PLACEMENT NEUTRAL;")
-            .expect_err("ALTER DOMAIN is nameless");
+        assert!(
+            parse_statement("ALTER DOMAIN prod SET PLACEMENT NEUTRAL;").is_err(),
+            "ALTER DOMAIN is nameless"
+        );
     }
 
     #[test]
@@ -324,20 +326,26 @@ mod tests {
 
     #[test]
     fn rejects_unpaced_domain_with_tick_config() {
-        parse_statement("CREATE UNPACED DOMAIN prod WITH PERIOD 30s SKEW 1s;")
-            .expect_err("unpaced domain must reject paced-only tick config");
+        assert!(
+            parse_statement("CREATE UNPACED DOMAIN prod WITH PERIOD 30s SKEW 1s;").is_err(),
+            "unpaced domain must reject paced-only tick config"
+        );
     }
 
     #[test]
     fn rejects_default_domain_with_tick_config() {
-        parse_statement("CREATE DOMAIN prod WITH PERIOD 30s SKEW 1s;")
-            .expect_err("default domain form must reject paced-only tick config");
+        assert!(
+            parse_statement("CREATE DOMAIN prod WITH PERIOD 30s SKEW 1s;").is_err(),
+            "default domain form must reject paced-only tick config"
+        );
     }
 
     #[test]
     fn rejects_invalid_if_exists_domain_clause() {
-        parse_statement("CREATE IF EXISTS DOMAIN prod;")
-            .expect_err("CREATE DOMAIN only supports IF NOT EXISTS");
+        assert!(
+            parse_statement("CREATE IF EXISTS DOMAIN prod;").is_err(),
+            "CREATE DOMAIN only supports IF NOT EXISTS"
+        );
     }
 
     #[test]
@@ -453,7 +461,9 @@ mod tests {
     fn rejects_start_now_with_time_rate() {
         let err = parse_statement("START NOW TIME RATE 4.0;")
             .expect_err("must reject time rate after NOW");
-        let crate::parser_support::ParseFromSourceError::Parse { diagnostics, .. } = err else {
+        let crate::parser_support::ParseFromSourceError::Parse { diagnostics, .. } =
+            err.current_context()
+        else {
             panic!("expected parse diagnostics");
         };
         assert!(!diagnostics.is_empty(), "must surface a parse diagnostic");
@@ -488,7 +498,10 @@ mod tests {
 
     #[test]
     fn rejects_use_domain_statement() {
-        parse_statement("USE prod;").expect_err("USE is a repl-only command");
+        assert!(
+            parse_statement("USE prod;").is_err(),
+            "USE is a repl-only command"
+        );
     }
 
     #[test]

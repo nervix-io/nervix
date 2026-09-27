@@ -2,9 +2,9 @@
 //!
 //! Layer: decisions.
 //!
-//! - **Owns.** The nodes and edges a domain's Models form, the fingerprints that detect a changed
-//!   shape, the dataflow description a client renders, and the drop and cycle checks the graph
-//!   answers.
+//! - **Owns.** The nodes, edges, and validated HTTP request plans a domain's Models form, the
+//!   fingerprints that detect a changed shape, the dataflow description a client renders, and the
+//!   drop and cycle checks the graph answers.
 //! - **Depends on.** The vocabulary and the dataflow-graph description.
 //! - **Must not know.** How a node is placed or executed.
 use std::collections::BTreeSet;
@@ -32,13 +32,15 @@ use crate::registry::{
     domain_state::DomainState,
     error::RegistryError,
     placement::{PlacementAnalysis, PlacementPlan},
-    validation::branching::model_branch_selection,
+    validation::{branching::model_branch_selection, connector::HttpEmitterRequestPlan},
 };
 #[derive(Debug, Clone)]
 pub(crate) struct ActiveGraph {
     pub(in crate::registry) graph: DiGraph<ActiveNode, EdgeKind>,
     pub(in crate::registry) indices: HashMap<NodeRef, NodeIndex>,
     pub(in crate::registry) placement: PlacementAnalysis,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(in crate::registry) http_emitter_plans: HashMap<NodeRef, Arc<HttpEmitterRequestPlan>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -83,6 +85,16 @@ impl ActiveGraph {
         self.indices
             .get(&NodeRef::new(kind, identifier.clone()))
             .and_then(|index| self.graph.node_weight(*index))
+    }
+
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) fn http_emitter_plan(
+        &self,
+        identifier: &ModelName,
+    ) -> Option<&HttpEmitterRequestPlan> {
+        self.http_emitter_plans
+            .get(&NodeRef::new(ModelKind::Emitter, identifier.clone()))
+            .map(Arc::as_ref)
     }
 
     pub(in crate::registry) fn node_count(&self) -> usize {
@@ -259,7 +271,8 @@ impl ActiveGraph {
     }
 
     /// The fingerprint of every schema model the node at `index` depends on through its
-    /// configuration, which the runtime keys the node's schema-bound state by.
+    /// configuration, together with the window definition when the node is a window processor.
+    /// The runtime keys the node's schema-bound state by this identity.
     pub(in crate::registry) fn schema_fingerprint_for_index(
         &self,
         index: NodeIndex,
@@ -272,6 +285,16 @@ impl ActiveGraph {
             encoded: Vec<u8>,
         }
 
+        let window_definition =
+            self.graph.node_weight(index).and_then(|node| {
+                if let Model::WindowProcessor(_) = node.config.as_ref() {
+                    Some(serde_json::to_vec(node.config.as_ref()).assured(
+                        "registry window models are plain serde structures with string keys",
+                    ))
+                } else {
+                    None
+                }
+            });
         let mut pending = vec![index];
         let mut visited = HashSet::default();
         let mut schemas = Vec::<FingerprintedSchema>::new();
@@ -323,6 +346,10 @@ impl ActiveGraph {
             hasher.update(&[0]);
             hasher.update(&schema.encoded);
             hasher.update(&[0]);
+        }
+        if let Some(encoded) = window_definition {
+            hasher.update(b"nervix/window-state/model");
+            hasher.update(&encoded);
         }
         SchemaFingerprint::from_digest(*hasher.finalize().as_bytes())
     }
@@ -1079,11 +1106,12 @@ pub(in crate::registry) fn ensure_drop_targets_are_not_in_use(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, fs};
+    use std::{collections::BTreeSet, fs, time::Duration};
 
     use nervix_models::{
         Assignment, AssignmentTarget, BranchSelection, CorrelationTimeoutAction,
-        CorrelationTimeoutPolicy, MaterializedRelayState, MaterializedStateDependency,
+        CorrelationTimeoutPolicy, CreateClientHttp, EmitSink, EmitterBody, EmitterPublishingMode,
+        HttpBodyMode, HttpConfigEntry, MaterializedRelayState, MaterializedStateDependency,
         MaterializedStatePolicy, MessageErrorPolicy, OutputBranch,
     };
 
@@ -1095,9 +1123,119 @@ mod tests {
             explicitly_unbranched_relay, full_graph_batch, ingestor_with_params, junction,
             materialized_relay, named, processor, relay_branched_by_relay_branch,
             relay_branched_like, schema, temp_db_path, unbranched_correlator, unbranched_ingestor,
-            wasm_processor, wire_schema,
+            wasm_processor, window_processor, wire_schema,
         },
     };
+
+    #[test]
+    fn active_http_emitter_retains_typed_request_plan() {
+        let path = temp_db_path();
+        let registry = Registry::open(&path).assured("a new temporary registry path is writable");
+        let domain = DomainName::parse("request_domain").assured("the test domain name is valid");
+        let Model::Emitter(mut http) = emitter("request", "incoming", "unused", "api") else {
+            unreachable!("the emitter fixture constructs an emitter Model")
+        };
+        let retry_policy = http.publishing_mode.retry_policy().clone();
+        http.body = EmitterBody::WithoutBody;
+        http.sink = Box::new(EmitSink::Http {
+            client: named("api"),
+            method: nervix_nspl::parse_expression("'POST'")
+                .assured("POST is a valid string expression"),
+            path: nervix_nspl::parse_expression("input.value")
+                .assured("input.value is a valid field expression"),
+        });
+        http.publishing_mode = EmitterPublishingMode::RequestAck { retry_policy };
+        http.construction =
+            nervix_nspl::parse_route_construction("INVOKE write_header('X-Value', input.value)")
+                .assured("write_header has two valid string expressions");
+        registry
+            .apply_batch(
+                &domain,
+                vec![
+                    schema("event"),
+                    explicitly_unbranched_relay("incoming", "event"),
+                    Model::ClientHttp(CreateClientHttp {
+                        name: named("api"),
+                        mount: None,
+                        config: vec![
+                            HttpConfigEntry {
+                                key: "endpoint".to_string(),
+                                value: "https://api.example.com".to_string(),
+                            },
+                            HttpConfigEntry {
+                                key: "timeout_ms".to_string(),
+                                value: "5000".to_string(),
+                            },
+                        ],
+                    }),
+                    Model::Emitter(http),
+                ],
+            )
+            .assured("the configured HTTP emitter satisfies the graph contract");
+
+        let graph = registry
+            .active_graph(&domain)
+            .assured("the committed domain has an active graph");
+        let plan = graph
+            .http_emitter_plan(&named("request"))
+            .assured("the HTTP emitter has a typed request plan");
+        assert_eq!(plan.client.timeout, Duration::from_secs(5));
+        assert_eq!(plan.body, HttpBodyMode::WithoutBody);
+        assert_eq!(plan.fields.output_schema.fields().len(), 2);
+        assert_eq!(
+            plan.route.as_ref().map(|route| route.invocations.len()),
+            Some(1)
+        );
+        assert_eq!(
+            plan.client
+                .origin
+                .target("/events")
+                .assured("a path on the client origin is valid")
+                .as_str(),
+            "/events"
+        );
+        fs::remove_dir_all(path).assured("the temporary registry can be removed");
+    }
+
+    #[test]
+    fn window_model_change_changes_its_state_fingerprint() {
+        fn fingerprint(width: u64) -> SchemaFingerprint {
+            let path = temp_db_path();
+            let registry = Registry::open(&path).expect("registry should open");
+            let domain = DomainName::parse("default").expect("valid domain");
+            let mut window = window_processor(
+                "window",
+                "notifications",
+                "summaries",
+                "SET value = FIRST(input.value)",
+            );
+            let Model::WindowProcessor(processor) = &mut window else {
+                unreachable!("the fixture constructs a window processor");
+            };
+            processor.width.messages = Some(width);
+            registry
+                .apply_batch(
+                    &domain,
+                    vec![
+                        schema("event_schema"),
+                        relay_branched_by_relay_branch("notifications", "event_schema"),
+                        relay_branched_like("summaries", "event_schema", "notifications"),
+                        branch_schema("value_branch", &["value"]),
+                        branch_for_relay("notifications", "value_branch"),
+                        window,
+                    ],
+                )
+                .expect("window graph should validate");
+            let graph = registry.active_graph(&domain).expect("graph should exist");
+            let node = NodeRef::new(ModelKind::WindowProcessor, named::<ModelName>("window"));
+            let index = graph.indices[&node];
+            let fingerprint = graph.schema_fingerprint_for_index(index);
+            let _ = fs::remove_dir_all(path);
+            fingerprint
+        }
+
+        assert_ne!(fingerprint(10), fingerprint(12));
+    }
 
     #[test]
     fn apply_batch_builds_full_graph_in_single_batch() {

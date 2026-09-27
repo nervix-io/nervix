@@ -43,9 +43,11 @@ load, a hash map's file must exist at its path, and an inferencer's ONNX model m
 the tensors the inferencer declares. The rest of a version's content is proven by the consumers that
 load it.
 
-A runtime consumer receives its model, and with it the pinned number, in the execution plan it is
-built from. It resolves that number to a local directory and nothing else. No consumer reads the
-catalog to choose a version.
+Domain activation resolves codec, signaling-protocol, and VHOST bindings into typed specifications
+with their pinned resource identity before a node installs them. Runtime compilation loads that
+exact version from the local store; the HTTPS listener does the same for the VHOST certificates.
+Neither path reads the catalog to choose a version. Running and stopped domains use the same
+activation decision, so a stop, restart, or reassignment cannot select another version.
 
 The HTTPS listener runs on every live node, independent of Raft leadership and graph placement,
 like every other entity that binds a configured listening port. It presents the TLS VHOSTs of the
@@ -204,11 +206,17 @@ clause. Omitting the clause is a parse error.
 | --- | --- | --- |
 | `VHOST ... WITH TLS` | `tls.crt`, `tls.key`, and `ca.crt` at the version root | When a node installs the TLS VHOSTs of a runtime revision into its HTTPS listener: on every live node, for running and stopped domains |
 | Protobuf `CODEC` | The `.proto` sources its configuration selects, or every `.proto` file in the version when it selects none, compiled into descriptors | When a node builds the domain's execution: on every live node, for running and stopped domains |
-| Protobuf `SIGNALING PROTOCOL` | The `.proto` sources it selects the same way, compiled into the descriptors of its send and wait messages | When a node builds the execution of a running domain |
+| Protobuf `SIGNALING PROTOCOL` | The `.proto` sources it selects the same way, compiled into the descriptors of its send and wait messages | When a node builds the domain's execution: on every live node, for running and stopped domains |
 | `INFERENCER` | The ONNX model file it names | When a branch instance first flushes output; each branch instance holds its own inference session |
 | `WASM PROCESSOR` | The module file it names, compiled into machine code | When a node builds the execution of a running domain or replaces the processor; a node keeps the compiled module only while the schedule assigns the processor to it as owner or replica, and each branch instantiates it when it first needs its guest |
 | `HASH MAP` | The file it names, decoded line by line through its codec into an in-memory index | When a node builds the domain's execution: on every live node, whatever the schedule assigns, for running and stopped domains |
 | `CLIENT ... MOUNT` | The version's content directory, linked into a temporary mount root; the connector reads the files it names from there | Whenever the client is instantiated, such as by an ingestor or emitter when it starts, or once per node for a pooled client; each client instance keeps its mount root for its lifetime |
+
+An HTTP emitter validates its referenced client's origin, attempt timeout and paired client
+certificate/key settings before its candidate graph activates. A TLS path rendered from `CLIENT
+... MOUNT` still names the pinned version in the client Model; validation does not fetch a newer
+version or probe the remote HTTP endpoint. Client instantiation reads the mounted CA or identity
+files at the existing load boundary above.
 
 ### The Pinning Invariant
 
@@ -255,7 +263,8 @@ What follows depends on who owns the plan. An ordinary command retains that fail
 starts another attempt, derived from the newer revision, under the same execution reference, so it
 plans again and `LATEST` binds the version that completed. An explicit transaction is frozen from
 `COMMIT` admission onwards: a basis that is already stale at admission leaves the transaction `OPEN`
-with a refreshed identity to commit again, and a conflict found after admission ends the
+with a refreshed identity; the Rust client requires an inspection of the attached transaction
+before retrying against that identity. A conflict found after admission ends the
 transaction instead of replanning it.
 
 Either way, a plan never commits a `LATEST` it resolved against an older catalog.
@@ -266,6 +275,9 @@ admission, and the frozen plan.
 
 `REBIND RESOURCE` is a model mutation. It changes the version the selected models bind and nothing
 else: it does not touch the catalog, and every other field of each model stays as written.
+Its operation reasons, effective model-run pause, resource-binding effects, and retained
+attribution use the shared [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md)
+report. This chapter owns version selection, pinning, activation, and rebinding failure semantics.
 
 ### Selection And Validation
 
@@ -286,7 +298,7 @@ sees models that earlier statements of the same transaction create or drop.
 5. The rebuilt models pass the same checks as `CREATE`: registry validation of the complete
    candidate graph, and the leader's content checks for each changed VHOST, hash map, inferencer,
    and WASM processor against the target version. One failing model rejects the whole statement, and
-   the error names it, for example `invalid INFERENCER '<name>': ...`.
+   the error names it, for example `INFERENCER '<name>' binding validation failed in domain '<domain>': ...`.
 
 A rejection at any of these steps happens before any effect: no model is stored, nothing pauses,
 and every usage keeps its version.
@@ -416,13 +428,18 @@ they are usable is a property of the model that binds them. A version whose cont
 use, such as a malformed TLS bundle, completes like any other upload, and every existing binding
 keeps its version. The problem is reported only when a statement binds that version: the leader's
 content checks reject it before any effect, for example with
-`invalid TLS resource for VHOST '<name>': no certificates found`, and content that only a consumer
-proves fails the statement's activation.
+`invalid TLS resource for VHOST '<name>' in domain '<domain>' from '<resource>@<version>': no certificates found in TLS CA certificate`,
+and content that only a consumer proves fails the statement's activation. TLS failures identify
+the certificate, private key, or CA certificate by kind without exposing its filesystem path or
+material in the command result or server log.
 
 ## The `DYNAMIC` TLS Refresh
 
 Every node's HTTPS listener presents the TLS VHOSTs of every domain in the runtime revision that
 node applied, including domains that are stopped, because a stopped domain keeps its schedule. For
+each revision the decision layer supplies the listener with VHOST specifications whose TLS resource
+identities already include the pinned version. Endpoint host and path decisions use those same
+VHOST hostnames, while stopped domains keep their routes inactive until they start. For
 each TLS VHOST the listener loads the pinned version's certificate chain and private key and
 presents them to clients whose SNI names one of the VHOST's hostnames. The certificate must be valid
 for every one of those hostnames; the leader's content check does not compare them, so a
@@ -489,7 +506,8 @@ Nervix does not provide:
   version, or module file, such as a rebinding, starts a new generation for every branch in the same
   schedule publication, so no checkpoint saved under the previous module can attach to the new one
   and every branch starts without guest state. A rebinding that leaves the processor's version
-  unchanged keeps its state. See [State Generations](./wasm-processor-guests.md#state-generations).
+  unchanged keeps its state. See [State Generations](./wasm-processor-guests.md#state-generations)
+  and [Rebinding And Rollback](./wasm-state.md#rebinding-and-rollback).
 - **Version deletion or retention.** Versions accumulate in the catalog and in every node's store.
   Plan storage for every version ever uploaded.
 
@@ -523,13 +541,13 @@ each kind of ending.
 
 | Signal | What it shows |
 | --- | --- |
-| `DESCRIBE RESOURCE <name>` | `latest:` as the highest completed version or `(none)`; every published version, including one still applying or failed after publication, with its checksums, sizes, and the entries of the answering node's copy; and `usages:`, one line per model that binds the resource with its pinned version. |
+| `DESCRIBE RESOURCE <name>` | `latest:` as the highest completed version or `(none)`; every published version, including one still applying or failed after publication, with its checksums, sizes, and the entries of the answering node's copy; and `usages:`, one line per model that binds the resource with its pinned version. Session clients receive the same facts as a typed resource description beside the text: an absent latest version stays absent, each entry keeps its exact path, and an unreadable manifest is reported as unavailable rather than as an empty version. |
 | `DESCRIBE RESOURCE <name> VERSION <n>` | The version's checksums, file count, size, and entries; one line per node with its topology, replica state, incarnation, checksum, verification time, source node, and error, taken from its live incarnation or, for a node that is not live, from its latest one; and the models pinned to that version, or `none`. |
 | `SHOW CREATE` | The stored number for every binding. A statement written with `LATEST` renders the number it resolved to. |
 | `DESCRIBE HASH MAP` | `resource: <name>@<n>` for the loaded version, together with the path, codec, placement, key field, and entry count. |
-| `DESCRIBE WASM PROCESSOR` | The module's `resource:` and pinned `resource version:`. |
+| `DESCRIBE WASM PROCESSOR` | The module's `resource:` and pinned `resource version:` beside the current guest-state generation and checkpoint status. A completed reset of the previous binding is not presented as a reset of the newly pinned module. |
 | Command results | `uploaded resource version <n>`, every `resolved VERSION LATEST ...` line, and the rebinding summary with one `from`/`to` line per selected usage. |
-| Web console | The highest completed version of each resource in the sidebar and, in the resource dialog, the models bound to each version. See [Web Console](./client-tools-web-console.md#uploading-resources). |
+| Web console | The highest completed version of each resource in the sidebar and, in the resource dialog, every version's entries and the models bound to it, read from the typed resource description. See [Web Console](./client-tools-web-console.md#uploading-resources). |
 | Server log | `rebound resource usages` at `info` once the leader has applied a rebinding's step, before the step's outcome is recorded, with the domain, resource, target version, and the counts of selected and changed usages; `installed HTTPS listener TLS configuration` at `info` whenever a node's listener starts presenting a changed set of certificates. |
 | Interconnect metrics | Archive fetches in flight and fetches refused for lack of capacity appear in `nervix_interconnect_pending_operations` and `nervix_interconnect_quota_failures_total` with `operation="resource"`. Their bytes count toward `nervix_interconnect_bulk_bytes_total{class="bulk"}`, which snapshots share. See [Metrics And Observability](./metrics-and-observability.md#interconnection-metrics). |
 

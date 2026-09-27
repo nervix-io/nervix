@@ -48,10 +48,11 @@ COMMIT;
 
 - The aggregate functions are `COUNT`, `COUNT_IF`, `SUM`, `AVG`, `MIN`, `MAX`, `FIRST`, `LAST`,
   `ARG_MIN`, `ARG_MAX`, `BOOL_AND`, `BOOL_OR`, `VAR_POP`, `VAR_SAMP`, `STDDEV_POP`, `STDDEV_SAMP`,
-  `COVAR_POP`, `COVAR_SAMP`, `CORR`, and `PERCENTILE_LINEAR_HISTOGRAM`. Aggregate calls also
-  participate in larger scalar expressions. See
-  [Window aggregate functions](processors.md#window-aggregate-functions) for their types, null
-  handling, and numerical behavior.
+  `COVAR_POP`, `COVAR_SAMP`, `CORR`, and `PERCENTILE_LINEAR_HISTOGRAM`, and the approximate
+  `APPROX_COUNT_DISTINCT`, `APPROX_QUANTILE`, and `APPROX_TOP_K`. Aggregate calls also participate
+  in larger scalar expressions. See
+  [Window Aggregates](filter-map-functions.md#window-aggregates) for their types, null handling,
+  numerical behavior, and the bounded state the approximate ones need.
 - A null argument contributes nothing to an aggregate. An aggregate that can be null, such as
   `VAR_SAMP` or any aggregate over an `OPTIONAL` field, needs an `OPTIONAL` output field or a
   `COALESCE`.

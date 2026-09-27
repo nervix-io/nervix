@@ -3,10 +3,14 @@ rustflags := env('RUSTFLAGS', '')
 build_mode := "debug"
 release_flag := if build_mode == "release" { "--release" } else { "" }
 cargo_target_dir := env("CARGO_TARGET_DIR", justfile_directory() + "/target")
+turmoil_failures := cargo_target_dir + "/turmoil-failures"
 
 build-deps: generate-test-onnx download-onnxruntime build-web-console wasm-processor-guests
 
-tests-deps: build-deps build-nspl-format
+tests-deps: build-deps build-nspl-format build-test-cli
+
+build-test-cli:
+    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo build --package nervix-cli --bin nervix-cli
 
 test: tests-deps
     #!/usr/bin/env bash
@@ -122,7 +126,8 @@ test-package-bins package *args:
 test-execution *args:
     cargo test --package nervix-execution --lib -- {{ args }}
 
-# Explore the filtered execution, interconnect and server invariants under Shuttle. The former Loom
+# Explore the filtered execution, interconnect and server invariants under Shuttle, then replay
+# randomized schedules to detect uncontrolled nondeterminism in every check. The former Loom
 # recipe is retired: acknowledgement races, the relay dispatch gate and the relay fan-out exercise
 # production types. A non-empty `filter` runs only the checks whose full names contain it.
 test-shuttle filter="": build-web-console wasm-processor-guests download-onnxruntime
@@ -131,6 +136,8 @@ test-shuttle filter="": build-web-console wasm-processor-guests download-onnxrun
     shuttle_packages=(nervix-execution nervix-interconnect nervix-server)
     for shuttle_package in "${shuttle_packages[@]}"; do
         just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
+        SHUTTLE_CHECK_NONDETERMINISM=1 \
+            just test-shuttle-package "${shuttle_package}" {{ quote(filter) }}
     done
 
 # Explore one package's filtered invariants under Shuttle. Each test gets its own process so a
@@ -183,13 +190,143 @@ test-shuttle-replay schedule: build-web-console wasm-processor-guests download-o
         cargo test --package "${shuttle_package}" --features shuttle --lib \
             "${shuttle_test}" -- --exact --test-threads=1 --nocapture
 
-# Tokio's unstable runtime knobs seed per-host scheduling and turn unhandled task panics into
-# runtime failures. Scope the cfg to this test mode; ordinary and Shuttle builds keep their flags.
-test-turmoil:
+# Run the Turmoil suite: the execution and library simulation checks, then every interconnect
+# scenario over its committed regression seeds. Tokio's unstable runtime knobs seed per-host
+# scheduling and turn unhandled task panics into runtime failures; the cfg is scoped to this test
+# mode, and ordinary and Shuttle builds keep their flags. After the build, the tests run inside a
+# real-time budget of `budget_seconds` and end with status 124 when it expires. A failed scenario
+# leaves a failure record under target/turmoil-failures for `test-turmoil-replay`.
+test-turmoil budget_seconds="480":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-execution --features turmoil --lib
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-interconnect --features turmoil --lib --test simulation
+    deadline=$((SECONDS + {{ budget_seconds }}))
+    within_budget() {
+        local remaining=$((deadline - SECONDS))
+        local status=0
+        if ((remaining > 0)); then
+            RUSTFLAGS="${turmoil_rustflags}" timeout --kill-after=30 "${remaining}" "$@" \
+                || status=$?
+        else
+            status=124
+        fi
+        if ((status == 124)); then
+            echo "the Turmoil suite exceeded its {{ budget_seconds }}s real-time budget;" \
+                "in-progress records under ${NERVIX_TURMOIL_FAILURES} name the unfinished runs" >&2
+        fi
+        return "${status}"
+    }
+    within_budget cargo test --package nervix-execution --features turmoil --lib -- \
+        --test-threads=1
+    within_budget cargo test --package nervix-interconnect --features turmoil --lib -- \
+        wire::simulation_checks authentication::simulation_tests --test-threads=1
+    within_budget cargo test --package nervix-interconnect --features turmoil --test simulation -- \
+        --test-threads=1
+
+# Run the interconnect's Turmoil simulation scenarios. Extra arguments filter or configure the test
+# binary, so one test can run without the execution and library checks.
+test-turmoil-simulation *args:
     #!/usr/bin/env bash
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
-    cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
+    export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
+    cargo test --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1 {{ args }}
+
+# Replay one Turmoil failure record in a fresh process with exactly its recorded inputs: the seed,
+# epoch, topology, network parameters, bounds and any injected failure. The record names the
+# package, test target and test, so nothing else runs. The replay reports how the recorded build
+# differs from this one, compares its outcome and semantic trace with the record, and fails when
+# the recorded failure reproduces.
+test-turmoil-replay record:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    record="$(realpath -e {{ quote(record) }})"
+    mapfile -t selection < <(
+        python3 -c 'import json, sys; scenario = json.load(open(sys.argv[1]))["scenario"]; print(scenario["package"], scenario["target"], scenario["test"], sep="\n")' "${record}"
+    )
+    if ((${#selection[@]} != 3)); then
+        echo "${record} is not a Turmoil failure record" >&2
+        exit 1
+    fi
+    output="$(mktemp)"
+    trap 'rm -f "${output}"' EXIT
+    status=0
+    NERVIX_TURMOIL_REPLAY="${record}" RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
+        cargo test --package "${selection[0]}" --features turmoil --test "${selection[1]}" -- \
+            "${selection[2]}" --exact --include-ignored --test-threads=1 --nocapture 2>&1 \
+        | tee "${output}" \
+        || status=$?
+    if ! grep -Fq 'turmoil replay of' "${output}"; then
+        echo "no scenario in ${selection[2]} matches ${record}; it may come from another revision" >&2
+        exit 1
+    fi
+    exit "${status}"
+
+# Prove the replay path end to end: inject a harness failure into one scenario, require exactly one
+# failure record, and reproduce it in a fresh process through `test-turmoil-replay`.
+test-turmoil-replay-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    check="$(mktemp -d)"
+    trap 'rm -rf "${check}"' EXIT
+    records="${check}/records"
+    if NERVIX_TURMOIL_FAILURES="${records}" NERVIX_TURMOIL_INJECT_FAILURE=5s \
+        RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
+        cargo test --package nervix-interconnect --features turmoil --test simulation -- \
+            transport::network_disruption_respects_deadlines_and_repairs_authenticated_service \
+            --exact --test-threads=1 >"${check}/injected.log" 2>&1; then
+        cat "${check}/injected.log"
+        echo "the injected harness failure did not fail its scenario" >&2
+        exit 1
+    fi
+    mapfile -t found < <(find "${records}" -name '*.json')
+    if ((${#found[@]} != 1)); then
+        cat "${check}/injected.log"
+        echo "expected one failure record, found ${#found[@]}" >&2
+        exit 1
+    fi
+    if just test-turmoil-replay "${found[0]}" >"${check}/replay.log" 2>&1; then
+        cat "${check}/replay.log"
+        echo "the replay of an injected failure passed" >&2
+        exit 1
+    fi
+    if ! grep -Fq 'turmoil replay: reproduced the recorded outcome and trace' \
+        "${check}/replay.log"; then
+        cat "${check}/replay.log"
+        echo "the replay did not reproduce the recorded failure" >&2
+        exit 1
+    fi
+    grep -F 'turmoil replay' "${check}/replay.log"
+
+# Explore every interconnect scenario over `count` consecutive seeds from `first` instead of its
+# committed regression seeds, running each seed twice, inside a real-time budget of
+# `budget_seconds`; the recipe ends with status 124 when the budget expires. A failure leaves a
+# record like any other run. A seed that exposes a defect joins its scenario's committed seeds
+# with the fix.
+test-turmoil-sweep first="1000" count="64" budget_seconds="1500":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    turmoil_rustflags="--cfg tokio_unstable ${RUSTFLAGS:-}"
+    export NERVIX_TURMOIL_FAILURES={{ quote(turmoil_failures) }}
+    first={{ quote(first) }}
+    end=$((first + {{ count }}))
+    RUSTFLAGS="${turmoil_rustflags}" cargo test --no-run \
+        --package nervix-interconnect --features turmoil --test simulation
+    status=0
+    NERVIX_TURMOIL_SWEEP="${first}..${end}" RUSTFLAGS="${turmoil_rustflags}" \
+        timeout --kill-after=30 {{ budget_seconds }} \
+        cargo test --package nervix-interconnect --features turmoil --test simulation -- \
+            --test-threads=1 || status=$?
+    if ((status == 124)); then
+        echo "the seed sweep exceeded its {{ budget_seconds }}s real-time budget;" \
+            "in-progress records under ${NERVIX_TURMOIL_FAILURES} name the unfinished runs" >&2
+    fi
+    exit "${status}"
 
 # Run the expression VM unit tests, which live in the nervix-vm crate rather than the server lib.
 test-vm *args:
@@ -209,6 +346,11 @@ test-consensus *args:
 test-interconnect *args:
     cargo test --package nervix-interconnect --lib -- {{ args }}
 
+# Run the resolver's unit tests and its focused protocol tests, which ask local DNS authorities the
+# tests start themselves.
+test-dns *args:
+    cargo test --package nervix-dns --all-targets -- {{ args }}
+
 # Run the connector unit tests, which live in the nervix-connector contract crate and in every
 # nervix-connector-* integration crate rather than the server lib.
 test-connectors *args:
@@ -217,6 +359,58 @@ test-connectors *args:
 # Run the session wire codec tests and the gRPC and WebSocket sessions that carry its frames.
 test-client-wire *args:
     cargo test --package nervix-client-wire --all-features --all-targets -- {{ args }}
+
+# Rewrite the client wire conformance corpus from the encoder's current output. Review the
+# regenerated `corpus.report` before committing it: every client implementation is held to it.
+update-client-wire-corpus:
+    NERVIX_UPDATE_CLIENT_WIRE_CORPUS=1 cargo test --package nervix-client-wire --lib -- \
+        tests::conformance
+
+# Build what the cross-language client probes run: the shared Rust binding, the C and C++ probes
+# linked against it, the Go probe with its generated FlatBuffers code, and the TypeScript probe
+# bundled with its generated code for Node.js and Bun. Every generated file lands under the
+# artifacts directory, never in the source tree.
+build-client-conformance:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifacts={{ quote(cargo_target_dir + "/client-conformance") }}
+    library_dir={{ quote(cargo_target_dir + "/debug") }}
+    schema="${PWD}/crates/client-wire/schema/session.fbs"
+    mkdir -p "${artifacts}"
+    cargo build --package nervix-client-ffi
+    cc -std=c11 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include \
+        tests/client_conformance/c/probe.c \
+        -L "${library_dir}" -lnervix_client_ffi -Wl,-rpath,"${library_dir}" \
+        -o "${artifacts}/c-probe"
+    c++ -std=c++17 -Wall -Wextra -Werror -pthread -I crates/client-ffi/include \
+        tests/client_conformance/cpp/probe.cpp \
+        -L "${library_dir}" -lnervix_client_ffi -Wl,-rpath,"${library_dir}" \
+        -o "${artifacts}/cpp-probe"
+    rm -rf "${artifacts}/go" && mkdir -p "${artifacts}/go"
+    cp tests/client_conformance/go/go.mod tests/client_conformance/go/go.sum \
+        tests/client_conformance/go/*.go "${artifacts}/go/"
+    flatc --go -o "${artifacts}/go" "${schema}"
+    (cd "${artifacts}/go" && go build -o "${artifacts}/go-probe" .)
+    rm -rf "${artifacts}/node-src" "${artifacts}/node" && mkdir -p "${artifacts}/node-src"
+    cp tests/client_conformance/node/package.json tests/client_conformance/node/package-lock.json \
+        tests/client_conformance/node/probe.ts "${artifacts}/node-src/"
+    flatc --ts -o "${artifacts}/node-src/generated" "${schema}"
+    (cd "${artifacts}/node-src" && npm ci --no-audit --no-fund && \
+        ./node_modules/.bin/esbuild probe.ts --bundle --platform=node --format=esm \
+            --target=es2022 --outfile="${artifacts}/node/probe.mjs")
+
+# Run the cross-language client probes against in-process clusters. Every probe prints the same
+# report, which the scenario compares with its one expected report. Select runtimes with a tag
+# expression, for example `just test-client-conformance '@client_probe_python or @client_probe_java'`.
+test-client-conformance tags="@client_conformance_toolchain" *args: tests-deps build-client-conformance
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    export NERVIX_CLIENT_CONFORMANCE_DIR={{ quote(cargo_target_dir + "/client-conformance") }}
+    export NERVIX_CLIENT_LIBRARY={{ quote(cargo_target_dir + "/debug/libnervix_client_ffi.so") }}
+    cargo test --features testing --test scenarios -- \
+        --input tests/features/runtime/client_conformance.feature \
+        --tags {{ quote(tags) }} {{ args }}
 
 test-runtime-state-capabilities: tests-deps
     #!/usr/bin/env bash
@@ -268,6 +462,10 @@ test-coverage: tests-deps
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --all-targets --all-features --workspace \
         "${workspace_exclusions[@]}"
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
     cargo llvm-cov --no-report --all-targets --features testing --package nervix-server
     cargo llvm-cov --no-report --all-targets \
         --package nervix-client-core \
@@ -276,28 +474,69 @@ test-coverage: tests-deps
         --package nervix-execution \
         --package nervix-interconnect \
         --package nervix-wasm
-    RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}" \
-        cargo llvm-cov --no-rustc-wrapper --no-report --package nervix-interconnect --features turmoil --test simulation
     cargo llvm-cov report --lcov --output-path lcov.info
     cargo crap --lcov lcov.info --min 30 --threshold 30
+    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
+        --package nervix-server --lcov --output-path lcov.info
+
+# Rewrite lcov.info from the profiles the last coverage recipe collected, over the sources of every
+# workspace package, so crate lines the server's tests executed are measured as CI measures them.
+coverage-report-workspace:
+    cargo llvm-cov report --workspace --lcov --output-path lcov.info
 
 # Measure changed server lines against its unit tests and selected Cucumber features while iterating.
 # The full `test-coverage` recipe remains the CI gate for workspace coverage and CRAP.
-test-coverage-feature feature additional_feature="": tests-deps
+test-coverage-feature +features: tests-deps
     #!/usr/bin/env bash
     set -euo pipefail
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
-    feature={{ quote(feature) }}
-    additional_feature={{ quote(additional_feature) }}
     cargo llvm-cov clean --workspace
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
-    cargo llvm-cov --no-report --features testing --package nervix-server \
-        --test scenarios -- --input "${feature}" --concurrency 1
-    if [[ -n "${additional_feature}" ]]; then
+    for feature in {{ features }}; do
         cargo llvm-cov --no-report --features testing --package nervix-server \
-            --test scenarios -- --input "${additional_feature}" --concurrency 1
-    fi
+            --test scenarios -- --input "${feature}" --concurrency 1
+    done
     cargo llvm-cov report --lcov --output-path lcov.info
+
+# Measure browser and CLI binary tests together with their public session scenarios.
+test-coverage-clients: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --bins \
+        --package nervix-web-console --package nervix-cli
+    just coverage-cli-binary
+    export NERVIX_TEST_CLI_PATH={{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-cli") }}
+    install -m 755 {{ quote(cargo_target_dir + "/debug/nervix-nspl-format") }} \
+        {{ quote(cargo_target_dir + "/llvm-cov-target/debug/nervix-nspl-format") }}
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib
+    for feature in \
+        tests/features/web-console/connection_status.feature \
+        tests/features/web-console/nspl_repl.feature \
+        tests/features/tools/cli_session.feature; do
+        cargo llvm-cov --no-report --features testing --package nervix-server \
+            --test scenarios -- --input "${feature}" --concurrency 1
+    done
+    just coverage-clients-report
+
+coverage-clients-report:
+    cargo llvm-cov report --package nervix-cli --package nervix-web-console \
+        --package nervix-server --lcov --output-path lcov.info
+
+# Build the standalone CLI with the same coverage flags as its binary unit tests. Cargo's
+# all-targets test pass alone leaves only the test executable, which public scenarios do not run.
+coverage-cli-binary:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source <(cargo llvm-cov show-env --sh 2>/dev/null)
+    CARGO_TARGET_DIR={{ quote(cargo_target_dir + "/llvm-cov-target") }} \
+        cargo build --package nervix-cli --bin nervix-cli
+
+coverage-clients-units:
+    cargo llvm-cov --no-report --bins \
+        --package nervix-web-console --package nervix-cli
+    just coverage-clients-report
 
 # Write the line coverage of the unit tests of the packages named in `args`, such as
 # `--package nervix-vm --package nervix-nspl`, as LCOV to `output`. It checks the patch coverage of
@@ -305,13 +544,102 @@ test-coverage-feature feature additional_feature="": tests-deps
 coverage-lib output *args:
     cargo llvm-cov --lib --lcov --output-path {{ output }} {{ args }}
 
+# Measure selected public scenarios with the same arguments as `test-scenarios`.
+coverage-scenarios output *args: tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
+
+# Collect the changed DNS client units and their public one-/three-node paths into one LCOV
+# profile so patch coverage can be checked before opening the PR.
+coverage-dns-clients output="target/dns-clients.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --all-targets \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-http \
+        --package nervix-connector-prometheus \
+        --package nervix-connector-sentry \
+        --package nervix-connector-otel \
+        --package nervix-connector-iceberg
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib
+    run_scenario() {
+        cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+            --input "$1" --name "$2" --retry 0 --concurrency 1
+    }
+    run_scenario tests/features/runtime/http_client_ingestion.feature 'DNS.*fixture'
+    run_scenario tests/features/runtime/prometheus_ingestion.feature 'Prometheus.*delivers'
+    run_scenario tests/features/runtime/sentry_emission.feature 'Sentry.*publishes'
+    run_scenario tests/features/runtime/otel_emission.feature 'OTEL.*metric.*HTTP'
+    run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
+    just coverage-dns-clients-report {{ quote(output) }}
+
+# Export the profiles collected by `coverage-dns-clients` without rebuilding its test binaries.
+coverage-dns-clients-report output="target/dns-clients.lcov":
+    cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
+        --package nervix-server \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-http \
+        --package nervix-connector-prometheus \
+        --package nervix-connector-sentry \
+        --package nervix-connector-otel \
+        --package nervix-connector-iceberg
+
+# Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
+# The same checks run under ordinary and nondeterminism-detection schedules, with one test thread
+# so Shuttle's scheduler state is not shared between tests.
+coverage-shuttle output: build-web-console wasm-processor-guests download-onnxruntime
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    for shuttle_package in nervix-execution nervix-interconnect nervix-server; do
+        SHUTTLE_REPORT_STEPS=1 cargo llvm-cov test --no-report \
+            --package "${shuttle_package}" --features shuttle --lib shuttle_ -- --test-threads=1
+        SHUTTLE_CHECK_NONDETERMINISM=1 cargo llvm-cov test --no-report \
+            --package "${shuttle_package}" --features shuttle --lib shuttle_ -- --test-threads=1
+    done
+    cargo llvm-cov report --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }}
+
+# Write line coverage for binary unit tests, such as the CLI's main target.
+coverage-bins output *args:
+    cargo llvm-cov --bins --lcov --output-path {{ output }} {{ args }}
+
+# Exercise the one-shot CLI binary through the public transaction scenario with LLVM coverage.
+coverage-cli-process output="target/cli-process.lcov":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    coverage_dir="{{ cargo_target_dir }}/cli-process"
+    mkdir -p "$coverage_dir"
+    CARGO_TARGET_DIR="$coverage_dir" RUSTFLAGS="-C instrument-coverage ${RUSTFLAGS:-}" \
+        cargo build --package nervix-cli --bin nervix-cli
+    rm -f "$coverage_dir"/cli-*.profraw
+    LLVM_PROFILE_FILE="$coverage_dir/cli-%p-%m.profraw" \
+        NERVIX_TEST_CLI_PATH="$coverage_dir/debug/nervix-cli" \
+        just test-scenarios --input tests/features/runtime/nspl_transactions.feature --name CLI
+    llvm_bin="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | awk '/^host:/{print $2}')/bin"
+    "$llvm_bin/llvm-profdata" merge -sparse "$coverage_dir"/*.profraw -o "$coverage_dir/merged.profdata"
+    "$llvm_bin/llvm-cov" export "$coverage_dir/debug/nervix-cli" \
+        --instr-profile="$coverage_dir/merged.profdata" --format=lcov > {{ quote(output) }}
+
 # Measure the Turmoil runner's changed lines without running the full scenario suite.
 coverage-turmoil output:
     #!/usr/bin/env bash
     set -euo pipefail
     export RUSTFLAGS="--cfg tokio_unstable ${RUSTFLAGS:-}"
-    cargo llvm-cov --no-rustc-wrapper --no-default-ignore-filename-regex \
-        --package nervix-interconnect --features turmoil --test simulation \
+    cargo llvm-cov --no-report \
+        --package nervix-execution --features turmoil --lib
+    cargo llvm-cov --no-report \
+        --package nervix-interconnect --features turmoil --lib -- \
+        wire::simulation_checks authentication::simulation_tests --test-threads=1
+    cargo llvm-cov --no-report \
+        --package nervix-interconnect --features turmoil --test simulation -- --test-threads=1
+    cargo llvm-cov report --no-default-ignore-filename-regex \
         --lcov --output-path {{ quote(output) }}
 
 # Run every Criterion suite. Extra arguments are forwarded to Criterion, so CI can use
@@ -338,6 +666,11 @@ bench-wasm-checkpoint *args:
 # group filter and `--save-baseline` or `--baseline` compare VM kernels without the relay suite.
 bench-vm *args:
     cargo bench --package nervix-vm --bench vm -- {{ args }}
+
+# Run the same VM Criterion harness with one-shot allocation and output-size probes. The
+# instrumentation is compiled only for this recipe; use `bench-vm` for timing comparisons.
+bench-vm-alloc *args:
+    cargo bench --package nervix-vm --bench vm --features benchmark-allocations -- {{ args }}
 
 # Build the reusable harness and forward its CLI arguments. This is enough for container subjects
 # such as Vector; local Nervix has a dedicated recipe below because it also builds the server.
@@ -548,9 +881,32 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-http-dns-dependencies
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
+# Check each connector as a consumer root. Cargo tree limits feature unification to that root;
+# the full workspace build alone can hide a missing resolver feature in a leaf connector.
+validate-http-dns-dependencies:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for package in nervix-connector-http nervix-connector-prometheus nervix-connector-sentry nervix-connector-otel nervix-connector-iceberg; do
+        graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
+        if ! rg -q '^reqwest v0\.13\.[0-9]+ .*hickory-dns' <<< "${graph}"; then
+            echo "${package} lacks Reqwest 0.13 Hickory DNS" >&2
+            exit 1
+        fi
+        if [[ "${package}" == nervix-connector-iceberg ]] && \
+            ! rg -q '^reqwest v0\.12\.[0-9]+ .*hickory-dns' <<< "${graph}"; then
+            echo "${package} lacks Reqwest 0.12 Hickory DNS" >&2
+            exit 1
+        fi
+        if [[ "${package}" == nervix-connector-iceberg ]] && \
+            rg -q '^reqwest v0\.12\.[0-9]+ [^ ]*__rustls-ring' <<< "${graph}"; then
+            echo "${package} selected Reqwest 0.12's Ring TLS provider" >&2
+            exit 1
+        fi
+    done
+
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-http-dns-dependencies
 
 # Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
 # graphs use the real synchronization crates directly and contain no Shuttle package.
@@ -566,35 +922,54 @@ validate-shuttle-dependencies:
         exit 1
     fi
 
-# The normal workspace graph must not pull the optional simulation scheduler into production.
+# The normal workspace graph, with or without default features, must not pull the optional
+# simulation scheduler into production.
 validate-turmoil-dependencies:
     #!/usr/bin/env bash
     set -euo pipefail
-    if cargo tree --workspace --edges normal --no-default-features --prefix none \
-        | grep -E '^turmoil([[:space:]-]|$)'; then
-        echo "the production workspace includes Turmoil" >&2
-        exit 1
-    fi
+    production_graphs=(
+        "$(cargo tree --workspace --edges normal --prefix none)"
+        "$(cargo tree --workspace --edges normal --no-default-features --prefix none)"
+    )
+    for production_graph in "${production_graphs[@]}"; do
+        if printf '%s\n' "${production_graph}" | grep -E '^turmoil([[:space:]-]|$)'; then
+            echo "the production workspace includes Turmoil" >&2
+            exit 1
+        fi
+    done
 
-# Keep a precise diagnostic when the two scheduler modes are accidentally selected together.
+# Keep a precise diagnostic when the two scheduler modes are accidentally selected together, in
+# every package that offers both.
 validate-simulation-feature-conflict:
     #!/usr/bin/env bash
     set -euo pipefail
     diagnostics="$(mktemp)"
     trap 'rm -f "${diagnostics}"' EXIT
-    if cargo check --package nervix-interconnect --features 'shuttle turmoil' --lib \
-        >"${diagnostics}" 2>&1; then
-        echo "Shuttle and Turmoil unexpectedly compiled together" >&2
-        exit 1
-    fi
-    if ! grep -Fq 'Shuttle and Turmoil scheduler modes cannot be enabled together' \
-        "${diagnostics}"; then
-        cat "${diagnostics}" >&2
-        exit 1
-    fi
+    for package in nervix-execution nervix-interconnect; do
+        if cargo check --package "${package}" --features 'shuttle turmoil' --lib \
+            >"${diagnostics}" 2>&1; then
+            echo "${package}: Shuttle and Turmoil unexpectedly compiled together" >&2
+            exit 1
+        fi
+        if ! grep -Fq 'Shuttle and Turmoil scheduler modes cannot be enabled together' \
+            "${diagnostics}"; then
+            cat "${diagnostics}" >&2
+            exit 1
+        fi
+    done
 
 validate-clock-boundaries:
     python3 scripts/check_clock_boundaries.py
+
+# Reject `Result<_, String>` in product code. A typed error is a rule, not a count, so there is no
+# baseline to raise: any occurrence fails and names the rule.
+validate-typed-errors:
+    python3 -m scripts.check_typed_errors
+
+# Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
+# unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.
+test-nspl *args:
+    cargo test --package nervix-nspl --package nervix-nspl-format --all-targets -- {{ args }}
 
 # Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
@@ -607,13 +982,13 @@ test-docs:
 
 # Screenshots are recaptured from the current console and the nervix-cli reference chapter is
 # rendered from the current binary, so a published book can never describe an older build.
-book version="": test-docs docs-screenshots
+book version="0.1.0-dev": test-docs docs-screenshots
     python scripts/build_book.py --version {{ version }}
 
 validate-skill:
     env GH_PROMPT_DISABLED=1 gh skill publish .agents/skills --dry-run
 
-book-pdf version="" output="":
+book-pdf version="0.1.0-dev" output="":
     #!/usr/bin/env bash
     set -euo pipefail
     just book "{{ version }}"
@@ -697,6 +1072,10 @@ deps:
 
 deps-down:
     docker compose down --remove-orphans --volumes
+
+# Run black-box cluster scenarios against an explicitly supplied, already-built Nervix image.
+chaos *args:
+    bash scripts/chaos/chaos.sh {{ args }}
 
 server *args: build-deps generate-dev-tls
     NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \

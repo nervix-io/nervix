@@ -128,12 +128,12 @@ callbacks onto the trait:
 
 | Trait method | When the host calls it |
 | --- | --- |
-| `create` | Branch initialization, with the decoded `BranchInit` payload as a `BranchContext`: domain, serialized branch key, and the exact input and output schemas. |
+| `create` | Branch initialization, with the decoded `BranchInit` payload as a `BranchContext`: domain, the concrete branch key, which is absent for the unbranched instance of an unbranched processor, and the exact input and output schemas. |
 | `process_batch` | One input envelope, decoded into an `InputBatch`: Arrow record batches and the ACK sidecar. |
 | `on_timeout` | A previously requested domain-clock timeout fired. |
-| `flush` | The runtime is quiescing this branch for a handoff or shutdown. Emit everything the processor still buffers; whatever it keeps stays unacknowledged until the branch resumes. |
-| `save_state` | After the host dispatches the output of a successful `process_batch` or `on_timeout`, and when it checkpoints the branch for an ownership handoff. Return the processor's durable computation state, or an error when it cannot be serialized. |
-| `restore` | The host recreates the branch instance, for example after a restart or on the node a branch moved to, and hands it the application state saved last. |
+| `flush` | The runtime is quiescing this branch: for an entity or domain pause, an ownership move, a coordinated reset, or a shutdown. Emit everything the processor still buffers; whatever it keeps stays unacknowledged until the branch resumes. |
+| `save_state` | After every `process_batch` and `on_timeout` call, whether it succeeded or failed, unless it exhausted a limit or requested a new state lifetime; after a `flush` that emitted output; and when the host checkpoints the branch for an ownership handoff. Return the processor's durable computation state, or an error when it cannot be serialized. |
+| `restore` | The host recreates the branch instance, for example after a restart or on the node a branch moved to, and hands it the application state of the checkpoint the branch continues from. |
 
 Keep all state branch-local. Never aggregate across branch keys inside one
 guest, and reject init payloads whose schemas the guest does not implement
@@ -191,7 +191,8 @@ surface as Wasmtime traps, which the host also treats as global errors.
 ## Guest State
 
 The runtime persists and replicates guest state so it can recreate a branch
-instance. `save_state` returns the processor's durable computation state:
+instance; [WASM State And Recovery](./wasm-state.md) describes how. `save_state`
+returns the processor's durable computation state:
 whatever a recreated instance needs to continue the computation, such as
 counters, aggregates, or open windows. The SDK stores those application bytes
 in its snapshot together with the branch configuration the instance was

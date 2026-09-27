@@ -2,17 +2,20 @@
 //!
 //! Layer: engines and infrastructure.
 //!
-//! - **Owns.** Loading cluster trust, TLS 1.3 configuration, and certificate SAN identity.
+//! - **Owns.** Loading cluster trust, TLS 1.3 configuration, certificate SAN identity, and the
+//!   identity a transport binds as.
 //! - **Depends on.** The shared cluster node name vocabulary and X.509/TLS primitives.
 //! - **Must not know.** HTTP/2 pools, request routing, or runtime operations.
 
 use std::{io, net::IpAddr, path::Path, sync::Arc as StdArc};
 
 use error_stack::Report;
+use meticulous::OptionExt as _;
 use nervix_models::ClusterNodeName;
 use percent_encoding::percent_decode_str;
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
+    crypto::CryptoProvider,
     pki_types::{CertificateDer, PrivateKeyDer},
     server::WebPkiClientVerifier,
 };
@@ -23,7 +26,7 @@ use x509_parser::{
     prelude::{FromDer as _, X509Certificate},
 };
 
-use super::TlsConfigError;
+use super::{TlsConfigError, TlsPemFailureKind, TlsPemFileKind, TransportClock};
 
 const INTERCONNECT_ALPN: &[u8] = b"h2";
 
@@ -185,11 +188,21 @@ fn parse_identity_uri(raw: &str) -> Result<(String, ClusterNodeName), Report<Tls
     Ok((cluster_id, node_id))
 }
 
+/// Who one transport is: the cluster and node its certificate must name, and the host it
+/// advertises, which its certificate must also name.
+#[derive(Debug, Clone)]
+pub struct TransportIdentity {
+    pub cluster_id: String,
+    pub node_id: ClusterNodeName,
+    pub advertised_host: String,
+}
+
 #[derive(Clone)]
 pub struct TlsConfigBundle {
     pub(crate) client_config: StdArc<ClientConfig>,
     pub(crate) server_config: StdArc<ServerConfig>,
     pub(crate) certificate: CertificateIdentity,
+    pub(crate) clock: TransportClock,
 }
 
 impl TlsConfigBundle {
@@ -197,39 +210,46 @@ impl TlsConfigBundle {
         ca_cert_path: impl AsRef<Path>,
         cert_path: impl AsRef<Path>,
         key_path: impl AsRef<Path>,
+        clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
         super::install_rustls_crypto_provider();
 
-        let ca_certs = load_certificates(ca_cert_path.as_ref())?;
-        let cert_chain = load_certificates(cert_path.as_ref())?;
-        let certificate =
-            CertificateIdentity::from_certificate(cert_chain.first().ok_or_else(|| {
-                TlsConfigError::MissingCertificate(cert_path.as_ref().display().to_string())
-            })?)?;
-        let private_key = load_private_key(key_path.as_ref())?;
+        let ca_certs = load_certificates(ca_cert_path.as_ref(), TlsPemFileKind::CaCertificate)?;
+        let cert_chain = load_certificates(cert_path.as_ref(), TlsPemFileKind::NodeCertificate)?;
+        let certificate = CertificateIdentity::from_certificate(
+            cert_chain
+                .first()
+                .verified("load_certificates returned a nonempty certificate chain"),
+        )?;
+        let private_key = load_private_key(key_path.as_ref(), TlsPemFileKind::NodePrivateKey)?;
 
-        Self::from_parts(ca_certs, cert_chain, private_key, certificate)
+        Self::from_parts(ca_certs, cert_chain, private_key, certificate, clock)
     }
 
     /// Builds one immutable client/server TLS bundle from a consistent in-memory view of its PEM
     /// files. Callers that watch projected secrets can read all files before replacing a live
     /// bundle, without the parser reopening paths that may change between reads.
+    ///
+    /// `clock` judges certificate validity for Rustls verification on both sides of every
+    /// handshake and for the transport's own validity and expiry checks.
     pub fn from_pem(
         ca_cert_pem: &[u8],
         cert_pem: &[u8],
         key_pem: &[u8],
+        clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
         super::install_rustls_crypto_provider();
 
-        let ca_certs = load_certificates_from_pem(ca_cert_pem, "CA certificate PEM")?;
-        let cert_chain = load_certificates_from_pem(cert_pem, "node certificate PEM")?;
-        let certificate =
-            CertificateIdentity::from_certificate(cert_chain.first().ok_or_else(|| {
-                TlsConfigError::MissingCertificate("node certificate PEM".to_string())
-            })?)?;
-        let private_key = load_private_key_from_pem(key_pem, "node private-key PEM")?;
+        let ca_certs = load_certificates_from_pem(ca_cert_pem, TlsPemFileKind::CaCertificate)?;
+        let cert_chain = load_certificates_from_pem(cert_pem, TlsPemFileKind::NodeCertificate)?;
+        let certificate = CertificateIdentity::from_certificate(
+            cert_chain
+                .first()
+                .verified("load_certificates_from_pem returned a nonempty certificate chain"),
+        )?;
+        let private_key = load_private_key_from_pem(key_pem, TlsPemFileKind::NodePrivateKey)?;
 
-        Self::from_parts(ca_certs, cert_chain, private_key, certificate)
+        Self::from_parts(ca_certs, cert_chain, private_key, certificate, clock)
     }
 
     fn from_parts(
@@ -237,24 +257,32 @@ impl TlsConfigBundle {
         cert_chain: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
         certificate: CertificateIdentity,
+        clock: TransportClock,
     ) -> Result<Self, Report<TlsConfigError>> {
         let mut roots = RootCertStore::empty();
         for cert in ca_certs {
             roots.add(cert).map_err(TlsConfigError::from)?;
         }
+        let crypto = CryptoProvider::get_default()
+            .verified("every public constructor installs the process crypto provider first");
 
         let mut client_config =
-            ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            ClientConfig::builder_with_details(StdArc::clone(crypto), clock.provider())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(TlsConfigError::from)?
                 .with_root_certificates(roots.clone())
                 .with_client_auth_cert(cert_chain.clone(), private_key.clone_key())
                 .map_err(TlsConfigError::from)?;
         client_config.alpn_protocols = vec![INTERCONNECT_ALPN.to_vec()];
 
-        let verifier = WebPkiClientVerifier::builder(StdArc::new(roots))
-            .build()
-            .map_err(|error| TlsConfigError::Io(io::Error::other(error.to_string())))?;
+        let verifier =
+            WebPkiClientVerifier::builder_with_provider(StdArc::new(roots), StdArc::clone(crypto))
+                .build()
+                .map_err(|error| TlsConfigError::Io(io::Error::other(error.to_string())))?;
         let mut server_config =
-            ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            ServerConfig::builder_with_details(StdArc::clone(crypto), clock.provider())
+                .with_protocol_versions(&[&rustls::version::TLS13])
+                .map_err(TlsConfigError::from)?
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(cert_chain, private_key)
                 .map_err(TlsConfigError::from)?;
@@ -264,75 +292,82 @@ impl TlsConfigBundle {
             client_config: StdArc::new(client_config),
             server_config: StdArc::new(server_config),
             certificate,
+            clock,
         })
     }
 }
 
-fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, Report<TlsConfigError>> {
+fn load_certificates(
+    path: &Path,
+    file: TlsPemFileKind,
+) -> Result<Vec<CertificateDer<'static>>, Report<TlsConfigError>> {
     let certs = CertificateDer::pem_file_iter(path)
-        .map_err(map_pem_error)?
+        .map_err(|error| map_pem_error(file, error))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(map_pem_error)?;
+        .map_err(|error| map_pem_error(file, error))?;
     if certs.is_empty() {
-        return Err(Report::new(TlsConfigError::MissingCertificate(
-            path.display().to_string(),
-        )));
+        return Err(Report::new(TlsConfigError::MissingCertificate { file }));
     }
     Ok(certs)
 }
 
-fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, Report<TlsConfigError>> {
+fn load_private_key(
+    path: &Path,
+    file: TlsPemFileKind,
+) -> Result<PrivateKeyDer<'static>, Report<TlsConfigError>> {
     match PrivateKeyDer::from_pem_file(path) {
         Ok(key) => Ok(key),
-        Err(PemError::NoItemsFound) => Err(Report::new(TlsConfigError::MissingPrivateKey(
-            path.display().to_string(),
-        ))),
-        Err(error) => Err(Report::new(map_pem_error(error))),
+        Err(PemError::NoItemsFound) => Err(Report::new(TlsConfigError::MissingPrivateKey { file })),
+        Err(error) => Err(Report::new(map_pem_error(file, error))),
     }
 }
 
 fn load_certificates_from_pem(
     pem: &[u8],
-    source: &'static str,
+    file: TlsPemFileKind,
 ) -> Result<Vec<CertificateDer<'static>>, Report<TlsConfigError>> {
     let certificates = CertificateDer::pem_slice_iter(pem)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(map_pem_error)?;
+        .map_err(|error| map_pem_error(file, error))?;
     if certificates.is_empty() {
-        return Err(Report::new(TlsConfigError::MissingCertificate(
-            source.to_string(),
-        )));
+        return Err(Report::new(TlsConfigError::MissingCertificate { file }));
     }
     Ok(certificates)
 }
 
 fn load_private_key_from_pem(
     pem: &[u8],
-    source: &'static str,
+    file: TlsPemFileKind,
 ) -> Result<PrivateKeyDer<'static>, Report<TlsConfigError>> {
     match PrivateKeyDer::from_pem_slice(pem) {
         Ok(key) => Ok(key),
-        Err(PemError::NoItemsFound) => Err(Report::new(TlsConfigError::MissingPrivateKey(
-            source.to_string(),
-        ))),
-        Err(error) => Err(Report::new(map_pem_error(error))),
+        Err(PemError::NoItemsFound) => Err(Report::new(TlsConfigError::MissingPrivateKey { file })),
+        Err(error) => Err(Report::new(map_pem_error(file, error))),
     }
 }
 
-fn map_pem_error(error: PemError) -> TlsConfigError {
-    match error {
-        PemError::NoItemsFound => TlsConfigError::Io(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "no PEM items found",
-        )),
-        PemError::Io(error) => TlsConfigError::Io(error),
-        other => TlsConfigError::Io(io::Error::new(io::ErrorKind::InvalidData, other)),
-    }
+fn map_pem_error(file: TlsPemFileKind, error: PemError) -> TlsConfigError {
+    let kind = match error {
+        PemError::NoItemsFound => TlsPemFailureKind::NoItemsFound,
+        PemError::MissingSectionEnd { .. } => TlsPemFailureKind::MissingSectionEnd,
+        PemError::IllegalSectionStart { .. } => TlsPemFailureKind::IllegalSectionStart,
+        PemError::Base64Decode(_) => TlsPemFailureKind::Base64Decode,
+        PemError::Io(error) => TlsPemFailureKind::Io(error.kind()),
+        PemError::SectionTooLarge => TlsPemFailureKind::SectionTooLarge,
+        _ => TlsPemFailureKind::Unclassified,
+    };
+    TlsConfigError::MalformedPem { file, kind }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_identity_uri;
+    use std::io;
+
+    use error_stack::Report;
+    use rustls_pki_types::pem::Error as PemError;
+
+    use super::{TlsConfigBundle, map_pem_error, parse_identity_uri};
+    use crate::{TlsConfigError, TlsPemFailureKind, TlsPemFileKind, TransportClock};
 
     #[test]
     fn identity_uri_rejects_components_outside_the_canonical_shape() {
@@ -347,5 +382,69 @@ mod tests {
                 "noncanonical identity URI should be rejected: {uri}"
             );
         }
+    }
+
+    #[test]
+    fn pem_diagnostics_do_not_include_input_bytes_or_file_paths() {
+        let secret = "SECRET_CERTIFICATE_OR_KEY_MATERIAL";
+        let samples = [
+            (
+                PemError::IllegalSectionStart {
+                    line: secret.as_bytes().to_vec(),
+                },
+                TlsPemFileKind::CaCertificate,
+                TlsPemFailureKind::IllegalSectionStart,
+            ),
+            (
+                PemError::MissingSectionEnd {
+                    end_marker: secret.as_bytes().to_vec(),
+                },
+                TlsPemFileKind::NodeCertificate,
+                TlsPemFailureKind::MissingSectionEnd,
+            ),
+            (
+                PemError::Base64Decode(secret.to_string()),
+                TlsPemFileKind::NodePrivateKey,
+                TlsPemFailureKind::Base64Decode,
+            ),
+            (
+                PemError::Io(io::Error::other(secret)),
+                TlsPemFileKind::NodePrivateKey,
+                TlsPemFailureKind::Io(io::ErrorKind::Other),
+            ),
+        ];
+        let byte_debug = format!("{:?}", secret.as_bytes());
+
+        for (source, expected_file, expected_kind) in samples {
+            let error = Report::new(map_pem_error(expected_file, source));
+            assert!(matches!(
+                error.current_context(),
+                TlsConfigError::MalformedPem { file, kind }
+                    if *file == expected_file && *kind == expected_kind
+            ));
+            for rendered in [format!("{error:#}"), format!("{error:?}")] {
+                assert!(!rendered.contains(secret));
+                assert!(!rendered.contains(&byte_debug));
+            }
+        }
+    }
+
+    #[test]
+    fn bundle_loading_reports_the_malformed_component_without_its_contents() {
+        let malformed_ca = b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
+        let error =
+            match TlsConfigBundle::from_pem(malformed_ca, b"", b"", TransportClock::system()) {
+                Ok(_) => panic!("malformed CA input cannot form a TLS bundle"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error.current_context(),
+            TlsConfigError::MalformedPem {
+                file: TlsPemFileKind::CaCertificate,
+                kind: TlsPemFailureKind::Base64Decode,
+            }
+        ));
+        assert!(!format!("{error:#}").contains("!!!!"));
+        assert!(!format!("{error:?}").contains("!!!!"));
     }
 }

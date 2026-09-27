@@ -2085,10 +2085,13 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("combined_sink"),
             from: ProcessorInputs::new(vec![named("source_b"), named("source_a")], Vec::new()),
-            encode_using_codec: Some(named("event_codec")),
+            body: nervix_models::EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Immediate,
             error_policies: ErrorPolicies::handled_by_log(),
             publishing_mode: EmitterPublishingMode::NoAck {

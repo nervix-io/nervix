@@ -431,7 +431,7 @@ fn encode_snapshot(
 #[derive(Debug, thiserror::Error)]
 enum SnapshotEncodingError {
     #[error("the domain graph could not be serialized: {0}")]
-    Graph(nervix_dataflow_graph::DataflowGraphError),
+    Graph(error_stack::Report<nervix_dataflow_graph::DataflowGraphError>),
     #[error("the snapshot does not fit a session frame: {0}")]
     Frame(error_stack::Report<nervix_client_wire::WireEncodeError>),
 }

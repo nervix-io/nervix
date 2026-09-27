@@ -21,13 +21,14 @@ use nervix_models::{
     ConsumerGroupName, CorrelatorName, DeduplicatorName, DomainClockPeriod, DomainName,
     EmitterAckWindow, EmitterName, EndpointName, Expression, FieldName, FlushPolicy,
     GeneralErrorPolicy, GeneratorName, InferencerName, IngestorName, InputCollectPolicy,
-    JunctionName, LookupName, MaterializedStateDependency, MaterializedStatePolicy,
-    MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName, ProcessorInputWhere,
-    ProcessorInputs, ProcessorOutput, ProcessorOutputs, PulsarSubscriptionName, QueueGroupName,
-    QueueName, ReingestorName, RelayName, ReordererName, RequestedResourceVersion, ResourceName,
-    RetryPolicy, RouteConstruction, SchemaName, SignalingProtocolName, SubjectName,
-    SubscriptionName, TableName, TopicName, TransactionOperationNumber, UdfName, UserName,
-    VhostName, WasmProcessorName, WindowProcessorName, WireSchemaName,
+    InspectionFormat, JunctionName, LookupName, MaterializedStateDependency,
+    MaterializedStatePolicy, MessageErrorPolicy, ModelName, NameError, OutputBranch, PlacementName,
+    ProcessorInputWhere, ProcessorInputs, ProcessorOutput, ProcessorOutputs,
+    PulsarSubscriptionName, QueueGroupName, QueueName, ReingestorName, RelayName, ReordererName,
+    RequestedResourceVersion, ResourceName, RetryPolicy, RouteConstruction, SchemaName,
+    SignalingProtocolName, SubjectName, SubscriptionName, TableName, TopicName,
+    TransactionOperationNumber, UdfName, UserName, VhostName, WasmProcessorName,
+    WindowProcessorName, WireSchemaName,
 };
 use sorted_vec::SortedSet;
 
@@ -88,14 +89,25 @@ pub(crate) use suggest_from;
 
 pub type ParseError<'src> = Rich<'src, Token>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why NSPL source text was rejected, and where.
+///
+/// The variant is the stage that rejected the text: lexing stops before any token exists, parsing
+/// after every token was read. Each diagnostic's span is a byte range into `text`, the text that
+/// stage was given. A parse function creates the report of this error at the failing stage; a
+/// caller that owns a larger operation adds its own context above it and reads the stage, text and
+/// diagnostics back from the report.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseFromSourceError {
+    /// The text could not be split into tokens.
+    #[error("lex error: {}", DiagnosticMessages(.diagnostics))]
     Lex {
-        source: String,
+        text: String,
         diagnostics: Vec<Diagnostic>,
     },
+    /// The tokens do not form what the grammar expects.
+    #[error("parse error: {}", DiagnosticMessages(.diagnostics))]
     Parse {
-        source: String,
+        text: String,
         diagnostics: Vec<Diagnostic>,
     },
 }
@@ -111,33 +123,43 @@ impl ParseFromSourceError {
     /// The source text that was rejected.
     pub fn source_text(&self) -> &str {
         match self {
-            Self::Lex { source, .. } | Self::Parse { source, .. } => source,
+            Self::Lex { text, .. } | Self::Parse { text, .. } => text,
+        }
+    }
+
+    /// The message a statement grammar reports when this error rejects an expression embedded in
+    /// the statement.
+    ///
+    /// The statement grammar locates the failure at the whole embedded region, so only the first
+    /// diagnostic's message is carried over; its span points into the embedded text, not into the
+    /// statement.
+    pub(crate) fn embedded_expression_message(&self) -> String {
+        match self.diagnostics().first() {
+            Some(diagnostic) => diagnostic.message.clone(),
+            None => "invalid expression".to_string(),
         }
     }
 }
-
-impl std::fmt::Display for ParseFromSourceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let stage = match self {
-            Self::Lex { .. } => "lex",
-            Self::Parse { .. } => "parse",
-        };
-        let messages = self
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
-        write!(f, "{stage} error: {messages}")
-    }
-}
-
-impl std::error::Error for ParseFromSourceError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub message: String,
     pub span: Range<usize>,
+}
+
+/// The messages of a rejection's diagnostics on one line, as its report displays them.
+struct DiagnosticMessages<'diagnostics>(&'diagnostics [Diagnostic]);
+
+impl std::fmt::Display for DiagnosticMessages<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, diagnostic) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            f.write_str(&diagnostic.message)?;
+        }
+        Ok(())
+    }
 }
 
 pub fn kw<'src>(
@@ -148,6 +170,16 @@ pub fn kw<'src>(
         Token::Word(Word::KnownWord { iden: got, .. }) if got == iden => ()
     }
     .labelled(label)
+    .boxed()
+}
+
+/// The shared rendering choice for read-only inspection statements.
+pub fn inspection_format<'src>()
+-> impl Parser<'src, &'src [Token], InspectionFormat, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        kw(Identifier::Text).to(InspectionFormat::Text),
+        kw(Identifier::Json).to(InspectionFormat::Json),
+    ))
     .boxed()
 }
 
@@ -495,8 +527,10 @@ fn materialized_default_assignments<'src>()
         )
         .try_map(|tokens, span| {
             let source = format!("SET {}", render_expression_tokens(&tokens));
-            let construction = crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))?;
+            let construction =
+                crate::semantic_program::parse_route_construction(&source).map_err(|error| {
+                    Rich::custom(span, error.current_context().embedded_expression_message())
+                })?;
             if construction.inherit.is_some()
                 || construction.where_clause.is_some()
                 || !construction.invocations.is_empty()
@@ -553,6 +587,11 @@ pub fn domain_name<'src>()
     parse_name("domain_name", DomainName::parse)
 }
 
+pub fn domain_ref<'src>()
+-> impl Parser<'src, &'src [Token], DomainName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:domain", DomainName::parse)
+}
+
 pub fn user_name<'src>()
 -> impl Parser<'src, &'src [Token], UserName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("user_name", UserName::parse)
@@ -596,6 +635,11 @@ pub fn codec_name<'src>()
 pub fn field_ref<'src>()
 -> impl Parser<'src, &'src [Token], FieldName, extra::Err<ParseError<'src>>> + Clone {
     parse_name("field_name", FieldName::parse)
+}
+
+pub fn schema_field_ref<'src>()
+-> impl Parser<'src, &'src [Token], FieldName, extra::Err<ParseError<'src>>> + Clone {
+    parse_name("ref:schema_field", FieldName::parse)
 }
 
 pub fn relay_ref<'src>()
@@ -1374,6 +1418,28 @@ fn route_boundary_token(token: &Token) -> bool {
     )
 }
 
+/// The three words that open an emitter's `BATCH MAX MESSAGES` clause, which ends the route
+/// construction written before it.
+///
+/// The whole phrase is the boundary rather than its first word, so a field named `batch` stays
+/// usable inside a construction.
+fn emitter_batch_clause_start<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    let word = |expected: Identifier| {
+        any().filter(move |token: &Token| {
+            matches!(
+                token,
+                Token::Word(Word::KnownWord { iden, .. }) if *iden == expected
+            )
+        })
+    };
+    word(Identifier::Batch)
+        .then(word(Identifier::Max))
+        .then(word(Identifier::Messages))
+        .ignored()
+        .boxed()
+}
+
 pub(crate) fn from_where_boundary_token(token: &Token) -> bool {
     processor_output_boundary_token(token)
         || matches!(
@@ -1399,6 +1465,7 @@ fn route_construction_body<'src>(
 ) -> impl Parser<'src, &'src [Token], Vec<Token>, extra::Err<ParseError<'src>>> + Clone {
     any()
         .filter(|token: &Token| !route_boundary_token(token))
+        .and_is(emitter_batch_clause_start().not())
         .repeated()
         .at_least(1)
         .collect::<Vec<_>>()
@@ -1418,8 +1485,9 @@ fn route_construction_clause<'src>(
         .try_map(move |tail, span| {
             let head: &'static str = head.into();
             let source = format!("{head} {}", render_expression_tokens(&tail));
-            crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::semantic_program::parse_route_construction(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -1451,6 +1519,20 @@ pub fn where_only_route_construction<'src>()
         Identifier::Where,
         route_construction_body("where_expression"),
     )
+}
+
+/// HTTP requests without a body may filter records and set outgoing headers, but construct no
+/// output fields.
+pub fn bodyless_route_construction<'src>()
+-> impl Parser<'src, &'src [Token], RouteConstruction, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        route_construction_clause(
+            Identifier::Where,
+            route_construction_body("where_expression"),
+        ),
+        route_construction_clause(Identifier::Invoke, route_construction_body("invocations")),
+    ))
+    .boxed()
 }
 
 fn set_only_alter_route_construction<'src>()
@@ -1518,8 +1600,9 @@ fn explicit_route_construction<'src>()
         .ignore_then(route_construction_body("set_assignments"))
         .try_map(|tokens, span| {
             let source = format!("SET {}", render_expression_tokens(&tokens));
-            crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::semantic_program::parse_route_construction(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .try_map(|construction, span| {
             if construction.assignments.is_empty() {
@@ -1580,6 +1663,10 @@ fn nested_expression_tokens<'src>(
     choice((
         group,
         any()
+            .filter(|token: &Token| matches!(token, Token::Dot))
+            .then(any().filter(|token: &Token| !token.is_group_delimiter()))
+            .map(|(dot, field)| vec![dot, field]),
+        any()
             .filter(move |token: &Token| !boundary(token) && !token.is_group_delimiter())
             .map(|token| vec![token]),
     ))
@@ -1590,6 +1677,20 @@ fn nested_expression_tokens<'src>(
     .boxed()
 }
 
+pub fn expression_before_clause<'src>(
+    boundary: fn(&Token) -> bool,
+) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
+    nested_expression_tokens(boundary)
+        .labelled("string_expression")
+        .try_map(|tokens, span| {
+            let source = render_expression_tokens(&tokens);
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
+        })
+        .boxed()
+}
+
 fn source_where_clause_with_boundary<'src>(
     boundary: fn(&Token) -> bool,
 ) -> impl Parser<'src, &'src [Token], Expression, extra::Err<ParseError<'src>>> + Clone {
@@ -1597,8 +1698,9 @@ fn source_where_clause_with_boundary<'src>(
         .ignore_then(nested_expression_tokens(boundary).labelled("where_expression"))
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -1621,8 +1723,9 @@ where
         )
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -1641,8 +1744,9 @@ where
         .at_least(1)
         .collect::<Vec<_>>()
         .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_expression_tokens(&tokens))
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression_list(&render_expression_tokens(&tokens)).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .labelled(label)
         .boxed()
@@ -1712,8 +1816,9 @@ pub fn filter_where_clause<'src>()
         )
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -1945,22 +2050,32 @@ pub struct LexedInput {
 /// case rather than a failure: an unterminated string or a half-written number leaves the lexer
 /// with nothing, and a caller with no tokens has no expectations to turn into suggestions. The
 /// diagnostics the lexer would produce belong to parsing, which reports them to the user; a
-/// completion offer is not the place to raise them.
+/// completion offer is not the place to raise them, so it builds neither them nor a report.
 pub fn completion_tokens(source: &str) -> Option<Vec<Token>> {
-    lex_input(source).ok().map(|lexed| lexed.tokens)
+    let Ok(spanned_tokens) = lex(source) else {
+        return None;
+    };
+    Some(
+        spanned_tokens
+            .into_iter()
+            .map(|spanned| spanned.token)
+            .collect(),
+    )
 }
 
-pub fn lex_input(input: &str) -> Result<LexedInput, ParseFromSourceError> {
+pub fn lex_input(input: &str) -> error_stack::Result<LexedInput, ParseFromSourceError> {
     let source = input.to_string();
-    let spanned_tokens = lex(input).map_err(|errs| ParseFromSourceError::Lex {
-        source: source.clone(),
-        diagnostics: errs
-            .into_iter()
-            .map(|err| Diagnostic {
-                message: err.to_string(),
-                span: err.span().into_range(),
-            })
-            .collect(),
+    let spanned_tokens = lex(input).map_err(|errs| {
+        Report::new(ParseFromSourceError::Lex {
+            text: source.clone(),
+            diagnostics: errs
+                .into_iter()
+                .map(|err| Diagnostic {
+                    message: err.to_string(),
+                    span: err.span().into_range(),
+                })
+                .collect(),
+        })
     })?;
 
     let tokens = spanned_tokens
@@ -1980,9 +2095,9 @@ pub fn into_parse_error(
     spanned_tokens: &[SpannedToken],
     source_len: usize,
     errs: Vec<ParseError<'_>>,
-) -> ParseFromSourceError {
-    ParseFromSourceError::Parse {
-        source,
+) -> Report<ParseFromSourceError> {
+    Report::new(ParseFromSourceError::Parse {
+        text: source,
         diagnostics: errs
             .into_iter()
             .map(|err| Diagnostic {
@@ -1994,7 +2109,7 @@ pub fn into_parse_error(
                 ),
             })
             .collect(),
-    }
+    })
 }
 
 /// Split completion input at the cursor into the source the grammar should parse and the partial
@@ -2052,8 +2167,8 @@ pub fn suggestions_from_errors(mut errors: Vec<ParseError<'_>>, prefix: &str) ->
 
 /// Keep only the suggestions the partial word could still grow into.
 ///
-/// Semantic references survive regardless: the server expands them into concrete object names and
-/// filters those by the same prefix itself.
+/// Semantic references and assignment bodies survive regardless: the server expands them into
+/// concrete object names and filters those by the same prefix itself.
 pub fn filter_by_prefix(suggestions: Vec<String>, prefix: &str) -> Vec<String> {
     if prefix.is_empty() {
         return suggestions;
@@ -2062,7 +2177,12 @@ pub fn filter_by_prefix(suggestions: Vec<String>, prefix: &str) -> Vec<String> {
     suggestions
         .into_iter()
         .filter(|suggestion| {
-            suggestion.starts_with("ref:") || suggestion.to_ascii_lowercase().starts_with(&prefix)
+            suggestion.starts_with("ref:")
+                || matches!(
+                    suggestion.as_str(),
+                    "resource_version" | "completed_resource_version" | "set_assignments"
+                )
+                || suggestion.to_ascii_lowercase().starts_with(&prefix)
         })
         .collect()
 }
@@ -2229,25 +2349,19 @@ fn expression_token_to_source(token: &Token) -> String {
     }
 }
 
-pub fn expression_error_message(error: ParseFromSourceError) -> String {
-    match error {
-        ParseFromSourceError::Lex { diagnostics, .. }
-        | ParseFromSourceError::Parse { diagnostics, .. } => match diagnostics.first() {
-            Some(diagnostic) => diagnostic.message.clone(),
-            None => "invalid expression".to_string(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use chumsky::prelude::*;
+    use chumsky::{
+        error::{RichPattern, RichReason},
+        prelude::*,
+    };
+    use meticulous::OptionExt as _;
 
     use super::{
         LexedInput, ParseError, current_word_prefix, format_parse_error, into_parse_error, kw,
         lex_input, schema_ref, suggestions_from_errors, token_span_to_source_span,
     };
-    use crate::lexer::Identifier;
+    use crate::lexer::{Identifier, Token, Word};
 
     #[test]
     fn current_word_prefix_stops_at_non_identifier_boundary() {
@@ -2290,20 +2404,38 @@ mod tests {
             .parse(tokens.as_slice());
         assert!(output.has_errors(), "parser should produce an error");
 
-        let err = into_parse_error(
-            source,
-            &spanned_tokens,
-            "create kafka".len(),
-            output.into_errors(),
-        );
-        let diagnostics = match err {
+        let errors = output.into_errors();
+        let error = errors
+            .first()
+            .verified("the has_errors check above established at least one diagnostic");
+        let RichReason::ExpectedFound { expected, found } = error.reason() else {
+            panic!("a keyword mismatch must retain expected and found tokens");
+        };
+        let mut expects_json = false;
+        for pattern in expected {
+            if let RichPattern::Label(label) = pattern
+                && label.as_ref() == "JSON"
+            {
+                expects_json = true;
+            }
+        }
+        assert!(expects_json);
+        assert!(matches!(
+            found.as_deref(),
+            Some(Token::Word(Word::KnownWord {
+                iden: Identifier::Kafka,
+                ..
+            }))
+        ));
+
+        let err = into_parse_error(source, &spanned_tokens, "create kafka".len(), errors);
+        let diagnostics = match err.current_context() {
             super::ParseFromSourceError::Parse { diagnostics, .. } => diagnostics,
             other => panic!("expected parse error, got {other:?}"),
         };
 
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].span, 7..12);
-        assert_eq!(diagnostics[0].message, "expected JSON, found kafka");
     }
 
     #[test]

@@ -7,20 +7,24 @@
 //! - **Depends on.** The Models and the runtime reports it renders.
 //! - **Must not know.** Where the values it renders were gathered.
 
+use std::fmt::Write as _;
+
 use ahash::{HashMap, HashSet};
 use arch_into::ArchInto;
+use meticulous::ResultExt as _;
 use nervix_dataflow_graph::{DataflowNodeHealth, DataflowNodeStatus};
 use nervix_interconnect::{
     DataflowNodeStatusEnvelope, IngestorDescribeEnvelope, LookupDescribeEnvelope,
 };
 use nervix_models::{
-    BranchSelection, ClusterNodeName, CreateCorrelator, CreateDeduplicator, CreateEmitter,
-    CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor, CreateReorderer,
-    CreateWindowProcessor, DomainName, EmitSink, IcebergCatalog, IngestSource,
-    IngestTimestampSource, KafkaOffsetMode, Model, ModelName, MongoDbConflictAction,
+    BranchSelection, CanonicalNsplError, ClusterNodeName, CreateCorrelator, CreateDeduplicator,
+    CreateEmitter, CreateEndpoint, CreateIngestor, CreateJunction, CreateReingestor,
+    CreateReorderer, CreateWindowProcessor, EmitSink, EmitterBody, IcebergCatalog, IngestSource,
+    IngestTimestampSource, KafkaOffsetMode, Model, ModelKind, ModelName, MongoDbConflictAction,
     MySqlConflictAction, NodeRef, PlacementName, PlacementPolicy, PostgresConflictAction,
-    ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ScheduledNode,
-    WasmStateResetScope, expression_to_nspl, ingest_quiesce_to_nspl,
+    ProcessorInputs, ProcessorOutputs, RelayName, RequestedResourceVersion, ResourceDescription,
+    ResourceEntryContent, ResourceManifestEntry, ResourceUsage, ResourceVersionEntries,
+    ScheduledNode, WasmStateInspection, expression_to_nspl, ingest_quiesce_to_nspl,
 };
 use nervix_vm::window::{WindowAggregateDemand, WindowAggregateProgram, WindowArguments};
 use tokio::time::Duration;
@@ -28,7 +32,6 @@ use tokio::time::Duration;
 use crate::{
     registry::{
         PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
-        Registry, RegistryMutation,
     },
     runtime::IngestorDescribe as RuntimeIngestorDescribe,
 };
@@ -702,7 +705,7 @@ pub(in crate::application) fn format_emitter_describe_output(
     emitter: &CreateEmitter,
     scheduled_node: Option<&ScheduledNode>,
     status: Option<&DataflowNodeStatusEnvelope>,
-) -> String {
+) -> error_stack::Result<String, CanonicalNsplError> {
     let name = name.into();
     let mut lines = vec![
         format!("emitter: {}", name.as_str()),
@@ -745,12 +748,24 @@ pub(in crate::application) fn format_emitter_describe_output(
         ),
         format!(
             "codec: {}",
-            match emitter.encode_using_codec.as_ref() {
+            match emitter.body.codec() {
                 Some(name) => name.as_str(),
                 None => "none",
             }
         ),
-        format!("sink: {}", format_emit_sink(&emitter.sink)),
+        format!(
+            "body: {}",
+            match &emitter.body {
+                EmitterBody::Codec { .. } => "codec",
+                EmitterBody::WithoutBody => "without body",
+                EmitterBody::Values => "values",
+            }
+        ),
+        format!("sink: {}", format_emit_sink(&emitter.sink)?),
+        match &emitter.batch {
+            Some(batch) => format!("batch: {batch}"),
+            None => "batch: none".to_string(),
+        },
         format!("flush: {}", emitter.flush_policy.to_canonical_nspl()),
         format!(
             "publishing mode: {}",
@@ -765,11 +780,21 @@ pub(in crate::application) fn format_emitter_describe_output(
             }
         ),
     ]);
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
-fn format_emit_sink(sink: &EmitSink) -> String {
-    match sink {
+fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
+    Ok(match sink {
+        EmitSink::Http {
+            client,
+            method,
+            path,
+        } => format!(
+            "HTTP client={} method={} path={}",
+            client.as_str(),
+            expression_to_nspl(method)?,
+            expression_to_nspl(path)?
+        ),
         EmitSink::Kafka { client, topic } => {
             format!("KAFKA client={} topic={}", client.as_str(), topic.as_str())
         }
@@ -838,22 +863,15 @@ fn format_emit_sink(sink: &EmitSink) -> String {
             };
             format!("OTEL client={} signal={signal}", client.as_str())
         }
-        EmitSink::ClickHouse {
-            client,
-            table,
-            max_batch,
-            ..
-        } => format!(
-            "CLICKHOUSE client={} table={} max_batch={}",
+        EmitSink::ClickHouse { client, table, .. } => format!(
+            "CLICKHOUSE client={} table={}",
             client.as_str(),
             table.as_str(),
-            max_batch
         ),
         EmitSink::Postgres {
             client,
             table,
             conflict_action,
-            max_batch,
             ..
         } => {
             let conflict = match conflict_action {
@@ -876,18 +894,16 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 }
             };
             format!(
-                "POSTGRES client={} table={}{} max_batch={}",
+                "POSTGRES client={} table={}{}",
                 client.as_str(),
                 table.as_str(),
                 conflict,
-                max_batch
             )
         }
         EmitSink::MySql {
             client,
             table,
             conflict_action,
-            max_batch,
             ..
         } => {
             let conflict = match conflict_action {
@@ -896,18 +912,16 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 MySqlConflictAction::DoUpdate => " conflict=ON CONFLICT DO UPDATE".to_string(),
             };
             format!(
-                "MYSQL client={} table={}{} max_batch={}",
+                "MYSQL client={} table={}{}",
                 client.as_str(),
                 table.as_str(),
                 conflict,
-                max_batch
             )
         }
         EmitSink::MongoDb {
             client,
             collection,
             conflict_action,
-            max_batch,
             ..
         } => {
             let conflict = match conflict_action {
@@ -920,11 +934,10 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 }
             };
             format!(
-                "MONGODB client={} collection={}{} max_batch={}",
+                "MONGODB client={} collection={}{}",
                 client.as_str(),
                 collection.as_str(),
                 conflict,
-                max_batch
             )
         }
         EmitSink::Iceberg {
@@ -952,7 +965,7 @@ fn format_emit_sink(sink: &EmitSink) -> String {
                 max_commit_size
             )
         }
-    }
+    })
 }
 
 pub(in crate::application) fn format_window_processor_describe_output(
@@ -995,7 +1008,7 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
     name: impl Into<ModelName>,
     processor: &nervix_models::CreateWasmProcessor,
     scheduled_node: Option<&ScheduledNode>,
-    state_lines: Vec<String>,
+    inspection: Option<&WasmStateInspection>,
 ) -> String {
     let name = name.into();
     let mut lines = vec![
@@ -1030,9 +1043,37 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
         "replicated state: true".to_string(),
     ]);
     lines.extend(format_processor_output_lines(&processor.output_routes));
-    lines.extend(format_wasm_state_recovery_lines(scheduled_node));
-    lines.extend(state_lines);
+    lines.extend(format_wasm_state_reset_lines(inspection));
+    lines.extend(format_wasm_state_recovery_lines(inspection));
+    lines.extend(format_wasm_checkpoint_lines(inspection));
     lines.join("\n")
+}
+
+fn format_wasm_state_reset_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+    let Some(inspection) = inspection else {
+        return Vec::new();
+    };
+    let mut lines = vec![format!(
+        "state default generation: {}",
+        inspection.default_generation
+    )];
+    let Some(reset) = &inspection.reset else {
+        return lines;
+    };
+    let scope = reset.reset.scope().kind();
+    lines.push(format!(
+        "state reset: {}, {scope}, generation {}",
+        reset.reset.phase().as_ref(),
+        reset.generation
+    ));
+    lines.push(format!(
+        "state reset reason: {}",
+        reset.reset.reason().as_ref()
+    ));
+    if let Some(readiness) = inspection.reset_readiness {
+        lines.push(format!("state reset readiness: {}", readiness.as_ref()));
+    }
+    lines
 }
 
 /// What became of the one recovery attempt each refused guest-state lifetime was worth.
@@ -1041,22 +1082,177 @@ pub(in crate::application) fn format_wasm_processor_describe_output(
 /// its attempt without producing a usable lifetime are the three states an operator acts on, so all
 /// three are reported. The branch is named by the scope alone, because a branch key may carry
 /// payload values.
-fn format_wasm_state_recovery_lines(scheduled_node: Option<&ScheduledNode>) -> Vec<String> {
-    let Some(recoveries) = scheduled_node.and_then(ScheduledNode::wasm_state_recoveries) else {
+fn format_wasm_state_recovery_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+    let Some(inspection) = inspection else {
         return Vec::new();
     };
     let mut lines = Vec::new();
-    for (scope, recovery) in recoveries.iter() {
-        let selected = match scope {
-            WasmStateResetScope::Unbranched => "unbranched",
-            WasmStateResetScope::Branch(_) => "branch",
-            WasmStateResetScope::AllBranches => "all branches",
-        };
+    for recovery in &inspection.recoveries {
+        let selected = recovery.scope.kind();
         lines.push(format!(
             "rejected state recovery: {selected}, {}, {} (generation {})",
-            recovery.rejection(),
-            recovery.outcome(),
-            recovery.generation()
+            recovery.rejection, recovery.outcome, recovery.generation
+        ));
+    }
+    if inspection.omitted_recoveries > 0 {
+        lines.push(format!(
+            "rejected state recoveries omitted: {}",
+            inspection.omitted_recoveries
+        ));
+    }
+    lines
+}
+
+fn format_wasm_checkpoint_lines(inspection: Option<&WasmStateInspection>) -> Vec<String> {
+    let Some(inspection) = inspection else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    for checkpoint in &inspection.checkpoints {
+        let mut branch = "unbranched".to_string();
+        if let Some(fingerprint) = checkpoint.branch {
+            branch.clear();
+            for byte in fingerprint.fingerprint() {
+                write!(branch, "{byte:02x}")
+                    .assured("writing fixed-size fingerprint bytes to String cannot fail");
+            }
+        }
+        let committed = match checkpoint.committed_revision {
+            Some(revision) => revision.to_string(),
+            None => "none".to_string(),
+        };
+        let latest = match checkpoint.latest_revision {
+            Some(revision) => revision.to_string(),
+            None => "none".to_string(),
+        };
+        let required = match checkpoint.required_replicas {
+            Some(count) => count.to_string(),
+            None => "unknown".to_string(),
+        };
+        let confirmed = match checkpoint.confirmed_replicas {
+            Some(count) => count.to_string(),
+            None => "unknown".to_string(),
+        };
+        lines.push(format!(
+            "checkpoint branch={branch} generation={} committed_revision={committed} \
+             latest_revision={latest} stage={} required_replicas={required} \
+             confirmed_replicas={confirmed}",
+            checkpoint.generation,
+            checkpoint.stage.as_ref(),
+        ));
+    }
+    let counts = &inspection.checkpoint_counts;
+    lines.insert(0, format!("state structures: {}", counts.total));
+    lines.insert(
+        1,
+        format!("checkpoints awaiting local storage: {}", counts.captured),
+    );
+    lines.insert(
+        2,
+        format!(
+            "checkpoints awaiting replicas: {}",
+            counts.awaiting_replicas
+        ),
+    );
+    lines.insert(3, format!("failed checkpoints: {}", counts.failed));
+    if inspection.omitted_checkpoints > 0 {
+        lines.push(format!(
+            "checkpoints omitted: {}",
+            inspection.omitted_checkpoints
+        ));
+    }
+    lines
+}
+
+/// The text `DESCRIBE RESOURCE <name>` prints for `description`.
+pub(in crate::application) fn format_resource_description(
+    description: &ResourceDescription,
+) -> String {
+    let latest = match description.latest_version {
+        Some(version) => version.to_string(),
+        None => "(none)".to_string(),
+    };
+    let version_numbers = if description.versions.is_empty() {
+        "(none)".to_string()
+    } else {
+        description
+            .versions
+            .iter()
+            .map(|version| version.version.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut lines = vec![
+        format!("resource: {}", description.resource.as_str()),
+        format!("latest: {latest}"),
+        format!("versions: {version_numbers}"),
+        "version_details:".to_string(),
+    ];
+    if description.versions.is_empty() {
+        lines.push("- none".to_string());
+    }
+    for version in &description.versions {
+        lines.push(format!(
+            "- version={} root_checksum={} manifest_checksum={} file_count={} total_bytes={} \
+             created_by_node={} created_at={}",
+            version.version,
+            version.root_checksum,
+            version.manifest_checksum,
+            version.file_count,
+            version.total_bytes,
+            version.created_by_node,
+            version.created_at
+        ));
+        lines.push("  entries:".to_string());
+        lines.extend(format_resource_entry_lines(&version.entries));
+    }
+    lines.extend(format_resource_usage_lines(&description.usages));
+    lines.join("\n")
+}
+
+/// The lines listing the entries of one resource version.
+pub(in crate::application) fn format_resource_entry_lines(
+    entries: &ResourceVersionEntries,
+) -> Vec<String> {
+    match entries {
+        ResourceVersionEntries::Listed(entries) if entries.is_empty() => {
+            vec!["  - none".to_string()]
+        }
+        ResourceVersionEntries::Listed(entries) => {
+            entries.iter().map(format_resource_manifest_entry).collect()
+        }
+        ResourceVersionEntries::Unavailable { reason } => {
+            vec![format!("  - unavailable error={reason}")]
+        }
+    }
+}
+
+fn format_resource_manifest_entry(entry: &ResourceManifestEntry) -> String {
+    let (entry_type, size, checksum) = match &entry.content {
+        ResourceEntryContent::File { size, checksum } => ("file", *size, checksum.as_str()),
+        ResourceEntryContent::Directory => ("directory", 0, "-"),
+    };
+    format!(
+        "  - type={} path={} size={} checksum={}",
+        entry_type, entry.path, size, checksum
+    )
+}
+
+/// The `usages` lines: one per model bound to a version of a resource.
+pub(in crate::application) fn format_resource_usage_lines(usages: &[ResourceUsage]) -> Vec<String> {
+    let mut lines = vec!["usages:".to_string()];
+    if usages.is_empty() {
+        lines.push("- none".to_string());
+    }
+    for usage in usages {
+        let kind = match usage.node.kind {
+            ModelKind::Lookup => "hash_map",
+            kind => kind.as_str(),
+        };
+        lines.push(format!(
+            "- kind={kind} name={} version={}",
+            usage.node.identifier.as_str(),
+            usage.version
         ));
     }
     lines
@@ -1233,15 +1429,9 @@ pub(in crate::application) fn placement_rule_coverage_status(
 }
 
 pub(in crate::application) fn placement_runtime_node_ref_suggestions(
-    registry: &Registry,
-    domain: &DomainName,
+    models: &[Model<RequestedResourceVersion>],
     prefix: &str,
-    queued: &[RegistryMutation<RequestedResourceVersion>],
 ) -> Vec<String> {
-    let Ok(models) = registry.resulting_models(domain, queued) else {
-        return Vec::new();
-    };
-
     let prefix = prefix.to_ascii_lowercase();
     let eligible = models
         .iter()
@@ -1360,9 +1550,101 @@ pub(in crate::application) fn placement_groups_claimed_by_rule<'a>(
 
 #[cfg(test)]
 mod tests {
-    use nervix_models::ModelKind;
+    use meticulous::OptionExt as _;
 
     use super::{super::test_fixtures::placement_member, *};
+
+    #[test]
+    fn a_resource_description_renders_every_version_entry_and_usage() {
+        let version = |number: u64, entries: ResourceVersionEntries| {
+            nervix_models::ResourceVersionDescription {
+                version: std::num::NonZeroU64::new(number).assured("the test version is non-zero"),
+                root_checksum: format!("root{number}"),
+                manifest_checksum: format!("manifest{number}"),
+                file_count: 1,
+                total_bytes: 5,
+                created_at: nervix_models::Timestamp::from_unix_nanos(0),
+                created_by_node: ClusterNodeName::parse("node-1").assured("a literal node name"),
+                entries,
+            }
+        };
+        let usage = |kind: ModelKind, name: &str, number: u64| ResourceUsage {
+            node: NodeRef::new(kind, ModelName::parse(name).assured("a literal model name")),
+            version: std::num::NonZeroU64::new(number).assured("the test version is non-zero"),
+        };
+        let description = ResourceDescription {
+            resource: nervix_models::ResourceName::parse("bundle").assured("a literal resource"),
+            latest_version: std::num::NonZeroU64::new(1),
+            versions: vec![
+                version(
+                    1,
+                    ResourceVersionEntries::Listed(vec![
+                        ResourceManifestEntry {
+                            path: "release notes.txt".to_string(),
+                            content: ResourceEntryContent::File {
+                                size: 5,
+                                checksum: "abc".to_string(),
+                            },
+                        },
+                        ResourceManifestEntry {
+                            path: "guides".to_string(),
+                            content: ResourceEntryContent::Directory,
+                        },
+                    ]),
+                ),
+                version(2, ResourceVersionEntries::Listed(Vec::new())),
+                version(
+                    3,
+                    ResourceVersionEntries::Unavailable {
+                        reason: "manifest missing".to_string(),
+                    },
+                ),
+            ],
+            usages: vec![
+                usage(ModelKind::Client, "store", 1),
+                usage(ModelKind::Lookup, "by_id", 1),
+            ],
+        };
+
+        assert_eq!(
+            format_resource_description(&description),
+            [
+                "resource: bundle",
+                "latest: 1",
+                "versions: 1,2,3",
+                "version_details:",
+                "- version=1 root_checksum=root1 manifest_checksum=manifest1 file_count=1 \
+                 total_bytes=5 created_by_node=node-1 created_at=1970-01-01 00:00:00 UTC",
+                "  entries:",
+                "  - type=file path=release notes.txt size=5 checksum=abc",
+                "  - type=directory path=guides size=0 checksum=-",
+                "- version=2 root_checksum=root2 manifest_checksum=manifest2 file_count=1 \
+                 total_bytes=5 created_by_node=node-1 created_at=1970-01-01 00:00:00 UTC",
+                "  entries:",
+                "  - none",
+                "- version=3 root_checksum=root3 manifest_checksum=manifest3 file_count=1 \
+                 total_bytes=5 created_by_node=node-1 created_at=1970-01-01 00:00:00 UTC",
+                "  entries:",
+                "  - unavailable error=manifest missing",
+                "usages:",
+                "- kind=client name=store version=1",
+                "- kind=hash_map name=by_id version=1",
+            ]
+            .join("\n")
+        );
+
+        let empty = ResourceDescription {
+            latest_version: None,
+            versions: Vec::new(),
+            usages: Vec::new(),
+            ..description
+        };
+        assert_eq!(
+            format_resource_description(&empty),
+            "resource: bundle\nlatest: (none)\nversions: (none)\nversion_details:\n- \
+             none\nusages:\n- none"
+        );
+    }
 
     #[test]
     fn placement_runtime_node_rendering_qualifies_only_kind_collisions() {

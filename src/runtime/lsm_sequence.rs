@@ -1,8 +1,11 @@
 //! The per-store sequence number that orders a replicated runtime state's snapshots.
 
+#[cfg(not(feature = "shuttle"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use meticulous::OptionExt as _;
+#[cfg(feature = "shuttle")]
+use shuttle::sync::atomic::{AtomicU64, Ordering};
 
 /// The log-structured-merge sequence of one replicated runtime state store.
 ///

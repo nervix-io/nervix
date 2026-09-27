@@ -8,7 +8,7 @@ use arrow_array::{
 use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use error_stack::{Report, ResultExt as _};
+use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
@@ -22,9 +22,16 @@ use nervix_vm::{
 use thiserror::Error;
 use triomphe::Arc;
 
+#[path = "vm/workloads.rs"]
+mod workloads;
+
+#[cfg(feature = "benchmark-allocations")]
+#[path = "vm/allocation_probe.rs"]
+mod allocation_probe;
+
 /// Row counts spanning `SPAWN_BLOCKING_ROW_THRESHOLD` so the sweep shows both the
 /// amortization curve below it and the cost of the blocking hop above it.
-const SWEEP_ROW_COUNTS: [usize; 6] = [64, 256, 1_024, 4_096, 16_384, 65_536];
+const SWEEP_ROW_COUNTS: [usize; 8] = [1, 8, 64, 256, 1_024, 4_096, 16_384, 65_536];
 
 #[derive(Debug, Error)]
 enum BenchmarkProgramError {
@@ -54,9 +61,8 @@ fn parse_program_with_namespaces(
     source: &str,
     scope_policy: SemanticScopePolicy<'_>,
 ) -> BenchmarkProgramResult<SpannedNode<Program>> {
-    let construction = nervix_nspl::parse_route_construction(source).map_err(|error| {
-        Report::new(BenchmarkProgramError::ParseRouteConstruction).attach_printable(error)
-    })?;
+    let construction = nervix_nspl::parse_route_construction(source)
+        .change_context(BenchmarkProgramError::ParseRouteConstruction)?;
     lower_route_construction(&construction, scope_policy)
         .change_context(BenchmarkProgramError::LowerRouteConstruction)
 }
@@ -788,6 +794,76 @@ fn compile_regex_argument_patterns() -> Arc<CompiledProgram> {
     )
     .map(Arc::new)
     .expect("argument pattern benchmark program must compile")
+}
+
+fn compile_multi_pattern_search(constant: bool) -> Arc<CompiledProgram> {
+    let expression = if constant {
+        "contains_any(input.text, vec('needle7', 'absent'))"
+    } else {
+        "contains_any(input.text, vec(input.pattern, 'absent'))"
+    };
+    let source = format!("SET matched = {expression}");
+    let program = parse_program(&source).assured("the benchmark expression is valid NSPL");
+    let output = with_output_fields(&regex_schema(), &[("matched", DataType::Boolean)]);
+    compile_program_with_options_for_bindings(
+        &program,
+        output,
+        [CompileBinding::writable("input", regex_schema())],
+        CompileOptions::default(),
+    )
+    .map(Arc::new)
+    .assured("the benchmark has a BOOL output for its search result")
+}
+
+fn multi_pattern_batch(cardinality: usize, text_length: usize) -> TypedBatch {
+    let prefix = "x".repeat(text_length);
+    let text = StringArray::from_iter((0..1_024).map(|_| Some(format!("{prefix}needle7"))));
+    let pattern =
+        StringArray::from_iter((0..1_024).map(|row| Some(format!("needle{}", row % cardinality))));
+    TypedBatch::try_new(
+        regex_schema(),
+        vec![TypedArray::Utf8(text), TypedArray::Utf8(pattern)],
+    )
+    .assured("the benchmark columns match the two STRING fields")
+}
+
+fn string_search_benches(c: &mut Criterion) {
+    let constant = compile_multi_pattern_search(true);
+    let dynamic = compile_multi_pattern_search(false);
+    let runtime = benchmark_runtime();
+    let mut group = c.benchmark_group("string_search");
+    group.throughput(Throughput::Elements(1_024));
+    for text_length in [32, 1_024] {
+        let batch = multi_pattern_batch(16, text_length);
+        group.bench_with_input(
+            BenchmarkId::new("constant_set", text_length),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&constant),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+        for cardinality in [1, 16, 64] {
+            let batch = multi_pattern_batch(cardinality, text_length);
+            group.bench_with_input(
+                BenchmarkId::new(format!("dynamic_{cardinality}"), text_length),
+                &batch,
+                |b, batch| {
+                    b.iter(|| {
+                        runtime.block_on(execute_benchmark_program(
+                            black_box(&dynamic),
+                            black_box(batch),
+                        ))
+                    })
+                },
+            );
+        }
+    }
+    group.finish();
 }
 
 fn unoptimized_options() -> CompileOptions {
@@ -2235,6 +2311,111 @@ fn network_kernel_benches(c: &mut Criterion) {
     group.finish();
 }
 
+/// Rows in every JSON extraction benchmark batch. It stays at the blocking threshold so no batch
+/// pays the blocking hop.
+const JSON_EXTRACTION_ROWS: usize = SPAWN_BLOCKING_ROW_THRESHOLD;
+
+/// Four columns holding the same documents, so a program reading one field from each parses every
+/// document four times while a program reading four fields from one column parses it once.
+fn json_schema() -> StdArc<Schema> {
+    StdArc::new(Schema::new(vec![
+        Field::new("doc", DataType::Utf8, true),
+        Field::new("doc_b", DataType::Utf8, true),
+        Field::new("doc_c", DataType::Utf8, true),
+        Field::new("doc_d", DataType::Utf8, true),
+    ]))
+}
+
+/// An order event of about 400 bytes with a nested customer, a list of tags and a list of line
+/// items, whose values vary by row.
+fn benchmark_json_document(row: usize) -> String {
+    format!(
+        r#"{{"id":"evt-{row}","customer":{{"id":{row},"name":"Customer \"{row}\"","tier":"gold"}},"amount":{}.25,"currency":"EUR","paid":{},"tags":["web","mobile","promo-{}"],"items":[{{"sku":"A-{row}","qty":1,"price":9.5}},{{"sku":"B-{row}","qty":3,"price":1.25}}],"note":null,"shipping":{{"country":"DE","express":false}}}}"#,
+        row % 997,
+        row.is_multiple_of(2),
+        row % 13
+    )
+}
+
+fn json_batch() -> TypedBatch {
+    let documents = (0..JSON_EXTRACTION_ROWS)
+        .map(benchmark_json_document)
+        .collect::<Vec<_>>();
+    let column = || TypedArray::Utf8(StringArray::from_iter_values(documents.iter()));
+    TypedBatch::try_new(json_schema(), vec![column(), column(), column(), column()])
+        .expect("JSON benchmark batch must build")
+}
+
+/// Reading typed fields from embedded JSON documents.
+///
+/// `four_fields_one_column` and `four_fields_four_columns` make the same four extractions; the
+/// first reads them all from one column, so each document is parsed once, and the second reads one
+/// from each of four identical columns, so each document is parsed four times. The difference is
+/// what sharing one parse among the extractions of a column saves.
+fn json_extraction_benches(c: &mut Criterion) {
+    let runtime = benchmark_runtime();
+    let batch = json_batch();
+    let mut group = c.benchmark_group("json_extraction");
+    group.throughput(Throughput::Elements(JSON_EXTRACTION_ROWS.arch_into()));
+    let four_fields: [(&str, DataType); 4] = [
+        ("customer_id", DataType::Int64),
+        ("amount", DataType::Float64),
+        ("paid", DataType::Boolean),
+        ("country", DataType::Utf8),
+    ];
+    let tags_type = DataType::List(StdArc::new(Field::new("item", DataType::Utf8, false)));
+    /// One benchmarked program and the fields it writes.
+    struct JsonProgram {
+        name: &'static str,
+        source: &'static str,
+        outputs: Vec<(&'static str, DataType)>,
+    }
+    let programs = [
+        JsonProgram {
+            name: "one_field",
+            source: "SET customer_id = JSON_VALUE(input.doc, '$.customer.id' AS I64)",
+            outputs: vec![("customer_id", DataType::Int64)],
+        },
+        JsonProgram {
+            name: "four_fields_one_column",
+            source: "SET customer_id = JSON_VALUE(input.doc, '$.customer.id' AS I64), amount = \
+                     JSON_VALUE(input.doc, '$.amount' AS F64), paid = JSON_VALUE(input.doc, \
+                     '$.paid' AS BOOL), country = JSON_VALUE(input.doc, '$.shipping.country' AS \
+                     STRING)",
+            outputs: four_fields.to_vec(),
+        },
+        JsonProgram {
+            name: "four_fields_four_columns",
+            source: "SET customer_id = JSON_VALUE(input.doc, '$.customer.id' AS I64), amount = \
+                     JSON_VALUE(input.doc_b, '$.amount' AS F64), paid = JSON_VALUE(input.doc_c, \
+                     '$.paid' AS BOOL), country = JSON_VALUE(input.doc_d, '$.shipping.country' AS \
+                     STRING)",
+            outputs: four_fields.to_vec(),
+        },
+        JsonProgram {
+            name: "string_vector",
+            source: "SET tags = JSON_VALUE(input.doc, '$.tags' AS VEC<STRING>)",
+            outputs: vec![("tags", tags_type)],
+        },
+    ];
+    for program in programs {
+        let compiled = compile_numeric_program(program.source, json_schema(), &program.outputs);
+        group.bench_with_input(
+            BenchmarkId::new(program.name, "columns"),
+            &batch,
+            |b, batch| {
+                b.iter(|| {
+                    runtime.block_on(execute_benchmark_program(
+                        black_box(&compiled),
+                        black_box(batch),
+                    ))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 /// How many rows of a batch a conditional arm selects.
 #[derive(Debug, Clone, Copy)]
 enum Selectivity {
@@ -2710,6 +2891,9 @@ criterion_group!(
     datetime_kernel_benches,
     calendar_kernel_benches,
     membership_kernel_benches,
-    network_kernel_benches
+    network_kernel_benches,
+    json_extraction_benches,
+    string_search_benches,
+    workloads::workload_shape_benches
 );
 criterion_main!(benches);

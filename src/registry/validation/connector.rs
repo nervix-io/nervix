@@ -8,20 +8,25 @@
 //! - **Depends on.** The connector Models and the schema rules.
 //! - **Must not know.** How a connector is instantiated or driven.
 
+use std::time::Duration;
+
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use error_stack::Report;
-use meticulous::ResultExt;
+use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_jaq::StatefulJaqProgram;
 use nervix_models::{
-    Assignment, AssignmentTarget, CreateEmitter, CreateIngestor, CreateSchema,
-    CreateSignalingProtocol, DomainName, EmitSink, EndpointName, Expression, FieldName,
-    IngestSource, IngestTimestampSource, Model, ModelIndex, ModelName, OtelAggregationTemporality,
-    OtelMetricKind, OtelSignal, OtelValueMapping, ParseAsType, ProcessorOutput, RelayName,
-    RouteConstruction, SchemaField, SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
+    Assignment, AssignmentTarget, CodecBatchContainer, CreateClientHttp, CreateCodec,
+    CreateEmitter, CreateIngestor, CreateSchema, CreateSignalingProtocol, DomainName, EmitSink,
+    EndpointName, Expression, FieldName, HttpApplicationHeaders, HttpBodyMode, HttpHeaderName,
+    HttpHeaderValue, HttpMethod, HttpOrigin, IngestSource, IngestTimestampSource, Model,
+    ModelIndex, ModelName, OtelAggregationTemporality, OtelMetricKind, OtelSignal,
+    OtelValueMapping, ParseAsType, ProcessorOutput, RelayName, RouteConstruction, SchemaField,
+    SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
 };
 use nervix_vm::{
-    CompileBinding, CompileOptions, OutputMode, SemanticScopePolicy,
-    compile_program_with_options_for_bindings_with_sensitivity, lower_route_construction,
+    CompileBinding, CompileOptions, CompiledProgram, OutputMode, SchemaSensitivity,
+    SemanticScopePolicy, compile_program_with_options_for_bindings_with_sensitivity,
+    infer_set_expr_types_for_bindings_with_udfs, lower_route_construction,
     lower_transforming_route, program::FunctionName,
 };
 
@@ -126,19 +131,40 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         )));
     }
 
-    let requires_codec = emitter.sink.requires_codec();
-    if requires_codec && emitter.encode_using_codec.is_none() {
-        return Err(invalid(format!(
-            "{} emitter requires ENCODE USING",
-            emitter.sink.transport_label()
-        )));
+    match (emitter.sink.as_ref(), &emitter.body) {
+        (
+            EmitSink::Http { .. },
+            nervix_models::EmitterBody::Codec { .. } | nervix_models::EmitterBody::WithoutBody,
+        ) => {}
+        (EmitSink::Http { .. }, nervix_models::EmitterBody::Values) => {
+            return Err(invalid(
+                "HTTP emitter requires ENCODE USING or WITHOUT BODY".to_string(),
+            ));
+        }
+        (_, nervix_models::EmitterBody::Codec { .. }) if emitter.sink.requires_codec() => {}
+        (_, nervix_models::EmitterBody::Values) if !emitter.sink.requires_codec() => {}
+        (_, nervix_models::EmitterBody::WithoutBody) => {
+            return Err(invalid(
+                "WITHOUT BODY is only supported by HTTP emitters".to_string(),
+            ));
+        }
+        (_, nervix_models::EmitterBody::Values) => {
+            return Err(invalid(format!(
+                "{} emitter requires ENCODE USING",
+                emitter.sink.transport_label()
+            )));
+        }
+        (_, nervix_models::EmitterBody::Codec { .. }) => {
+            return Err(invalid(format!(
+                "{} emitter does not support ENCODE USING",
+                emitter.sink.transport_label()
+            )));
+        }
     }
-    if !requires_codec && emitter.encode_using_codec.is_some() {
-        return Err(invalid(format!(
-            "{} emitter does not support ENCODE USING",
-            emitter.sink.transport_label()
-        )));
-    }
+
+    emitter
+        .validate_batch()
+        .map_err(|error| invalid(error.current_context().to_string()))?;
 
     let retry = emitter.publishing_mode.retry_policy();
     let backoff = humantime::parse_duration(&retry.backoff).map_err(|error| {
@@ -219,7 +245,8 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
                 domain, identifier, signal, values, attributes, resource,
             )?;
         }
-        EmitSink::Kafka { .. }
+        EmitSink::Http { .. }
+        | EmitSink::Kafka { .. }
         | EmitSink::Pulsar { .. }
         | EmitSink::RabbitMq { .. }
         | EmitSink::Redis { .. }
@@ -235,6 +262,114 @@ pub(in crate::registry) fn validate_emitter_publishing_contract(
         | EmitSink::MongoDb { .. } => {}
     }
 
+    Ok(())
+}
+
+pub(in crate::registry) fn validate_direct_values_sensitivity(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    emitter: &CreateEmitter,
+    input_schema: &CreateSchema,
+) -> Result<(), Report<RegistryError>> {
+    let mappings = emitter.sink.direct_value_mappings().collect::<Vec<_>>();
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let assignments = mappings
+        .iter()
+        .enumerate()
+        .map(|(index, mapping)| {
+            let field = FieldName::parse(&format!("c{index}"))
+                .assured("c followed by decimal digits is a valid generated field name");
+            Assignment {
+                target: AssignmentTarget::bare(field),
+                value: mapping.expression.clone(),
+            }
+        })
+        .collect();
+    let program = lower_route_construction(
+        &RouteConstruction {
+            assignments,
+            ..RouteConstruction::default()
+        },
+        SemanticScopePolicy::read_write("input", "emitted"),
+    )
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("emitter VALUES is invalid: {reason}"),
+        })
+    })?;
+    let empty_output =
+        std::sync::Arc::new(arrow_schema::Schema::new(Vec::<arrow_schema::Field>::new()));
+    let bindings = [
+        CompileBinding::writeonly("emitted", empty_output),
+        readonly_binding_for_internal_schema("input", input_schema),
+        readonly_binding_for_internal_schema("message", input_schema),
+    ];
+    let udf_signatures = udf_compile_options(models, CompileOptions::default()).udf_signatures;
+    let inferred = infer_set_expr_types_for_bindings_with_udfs(&program, bindings, udf_signatures)
+        .map_err(|error| {
+            Report::new(RegistryError::InvalidModel {
+                domain: domain.as_str().to_string(),
+                identifier: identifier.as_str().to_string(),
+                reason: format!("emitter VALUES type inference failed: {}", error.message),
+            })
+        })?;
+    for (index, field) in inferred.iter().enumerate() {
+        if !field.sensitive {
+            continue;
+        }
+        let mapping = mappings
+            .get(index)
+            .assured("one unique generated field is inferred for each VALUES mapping");
+        return Err(Report::new(RegistryError::SensitiveEmitterValue {
+            domain: domain.clone(),
+            emitter: identifier.clone(),
+            sink: emitter.sink.transport_label(),
+            target: mapping.column.clone(),
+        }));
+    }
+    Ok(())
+}
+
+/// Checks that the codec a batching emitter encodes through has a container its sink can publish
+/// one batch in.
+pub(in crate::registry) fn validate_emitter_batch_container(
+    domain: &DomainName,
+    identifier: &ModelName,
+    emitter: &CreateEmitter,
+    codec: &CreateCodec,
+) -> Result<(), Report<RegistryError>> {
+    let invalid = |reason: String| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason,
+        })
+    };
+    if emitter.batch.is_none() {
+        return Ok(());
+    }
+    let container = codec.wire_format.batch_container();
+    if let CodecBatchContainer::Undeclared = container {
+        return Err(invalid(format!(
+            "a batching emitter requires protobuf codec '{}' to declare a BATCH MESSAGE, because \
+             protobuf has no self-delimiting sequence",
+            codec.name.as_str()
+        )));
+    }
+    if emitter.sink.requires_batch_transformation() && container.transformation().is_none() {
+        return Err(invalid(format!(
+            "a batching {} emitter requires codec '{}' to declare an ON EMITTING BATCH \
+             transformation, because one envelope carries at most one event",
+            emitter.sink.transport_label(),
+            codec.name.as_str()
+        )));
+    }
     Ok(())
 }
 
@@ -476,6 +611,308 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
         })
     })?;
 
+    Ok(())
+}
+
+/// The validated request fields and client settings carried by an active HTTP emitter graph node.
+/// The next data-plane stage can evaluate these programs without lowering its Models again.
+#[derive(Debug, Clone)]
+pub(crate) struct HttpEmitterRequestPlan {
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) client: HttpEmitterClientPlan,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) body: HttpBodyMode,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) fields: CompiledProgram,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) route: Option<CompiledProgram>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HttpEmitterClientPlan {
+    pub(crate) origin: HttpOrigin,
+    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
+    pub(crate) timeout: Duration,
+}
+
+pub(in crate::registry) fn validate_http_request_expressions(
+    domain: &DomainName,
+    identifier: &ModelName,
+    models: &ModelIndex,
+    emitter: &CreateEmitter,
+    input_schema: &CreateSchema,
+    payload_schema: &CreateSchema,
+) -> Result<Option<CompiledProgram>, Report<RegistryError>> {
+    let EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
+        return Ok(None);
+    };
+
+    let mut fields = Vec::with_capacity(2);
+    let mut assignments = Vec::with_capacity(2);
+    for (name, expression) in [("method", method), ("path", path)] {
+        let target = FieldName::parse(name).assured("HTTP request field names are valid literals");
+        fields.push(SchemaField {
+            name: target.clone(),
+            ty: ParseAsType::String,
+            optional: false,
+            sensitive: false,
+        });
+        assignments.push(Assignment {
+            target: AssignmentTarget::bare(target),
+            value: expression.clone(),
+        });
+    }
+    let output_schema = CreateSchema {
+        name: SchemaName::parse("http_request")
+            .assured("HTTP request schema name is a valid literal"),
+        fields,
+    };
+    let output_arrow_schema = arrow_schema_for_internal_schema(&output_schema);
+    let parsed = lower_route_construction(
+        &RouteConstruction {
+            assignments,
+            ..RouteConstruction::default()
+        },
+        SemanticScopePolicy::read_write("message", "http_request"),
+    )
+    .map_err(|reason| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!("HTTP METHOD or PATH expression is invalid: {reason}"),
+        })
+    })?;
+    let original_parsed = parsed.clone();
+    let LookupHashMapRewriteResult {
+        program: parsed,
+        fields: lookup_fields,
+    } = rewrite_lookup_hash_map_program(domain, identifier, models, &parsed)?;
+    let mut bindings = vec![
+        readonly_binding_for_internal_schema("input", input_schema),
+        writable_binding_for_internal_schema("http_request", &output_schema),
+    ];
+    let working_schema = if emitter.body.codec().is_some() {
+        bindings.push(readonly_binding_for_internal_schema(
+            "output",
+            payload_schema,
+        ));
+        payload_schema
+    } else {
+        input_schema
+    };
+    bindings.push(readonly_binding_for_internal_schema(
+        "message",
+        working_schema,
+    ));
+    let local_namespaces = HashSet::from_iter([
+        "input".to_string(),
+        "message".to_string(),
+        "output".to_string(),
+        "http_request".to_string(),
+    ]);
+    bindings.extend(referenced_materialized_stream_bindings(
+        domain,
+        identifier,
+        models,
+        &original_parsed,
+        &local_namespaces,
+        "HTTP request expression",
+    )?);
+    bindings.extend(lookup_hash_map_bindings(lookup_fields));
+    let program = compile_program_with_options_for_bindings_with_sensitivity(
+        &parsed,
+        output_arrow_schema,
+        schema_sensitivity_for_internal_schema(&output_schema),
+        bindings,
+        udf_compile_options(
+            models,
+            CompileOptions {
+                output_mode: OutputMode::ExplicitOnly,
+                allow_sensitive_output: false,
+                ..CompileOptions::default()
+            },
+        ),
+    )
+    .map_err(|error| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: format!(
+                "HTTP METHOD and PATH require exact non-sensitive STRING values: {}",
+                error.message
+            ),
+        })
+    })?;
+
+    Ok(Some(program))
+}
+
+/// The origin accepted by an HTTP emitter. The returned URL is safe to use as the base for
+/// request-target validation; its credentials, path, query and fragment have been ruled out.
+pub(in crate::registry) fn validate_http_emitter_client(
+    domain: &DomainName,
+    identifier: &ModelName,
+    client: &CreateClientHttp,
+) -> Result<HttpEmitterClientPlan, Report<RegistryError>> {
+    let invalid = |reason: &'static str| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason: reason.to_string(),
+        })
+    };
+    let entry = |key: &str| {
+        client
+            .config
+            .iter()
+            .find(|entry| entry.key.eq_ignore_ascii_case(key))
+            .map(|entry| entry.value.as_str())
+    };
+
+    let endpoint = entry("endpoint").ok_or_else(|| invalid("HTTP client requires endpoint"))?;
+    let origin = HttpOrigin::parse(endpoint)
+        .map_err(|_| invalid("HTTP client endpoint must be an http or https origin"))?;
+
+    let timeout =
+        entry("timeout_ms").ok_or_else(|| invalid("HTTP emitter client requires timeout_ms"))?;
+    if timeout.is_empty() || !timeout.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid(
+            "HTTP emitter client timeout_ms must be a positive schedulable integer",
+        ));
+    }
+    let timeout = timeout.parse::<u64>().map_err(|_| {
+        invalid("HTTP emitter client timeout_ms must be a positive schedulable integer")
+    })?;
+    if timeout == 0 || Duration::from_millis(timeout).as_nanos() > u128::from(u64::MAX / 2) {
+        return Err(invalid(
+            "HTTP emitter client timeout_ms must be a positive schedulable integer",
+        ));
+    }
+
+    if entry("tls_cert_file").is_some() != entry("tls_key_file").is_some() {
+        return Err(invalid(
+            "HTTP client TLS requires both tls_cert_file and tls_key_file",
+        ));
+    }
+    Ok(HttpEmitterClientPlan {
+        origin,
+        timeout: Duration::from_millis(timeout),
+    })
+}
+
+pub(in crate::registry) fn validate_http_literal_request_fields(
+    domain: &DomainName,
+    identifier: &ModelName,
+    origin: &HttpOrigin,
+    emitter: &CreateEmitter,
+) -> Result<(), Report<RegistryError>> {
+    struct KnownHeader {
+        invocation: usize,
+        name: HttpHeaderName,
+        value: HttpHeaderValue,
+    }
+
+    let EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
+        return Ok(());
+    };
+    let invalid = |reason: String| {
+        Report::new(RegistryError::InvalidModel {
+            domain: domain.as_str().to_string(),
+            identifier: identifier.as_str().to_string(),
+            reason,
+        })
+    };
+
+    if let Expression::Literal(nervix_models::Literal::String(value)) = method {
+        let body = match emitter.body {
+            nervix_models::EmitterBody::Codec { .. } => HttpBodyMode::Codec,
+            nervix_models::EmitterBody::WithoutBody => HttpBodyMode::WithoutBody,
+            nervix_models::EmitterBody::Values => {
+                return Err(invalid(
+                    "HTTP publish method requires ENCODE USING or WITHOUT BODY".to_string(),
+                ));
+            }
+        };
+        HttpMethod::parse(value, body)
+            .map_err(|error| invalid(format!("HTTP publish method {}", error.current_context())))?;
+    }
+
+    if let Expression::Literal(nervix_models::Literal::String(value)) = path {
+        origin
+            .target(value)
+            .map_err(|_| invalid("HTTP publish path is invalid".to_string()))?;
+    }
+
+    let mut known_headers = Vec::new();
+    let mut all_headers_known = true;
+    for (index, invocation) in emitter.construction.invocations.iter().enumerate() {
+        let invocation_index = index
+            .checked_add(1)
+            .assured("an index into an in-memory invocation vector is below isize::MAX");
+        let [name, value] = invocation.arguments.as_slice() else {
+            continue;
+        };
+        let name = if let Expression::Literal(nervix_models::Literal::String(name)) = name {
+            Some(HttpHeaderName::parse(name).map_err(|_| {
+                invalid(format!(
+                    "HTTP invoke #{invocation_index} header name is invalid or reserved"
+                ))
+            })?)
+        } else {
+            all_headers_known = false;
+            None
+        };
+        let value = if let Expression::Literal(nervix_models::Literal::String(value)) = value {
+            Some(HttpHeaderValue::parse(value).map_err(|_| {
+                invalid(format!(
+                    "HTTP invoke #{invocation_index} header value is invalid"
+                ))
+            })?)
+        } else {
+            all_headers_known = false;
+            None
+        };
+        if let (Some(name), Some(value)) = (name, value) {
+            let size = name
+                .as_str()
+                .len()
+                .checked_add(value.as_str().len())
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "HTTP invoke #{invocation_index} header exceeds 32 KiB"
+                    ))
+                })?;
+            if size > 32 * 1024 {
+                return Err(invalid(format!(
+                    "HTTP invoke #{invocation_index} header exceeds 32 KiB"
+                )));
+            }
+            known_headers.push(KnownHeader {
+                invocation: invocation_index,
+                name,
+                value,
+            });
+        }
+    }
+    if all_headers_known {
+        let mut headers = HttpApplicationHeaders::default();
+        let final_invocation = known_headers.last().map(|header| header.invocation);
+        for known in known_headers {
+            headers.write(known.name, known.value).map_err(|_| {
+                invalid(format!(
+                    "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
+                    known.invocation
+                ))
+            })?;
+        }
+        if headers.validate_total().is_err() {
+            let invocation = final_invocation
+                .assured("a nonzero total requires at least one literal header invocation");
+            return Err(invalid(format!(
+                "HTTP invoke #{invocation} application headers exceed the 32 KiB limit"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -815,21 +1252,26 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
     emitter: &nervix_models::CreateEmitter,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-) -> Result<CreateSchema, Report<RegistryError>> {
-    let codec_route = emitter.encode_using_codec.is_some();
-    if !codec_route
-        && (emitter.construction.inherit.is_some()
-            || !emitter.construction.assignments.is_empty()
-            || !emitter.construction.invocations.is_empty())
-    {
+) -> Result<(CreateSchema, Option<CompiledProgram>), Report<RegistryError>> {
+    let codec_route = emitter.body.codec().is_some();
+    let has_output_construction =
+        emitter.construction.inherit.is_some() || !emitter.construction.assignments.is_empty();
+    let invalid_direct_construction = match emitter.body {
+        nervix_models::EmitterBody::Codec { .. } => false,
+        nervix_models::EmitterBody::WithoutBody => has_output_construction,
+        nervix_models::EmitterBody::Values => {
+            has_output_construction || !emitter.construction.invocations.is_empty()
+        }
+    };
+    if invalid_direct_construction {
         return Err(Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
             identifier: identifier.as_str().to_string(),
-            reason: "direct emitter routes support VALUES and WHERE only".to_string(),
+            reason: "emitter body selection does not support the retained construction".to_string(),
         }));
     }
     if emitter.construction.is_empty() && !codec_route {
-        return Ok(input_schema.clone());
+        return Ok((input_schema.clone(), None));
     }
     let input_arrow_schema = arrow_schema_for_internal_schema(input_schema);
     let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
@@ -898,10 +1340,14 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         "emitter route",
     )?);
     body_bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    compile_program_with_options_for_bindings_with_sensitivity(
+    let output_sensitivity = match (emitter.sink.as_ref(), codec_route) {
+        (EmitSink::Http { .. }, true) => SchemaSensitivity::default(),
+        _ => schema_sensitivity_for_internal_schema(output_schema),
+    };
+    let program = compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_arrow_schema,
-        schema_sensitivity_for_internal_schema(output_schema),
+        output_sensitivity,
         body_bindings,
         udf_compile_options(
             models,
@@ -925,7 +1371,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         })
     })?;
 
-    Ok(output_schema.clone())
+    Ok((output_schema.clone(), Some(program)))
 }
 
 pub(in crate::registry) fn validate_vhost_hostnames(
@@ -1003,12 +1449,12 @@ mod tests {
 
     use nervix_models::{
         AckMode, AlterEmitter, AlterEmitterOperation, ClientConfigEntry, ClientName, CodecName,
-        ConsumerGroupName, CreateClientHttp, CreateClientSqs, CreateWireSchema, EmitterAckWindow,
-        EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy, IngestorName,
-        JsonType, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState, MessageErrorPolicy,
-        MqttIngestMode, MqttQos, MqttSession, OtelMetric, OutputBranch, ProcessorInputs,
-        ProcessorOutputs, RetryPolicy, SignalingProtobufConfig, TopicName, WireSchemaField,
-        WireSchemaName,
+        CodecWireFormat, ConsumerGroupName, CreateClientHttp, CreateClientSqs, CreateWireSchema,
+        EmitterAckWindow, EmitterPublishingMode, ErrorPolicies, FlushPolicy, GeneralErrorPolicy,
+        IngestorName, JsonType, KafkaIngestMode, KafkaOffsetMode, MaterializedRelayState,
+        MessageErrorPolicy, MqttIngestMode, MqttQos, MqttSession, OtelMetric, OutputBranch,
+        ProcessorInputs, ProcessorOutputs, RetryPolicy, SignalingProtobufConfig, TopicName,
+        WireSchemaField, WireSchemaName,
     };
     use nonzero_ext::nonzero;
 
@@ -1018,9 +1464,9 @@ mod tests {
         storage::Registry,
         test_fixtures::{
             branch, branch_for_relay, branch_schema, branch_schema_with_types, branched_by,
-            client_model, codec, emitter, explicitly_unbranched_relay, named, relay,
-            relay_branched_by, relay_branched_by_relay_branch, schema, signaling_protocol,
-            temp_db_path, unbranched_transforming_outputs, vhost, wire_schema,
+            client_model, codec, emitter, explicitly_unbranched_relay, jaq_native_codec, named,
+            protobuf_codec, relay, relay_branched_by, relay_branched_by_relay_branch, schema,
+            signaling_protocol, temp_db_path, unbranched_transforming_outputs, vhost, wire_schema,
         },
     };
 
@@ -1223,11 +1669,191 @@ mod tests {
         assert!(format!("{error:#}").contains("requires a queue name ending in .fifo"));
     }
 
+    fn batch_policy(max_messages: u32, max_size: &str) -> nervix_models::EmitterBatchPolicy {
+        nervix_models::EmitterBatchPolicy {
+            max_messages: nervix_models::BatchMessageLimit::try_from(max_messages)
+                .expect("the fixture message limit is within range"),
+            max_size: max_size
+                .parse()
+                .expect("the fixture size is a whole number of bytes"),
+        }
+    }
+
+    #[test]
+    fn publishing_contract_checks_the_batch_clause_against_its_sink() {
+        let domain = DomainName::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        let identifier = ModelName::from(&emitter.name);
+        let models = ModelIndex::new();
+        emitter.body = nervix_models::EmitterBody::Values;
+        emitter.publishing_mode = EmitterPublishingMode::RequestAck {
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        *emitter.sink = EmitSink::Postgres {
+            client: named("postgres_main"),
+            table: named("events"),
+            values: Vec::new(),
+            conflict_action: nervix_models::PostgresConflictAction::None,
+        };
+
+        let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect_err("a Postgres emitter without BATCH must be rejected");
+        assert!(
+            format!("{error:#}").contains("POSTGRES emitters require BATCH MAX MESSAGES"),
+            "unexpected error: {error:#}"
+        );
+
+        emitter.batch = Some(batch_policy(500, "8MiB"));
+        validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect("a Postgres emitter with BATCH is valid");
+
+        *emitter.sink = EmitSink::Sqs {
+            client: named("sqs_main"),
+            queue: "events".to_string(),
+            fifo_group: None,
+        };
+        emitter.body = nervix_models::EmitterBody::Codec {
+            codec: named("event_codec"),
+        };
+        emitter.publishing_mode = EmitterPublishingMode::SqsBatch {
+            retry_policy: RetryPolicy {
+                backoff: "10ms".to_string(),
+                max_backoff: "1s".to_string(),
+            },
+        };
+        let error = validate_emitter_publishing_contract(&domain, &identifier, &models, &emitter)
+            .expect_err("an SQS batch larger than one SQS message must be rejected");
+        assert!(
+            format!("{error:#}").contains("accept BATCH MAX SIZE up to 256KiB"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn batching_emitters_require_a_codec_container_their_sink_can_publish() {
+        let domain = DomainName::parse("default").expect("valid domain");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            unreachable!("emitter helper must build an emitter model")
+        };
+        let identifier = ModelName::from(&emitter.name);
+        let Model::Codec(mut protobuf) =
+            protobuf_codec("event_codec", "event_schema", None, Some("."))
+        else {
+            unreachable!("protobuf_codec builds a codec model")
+        };
+
+        validate_emitter_batch_container(&domain, &identifier, &emitter, &protobuf)
+            .expect("an emitter without BATCH needs no batch container");
+
+        emitter.batch = Some(batch_policy(100, "1MiB"));
+        let error = validate_emitter_batch_container(&domain, &identifier, &emitter, &protobuf)
+            .expect_err("a protobuf codec without BATCH MESSAGE has no batch container");
+        assert!(
+            format!("{error:#}").contains("to declare a BATCH MESSAGE"),
+            "unexpected error: {error:#}"
+        );
+        if let CodecWireFormat::Protobuf(config) = &mut protobuf.wire_format {
+            config.batch_message = Some("nervix.test.NotificationBatch".to_string());
+        }
+        validate_emitter_batch_container(&domain, &identifier, &emitter, &protobuf)
+            .expect("a protobuf codec with BATCH MESSAGE has a batch container");
+
+        *emitter.sink = EmitSink::Sentry {
+            client: named("sentry_main"),
+        };
+        let Model::Codec(mut json) =
+            jaq_native_codec("event_codec", "event_schema", None, Some("."))
+        else {
+            unreachable!("jaq_native_codec builds a codec model")
+        };
+        let error = validate_emitter_batch_container(&domain, &identifier, &emitter, &json)
+            .expect_err("a batching Sentry emitter needs ON EMITTING BATCH");
+        assert!(
+            format!("{error:#}").contains(
+                "SENTRY emitter requires codec 'event_codec' to declare an ON EMITTING BATCH"
+            ),
+            "unexpected error: {error:#}"
+        );
+        if let CodecWireFormat::JaqNative {
+            transformations, ..
+        } = &mut json.wire_format
+        {
+            transformations.on_emitting_batch = Some("{extra: {records: .}}".to_string());
+        }
+        validate_emitter_batch_container(&domain, &identifier, &emitter, &json)
+            .expect("a Sentry emitter whose codec builds the batch event is valid");
+    }
+
     fn otel_mapping(key: &str) -> OtelValueMapping {
         OtelValueMapping {
             column: key.to_string(),
             expression: Expression::Literal(nervix_models::Literal::String("value".to_string())),
         }
+    }
+
+    #[test]
+    fn direct_values_sensitivity_reports_the_typed_external_target() {
+        let domain = DomainName::parse("default").assured("default is a valid domain name");
+        let Model::Emitter(mut emitter) = emitter("emit", "events", "event_codec", "broker_out")
+        else {
+            panic!("the emitter fixture constructs an emitter model");
+        };
+        let identifier = ModelName::from(&emitter.name);
+        let input_schema = CreateSchema {
+            name: named("event"),
+            fields: vec![SchemaField {
+                name: named("secret"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: true,
+            }],
+        };
+        let mapping = nervix_models::ClickHouseValueMapping {
+            column: "external_secret".to_string(),
+            expression: nervix_nspl::parse_expression("input.secret")
+                .assured("input.secret is a valid expression"),
+        };
+        *emitter.sink = EmitSink::Postgres {
+            client: named("database"),
+            table: named("events"),
+            values: vec![mapping],
+            conflict_action: nervix_models::PostgresConflictAction::None,
+        };
+        let models = ModelIndex::new();
+        let error = validate_direct_values_sensitivity(
+            &domain,
+            &identifier,
+            &models,
+            &emitter,
+            &input_schema,
+        )
+        .expect_err("a sensitive VALUES expression must be rejected");
+        assert!(matches!(
+            error.current_context(),
+            RegistryError::SensitiveEmitterValue {
+                domain: error_domain,
+                emitter: error_emitter,
+                sink: "POSTGRES",
+                target,
+            } if error_domain == &domain
+                && error_emitter == &identifier
+                && target == "external_secret"
+        ));
+
+        let EmitSink::Postgres { values, .. } = emitter.sink.as_mut() else {
+            panic!("the test emitter uses Postgres VALUES");
+        };
+        values[0].expression = nervix_nspl::parse_expression("leak_sensitive(input.secret)")
+            .assured("leak_sensitive(input.secret) is a valid expression");
+        validate_direct_values_sensitivity(&domain, &identifier, &models, &emitter, &input_schema)
+            .assured("explicit leakage permits the direct VALUES mapping");
     }
 
     #[test]
@@ -1238,7 +1864,7 @@ mod tests {
             unreachable!("emitter helper must build an emitter model")
         };
         let identifier = ModelName::from(&emitter.name);
-        emitter.encode_using_codec = None;
+        emitter.body = nervix_models::EmitterBody::Values;
         emitter.publishing_mode = EmitterPublishingMode::RequestAck {
             retry_policy: RetryPolicy {
                 backoff: "10ms".to_string(),
@@ -1444,7 +2070,9 @@ mod tests {
         let mut emitter = CreateEmitter {
             name: named("emit"),
             from: ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("events_codec")),
+            body: nervix_models::EmitterBody::Codec {
+                codec: named("events_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("zeromq_main"),
             }),
@@ -1454,6 +2082,7 @@ mod tests {
                     max_backoff: "30s".to_string(),
                 },
             },
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "100ms".to_string(),
                 max_batch_size: "1MiB".to_string(),

@@ -7,7 +7,7 @@
 //! - **Depends on.** `fjall` for storage and the domain state for validation.
 //! - **Must not know.** How a runtime change is applied.
 
-use std::{collections::BTreeSet, path::Path, str::FromStr};
+use std::{path::Path, str::FromStr};
 
 use ahash::{HashMap, HashSet};
 use error_stack::{Report, ResultExt};
@@ -464,12 +464,8 @@ impl Registry {
                             identifier: alter.schema.as_str().to_string(),
                         }));
                     };
-                    schema.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    schema.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.schema.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterWireJsonSchema(alter) => {
@@ -496,12 +492,8 @@ impl Registry {
                             identifier: alter.schema.as_str().to_string(),
                         }));
                     };
-                    schema.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    schema.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.schema.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterWireCborSchema(alter) => {
@@ -521,12 +513,8 @@ impl Registry {
                             identifier: alter.schema.as_str().to_string(),
                         }));
                     };
-                    schema.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    schema.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.schema.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterWireAvroSchema(alter) => {
@@ -538,12 +526,8 @@ impl Registry {
                             identifier: alter.schema.as_str().to_string(),
                         }));
                     };
-                    schema.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.schema.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    schema.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.schema.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterRelay(alter) => {
@@ -562,12 +546,8 @@ impl Registry {
                         }));
                     };
                     let before = Model::Relay(relay.clone());
-                    relay.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.relay.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    relay.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.relay.as_str(), rejection)
                     })?;
                     let after = Model::Relay(relay.clone());
                     ensure_placement_member_shape_change_allowed(
@@ -590,12 +570,8 @@ impl Registry {
                             identifier: alter.junction.as_str().to_string(),
                         }));
                     };
-                    junction.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.junction.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    junction.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.junction.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterDeduplicator(alter) => {
@@ -614,12 +590,8 @@ impl Registry {
                             identifier: alter.deduplicator.as_str().to_string(),
                         }));
                     };
-                    deduplicator.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.deduplicator.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    deduplicator.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.deduplicator.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterReorderer(alter) => {
@@ -638,12 +610,8 @@ impl Registry {
                             identifier: alter.reorderer.as_str().to_string(),
                         }));
                     };
-                    reorderer.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.reorderer.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    reorderer.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.reorderer.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterEmitter(alter) => {
@@ -662,12 +630,8 @@ impl Registry {
                             identifier: alter.emitter.as_str().to_string(),
                         }));
                     };
-                    emitter.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.emitter.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    emitter.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.emitter.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterIngestor(alter) => {
@@ -687,12 +651,8 @@ impl Registry {
                         }));
                     };
                     let before = Model::Ingestor(ingestor.clone());
-                    ingestor.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.ingestor.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    ingestor.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.ingestor.as_str(), rejection)
                     })?;
                     let after = Model::Ingestor(ingestor.clone());
                     ensure_placement_member_shape_change_allowed(
@@ -715,12 +675,8 @@ impl Registry {
                             identifier: alter.reingestor.as_str().to_string(),
                         }));
                     };
-                    reingestor.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.reingestor.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    reingestor.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.reingestor.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterGenerator(alter) => {
@@ -739,12 +695,8 @@ impl Registry {
                             identifier: alter.generator.as_str().to_string(),
                         }));
                     };
-                    generator.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.generator.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    generator.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.generator.as_str(), rejection)
                     })?;
                 }
                 RegistryMutation::AlterPlacement(alter) => {
@@ -766,12 +718,8 @@ impl Registry {
                         }));
                     };
                     let mut altered = placement.clone();
-                    altered.apply_alter(alter).map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: alter.placement.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    altered.apply_alter(alter).map_err(|rejection| {
+                        RegistryError::invalid_model(domain, alter.placement.as_str(), rejection)
                     })?;
                     let model = Model::Placement(altered);
                     let next_key = model.node_ref();
@@ -1197,38 +1145,6 @@ impl Registry {
         self.storage
             .list_identifiers(domain, kind, prefix)
             .change_context(RegistryError::LoadStoredModels)
-    }
-
-    /// Identifiers of `kind` in the configuration `queued` produces when applied to `domain` in
-    /// written order. Only the create and drop sequence decides a name, so an intermediate
-    /// configuration that does not yet resolve still reports the names it defines.
-    pub(crate) fn resulting_identifiers(
-        &self,
-        domain: &DomainName,
-        kind: ModelKind,
-        prefix: &str,
-        queued: &[RegistryMutation<RequestedResourceVersion>],
-    ) -> Result<Vec<ModelName>, Report<RegistryError>> {
-        let committed = self.list_identifiers(domain, kind, prefix)?;
-        if queued.is_empty() {
-            return Ok(committed);
-        }
-
-        let prefix = prefix.to_ascii_lowercase();
-        let mut identifiers = committed.into_iter().collect::<BTreeSet<_>>();
-        for mutation in queued {
-            let target = mutation.target_key();
-            if target.kind == kind {
-                identifiers.remove(&target.identifier);
-            }
-            if let Some(resulting) = mutation.resulting_key()
-                && resulting.kind == kind
-                && resulting.identifier.as_str().starts_with(&prefix)
-            {
-                identifiers.insert(resulting.identifier);
-            }
-        }
-        Ok(identifiers.into_iter().collect())
     }
 
     /// The models of `domain` as `queued` leaves them, applied in written order and without
@@ -1663,7 +1579,7 @@ mod tests {
     use meticulous::ResultExt as _;
     use nervix_models::{
         AckMode, AlterEmitter, AlterJunction, AlterProcessorOperation, AlterRelay,
-        AlterRelayOperation, AlterSchema, AlterSchemaOperation, AlterWireSchema,
+        AlterRelayOperation, AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema,
         AlterWireSchemaOperation, BranchSelection, ClientName, ClusterNodeName, CodecWireFormat,
         CreateWireSchema, DropModel, EmitterName, FlushPolicy, JsonType, MaterializedRelayState,
         ParseAsType, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, SchemaField,
@@ -2668,10 +2584,21 @@ mod tests {
             )
             .expect_err("invalid ALTER should reject the whole batch");
 
-        assert!(matches!(
+        assert_eq!(
             error.current_context(),
-            RegistryError::InvalidModel { .. }
-        ));
+            &RegistryError::InvalidModel {
+                domain: "default".to_string(),
+                identifier: "event_schema".to_string(),
+                reason: "field `missing` does not exist".to_string(),
+            }
+        );
+        assert_eq!(
+            error.downcast_ref::<AlterSchemaError>(),
+            Some(&AlterSchemaError::FieldNotFound {
+                field: named("missing"),
+            }),
+            "the refusal keeps the vocabulary's rejection beneath it"
+        );
         assert!(
             registry
                 .get::<CreateSchema>(&domain, named::<ModelName>("new_schema"))

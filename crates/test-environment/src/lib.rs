@@ -2,9 +2,9 @@
 //!
 //! Outside the layer order: a harness. It may name any layer, and no product code may name it.
 //!
-//! - **Owns.** Container lifecycle, the addresses and TLS material a run is given, and the
-//!   parallelism budget it is allowed.
-//! - **Depends on.** Container and process management.
+//! - **Owns.** Container lifecycle, the in-process DNS authority tests point resolvers at, the
+//!   addresses and TLS material a run is given, and the parallelism budget it is allowed.
+//! - **Depends on.** Container and process management, and the DNS message grammar.
 //! - **Must not know.** Nervix. It provisions what a test points Nervix at; the entities themselves
 //!   are always provisioned explicitly, never as a side effect of the product starting.
 
@@ -22,6 +22,7 @@ use std::{
 };
 
 use arch_into::ArchInto as _;
+use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_recovery::Discarded as _;
 use tempfile::{TempDir, tempdir, tempdir_in};
@@ -35,7 +36,9 @@ use testcontainers::{
     },
     runners::{AsyncBuilder, AsyncRunner},
 };
+use thiserror::Error;
 
+pub mod dns_authority;
 mod reaper;
 
 use reaper::ResourceReaper;
@@ -1400,7 +1403,7 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             if self.mode.is_reusable() {
                 drop(container);
             } else if let Err(error) = container.stop_and_remove().await {
-                errors.push(error);
+                errors.push(format!("{error:#}"));
             }
         }
         self.running.clear();
@@ -2014,7 +2017,7 @@ impl RunningContainer {
         }
     }
 
-    async fn stop_and_remove(self) -> Result<(), String> {
+    async fn stop_and_remove(self) -> error_stack::Result<(), ContainerTeardownError> {
         match self {
             Self::Generic(container) | Self::OtelCollector(container) | Self::Sentry(container) => {
                 stop_and_remove(container).await
@@ -2024,21 +2027,43 @@ impl RunningContainer {
     }
 }
 
-async fn stop_and_remove<I: Image>(container: ContainerAsync<I>) -> Result<(), String> {
+/// Why a test container could not be torn down. Removal is attempted even when the stop fails, so
+/// one teardown can report both.
+#[derive(Debug, Error)]
+enum ContainerTeardownError {
+    #[error("failed to stop test container {container}")]
+    Stop { container: String },
+    #[error("failed to remove test container {container}")]
+    Remove { container: String },
+}
+
+async fn stop_and_remove<I: Image>(
+    container: ContainerAsync<I>,
+) -> error_stack::Result<(), ContainerTeardownError> {
     let id = container.id().to_string();
-    let stop_error = container
-        .stop_with_timeout(Some(10))
-        .await
-        .err()
-        .map(|error| error.to_string());
-    let remove_error = container.rm().await.err().map(|error| error.to_string());
-    match (stop_error, remove_error) {
+    let stopped = container.stop_with_timeout(Some(10)).await;
+    let removed = container.rm().await;
+    let stop_failure = match stopped {
+        Ok(()) => None,
+        Err(error) => Some(
+            Report::new(error).change_context(ContainerTeardownError::Stop {
+                container: id.clone(),
+            }),
+        ),
+    };
+    let remove_failure = match removed {
+        Ok(()) => None,
+        Err(error) => Some(
+            Report::new(error).change_context(ContainerTeardownError::Remove { container: id }),
+        ),
+    };
+    match (stop_failure, remove_failure) {
         (None, None) => Ok(()),
-        (Some(stop), None) => Err(format!("failed to stop test container {id}: {stop}")),
-        (None, Some(remove)) => Err(format!("failed to remove test container {id}: {remove}")),
-        (Some(stop), Some(remove)) => Err(format!(
-            "failed to stop test container {id}: {stop}; failed to remove it: {remove}"
-        )),
+        (Some(failure), None) | (None, Some(failure)) => Err(failure),
+        (Some(mut stop), Some(remove)) => {
+            stop.extend_one(remove);
+            Err(stop)
+        }
     }
 }
 

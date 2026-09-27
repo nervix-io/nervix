@@ -161,6 +161,8 @@ pub(super) async fn checkpoint_wasm_instance(
     live: &mut WasmLiveInstance,
     execution_now: Timestamp,
 ) -> error_stack::Result<(), WasmInstanceError> {
+    #[cfg(feature = "testing")]
+    hold_checkpoint_at(runtime, state, crate::WasmCheckpointWindow::BeforeCapture).await;
     let deadline = Instant::now()
         .checked_add(WASM_CHECKPOINT_DEADLINE)
         .assured("a deadline seconds away stays within Instant");
@@ -184,6 +186,8 @@ pub(super) async fn checkpoint_wasm_instance(
     };
     let captured = state.capture(bytes, boundary);
     let revision = captured.revision();
+    #[cfg(feature = "testing")]
+    hold_checkpoint_at(runtime, state, crate::WasmCheckpointWindow::AfterCapture).await;
     let durable = match runtime
         .persist_wasm_checkpoint(state, captured, deadline)
         .await
@@ -194,6 +198,13 @@ pub(super) async fn checkpoint_wasm_instance(
             return Err(live.module.persistence_failure(error, revision));
         }
     };
+    #[cfg(feature = "testing")]
+    hold_checkpoint_at(
+        runtime,
+        state,
+        crate::WasmCheckpointWindow::AfterLocalDurability,
+    )
+    .await;
     let completed = match runtime
         .confirm_wasm_checkpoint(state, durable, deadline)
         .await
@@ -204,8 +215,34 @@ pub(super) async fn checkpoint_wasm_instance(
             return Err(live.module.persistence_failure(error, revision));
         }
     };
+    #[cfg(feature = "testing")]
+    hold_checkpoint_at(
+        runtime,
+        state,
+        crate::WasmCheckpointWindow::BeforeAcknowledgement,
+    )
+    .await;
     state.commit(completed);
     Ok(())
+}
+
+/// Hold this checkpoint at `window` while a scenario has armed it, so the scenario can end the node
+/// with the checkpoint exactly that far.
+#[cfg(feature = "testing")]
+async fn hold_checkpoint_at(
+    runtime: &Runtime,
+    state: &ReplicatedWasmProcessorState,
+    window: crate::WasmCheckpointWindow,
+) {
+    runtime
+        .inner
+        .fault_injection
+        .pause_wasm_checkpoint_if_armed(
+            &state.placement.domain,
+            &state.placement.identifier,
+            window,
+        )
+        .await;
 }
 
 /// Checkpoint the guest state an ownership handoff transfers, and wait until it reached its
@@ -307,3 +344,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "wasm_checkpoint_shuttle_tests.rs"]
+mod shuttle_tests;

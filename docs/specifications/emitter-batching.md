@@ -1,7 +1,8 @@
 # Optional emitter batching
 
-Status: specified. Not implemented. This document defines the complete contract for combining
-several records into one externally observable batch, for every emitter kind and every wire format.
+Status: specified, with implementation progressing by task. This document defines the complete
+contract for combining several records into one externally observable batch, for every emitter kind
+and every wire format.
 
 ## Required outcome
 
@@ -61,7 +62,7 @@ exists, so it fails to load with an error naming it and is recreated rather than
   OTLP export request, a Parquet data file. Every container is named in this document; none is
   invented at runtime.
 - **Packing order.** The order members occupy in the container: the order the emitter would have
-  published them in, which is the row order of the buffered batch they come from.
+  published them in, walking released Arrow carriers in arrival order and each carrier in row order.
 - **Batch-compatible.** Two records may share a batch only when everything the container carries
   once is equal for both of them.
 - **Measured size.** The exact byte length of the batch payload. Nervix does not estimate it.
@@ -159,13 +160,15 @@ batch: none
 
 ### Which records may share a batch
 
-A batch never spans two buffered input batches. Each buffered batch carries one source relay, one
-concrete branch or no branch at all, and one accepted domain execution snapshot, so relay identity,
-branch identity and the snapshot every expression in the batch was evaluated under are uniform by
-construction. A batch never mixes branches, never mixes relays, and never mixes execution
-snapshots.
+A payload may select rows from successive buffered Arrow carriers released by one emitter flush.
+Each carrier retains its source relay, concrete branch or typed absence, execution time and row
+membership. A relay has one fixed named branch declaration, so the source relay and its concrete
+key identify the exact branch, including when another named branch has an equal key. One payload
+never mixes relays or branches. Each carrier's materialized dependencies and construction run in
+its own execution context before packing; packing does not rerun those expressions or substitute
+another carrier's execution time for their error attribution.
 
-Within one buffered batch, two records are batch-compatible when every attribute the container
+Within a flush, two records are batch-compatible when every attribute the container
 carries once is equal for both:
 
 - the message key, which is the record's concrete branch key where the sink exposes one
@@ -175,7 +178,8 @@ carries once is equal for both:
 - for a codec using the `SYSLOG` wire schema, every syslog header field the codec's schema declares
   except `timestamp`
 
-The emitter walks the buffered batch in row order and adds each eligible record to the open batch.
+The emitter walks released carriers in arrival order and their selected rows in row order, adding
+each eligible record to the open payload.
 A record that is not batch-compatible with the open batch closes it and opens a new one. A record
 is never skipped over to reach a compatible one later in the batch, so order is preserved
 end to end and no record is reordered across a boundary.
@@ -184,20 +188,22 @@ Compatibility is what keeps a batch from asserting something untrue about one of
 it is visible in how large batches get. A header written from a per-record value limits batches to
 runs of records that share that value, and so does a per-record ordering group; carrying the value
 in the payload instead, where every member has its own, restores full batching. An emitter without
-written headers, without an ordering group and with one branch per buffered batch has nothing that
-can split a batch except its two declared limits.
+written headers or an ordering group can combine successive carriers of one relay and concrete
+branch until either declared limit seals the payload.
 
 ### Order, cadence and partial batches
 
 `FLUSH` decides when an emitter publishes and how much it holds. Batching decides only how what it
 holds is divided into payloads. A flush holding 1,000 eligible records and declaring
-`MAX MESSAGES 100` publishes ten payloads; a flush holding three publishes one payload with three
-members. A batch is never held back waiting to reach its maximum, and batching adds no timer,
+`MAX MESSAGES 100` publishes ten payloads when those records are compatible and each encoding fits;
+a flush holding three compatible records publishes one payload with three members when it fits.
+A batch is never held back waiting to reach its maximum, and batching adds no timer,
 deadline or cadence of its own. A partial batch — one that reached neither limit — is published
 exactly like a full one.
 
 `FLUSH IMMEDIATE` is unchanged, including its system-owned 100 µs minimum batching window. With
-batching declared, whatever that window collected becomes one batch, which is usually one member.
+batching declared, records collected in that window are divided into payloads by the same limits
+and compatibility rules; each payload usually has one member.
 
 ### Singleton and empty batches
 
@@ -488,7 +494,7 @@ runs after the batch failed, not a second way to publish.
 | --- | --- |
 | `FLUSH EACH <duration> MAX BATCH SIZE <bytes>` | Unchanged. It decides when the emitter publishes and how many Arrow bytes it holds; batching divides what it holds. The two bounds measure different quantities and neither is derived from the other. |
 | `FLUSH IMMEDIATE` | Unchanged, including the 100 µs minimum batching window. Batching does not extend it. |
-| `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` | Unchanged. It changes how much one buffered batch holds, and therefore how many members a batch can draw on, and nothing else. Collection stays independent per source relay and concrete branch. |
+| `COLLECT FOR <duration> [MAX BATCH SIZE <bytes>]` | Unchanged. It changes the size of incoming Arrow carriers; compatible rows from successive carriers may share a payload within one emitter flush. Collection stays independent per source relay and concrete branch. |
 | `MODE` | Unchanged in form. A confirmation window counts publishes: without batching a publish is one record, with batching it is one batch. `ACK PARALLEL MAX 100` with `MAX MESSAGES 500` therefore exposes up to 50,000 records to one ambiguity window, which is the declaration's meaning, not a hidden multiplier. |
 | SQS `MODE BATCH` | Unchanged and orthogonal. `MODE` groups independent SQS messages into one service request; batching decides how many source records one SQS message carries. A request still holds at most ten messages and at most the service's request limit. |
 | Database `WITH MAX BATCH <n>` | Deleted. The batching clause declares the same bound for the four database sinks and adds the encoded-size bound. |
@@ -586,7 +592,7 @@ or `trace` detail and carry no payload values.
 | `MAX MESSAGES` | 1 to 65,536 |
 | `MAX SIZE` | At least 1 byte; at most 256 KiB for SQS |
 | Encodings per candidate | At most `⌈log2(n)⌉ + 1` for `n` members, each bounded by `MAX SIZE` |
-| Members per batch | At most `MAX MESSAGES`, and never more than one buffered batch holds |
+| Members per batch | At most `MAX MESSAGES`, selected from compatible carriers released by one emitter flush |
 | Batch cadence | None: batching owns no timer, and `FLUSH` alone decides when output leaves |
 
 ## Examples
@@ -766,7 +772,7 @@ existing emission scenarios already provision.
 | NSPL, Models and execution plans | The clause parses, completes, renders in `SHOW CREATE` and `DESCRIBE`, validates its limits, is required for the four database sinks, and reaches the runtime as a typed plan; `WITH MAX BATCH` no longer exists | NSPL statements and `DESCRIBE EMITTER` |
 | Wire-size upper bounds and bounded encoders | Encoding stops at `MAX SIZE`, the measured size is exact for every format, subdivision halves and re-measures without assuming monotonicity, and a singleton is rejected only after a bounded encoding of it alone | Consumed payload bytes and `ON MESSAGE ERROR` records |
 | Batch-aware jaq and format-native containers | Every container in the [container table](#containers-by-format), the protobuf batch message with and without a transformation, and the zero-output, multiple-output, evaluation-failure and unwritable-value failures | Kafka, and a protobuf consumer for the batch message |
-| Bounded payload assembly | Packing order, batch compatibility on key, headers and ordering group, one buffered batch per batch, singleton shape, nothing for an empty batch, partial batches, and no batch cadence of its own | Kafka and SQS, with interleaved records from at least two branches |
+| Bounded payload assembly | Packing order across Arrow carriers, compatibility on source relay, exact branch, key, headers and ordering group, singleton shape, nothing for an empty carrier, partial batches, and no batch cadence of its own | Kafka and SQS, with interleaved records from at least two branches and source relays |
 | Membership through acknowledgements and retries | One confirmation acknowledging every member, a retained prepared payload across an ambiguous retry, a smaller retry where the contract names members, and upstream leases kept alive | Kafka with a stalled broker, and MongoDB with a poison document |
 | Broker and message emitters | One batch per message on Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ and SQS, in every publishing mode, including SQS `MODE BATCH` with FIFO groups | Kafka, Pulsar, RabbitMQ, Redis, EMQX, NATS, a Nervix ZeroMQ ingestor, ElasticMQ |
 | Syslog, Sentry and OTEL | The syslog frame and its compatibility rule over UDP, TCP and TLS; a Sentry envelope accepted with the batch event; bounded OTLP export requests for logs, traces and metrics over both transports | A Nervix syslog ingestor, Bugsink, Quickwit and Jaeger |

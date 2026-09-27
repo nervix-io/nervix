@@ -239,6 +239,12 @@ state but emits only windows that have met their declared `WIDTH`. A partially f
 emitted early by a shutdown, so its rows do not reach the sink; the window's input was already
 acknowledged when it was admitted, so nothing redelivers them either.
 
+An ownership handoff publishes the remaining window for the destination to restore. Evicting a
+concrete branch has a different endpoint: it drops the branch's retained rows and aggregate state
+before the final checkpoint, so a later branch with the same key begins with an empty window.
+The lifecycle checkpoint carries each branch incarnation; window restore accepts retained state
+only from that same incarnation.
+
 Draining ends with a confirmation pass. After a flush generation observes nothing outstanding, one
 more generation must also observe nothing, so work that an upstream node publishes after a
 downstream node finished its own flush is not left behind. A domain is quiescent only when that
@@ -268,6 +274,14 @@ checkpoint as it waits for any other outstanding acknowledgement. The checkpoint
 deadline bounds that wait: a checkpoint that cannot complete fails and negatively acknowledges what
 it held.
 
+Runtime teardown gives each processor task a stop grace, and the processor task gives each of its
+branch tasks one of its own. A processor task still stopping its branches when its grace ends is
+ended together with every branch task it holds. A branch still waiting for its checkpoint therefore
+never outlives its node: it cannot keep the node's runtime database open past terminal teardown,
+continue a checkpoint, or settle acknowledgements after the node stopped. Its unreleased
+acknowledgements are negatively acknowledged, and a restart finds whatever that checkpoint had
+already written to the node's storage, exactly as after a forced ending.
+
 A coordinated WASM state reset is serialized with domain lifecycle, placement, ownership movement,
 resource rebinding, and model mutation by the domain alteration lease and its entity gate. If node
 shutdown interrupts a preparation before reset publication, the old generation remains
@@ -278,6 +292,13 @@ already fenced permanently. Drain support keeps schedule activation, state stora
 and interconnect handlers alive so the fresh initial checkpoint and `Ready` publication can finish
 within their ordinary bounds. If shutdown ends first, restart observes `Publishing` and resumes the
 new generation rather than restoring the old one.
+
+Read-only WASM state inspection after restart uses the committed schedule's generation and
+retained reset and recovery outcomes. A pre-publication failure leaves the preceding generation
+visible; a published but not yet usable reset remains `PUBLISHING` until its initial checkpoint
+and activation finish. Runtime checkpoint observations from a replaced generation are excluded,
+and a restored checkpoint reports unknown prior replica confirmation when that boundary cannot
+be reconstructed. Inspection never settles an uncertain transaction outcome or resumes a reset.
 
 An admitted NSPL reset is recorded as an ordered transaction effect. If shutdown interrupts the
 command after its effect is recorded, recovery resumes it with the original execution reference;
@@ -395,7 +416,9 @@ every checkpoint whose acknowledgements the lost owner released, because the own
 only after its replicas had synchronized the checkpoint, so forced recovery continues each branch
 from at least the state its acknowledged inputs produced. The promoted replica restores every
 staged checkpoint into a guest before the schedule is published, from the module it compiled while
-it was a replica, so the recovery does not wait for the module to compile.
+it was a replica, so the recovery does not wait for the module to compile. A preparation that fails,
+including a guest that cannot restore a staged checkpoint, publishes the recovery with recreated
+state; see [Forced Recovery](./wasm-state.md#forced-recovery).
 
 ## Topology Cases
 
@@ -413,6 +436,10 @@ The no-replacement path is explicit in the log: `no live schedulable replacement
 admitted work completes in place`.
 
 ## Connector Contracts
+
+[Connector Crates And The Connector Contract](./connector-contract.md) defines normal source and
+sink ownership and completion points. This section describes what a node's drain can complete
+before its shared stop deadline.
 
 Shutdown does not change any connector's delivery contract. It changes only whether a connector
 reaches its completion point before the process ends.
@@ -446,7 +473,9 @@ acknowledged source redelivers the record after the restart.
 
 An emitter reaches the sink completion point its `MODE` declares, and the drain waits for it. An
 emitter that cannot finish reports `emitter '<name>' did not drain before its configured deadline`
-and holds the drain until the timeout.
+and holds the drain until the timeout. A batching emitter's drain also writes every batch payload an
+earlier attempt left unanswered, with the bytes and members it was first written with, and the
+emitter buffer counts those members as work the node still holds until they resolve.
 
 Kafka is the only sink whose client-side queue shutdown drains explicitly: after its buffered
 batches are published, the emitter host calls the sink contract's finish hook with the remaining
@@ -500,10 +529,12 @@ handles. Terminal teardown does not finish until both database locks have been r
 [Consensus Storage And Replication](./consensus-storage-and-replication.md) for the write, replay,
 retention, and snapshot contracts behind this barrier.
 
-The interconnect rejects new admission, cancels pool and operation waiters, and begins a graceful
-HTTP/2 shutdown, giving active transport work up to ten seconds before closing the remaining
-connections and handlers. A forced ending skips this entirely, so peers observe the connections
-ending exactly as they do when a process crashes.
+The interconnect rejects new admission, cancels pool and operation waiters, and retires the pool
+connections the node opened, giving their leased streams up to ten seconds before closing whatever
+remains. Connections that peers opened to the node close at once, together with the handlers still
+serving their streams, so a peer's request the node has not answered fails instead of completing.
+A forced ending skips this entirely, so peers observe the connections ending exactly as they do
+when a process crashes.
 
 ### Consensus Work At The Ending Boundary
 
@@ -556,6 +587,7 @@ Durability is not uniform across those rows, and the difference is operationally
   schedule assigns, before the source acknowledgements it covers are released, so every checkpoint
   that released an acknowledgement survives a host power loss. Checkpoints that branches take at the
   same time share one synchronization. See
+  [Failure At Each Boundary](wasm-state.md#failure-at-each-boundary) and
   [WASM Processor Guests](wasm-processor-guests.md#recovery-replay-and-duplicates) for what a
   recovered branch continues from and which inputs its source redelivers.
 
@@ -583,6 +615,15 @@ owns the work.
 This is the fence that prevents crash recovery from reviving an obsolete owner. It is a
 process-start admission proof only: connectivity lost after admission does not revoke execution.
 
+### Whole-Cluster Restart Keeps Ownership
+
+When every node restarts, the first node to lead can form a quorum while the others are still
+starting and gossip has not heard from them yet. Its automatic scheduling therefore waits, for the
+first ten seconds of its reconciliation, while any voter is neither reported live nor declared dead.
+Each owner that returns in that time keeps its work and restores it from its own storage and
+replicas, instead of having it failed over without its state. See
+[Planned Ownership Handoffs And Failover](./control-plane.md#planned-ownership-handoffs-and-failover).
+
 ### Checkpoint Identity
 
 A restart reopens a runtime-state checkpoint only under the identity the committed schedule
@@ -591,9 +632,12 @@ depend on no schema: they are keyed by their entity alone and survive a restart 
 changed while the node was down. Every other checkpoint, including deduplicator, window, and
 materialized relay state, branch lifecycle records, and WASM guest state, is keyed by the
 fingerprint of the schemas its entity lays records out by, and WASM guest state also by its
-generation. A checkpoint written under a replaced fingerprint is never restored as the new layout,
-served, replicated, handed over, or selected by a forced recovery, and applying the committed
-schedule of a running domain removes it. Until the node has applied a schedule that names an entity,
+generation. Window state additionally includes the current window model in its identity, so a
+replacement that changes `WIDTH`, `STEP`, or aggregate expressions begins with an empty window even
+when its schemas are unchanged. A checkpoint written under a replaced fingerprint is never restored
+as the new layout, served, replicated, handed over, or selected by a forced recovery. Applying the
+committed schedule of a running domain removes it. Until the node has applied a schedule that names
+an entity,
 it has no fingerprint for that entity's schema-bound state and does not place that state at all.
 
 ### Interrupted Snapshot Installation

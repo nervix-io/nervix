@@ -26,6 +26,11 @@ impl<T> AbortOnDropHandle<T> {
     pub fn new(handle: tokio::task::JoinHandle<T>) -> Self {
         Self(handle)
     }
+
+    /// End the task now, while keeping the handle to await its cancellation.
+    pub fn abort(&self) {
+        self.0.abort();
+    }
 }
 
 #[cfg(feature = "shuttle")]

@@ -54,6 +54,8 @@ pub enum RegexpFunction {
     Replace,
     /// `regexp_substr(text, pattern)`.
     Substr,
+    /// `regexp_extract(text, pattern, group)`.
+    Extract,
 }
 
 /// One regular-expression call as the compiler lowered it: which function it is, and where its
@@ -262,6 +264,17 @@ impl ActiveRegex<'_> {
         let input = Input::new(text);
         let matched = self.regex.search_with(&mut self.cache, &input)?;
         Some(&text[matched.range()])
+    }
+
+    /// The numbered capture of the first leftmost match, or no value when either is absent.
+    pub(crate) fn extract<'t>(&mut self, text: &'t str, group: usize) -> Option<&'t str> {
+        let captures = self
+            .captures
+            .get_or_insert_with(|| self.regex.create_captures());
+        self.regex
+            .search_captures_with(&mut self.cache, &Input::new(text), captures);
+        let span = captures.get_group(group)?;
+        Some(&text[span.range()])
     }
 
     /// Appends `text` to `output` with every match replaced by `replacement`, where `$1`,
@@ -475,6 +488,21 @@ mod tests {
             ActivePattern::Regex(regex) => regex,
             ActivePattern::Invalid(error) => panic!("pattern must compile: {error}"),
         }
+    }
+
+    #[test]
+    fn captures_include_full_optional_and_empty_matches() {
+        let outcome = PatternOutcome::compile("(a)?(b)");
+        let mut regex = active(&outcome);
+        assert_eq!(regex.extract("b", 0), Some("b"));
+        assert_eq!(regex.extract("b", 1), None);
+        assert_eq!(regex.extract("b", 2), Some("b"));
+        assert_eq!(regex.extract("x", 0), None);
+        assert_eq!(regex.extract("ab", 1), Some("a"));
+        assert_eq!(regex.extract("ab", 3), None);
+
+        let empty = PatternOutcome::compile("");
+        assert_eq!(active(&empty).extract("é", 0), Some(""));
     }
 
     #[rstest]

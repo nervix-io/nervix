@@ -105,7 +105,7 @@ defines the rebinding contract.
 The ordered transaction records the reset as an effect even though it changes no Model. Success
 waits for the selected guest-state generation to be durable and its replacement execution usable.
 Retrying an admitted reference resumes or reads the original outcome; an expired reference cannot
-start another destructive reset.
+start another destructive reset. See [Coordinated Reset](./wasm-state.md#coordinated-reset).
 
 ## All-live-node barriers
 
@@ -160,6 +160,10 @@ recovery and application owners perform repair before declaring readiness.
 
 ## Transactions
 
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines the frozen
+step plan, required and actual pause scopes, applying progress, and historical report. This chapter
+defines when each authoritative effect and its runtime application finish.
+
 `BEGIN` creates an `OPEN` transaction for one existing selected domain. A queueable statement is
 validated by planning the ordered candidate formed by the existing prefix, then durably appended
 with its request reference, expected position, admitted result, stable operation metadata, and
@@ -186,6 +190,15 @@ records applied or failed separately. A step whose authoritative write is commit
 until activation, handoff, drain, source readiness, lifecycle work, and command-owned gate release
 are complete. Only then can the next step advance. The transaction becomes `COMMITTED` after the
 final application record and terminal visibility barrier.
+
+For a transaction containing a WASM state reset, the frozen preview describes the planned reset
+effect, while the retained actual step separately records quiescence engagement and whether
+application completed. `DESCRIBE TRANSACTION` renders those same typed facts in text or JSON; an
+uncertain engagement remains uncertain on inspection. `DESCRIBE WASM PROCESSOR` is a separate
+read-only observation of the current scheduled lifetime and owner checkpoint progress. Its client
+outcome carries the typed state inspection beside the text message, and reading it does not advance
+checkpoint durability or change a retained command outcome. `FORMAT JSON` renders that same typed
+state inspection as JSON while retaining it in the client outcome.
 
 ```mermaid
 sequenceDiagram

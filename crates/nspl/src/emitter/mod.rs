@@ -1,27 +1,29 @@
-use std::{borrow::Cow, num::NonZeroU64};
+use std::borrow::Cow;
 
 use ahash_compile_time::HashSet;
 use chumsky::{error::LabelError, prelude::*, util::MaybeRef};
 use meticulous::OptionExt as _;
 use nervix_models::{
-    AckMode, AlterEmitter, AlterEmitterOperation, ClickHouseValueMapping, CodecName, CreateEmitter,
-    CreateStatement, EmitSink, EmitterName, EmitterPublishingMode, IcebergCatalog,
-    IcebergStorageBackend, IcebergValueMapping, MaterializedStateDependency, MongoDbConflictAction,
-    MySqlConflictAction, OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope,
-    OtelSignal, PostgresConflictAction, ProcessorInputs, SqsFifoGroup,
+    AckMode, AlterEmitter, AlterEmitterOperation, BatchMessageLimit, ClickHouseValueMapping,
+    CodecName, CreateEmitter, CreateStatement, EmitSink, EmitterBatchPolicy, EmitterBody,
+    EmitterName, EmitterPublishingMode, IcebergCatalog, IcebergStorageBackend, IcebergValueMapping,
+    MaterializedStateDependency, MongoDbConflictAction, MySqlConflictAction,
+    OtelAggregationTemporality, OtelMetric, OtelMetricKind, OtelScope, OtelSignal,
+    PayloadSizeLimit, PostgresConflictAction, ProcessorInputs, SqsFifoGroup,
 };
 
 use crate::{
     lexer::{Identifier, Token, Word},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, ack_timeout, alter_op_separator,
-        boxed_choice, byte_size_lit, channel_ref, client_ref, codec_ref, collect_for,
-        collection_ref, duration_lit, emitter_ack_window, emitter_name, emitter_ref, flush_each,
-        from_relay_clauses, general_error_policy, if_not_exists_clause, into_parse_error, kw,
-        kw_phrase2, kw_phrase3, lex_input, materialized_state_dependencies, message_error_policy,
-        nonzero_u64_value, queue_ref, relay_ref, render_expression_tokens, retry_policy,
-        route_construction, string_lit, subject_ref, suggest_from, table_ref, tok, topic_ref,
-        where_expression, where_only_route_construction, word_raw,
+        bodyless_route_construction, boxed_choice, byte_size_lit, channel_ref, client_ref,
+        codec_ref, collect_for, collection_ref, duration_lit, emitter_ack_window, emitter_name,
+        emitter_ref, expression_before_clause, flush_each, from_relay_clauses,
+        general_error_policy, if_not_exists_clause, into_parse_error, kw, kw_phrase2, kw_phrase3,
+        lex_input, materialized_state_dependencies, message_error_policy, queue_ref, relay_ref,
+        render_expression_tokens, retry_policy, route_construction, string_lit, subject_ref,
+        suggest_from, table_ref, tok, topic_ref, u64_value, where_expression,
+        where_only_route_construction, word_raw,
     },
 };
 
@@ -243,7 +245,7 @@ fn sqs_fifo_group_expression<'src>()
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, crate::parser_support::expression_error_message(error))
+                Rich::custom(span, error.current_context().embedded_expression_message())
             })
         })
         .boxed()
@@ -377,7 +379,10 @@ fn otel_literal_expression(expression: &nervix_models::Expression) -> bool {
         | nervix_models::Expression::Case { .. }
         | nervix_models::Expression::Membership { .. }
         | nervix_models::Expression::Range { .. }
-        | nervix_models::Expression::TryCast { .. } => false,
+        | nervix_models::Expression::TryCast { .. }
+        | nervix_models::Expression::JsonValue { .. }
+        | nervix_models::Expression::TryJsonValue { .. }
+        | nervix_models::Expression::JsonExists { .. } => false,
     }
 }
 
@@ -476,7 +481,7 @@ fn clickhouse_value_expr<'src>()
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, crate::parser_support::expression_error_message(error))
+                Rich::custom(span, error.current_context().embedded_expression_message())
             })
         })
 }
@@ -516,23 +521,37 @@ fn clickhouse_emit_sink_parser<'src>()
         .then(table_ref())
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
-        .then(max_batch())
-        .map(
-            |(((client, table), values), max_batch)| EmitSink::ClickHouse {
-                client,
-                table,
-                values,
-                max_batch,
-            },
-        )
+        .map(|((client, table), values)| EmitSink::ClickHouse {
+            client,
+            table,
+            values,
+        })
 }
 
-fn max_batch<'src>()
--> impl Parser<'src, &'src [Token], NonZeroU64, extra::Err<ParseError<'src>>> + Clone {
-    kw_phrase3(Identifier::With, Identifier::Max, Identifier::Batch).ignore_then(nonzero_u64_value(
-        "batch_size",
-        "max batch size must be greater than zero",
-    ))
+/// `BATCH MAX MESSAGES <n> MAX SIZE <bytes>`, the two hard limits of every batch an emitter
+/// publishes.
+///
+/// Both limits are checked where they are written: a count outside `1..=65536`, a size of zero,
+/// a fractional size and a size past the 64-bit byte range are rejected here rather than narrowed,
+/// rounded or saturated later.
+fn batch_clause<'src>()
+-> impl Parser<'src, &'src [Token], EmitterBatchPolicy, extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Identifier::Batch, Identifier::Max, Identifier::Messages)
+        .ignore_then(u64_value("message_count").try_map(|value, span| {
+            BatchMessageLimit::try_from(value)
+                .map_err(|error| Rich::custom(span, error.to_string()))
+        }))
+        .then_ignore(kw_phrase2(Identifier::Max, Identifier::Size))
+        .then(byte_size_lit().try_map(|literal, span| {
+            literal
+                .parse::<PayloadSizeLimit>()
+                .map_err(|error| Rich::custom(span, error.to_string()))
+        }))
+        .map(|(max_messages, max_size)| EmitterBatchPolicy {
+            max_messages,
+            max_size,
+        })
+        .boxed()
 }
 
 #[derive(Clone, Copy)]
@@ -713,30 +732,26 @@ fn postgres_emit_sink_parser<'src>()
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
         .then(postgres_conflict_action())
-        .then(max_batch())
-        .try_map(
-            |((((client, table), values), conflict_action), max_batch), span| {
-                if let PostgresConflictAction::DoUpdate { target } = &conflict_action {
-                    let has_update_column = values
-                        .iter()
-                        .any(|mapping| !target.contains(&mapping.column));
-                    if !has_update_column {
-                        return Err(Rich::custom(
-                            span,
-                            "Postgres ON CONFLICT DO UPDATE requires at least one non-conflict \
-                             VALUES column to update",
-                        ));
-                    }
+        .try_map(|(((client, table), values), conflict_action), span| {
+            if let PostgresConflictAction::DoUpdate { target } = &conflict_action {
+                let has_update_column = values
+                    .iter()
+                    .any(|mapping| !target.contains(&mapping.column));
+                if !has_update_column {
+                    return Err(Rich::custom(
+                        span,
+                        "Postgres ON CONFLICT DO UPDATE requires at least one non-conflict VALUES \
+                         column to update",
+                    ));
                 }
-                Ok(EmitSink::Postgres {
-                    client,
-                    table,
-                    values,
-                    conflict_action,
-                    max_batch,
-                })
-            },
-        )
+            }
+            Ok(EmitSink::Postgres {
+                client,
+                table,
+                values,
+                conflict_action,
+            })
+        })
 }
 
 fn mysql_emit_sink_parser<'src>()
@@ -749,14 +764,12 @@ fn mysql_emit_sink_parser<'src>()
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
         .then(mysql_conflict_action())
-        .then(max_batch())
         .map(
-            |((((client, table), values), conflict_action), max_batch)| EmitSink::MySql {
+            |(((client, table), values), conflict_action)| EmitSink::MySql {
                 client,
                 table,
                 values,
                 conflict_action,
-                max_batch,
             },
         )
 }
@@ -771,19 +784,15 @@ fn mongodb_emit_sink_parser<'src>()
         .then_ignore(kw(Identifier::Values))
         .then(clickhouse_values())
         .then(mongodb_conflict_action())
-        .then(max_batch())
-        .try_map(
-            |((((client, collection), values), conflict_action), max_batch), span| {
-                validate_mongodb_conflict_action(&values, &conflict_action, span)?;
-                Ok(EmitSink::MongoDb {
-                    client,
-                    collection,
-                    values,
-                    conflict_action,
-                    max_batch,
-                })
-            },
-        )
+        .try_map(|(((client, collection), values), conflict_action), span| {
+            validate_mongodb_conflict_action(&values, &conflict_action, span)?;
+            Ok(EmitSink::MongoDb {
+                client,
+                collection,
+                values,
+                conflict_action,
+            })
+        })
 }
 
 fn iceberg_catalog_parser<'src>()
@@ -880,6 +889,83 @@ fn encode_using_clause<'src>()
         .boxed()
 }
 
+fn method_boundary(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Word(Word::KnownWord {
+            iden: Identifier::Path,
+            ..
+        })
+    )
+}
+
+fn path_boundary(token: &Token) -> bool {
+    matches!(
+        token,
+        Token::Word(Word::KnownWord {
+            iden: Identifier::Mode,
+            ..
+        })
+    )
+}
+
+fn http_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], SinkWithPublishingMode, extra::Err<ParseError<'src>>> + Clone {
+    kw(Identifier::Http)
+        .ignore_then(client_ref())
+        .then_ignore(kw(Identifier::Method))
+        .then(expression_before_clause(method_boundary))
+        .then_ignore(kw(Identifier::Path))
+        .then(expression_before_clause(path_boundary))
+        .then_ignore(kw(Identifier::Mode))
+        .then(request_ack_publishing_mode())
+        .map(
+            |(((client, method), path), publishing_mode)| SinkWithPublishingMode {
+                sink: EmitSink::Http {
+                    client,
+                    method,
+                    path,
+                },
+                publishing_mode,
+            },
+        )
+        .boxed()
+}
+
+fn http_body_selection<'src>()
+-> impl Parser<'src, &'src [Token], EmitterBody, extra::Err<ParseError<'src>>> + Clone {
+    choice((
+        encode_using_clause().map(|codec| EmitterBody::Codec { codec }),
+        kw_phrase2(Identifier::Without, Identifier::Body).to(EmitterBody::WithoutBody),
+    ))
+    .boxed()
+}
+
+fn http_create_sink_parser<'src>()
+-> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
+    let encoded = http_sink_parser()
+        .then(encode_using_clause())
+        .then(route_construction().or_not())
+        .map(|((head, codec), construction)| ParsedSink {
+            sink: head.sink,
+            publishing_mode: head.publishing_mode,
+            body: EmitterBody::Codec { codec },
+            construction,
+            batch: None,
+        });
+    let bodyless = http_sink_parser()
+        .then_ignore(kw_phrase2(Identifier::Without, Identifier::Body))
+        .then(bodyless_route_construction().or_not())
+        .map(|(head, construction)| ParsedSink {
+            sink: head.sink,
+            publishing_mode: head.publishing_mode,
+            body: EmitterBody::WithoutBody,
+            construction,
+            batch: None,
+        });
+    choice((encoded, bodyless)).boxed()
+}
+
 /// A sink together with the publishing mode written after it, which every sink accepts.
 struct SinkWithPublishingMode {
     sink: EmitSink,
@@ -914,8 +1000,9 @@ fn encoded_sink<'src>(
         .map(|((sink, codec), construction)| ParsedSink {
             sink: sink.sink,
             publishing_mode: sink.publishing_mode,
-            codec: Some(codec),
+            body: EmitterBody::Codec { codec },
             construction,
+            batch: None,
         })
         .boxed()
 }
@@ -931,9 +1018,31 @@ fn codec_free_sink<'src>(
         .map(|(sink, construction)| ParsedSink {
             sink: sink.sink,
             publishing_mode: sink.publishing_mode,
-            codec: None,
+            body: EmitterBody::Values,
             construction,
+            batch: None,
         })
+        .boxed()
+}
+
+/// A complete sink clause followed by the batching clause its sink cannot do without.
+fn batch_required<'src>(
+    sink: impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
+    sink.then(batch_clause())
+        .map(|(sink, batch)| ParsedSink {
+            batch: Some(batch),
+            ..sink
+        })
+        .boxed()
+}
+
+/// A complete sink clause optionally followed by the batching clause.
+fn batch_optional<'src>(
+    sink: impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone + 'src,
+) -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
+    sink.then(batch_clause().or_not())
+        .map(|(sink, batch)| ParsedSink { batch, ..sink })
         .boxed()
 }
 
@@ -941,77 +1050,79 @@ fn codec_free_sink<'src>(
 struct ParsedSink {
     sink: EmitSink,
     publishing_mode: EmitterPublishingMode,
-    codec: Option<CodecName>,
+    body: EmitterBody,
     construction: Option<nervix_models::RouteConstruction>,
+    batch: Option<EmitterBatchPolicy>,
 }
 
 fn emit_sink_parser<'src>()
 -> impl Parser<'src, &'src [Token], ParsedSink, extra::Err<ParseError<'src>>> + Clone {
     boxed_choice!(
-        codec_free_sink(sink_with_publishing_mode(
+        http_create_sink_parser(),
+        batch_optional(codec_free_sink(sink_with_publishing_mode(
             otel_emit_sink_parser(),
             request_ack_publishing_mode(),
-        )),
-        codec_free_sink(sink_with_publishing_mode(
+        ))),
+        batch_required(codec_free_sink(sink_with_publishing_mode(
             clickhouse_emit_sink_parser(),
             request_ack_publishing_mode(),
-        )),
-        codec_free_sink(sink_with_publishing_mode(
+        ))),
+        batch_required(codec_free_sink(sink_with_publishing_mode(
             postgres_emit_sink_parser(),
             request_ack_publishing_mode(),
-        )),
-        codec_free_sink(sink_with_publishing_mode(
+        ))),
+        batch_required(codec_free_sink(sink_with_publishing_mode(
             mysql_emit_sink_parser(),
             request_ack_publishing_mode(),
-        )),
-        codec_free_sink(sink_with_publishing_mode(
+        ))),
+        batch_required(codec_free_sink(sink_with_publishing_mode(
             mongodb_emit_sink_parser(),
             request_ack_publishing_mode(),
-        )),
-        codec_free_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(codec_free_sink(sink_with_publishing_mode(
             iceberg_emit_sink_parser(),
             request_ack_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             kafka_emit_sink_parser(),
             broker_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             pulsar_emit_sink_parser(),
             broker_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             rabbitmq_emit_sink_parser(),
             broker_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             redis_emit_sink_parser(),
             no_ack_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             mqtt_emit_sink_parser(),
             mqtt_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             nats_emit_sink_parser(),
             nats_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             zeromq_emit_sink_parser(),
             no_ack_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             syslog_emit_sink_parser(),
             no_ack_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             sqs_emit_sink_parser(),
             sqs_publishing_mode(),
-        )),
-        encoded_sink(sink_with_publishing_mode(
+        ))),
+        batch_optional(encoded_sink(sink_with_publishing_mode(
             sentry_emit_sink_parser(),
             request_ack_publishing_mode(),
-        )),
+        ))),
     )
 }
 
@@ -1078,6 +1189,16 @@ pub fn alter_emitter_parser<'src>()
         .map(|sink| AlterEmitterOperation::SetSink {
             sink: Box::new(sink.sink),
             publishing_mode: sink.publishing_mode,
+            body: None,
+        });
+    let set_http_sink = kw(Identifier::Set)
+        .ignore_then(kw(Identifier::To))
+        .ignore_then(http_sink_parser())
+        .then(http_body_selection())
+        .map(|(sink, body)| AlterEmitterOperation::SetSink {
+            sink: Box::new(sink.sink),
+            publishing_mode: sink.publishing_mode,
+            body: Some(body),
         });
     let set_client = kw(Identifier::Set)
         .ignore_then(kw(Identifier::Client))
@@ -1102,6 +1223,12 @@ pub fn alter_emitter_parser<'src>()
     let set_publishing_mode = kw_phrase2(Identifier::Set, Identifier::Mode)
         .ignore_then(any_publishing_mode())
         .map(|mode| AlterEmitterOperation::SetPublishingMode { mode });
+    let set_batch = kw(Identifier::Set)
+        .ignore_then(batch_clause())
+        .map(|policy| AlterEmitterOperation::SetBatch { policy });
+    let drop_batch = kw(Identifier::Drop)
+        .ignore_then(kw(Identifier::Batch))
+        .to(AlterEmitterOperation::DropBatch);
     let set_flush = kw(Identifier::Set)
         .ignore_then(flush_each())
         .map(|flush_policy| AlterEmitterOperation::SetFlush { flush_policy });
@@ -1116,6 +1243,7 @@ pub fn alter_emitter_parser<'src>()
         drop_from,
         alter_from,
         set_sink,
+        set_http_sink,
         set_client,
         set_encode,
         drop_encode,
@@ -1123,6 +1251,8 @@ pub fn alter_emitter_parser<'src>()
         drop_collect,
         set_attachment,
         set_publishing_mode,
+        set_batch,
+        drop_batch,
         set_flush,
         set_commit,
     ))
@@ -1155,8 +1285,9 @@ struct EmitterHead {
     materialized_state: Vec<MaterializedStateDependency>,
     sink: EmitSink,
     publishing_mode: EmitterPublishingMode,
-    encode_using_codec: Option<CodecName>,
+    body: EmitterBody,
     construction: Option<nervix_models::RouteConstruction>,
+    batch: Option<EmitterBatchPolicy>,
 }
 
 pub fn create_emitter_parser<'src>()
@@ -1183,8 +1314,9 @@ pub fn create_emitter_parser<'src>()
                 materialized_state,
                 sink: parsed_sink.sink,
                 publishing_mode: parsed_sink.publishing_mode,
-                encode_using_codec: parsed_sink.codec,
+                body: parsed_sink.body,
                 construction: parsed_sink.construction,
+                batch: parsed_sink.batch,
             }
         })
         .boxed()
@@ -1203,15 +1335,17 @@ pub fn create_emitter_parser<'src>()
                     materialized_state,
                     sink,
                     publishing_mode,
-                    encode_using_codec,
+                    body,
                     construction,
+                    batch,
                 } = head;
                 CreateStatement::new(
                     CreateEmitter {
                         name,
                         from,
-                        encode_using_codec,
+                        body,
                         sink: Box::new(sink),
+                        batch,
                         flush_policy,
                         error_policies: nervix_models::ErrorPolicies {
                             message: message_error_policy,
@@ -1255,7 +1389,7 @@ pub fn parse_alter_emitter_tokens(tokens: &[Token]) -> Result<AlterEmitter, Vec<
 
 pub fn parse_create_emitter(
     input: &str,
-) -> Result<CreateStatement<CreateEmitter>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateEmitter>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -1265,7 +1399,7 @@ pub fn parse_create_emitter(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_emitter(input: &str) -> Result<AlterEmitter, ParseFromSourceError> {
+pub fn parse_alter_emitter(input: &str) -> error_stack::Result<AlterEmitter, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -1286,10 +1420,102 @@ pub fn suggest_alter_emitter(input: &str, cursor: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use nervix_models::FlushPolicy;
-    use nonzero_ext::nonzero;
 
     use super::*;
     use crate::lexer::lex;
+
+    #[test]
+    fn http_emitter_body_modes_roundtrip_with_qualified_request_fields() {
+        for body in [
+            "ENCODE USING body_codec INHERIT ALL",
+            "WITHOUT BODY INVOKE write_header('X-Request', input.method)",
+        ] {
+            let source = format!(
+                "CREATE EMITTER send FROM source TO HTTP api METHOD input.method PATH input.path \
+                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s {body} FLUSH IMMEDIATE ON MESSAGE \
+                 ERROR LOG ON GENERAL ERROR LOG;"
+            );
+            let parsed = parse_create_emitter(&source).expect("HTTP emitter should parse");
+            let canonical = parsed
+                .to_canonical_nspl()
+                .expect("HTTP emitter should format");
+            let reparsed = parse_create_emitter(&canonical).expect("canonical HTTP should parse");
+            assert_eq!(parsed, reparsed);
+        }
+    }
+
+    #[test]
+    fn http_emitter_requires_ordered_request_and_body_clauses() {
+        for sink in [
+            "HTTP api PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY",
+            "HTTP api METHOD 'GET' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT BODY",
+            "HTTP api METHOD 'GET' PATH '/' MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s \
+             WITHOUT BODY",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK SEQUENTIAL ACK TIMEOUT 1s RETRY POLICY \
+             BACKOFF 250ms MAX 30s WITHOUT BODY",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
+             BODY INHERIT ALL",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
+             BODY SET id = input.id",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
+             BODY VALUES { 'id' = input.id }",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ENCODE \
+             USING body_codec WITHOUT BODY",
+            "HTTP api METHOD 'GET' PATH '/' MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WITHOUT \
+             BODY BATCH MAX MESSAGES 2 MAX SIZE 1MiB",
+        ] {
+            let source = format!(
+                "CREATE EMITTER send FROM source TO {sink} FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                 ON GENERAL ERROR LOG;"
+            );
+            assert!(parse_create_emitter(&source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn http_emitter_completion_follows_clause_order() {
+        let prefix = "CREATE EMITTER send FROM source TO HTTP api ";
+        assert_eq!(suggest_create_emitter(prefix, prefix.len()), vec!["METHOD"]);
+        let mode = format!("{prefix}METHOD 'POST' PATH input.path MODE ");
+        assert_eq!(suggest_create_emitter(&mode, mode.len()), vec!["ACK"]);
+        let body = format!("{mode}ACK RETRY POLICY BACKOFF 250ms MAX 30s ");
+        let suggestions = suggest_create_emitter(&body, body.len());
+        assert!(suggestions.contains(&"ENCODE USING".to_string()));
+        assert!(suggestions.contains(&"WITHOUT BODY".to_string()));
+        assert!(!suggestions.contains(&"BATCH".to_string()));
+    }
+
+    #[test]
+    fn http_alter_sink_roundtrips_both_explicit_body_selections() {
+        for body in ["ENCODE USING body_codec", "WITHOUT BODY"] {
+            let source = format!(
+                "ALTER EMITTER send SET TO HTTP api METHOD input.method PATH input.path MODE ACK \
+                 RETRY POLICY BACKOFF 250ms MAX 30s {body};"
+            );
+            let parsed = parse_alter_emitter(&source).expect("HTTP replacement should parse");
+            let canonical = parsed
+                .to_canonical_nspl()
+                .expect("HTTP replacement should format");
+            let reparsed =
+                parse_alter_emitter(&canonical).expect("canonical replacement should parse");
+            assert_eq!(parsed, reparsed);
+        }
+    }
+
+    #[test]
+    fn http_request_expressions_keep_clause_words_inside_qualified_fields_and_groups() {
+        let source = "CREATE EMITTER send FROM source TO HTTP api METHOD input.path PATH \
+                      coalesce(input.mode, 'MODE ACK') MODE ACK RETRY POLICY BACKOFF 250ms MAX \
+                      30s WITHOUT BODY WHERE input.path = '/ready' INVOKE \
+                      write_header('X-Method', input.method) FLUSH IMMEDIATE ON MESSAGE ERROR LOG \
+                      ON GENERAL ERROR LOG;";
+        let parsed = parse_create_emitter(source).expect("qualified clause words should parse");
+        let canonical = parsed
+            .to_canonical_nspl()
+            .expect("request expressions should format");
+        assert_eq!(parse_create_emitter(&canonical).expect("roundtrip"), parsed);
+    }
 
     fn to_tokens(input: &str) -> Vec<Token> {
         lex(input)
@@ -1530,11 +1756,12 @@ mod tests {
     fn parses_alter_emitter_direct_sink_values_and_iceberg_commit_policy() {
         let direct = parse_alter_emitter(
             "ALTER EMITTER event_sink SET TO POSTGRES postgres_main INSERT TO TABLE events VALUES \
-             { 'seq' = concat(input.kind, ','), 'value' = input.value } WITH MAX BATCH 100 MODE \
-             ACK RETRY POLICY BACKOFF 250ms MAX 30s, SET FLUSH EACH 1s MAX BATCH SIZE 1MiB;",
+             { 'seq' = concat(input.kind, ','), 'value' = input.value } MODE ACK RETRY POLICY \
+             BACKOFF 250ms MAX 30s, SET BATCH MAX MESSAGES 100 MAX SIZE 1MiB, SET FLUSH EACH 1s \
+             MAX BATCH SIZE 1MiB;",
         )
         .expect("direct sink expressions should preserve internal commas");
-        assert_eq!(direct.operations.len(), 2);
+        assert_eq!(direct.operations.len(), 3);
 
         let iceberg =
             parse_alter_emitter("ALTER EMITTER event_sink SET COMMIT EACH 30s MAX SIZE 64MiB;")
@@ -1591,6 +1818,16 @@ mod tests {
         crate::parse_expression(source).expect("valid structured expression")
     }
 
+    fn batch_policy(max_messages: u64, max_size: &str) -> EmitterBatchPolicy {
+        EmitterBatchPolicy {
+            max_messages: BatchMessageLimit::try_from(max_messages)
+                .expect("the fixture message limit is within range"),
+            max_size: max_size
+                .parse()
+                .expect("the fixture size is a whole number of bytes"),
+        }
+    }
+
     fn complete_codec_emitter(sink: &str) -> String {
         format!(
             "CREATE EMITTER emit FROM p99 TO {sink} ENCODE USING my_codec FLUSH IMMEDIATE ON \
@@ -1637,14 +1874,14 @@ mod tests {
         }
 
         for sink in [
-            "CLICKHOUSE db INSERT TO TABLE events VALUES { 'id' = input.id } WITH MAX BATCH 100 \
-             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-            "POSTGRES db INSERT TO TABLE events VALUES { 'id' = input.id } WITH MAX BATCH 100 \
-             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-            "MYSQL db INSERT TO TABLE events VALUES { 'id' = input.id } WITH MAX BATCH 100 MODE \
-             ACK RETRY POLICY BACKOFF 250ms MAX 30s",
-            "MONGODB db INSERT TO COLLECTION events VALUES { 'id' = input.id } WITH MAX BATCH 100 \
-             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "CLICKHOUSE db INSERT TO TABLE events VALUES { 'id' = input.id } MODE ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
+            "POSTGRES db INSERT TO TABLE events VALUES { 'id' = input.id } MODE ACK RETRY POLICY \
+             BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
+            "MYSQL db INSERT TO TABLE events VALUES { 'id' = input.id } MODE ACK RETRY POLICY \
+             BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
+            "MONGODB db INSERT TO COLLECTION events VALUES { 'id' = input.id } MODE ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s BATCH MAX MESSAGES 100 MAX SIZE 1MiB",
             "ICEBERG ON S3 store TABLE events VALUES { 'id' = input.id } LOCATION \
              's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY \
              POLICY BACKOFF 250ms MAX 30s",
@@ -1746,13 +1983,14 @@ mod tests {
     #[test]
     fn direct_emitter_completion_only_offers_where_construction() {
         let input = "CREATE EMITTER emit FROM p99 TO CLICKHOUSE db INSERT TO TABLE events VALUES \
-                     { 'id' = input.id } WITH MAX BATCH 10 MODE ACK RETRY POLICY BACKOFF 250ms \
-                     MAX 30s ";
+                     { 'id' = input.id } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s ";
         let suggestions = suggest_create_emitter(input, input.len());
 
         assert!(suggestions.contains(&"WHERE".to_string()));
-        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
-        assert!(suggestions.contains(&"FLUSH IMMEDIATE".to_string()));
+        // A database write has no unbounded form, so its batching clause comes before any flush.
+        assert!(suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
+        assert!(!suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(!suggestions.contains(&"FLUSH IMMEDIATE".to_string()));
         assert!(!suggestions.contains(&"INHERIT".to_string()));
         assert!(!suggestions.contains(&"SET".to_string()));
         assert!(!suggestions.contains(&"INVOKE".to_string()));
@@ -1875,10 +2113,7 @@ mod tests {
             "p99"
         );
         assert_eq!(
-            parsed
-                .encode_using_codec
-                .as_ref()
-                .map(|codec| codec.as_str()),
+            parsed.body.body.codec().map(|codec| codec.as_str()),
             Some("my_codec")
         );
         assert_eq!(
@@ -1997,7 +2232,7 @@ mod tests {
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse must fail");
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error, got {error:?}");
         };
         assert!(
@@ -2019,15 +2254,15 @@ mod tests {
                     "clickhouse_now" = NOW(),
                     "clickhouse_action" = LOWER(input.action)
                 }
-                WITH MAX BATCH 100
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 100 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::ClickHouse {
@@ -2049,9 +2284,9 @@ mod tests {
                         expression: expression("LOWER ( input.action )"),
                     },
                 ],
-                max_batch: nonzero!(100u64),
             }
         );
+        assert_eq!(parsed.batch, Some(batch_policy(100, "1MiB")));
     }
 
     #[test]
@@ -2061,8 +2296,8 @@ mod tests {
             CREATE EMITTER to_ch FROM notifications
             TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 100
             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 100 MAX SIZE 1MiB
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -2093,7 +2328,7 @@ mod tests {
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(parsed.mode, AckMode::Detached);
         assert_eq!(
             parsed.sink.as_ref(),
@@ -2327,8 +2562,8 @@ mod tests {
             CREATE EMITTER to_ch FROM notifications
             TO CLICKHOUSE clickhouse_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 100
             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 100 MAX SIZE 1MiB
             FLUSH EACH 100ms MAX BATCH SIZE 1MiB COMMIT EACH 1m MAX SIZE 512MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -2402,21 +2637,21 @@ mod tests {
             CREATE EMITTER to_pg FROM notifications
             TO POSTGRES postgres_client TABLE my_table
             VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 25
+            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
             r#"
             CREATE EMITTER to_mysql FROM notifications
             TO MYSQL mysql_client TABLE my_table
             VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 25
+            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
             r#"
             CREATE EMITTER to_mongodb FROM notifications
             TO MONGODB mongodb_client COLLECTION my_collection
             VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 25
+            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         ] {
@@ -2437,15 +2672,15 @@ mod tests {
                     "postgres_now" = NOW() AS STRING,
                     "postgres_action" = LOWER(input.action)
                 }
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::Postgres {
@@ -2468,9 +2703,9 @@ mod tests {
                     },
                 ],
                 conflict_action: PostgresConflictAction::None,
-                max_batch: nonzero!(25u64),
             }
         );
+        assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
     }
 
     #[test]
@@ -2484,8 +2719,8 @@ mod tests {
                     "postgres_action" = LOWER(input.action)
                 }
                 ON CONFLICT ("postgres_user_id") DO UPDATE
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2515,8 +2750,8 @@ mod tests {
                     "postgres_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO NOTHING
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2544,12 +2779,12 @@ mod tests {
                     "postgres_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO UPDATE
-                WITH MAX BATCH 25
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse must fail");
-        match error {
+        match error.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. } => {
                 assert!(
                     diagnostics.iter().any(|diagnostic| diagnostic
@@ -2563,7 +2798,7 @@ mod tests {
     }
 
     #[test]
-    fn suggests_postgres_conflict_clause_before_max_batch() {
+    fn suggests_postgres_conflict_clause_before_mode() {
         let input = "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT \
                      TO TABLE my_table VALUES { \"postgres_user_id\" = input.user_id } ";
         let suggestions = suggest_create_emitter(input, input.len());
@@ -2571,8 +2806,7 @@ mod tests {
         // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
         assert!(suggestions.contains(&"ON CONFLICT".to_string()));
         assert!(!suggestions.contains(&"ON".to_string()));
-        assert!(suggestions.contains(&"WITH MAX BATCH".to_string()));
-        assert!(!suggestions.contains(&"WITH".to_string()));
+        assert!(suggestions.contains(&"MODE".to_string()));
     }
 
     #[test]
@@ -2587,20 +2821,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_postgres_emitter_without_max_batch() {
+    fn rejects_postgres_emitter_without_batch_clause() {
         let tokens = to_tokens(
             r#"
             CREATE EMITTER to_pg FROM notifications
             TO POSTGRES postgres_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
         let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
         assert!(
-            errs.iter().any(|err| format!("{err:?}").contains("WITH")),
-            "expected WITH MAX BATCH diagnostic, got {errs:?}"
+            errs.iter()
+                .any(|err| format!("{err:?}").contains("BATCH MAX MESSAGES")),
+            "expected a BATCH MAX MESSAGES diagnostic, got {errs:?}"
         );
     }
 
@@ -2611,8 +2847,8 @@ mod tests {
             CREATE EMITTER to_pg FROM notifications
             TO POSTGRES postgres_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 25
             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -2625,23 +2861,42 @@ mod tests {
     }
 
     #[test]
-    fn rejects_postgres_emitter_with_zero_max_batch() {
-        let tokens = to_tokens(
-            r#"
-            CREATE EMITTER to_pg FROM notifications
-            TO POSTGRES postgres_client INSERT TO TABLE my_table
-            VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 0
-            FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
-            "#,
-        );
+    fn rejects_batch_limits_outside_their_range() {
+        for (clause, diagnostic) in [
+            (
+                "BATCH MAX MESSAGES 0 MAX SIZE 1MiB",
+                "BATCH MAX MESSAGES must be between 1 and 65536, found 0",
+            ),
+            (
+                "BATCH MAX MESSAGES 65537 MAX SIZE 1MiB",
+                "BATCH MAX MESSAGES must be between 1 and 65536, found 65537",
+            ),
+            (
+                "BATCH MAX MESSAGES 10 MAX SIZE 0B",
+                "BATCH MAX SIZE must be greater than zero",
+            ),
+            (
+                "BATCH MAX MESSAGES 10 MAX SIZE 1.5MiB",
+                "BATCH MAX SIZE '1.5MiB' must be a whole number",
+            ),
+            (
+                "BATCH MAX MESSAGES 10 MAX SIZE 16777216TiB",
+                "BATCH MAX SIZE '16777216TiB' exceeds the largest size",
+            ),
+        ] {
+            let source = format!(
+                "CREATE EMITTER to_pg FROM notifications TO POSTGRES postgres_client INSERT TO \
+                 TABLE my_table VALUES {{ 'user_id' = input.user_id }} MODE ACK RETRY POLICY \
+                 BACKOFF 250ms MAX 30s {clause} FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE \
+                 ERROR LOG ON GENERAL ERROR LOG;"
+            );
+            let error = parse_create_emitter(&source).expect_err("the limit must be rejected");
 
-        let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
-        assert!(
-            errs.iter()
-                .any(|err| format!("{err:?}").contains("greater than zero")),
-            "expected max batch diagnostic, got {errs:?}"
-        );
+            assert!(
+                format!("{error:?}").contains(diagnostic),
+                "expected `{diagnostic}` for `{clause}`, got {error:?}"
+            );
+        }
     }
 
     #[test]
@@ -2655,15 +2910,15 @@ mod tests {
                     "mysql_now" = NOW() AS STRING,
                     "mysql_action" = LOWER(input.action)
                 }
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::MySql {
@@ -2686,9 +2941,9 @@ mod tests {
                     },
                 ],
                 conflict_action: MySqlConflictAction::None,
-                max_batch: nonzero!(25u64),
             }
         );
+        assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
     }
 
     #[test]
@@ -2702,8 +2957,8 @@ mod tests {
                     "mysql_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO UPDATE
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2728,8 +2983,8 @@ mod tests {
                     "mysql_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO NOTHING
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2751,15 +3006,18 @@ mod tests {
                 TO MYSQL mysql_client INSERT TO TABLE my_table
                 VALUES { "mysql_user_id" = input.user_id }
                 ON CONFLICT ("mysql_user_id") DO UPDATE
-                WITH MAX BATCH 25
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
-        parse_create_emitter(input).expect_err("mysql conflict target must fail");
+        assert!(
+            parse_create_emitter(input).is_err(),
+            "mysql conflict target must fail"
+        );
     }
 
     #[test]
-    fn suggests_mysql_conflict_clause_before_max_batch() {
+    fn suggests_mysql_conflict_clause_before_mode() {
         let input = "CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO \
                      TABLE my_table VALUES { \"mysql_user_id\" = input.user_id } ";
         let suggestions = suggest_create_emitter(input, input.len());
@@ -2767,8 +3025,7 @@ mod tests {
         // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
         assert!(suggestions.contains(&"ON CONFLICT".to_string()));
         assert!(!suggestions.contains(&"ON".to_string()));
-        assert!(suggestions.contains(&"WITH MAX BATCH".to_string()));
-        assert!(!suggestions.contains(&"WITH".to_string()));
+        assert!(suggestions.contains(&"MODE".to_string()));
     }
 
     #[test]
@@ -2782,20 +3039,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mysql_emitter_without_max_batch() {
+    fn rejects_mysql_emitter_without_batch_clause() {
         let tokens = to_tokens(
             r#"
             CREATE EMITTER to_mysql FROM notifications
             TO MYSQL mysql_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
         let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
         assert!(
-            errs.iter().any(|err| format!("{err:?}").contains("WITH")),
-            "expected WITH MAX BATCH diagnostic, got {errs:?}"
+            errs.iter()
+                .any(|err| format!("{err:?}").contains("BATCH MAX MESSAGES")),
+            "expected a BATCH MAX MESSAGES diagnostic, got {errs:?}"
         );
     }
 
@@ -2806,8 +3065,8 @@ mod tests {
             CREATE EMITTER to_mysql FROM notifications
             TO MYSQL mysql_client INSERT TO TABLE my_table
             VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 25
             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -2830,15 +3089,15 @@ mod tests {
                     "mongodb_now" = NOW() AS STRING,
                     "mongodb_action" = LOWER(input.action)
                 }
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let tokens = to_tokens(input);
         let parsed = parse_create_emitter_tokens(&tokens).expect("parse should succeed");
 
-        assert_eq!(parsed.encode_using_codec, None);
+        assert_eq!(parsed.body.body, EmitterBody::Values);
         assert_eq!(
             parsed.sink.as_ref(),
             &EmitSink::MongoDb {
@@ -2861,9 +3120,9 @@ mod tests {
                     },
                 ],
                 conflict_action: MongoDbConflictAction::None,
-                max_batch: nonzero!(25u64),
             }
         );
+        assert_eq!(parsed.batch, Some(batch_policy(25, "1MiB")));
     }
 
     #[test]
@@ -2877,8 +3136,8 @@ mod tests {
                     "mongodb_action" = LOWER(input.action)
                 }
                 ON CONFLICT ("mongodb_user_id") DO UPDATE
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2908,8 +3167,8 @@ mod tests {
                     "mongodb_action" = LOWER(input.action)
                 }
                 ON CONFLICT ("mongodb_user_id") DO NOTHING
-                WITH MAX BATCH 25
                 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
@@ -2939,11 +3198,14 @@ mod tests {
                     "mongodb_action" = LOWER(input.action)
                 }
                 ON CONFLICT DO UPDATE
-                WITH MAX BATCH 25
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
-        parse_create_emitter(input).expect_err("mongodb conflict target must fail");
+        assert!(
+            parse_create_emitter(input).is_err(),
+            "mongodb conflict target must fail"
+        );
     }
 
     #[test]
@@ -2956,12 +3218,12 @@ mod tests {
                     "mongodb_action" = LOWER(input.action)
                 }
                 ON CONFLICT ("mongodb_user_id") DO UPDATE
-                WITH MAX BATCH 25
+                BATCH MAX MESSAGES 25 MAX SIZE 1MiB
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse must fail");
-        match error {
+        match error.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. } => {
                 assert!(
                     diagnostics
@@ -2975,7 +3237,7 @@ mod tests {
     }
 
     #[test]
-    fn suggests_mongodb_conflict_clause_before_max_batch() {
+    fn suggests_mongodb_conflict_clause_before_mode() {
         let input = "CREATE EMITTER to_mongodb FROM notifications TO MONGODB mongodb_client \
                      INSERT TO COLLECTION my_collection VALUES { \"mongodb_user_id\" = \
                      input.user_id } ";
@@ -2984,8 +3246,7 @@ mod tests {
         // The whole phrase, not a bare `ON`: `ON` alone cannot be continued from here.
         assert!(suggestions.contains(&"ON CONFLICT".to_string()));
         assert!(!suggestions.contains(&"ON".to_string()));
-        assert!(suggestions.contains(&"WITH MAX BATCH".to_string()));
-        assert!(!suggestions.contains(&"WITH".to_string()));
+        assert!(suggestions.contains(&"MODE".to_string()));
     }
 
     #[test]
@@ -3007,8 +3268,8 @@ mod tests {
             CREATE EMITTER to_mongodb FROM notifications
             TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
             VALUES { "user_id" = input.user_id }
-            WITH MAX BATCH 25
             MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+            BATCH MAX MESSAGES 25 MAX SIZE 1MiB
             ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
@@ -3021,20 +3282,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mongodb_emitter_without_max_batch() {
+    fn rejects_mongodb_emitter_without_batch_clause() {
         let tokens = to_tokens(
             r#"
             CREATE EMITTER to_mongodb FROM notifications
             TO MONGODB mongodb_client INSERT TO COLLECTION my_collection
             VALUES { "user_id" = input.user_id }
+            MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
             FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
             "#,
         );
 
         let errs = parse_create_emitter_tokens(&tokens).expect_err("parse must fail");
         assert!(
-            errs.iter().any(|err| format!("{err:?}").contains("WITH")),
-            "expected WITH MAX BATCH diagnostic, got {errs:?}"
+            errs.iter()
+                .any(|err| format!("{err:?}").contains("BATCH MAX MESSAGES")),
+            "expected a BATCH MAX MESSAGES diagnostic, got {errs:?}"
         );
     }
 
@@ -3480,7 +3743,7 @@ mod tests {
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse should fail");
-        match error {
+        match error.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. } => {
                 assert!(!diagnostics.is_empty());
             }
@@ -3516,5 +3779,203 @@ mod tests {
         assert!(!suggestions.contains(&"QUEUE".to_string()));
         assert!(!suggestions.contains(&"SUBJECT".to_string()));
         assert!(!suggestions.contains(&"CHANNEL".to_string()));
+    }
+
+    #[test]
+    fn every_sink_family_accepts_an_optional_batch_clause_and_round_trips_it() {
+        let codec_sinks = [
+            "KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "PULSAR broker TOPIC events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "RABBITMQ broker QUEUE events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "REDIS PUBSUB broker CHANNEL events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "MQTT broker TOPIC events MODE QOS 1 ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY \
+             BACKOFF 250ms MAX 30s",
+            "NATS broker SUBJECT events MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "ZEROMQ broker MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "SYSLOG broker MODE NO_ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+            "SQS broker QUEUE events MODE BATCH RETRY POLICY BACKOFF 250ms MAX 30s",
+            "SENTRY broker MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s",
+        ];
+        for sink in codec_sinks {
+            let omitted = complete_codec_emitter(sink);
+            let parsed = parse_create_emitter(&omitted).expect("an emitter without BATCH parses");
+            assert_eq!(parsed.batch, None, "`{sink}` without BATCH");
+            assert_canonical_emitter_roundtrip(&omitted, sink);
+
+            let batched = format!(
+                "CREATE EMITTER emit FROM p99 TO {sink} ENCODE USING my_codec BATCH MAX MESSAGES \
+                 500 MAX SIZE 1MiB FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            );
+            let parsed = parse_create_emitter(&batched).expect("an emitter with BATCH parses");
+            assert_eq!(
+                parsed.batch,
+                Some(batch_policy(500, "1MiB")),
+                "`{sink}` with BATCH"
+            );
+            assert_canonical_emitter_roundtrip(&batched, sink);
+        }
+
+        let direct_sinks = [
+            "OTEL otel_main LOGS VALUES { 'time' = input.time, 'body' = input.body } MODE ACK \
+             RETRY POLICY BACKOFF 250ms MAX 30s",
+            "ICEBERG ON S3 store TABLE events VALUES { 'id' = input.id } LOCATION \
+             's3://bucket/events' CATALOG catalog COMMIT EACH 1m MAX SIZE 64MiB MODE ACK RETRY \
+             POLICY BACKOFF 250ms MAX 30s",
+        ];
+        for sink in direct_sinks {
+            for batch in ["", " BATCH MAX MESSAGES 1000 MAX SIZE 3MiB"] {
+                let source = format!(
+                    "CREATE EMITTER emit FROM p99 TO {sink}{batch} FLUSH IMMEDIATE ON MESSAGE \
+                     ERROR LOG ON GENERAL ERROR LOG;"
+                );
+                let parsed = parse_create_emitter(&source).expect("the direct emitter parses");
+                assert_eq!(parsed.batch.is_some(), !batch.is_empty(), "`{source}`");
+                assert_canonical_emitter_roundtrip(&source, sink);
+            }
+        }
+    }
+
+    #[test]
+    fn batch_clause_follows_route_construction() {
+        let encoded = parse_create_emitter(
+            "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY \
+             BACKOFF 250ms MAX 30s ENCODE USING my_codec INHERIT ALL WHERE input.id > 0 BATCH MAX \
+             MESSAGES 10 MAX SIZE 64KiB FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
+             GENERAL ERROR LOG;",
+        )
+        .expect("BATCH follows the route construction of an encoded sink");
+        assert_eq!(encoded.batch, Some(batch_policy(10, "64KiB")));
+        assert!(encoded.construction.where_clause.is_some());
+
+        let direct = parse_create_emitter(
+            "CREATE EMITTER emit FROM p99 TO POSTGRES db INSERT TO TABLE events VALUES { 'id' = \
+             input.id } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s WHERE input.id > 0 BATCH MAX \
+             MESSAGES 500 MAX SIZE 8MiB FLUSH EACH 1s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON \
+             GENERAL ERROR LOG;",
+        )
+        .expect("BATCH follows the WHERE clause of a direct sink");
+        assert_eq!(direct.batch, Some(batch_policy(500, "8MiB")));
+        assert!(direct.construction.where_clause.is_some());
+    }
+
+    #[test]
+    fn batch_clause_is_written_before_the_flush_policy() {
+        let error = parse_create_emitter(
+            "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY POLICY \
+             BACKOFF 250ms MAX 30s ENCODE USING my_codec FLUSH IMMEDIATE BATCH MAX MESSAGES 10 \
+             MAX SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;",
+        );
+
+        assert!(error.is_err(), "BATCH after FLUSH must not parse");
+    }
+
+    #[test]
+    fn batch_clause_requires_both_limits() {
+        for clause in [
+            "BATCH MAX MESSAGES 10",
+            "BATCH MAX SIZE 1MiB",
+            "BATCH MAX SIZE 1MiB MAX MESSAGES 10",
+        ] {
+            let source = format!(
+                "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
+                 POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec {clause} FLUSH IMMEDIATE ON \
+                 MESSAGE ERROR LOG ON GENERAL ERROR LOG;"
+            );
+
+            assert!(
+                parse_create_emitter(&source).is_err(),
+                "`{clause}` must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_and_renders_alter_emitter_batch_operations() {
+        let alter = parse_alter_emitter(
+            "ALTER EMITTER event_sink SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP BATCH;",
+        )
+        .expect("batch operations parse");
+
+        assert_eq!(
+            alter.operations,
+            vec![
+                AlterEmitterOperation::SetBatch {
+                    policy: batch_policy(250, "512KiB"),
+                },
+                AlterEmitterOperation::DropBatch,
+            ]
+        );
+        let canonical = alter.to_canonical_nspl().expect("batch operations render");
+        assert_eq!(
+            canonical,
+            "ALTER EMITTER event_sink SET BATCH MAX MESSAGES 250 MAX SIZE 512KiB, DROP BATCH;"
+        );
+        assert_eq!(
+            parse_alter_emitter(&canonical).expect("the rendering reparses"),
+            alter
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_alter_emitter_batch_operations() {
+        for source in [
+            "ALTER EMITTER event_sink SET BATCH;",
+            "ALTER EMITTER event_sink SET BATCH MAX MESSAGES 0 MAX SIZE 1MiB;",
+            "ALTER EMITTER event_sink SET BATCH MAX MESSAGES 10;",
+            "ALTER EMITTER event_sink DROP BATCH MAX MESSAGES 10 MAX SIZE 1MiB;",
+        ] {
+            assert!(
+                parse_alter_emitter(source).is_err(),
+                "`{source}` must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn completes_the_optional_batch_clause_beside_the_flush_policy() {
+        let input = "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
+                     POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert!(suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
+        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(suggestions.contains(&"FLUSH IMMEDIATE".to_string()));
+        assert!(!suggestions.contains(&"BATCH".to_string()));
+    }
+
+    #[test]
+    fn completes_the_batch_size_after_the_message_limit() {
+        let input = "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
+                     POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec BATCH MAX MESSAGES 10 ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert_eq!(suggestions, vec!["MAX SIZE".to_string()]);
+    }
+
+    #[test]
+    fn completes_the_flush_policy_after_the_batch_clause() {
+        let input = "CREATE EMITTER emit FROM p99 TO KAFKA broker TOPIC events MODE NO_ACK RETRY \
+                     POLICY BACKOFF 250ms MAX 30s ENCODE USING my_codec BATCH MAX MESSAGES 10 MAX \
+                     SIZE 1MiB ";
+        let suggestions = suggest_create_emitter(input, input.len());
+
+        assert!(suggestions.contains(&"FLUSH EACH".to_string()));
+        assert!(suggestions.contains(&"FLUSH IMMEDIATE".to_string()));
+        assert!(!suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
+        assert!(!suggestions.contains(&"WHERE".to_string()));
+    }
+
+    #[test]
+    fn completes_alter_emitter_batch_operations() {
+        let set = "ALTER EMITTER event_sink SET ";
+        let set_suggestions = suggest_alter_emitter(set, set.len());
+        assert!(set_suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
+        assert!(set_suggestions.contains(&"FLUSH EACH".to_string()));
+
+        let drop = "ALTER EMITTER event_sink DROP ";
+        let drop_suggestions = suggest_alter_emitter(drop, drop.len());
+        assert!(drop_suggestions.contains(&"BATCH".to_string()));
+        assert!(drop_suggestions.contains(&"ENCODE".to_string()));
+        assert!(!drop_suggestions.contains(&"BATCH MAX MESSAGES".to_string()));
     }
 }

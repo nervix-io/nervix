@@ -383,7 +383,7 @@ impl SinkLifecycle for ClickHouseSink {}
 
 #[async_trait::async_trait]
 impl RowSink for ClickHouseSink {
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome {
+    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
         let columns = match MappedJsonColumns::new(rows.batch, rows.target_columns) {
             Ok(columns) => columns,

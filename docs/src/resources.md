@@ -54,6 +54,8 @@ upload has completed. Its `versions` list and version details include every vers
 has been published, including a version whose upload is still applying or finished with failure.
 This keeps incomplete upload diagnostics visible without making that version eligible for use.
 Its `usages` section lists every model currently bound to the resource and its pinned version.
+A session client also receives the same description typed, so it never reads these facts back out
+of the printed text.
 
 `DESCRIBE RESOURCE <name> VERSION <n>` shows the detailed state for one version, including:
 
@@ -141,7 +143,7 @@ cannot compile rejects the whole rebinding with every previous binding and its s
 still in place:
 
 ```text
-invalid WASM PROCESSOR 'counting_guest': wasm processor 'counting_guest' module compilation failed
+invalid WASM PROCESSOR 'counting_guest' in domain '<domain>': wasm processor 'counting_guest' module compilation failed
 ```
 
 ## Upload Format

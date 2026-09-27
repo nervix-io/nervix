@@ -44,6 +44,12 @@ Current session behavior:
 
 Sessions are runtime-facing protocol interactions, not part of the persisted namespace model.
 
+A terminal reply may hold up to 64 MiB, including one string of that size. A reply above the 4 MiB
+frame bound is carried as ordered transfer parts that each fit one frame, then validated and
+reassembled before the client exposes it. This is how a rendered transaction report larger than one
+frame reaches the Rust client, CLI, and browser without truncation. A reply above the transfer bound
+is rejected whole; no client receives a successful partial result.
+
 ## Subscription Lifecycle
 
 A subscription is identified by its name together with the generation its session assigns when it
@@ -53,7 +59,9 @@ subscription belongs to the session that created it and moves through one lifecy
 
 - **Creating.** The server validates the statement, makes the node's interest in the relay visible
   to every live node, and attaches to the relay. A refusal at any step leaves nothing behind: no
-  interest, no attachment, and the name remains free.
+  interest, no attachment, and the name remains free. Reopening after the last subscription closed
+  waits for the renewed interest to become visible; an advertisement from before that closure does
+  not establish readiness.
 - **Active.** The reply that opens the subscription carries the schema of its rows, and no row
   precedes it. When that reply cannot be delivered, because the request was cancelled, the session
   ended, or the reply did not fit the session limits, the subscription is abandoned before it
@@ -95,6 +103,63 @@ validity, 15 minutes by default. The reference is a UUIDv7 whose creation time b
 may be retried. The CLI, web console, and Rust client reuse the reference through redirects and
 reconnects. Reuse for changed content fails. While a long command waits, transport keepalives, server events, and
 subscription delivery continue independently. See [Command Completion](command-completion.md).
+
+## Suggestions
+
+The session's `SuggestRequest` carries the full NSPL input, a UTF-8 byte cursor on a character
+boundary, the selected domain, a page size from 1 through 100, and an optional continuation.
+The server asks the composed client/server grammar for expectations at that cursor, then resolves
+semantic references from one read of the selected domain's committed configuration with the
+authenticated session's ordered queued transaction prefix applied. The prefix includes staged
+model creation, alteration, renaming, and removal. Other sessions see committed configuration.
+For `ALTER SCHEMA` and `ALTER WIRE ... SCHEMA`, field references are drawn from the named schema
+after that prefix has been applied, so a staged field rename or removal changes the available
+candidates immediately.
+Inside a route expression, completion also offers ordinary VM builtins. For a junction,
+`input.<field>` resolves through the input relay's declared schema, and a `SET` field resolves
+through the output relay's declared schema. Qualified `udf::<name>` calls use the domain's UDF
+models, including the session's queued changes. In an ingestor construction expression,
+`read_header` and `read_headers` are offered only when the selected source supports header reads.
+In an emitter `INVOKE` expression, `write_header` is offered only when the selected sink supports
+header writes.
+
+Each suggestion carries a display value, a kind, and a text edit with UTF-8 byte start and end
+offsets and replacement text. Clients apply that edit to the original input; they do not infer the
+range from the display value. A local upload path suggestion asks the native CLI to search its own
+filesystem and carries the path fragment's source range. The server sorts and deduplicates the
+candidate set before returning a bounded page. A continuation binds the input, cursor, domain,
+configuration revision, and candidate set; if any of these changes, the server returns
+`StaleContext` instead of silently paging through a different set.
+
+`Ready` with no suggestions means there are no matches. `MissingContext` means a domain required
+for a semantic reference is absent or unavailable. `StaleContext` means a transaction binding or
+page basis no longer matches. `LookupFailed` means the semantic configuration read failed. These
+statuses are part of the suggestion reply, so a client can distinguish them without interpreting
+an empty candidate list.
+
+Suggestions are read-only session requests. They can complete while a command is still pending;
+they neither enter the command admission gate nor change the transaction queue.
+
+## Structured Choices
+
+`ChoiceLookupRequest` resolves values for structured client controls without constructing partial
+NSPL. It carries a semantic target, typed dependent selections, search text, a page size from 1
+through 100, and an optional page cursor. The first targets resolve domain pace and placement
+policy. Placement requires exactly one domain-pace dependency; an absent or differently typed
+dependency returns `MissingContext`.
+
+Each result separates semantics from presentation. `ChoiceValue` carries a domain-pace or
+placement-policy variant, or a typed domain, resource, or model reference. `ChoicePresentation`
+carries its label, optional detail, and optional group. A client selects by the typed value and
+never derives behavior from the label. `Ready` with no values is an ordinary empty match;
+`MissingContext`, `StaleContext`, and `LookupFailed` remain distinct outcomes.
+
+A page cursor binds the target, every dependent value, search text, application revision, and the
+ordered typed candidate set including its presentation metadata. Changing any part returns
+`StaleContext` instead of continuing through a different result. Choice lookups are read-only and
+can run concurrently with each other and with commands. The web console additionally correlates
+each lookup with its control, draft revision, and session generation, so a late reply cannot
+replace the choices for a newer edit or connection.
 
 ## Transaction Binding
 

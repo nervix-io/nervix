@@ -62,7 +62,7 @@ pub mod subscription_row;
 pub(crate) mod task_shutdown;
 
 #[cfg(feature = "testing")]
-pub use fault_injection::{FaultInjection, WasmStateResetRequestError};
+pub use fault_injection::{FaultInjection, WasmCheckpointWindow, WasmStateResetRequestError};
 #[cfg(feature = "testing")]
 pub use registry::SchedulerMode;
 

@@ -49,7 +49,8 @@ Feature: MySQL emission
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_out_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = CASE WHEN NOW() < ('2001-01-01T00:00:00Z' AS DATETIME) THEN LOWER(input.action) ELSE 'physical-time' END } MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -129,7 +130,8 @@ Feature: MySQL emission
         CONFIG {
           'addr' = '{{mysql_addr}}'
         };
-        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_conflict_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } ON CONFLICT <conflict_action> WITH MAX BATCH 2 MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        CREATE EMITTER to_mysql FROM notifications TO MYSQL mysql_client INSERT TO TABLE notifications_mysql_conflict_{{test_id}} VALUES { "mysql_user_id" = input.user_id, "mysql_now" = NOW() AS STRING, "mysql_action" = LOWER(input.action) } ON CONFLICT <conflict_action> MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH EACH 100ms MAX BATCH SIZE 1MiB
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -183,7 +185,7 @@ Feature: MySQL emission
       | 3            | 1             | DO NOTHING      | open            |
 
   @database_emitter_modes @max_batch @mysql_max_batch
-  Scenario Outline: MySQL WITH MAX BATCH splits one oversized flush into multiple inserts
+  Scenario Outline: MySQL BATCH MAX MESSAGES splits one oversized flush into multiple inserts
     Given MQTT is running
     And MySQL is running
     Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
@@ -221,8 +223,8 @@ Feature: MySQL emission
       FROM notifications
       TO MYSQL mysql_client INSERT TO TABLE batch_mysql_{{test_id}}
       VALUES { "mysql_user_id" = input.user_id }
-      WITH MAX BATCH 2
       MODE ACK RETRY POLICY BACKOFF 100ms MAX 1s
+      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       FLUSH EACH 2s MAX BATCH SIZE 1MiB
       ON MESSAGE ERROR LOG
       ON GENERAL ERROR LOG;

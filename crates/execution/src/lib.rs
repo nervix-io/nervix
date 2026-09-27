@@ -8,8 +8,8 @@
 //!   the incremental writer that fails at its budget boundary instead of growing past it. It is
 //!   the only entry point for variable-size encoding, decoding, validation, hashing, snapshot
 //!   construction, and synchronous filesystem or database work.
-//! - **Depends on.** Tokio's runtime and its blocking pool, and the byte vocabulary its budgets
-//!   are configured in.
+//! - **Depends on.** Tokio's runtime and its blocking pool, the simulation scheduler when enabled,
+//!   and the byte vocabulary its budgets are configured in.
 //! - **Must not know.** What a job computes. It admits, charges, runs and cancels; it decides
 //!   nothing about relays, branches, domains, peers, graphs or the cluster.
 //!
@@ -26,6 +26,11 @@
 //! process, and a class holding a free permit still queues behind whatever is already running
 //! there. Reserving threads per class would isolate them physically, at the cost of a pool per
 //! class; the node deliberately does not do that.
+//!
+//! In the Turmoil test build, admitted CPU jobs run as tasks on the simulated scheduler. Each
+//! bounded synchronous job body is one scheduling step. Storage jobs still use the blocking pool
+//! and are outside the simulated target. The same admission, cancellation and charge ownership
+//! apply in either build mode.
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_dashmap as dashmap;
@@ -209,10 +214,11 @@ impl Executor {
 
     /// Run one CPU job on `class`'s workers, holding `reservation` until the work actually exits.
     ///
-    /// The job runs off the async workers entirely. It is handed the reservation it allocates
-    /// under, and a [`Cancellation`] to check between its own bounded units: when the caller stops
-    /// awaiting, the flag is raised, but the charge stays held until the job returns, because its
-    /// allocation is still live.
+    /// In production and Shuttle builds the job runs off the async workers. In Turmoil builds a
+    /// bounded, simulation-approved CPU job runs as one task on the simulated scheduler. It is
+    /// handed the reservation it allocates under, and a [`Cancellation`] to check between its own
+    /// bounded units: when the caller stops awaiting, the flag is raised, but the charge stays held
+    /// until the job returns, because its allocation is still live.
     pub async fn run_cpu<T>(
         &self,
         class: CpuClass,

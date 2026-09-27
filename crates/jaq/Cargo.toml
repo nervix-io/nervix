@@ -16,6 +16,8 @@ jaq-fmts = { workspace = true }
 jaq-json = { workspace = true, features = ["serde"] }
 jaq-std = { workspace = true }
 nervix-models = { workspace = true }
+serde = { workspace = true }
+# JAQ emits object members in declaration order, which is part of its public JSON output contract.
 serde_json = { workspace = true, features = ["preserve_order"] }
 strum = { workspace = true }
 thiserror = { workspace = true }

@@ -639,6 +639,16 @@ Feature: Resource version bindings
     And transaction "{{transaction_id}}" eventually has state "OPEN"
     When client "owner" executes these NSPL commands
       """
+      DESCRIBE TRANSACTION OPERATION 1 FORMAT JSON;
+      """
+    Then the last command output is a JSON document where
+      """
+      /transaction/transaction_id = "{{transaction_id}}"
+      /operation = 1
+      /report/position = 1
+      """
+    When client "owner" executes these NSPL commands
+      """
       COMMIT;
       """
     Then the last command output contains
@@ -827,7 +837,7 @@ Feature: Resource version bindings
         DECODE USING lookup_codec;
       UPLOAD RESOURCE shared_bundle VERSION '{{shared_v2}}';
       """
-    When these NSPL commands fail with "invalid INFERENCER 'score_model':"
+    When these NSPL commands fail with "INFERENCER 'score_model' binding validation failed"
       """
       REBIND RESOURCE shared_bundle TO VERSION 2;
       """

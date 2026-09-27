@@ -6,6 +6,28 @@
 use super::*;
 
 impl Runtime {
+    /// Drop the published generation of a concrete window branch after its empty eviction
+    /// checkpoint has been flushed. The checkpoint remains available to a later appearance of the
+    /// same key, but evicted branches no longer occupy the owner's in-memory state map.
+    pub(in crate::runtime) fn release_evicted_window_state(
+        &self,
+        domain: &DomainName,
+        processor: &ModelName,
+        branch: &Option<BranchKey>,
+    ) -> error_stack::Result<(), StateIdentityError> {
+        let placement = self.state_placement(
+            domain,
+            RuntimeStateKind::WindowProcessor,
+            ModelKind::WindowProcessor,
+            processor,
+            branch.clone(),
+        )?;
+        self.inner
+            .replicated_window_processor_states
+            .remove(&placement);
+        Ok(())
+    }
+
     pub(in crate::runtime) fn relay_state_epoch(&self, domain: &DomainName) -> Arc<AtomicU64> {
         self.inner
             .relay_state_epochs

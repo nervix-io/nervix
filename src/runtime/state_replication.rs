@@ -529,7 +529,7 @@ impl Runtime {
             .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?;
         Ok(entries
             .iter()
-            .any(|(branch, _)| branch.as_ref() == placement.branch_key.as_ref()))
+            .any(|entry| entry.key.as_ref() == placement.branch_key.as_ref()))
     }
 
     fn install_replica_branch_lru_snapshot(
@@ -540,7 +540,7 @@ impl Runtime {
         let branches = decode_branch_lru_snapshot(&snapshot.payload)
             .map_err(|error| RuntimeStateOperationError::replication(error.to_string()))?
             .into_iter()
-            .map(|(branch, _)| branch)
+            .map(|entry| entry.key)
             .collect::<HashSet<_>>();
         self.inner
             .passive_runtime_state_snapshots
@@ -877,9 +877,13 @@ impl Runtime {
             }
         }
         for (placement, state) in windows {
-            let snapshot = state.latest_snapshot().map_err(|error| {
-                OwnershipHandoffError::persistence(error.current_context().clone())
-            })?;
+            tokio::task::consume_budget().await;
+            let snapshot = state
+                .latest_snapshot(&self.inner.executor)
+                .await
+                .map_err(|error| {
+                    OwnershipHandoffError::persistence(error.current_context().clone())
+                })?;
             checkpoints.push((placement, snapshot));
         }
         let mut wasm_processors = Vec::new();
@@ -1174,7 +1178,7 @@ impl Runtime {
         if let Some(entries) = branch_entries
             && let Some((component, state)) = Self::branch_recovery_state_component(&scheduled)
         {
-            for (branch_key, _) in entries {
+            for entry in entries {
                 tokio::task::consume_budget().await;
                 let placement = self
                     .state_placement(
@@ -1182,7 +1186,7 @@ impl Runtime {
                         state,
                         scheduled.kind(),
                         scheduled.identifier.clone(),
-                        branch_key,
+                        entry.key,
                     )
                     .change_context_lazy(|| OwnershipHandoffError::StatePlacement {
                         kind: scheduled.kind(),
@@ -1197,7 +1201,7 @@ impl Runtime {
                         resets.entry(component).or_insert(recovered.reset_cause);
                         checkpoints.push((
                             placement.clone(),
-                            self.empty_forced_branch_state_snapshot(&placement)?,
+                            self.empty_forced_branch_state_snapshot(&placement).await?,
                         ));
                     }
                 }
@@ -1305,7 +1309,7 @@ impl Runtime {
         }
     }
 
-    fn empty_forced_branch_state_snapshot(
+    async fn empty_forced_branch_state_snapshot(
         &self,
         placement: &RuntimeStatePlacement,
     ) -> OwnershipHandoffResult<PersistedRuntimeStateEntry> {
@@ -1321,7 +1325,8 @@ impl Runtime {
             RuntimeStateKind::WindowProcessor => {
                 ReplicatedWindowProcessorState::new(placement.clone(), None)
                     .map_err(OwnershipHandoffError::persistence)?
-                    .latest_snapshot()
+                    .latest_snapshot(&self.inner.executor)
+                    .await
                     .map_err(|error| {
                         OwnershipHandoffError::persistence(error.current_context().clone())
                     })
@@ -1495,30 +1500,32 @@ impl Runtime {
         if snapshots.len() == 1 {
             return Ok(snapshots.pop());
         }
-        let mut entries = HashMap::default();
+        let mut entries =
+            HashMap::<Option<BranchKey>, BranchInstanceSnapshotEntry<Option<BranchKey>>>::default();
         let mut lsm = 0_u64;
         for snapshot in snapshots {
             lsm = lsm.max(snapshot.lsm);
-            for (branch, last_ingestion) in decode_branch_lru_snapshot(&snapshot.payload)
+            for snapshot_entry in decode_branch_lru_snapshot(&snapshot.payload)
                 .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
             {
-                match entries.entry(branch) {
+                match entries.entry(snapshot_entry.key.clone()) {
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        if entry.get() < &last_ingestion {
-                            entry.insert(last_ingestion);
+                        if entry.get().last_ingestion < snapshot_entry.last_ingestion {
+                            entry.insert(snapshot_entry);
                         }
                     }
                     std::collections::hash_map::Entry::Vacant(entry) => {
-                        entry.insert(last_ingestion);
+                        entry.insert(snapshot_entry);
                     }
                 }
             }
         }
-        let mut entries = entries.into_iter().collect::<Vec<_>>();
-        entries.sort_by(|(left, _), (right, _)| {
-            left.as_ref()
+        let mut entries = entries.into_values().collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            left.key
+                .as_ref()
                 .map(BranchKey::as_str)
-                .cmp(&right.as_ref().map(BranchKey::as_str))
+                .cmp(&right.key.as_ref().map(BranchKey::as_str))
         });
         Ok(Some(PersistedRuntimeStateEntry {
             lsm: lsm.checked_add(1).ok_or_else(|| {
@@ -1629,7 +1636,7 @@ impl Runtime {
             _ => None,
         };
         if let Some(state_kind) = state_kind {
-            for (branch_key, _) in decode_branch_lru_snapshot(&snapshot.payload)
+            for entry in decode_branch_lru_snapshot(&snapshot.payload)
                 .map_err(|error| OwnershipHandoffError::checkpoint(error.to_string()))?
             {
                 let placement = self
@@ -1638,7 +1645,7 @@ impl Runtime {
                         state_kind,
                         node.kind(),
                         node.identifier.clone(),
-                        branch_key,
+                        entry.key,
                     )
                     .change_context_lazy(unplaceable)?;
                 expected.insert(placement);
@@ -2424,12 +2431,12 @@ impl Runtime {
             .get(placement)
             .map(|state| state.clone());
         if let Some(state) = window
-            && let Some(snapshot) =
-                state
-                    .snapshot_after(after_lsm)
-                    .change_context(StateReplicationError::Capture {
-                        placement: placement.clone(),
-                    })?
+            && let Some(snapshot) = state
+                .snapshot_after(after_lsm, &self.inner.executor)
+                .await
+                .change_context(StateReplicationError::Capture {
+                    placement: placement.clone(),
+                })?
         {
             return Ok(Some(snapshot));
         }

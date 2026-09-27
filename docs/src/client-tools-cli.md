@@ -95,6 +95,15 @@ resource names and versions, session subscription names, and domain names. Insid
 `UPLOAD RESOURCE ... VERSION '<path>'` the client completes local filesystem paths instead,
 expanding `~` to your home directory.
 
+The replacement covers the current word even when the cursor is inside it, and keeps the text
+after that word. The CLI reads successive bounded pages when the server has more matches. A
+missing or stale domain or transaction context does not produce candidates from a different
+configuration.
+
+Scripts can request the same candidates with `--suggest 'DROP SCHEMA ord' --cursor 15`.
+The cursor is a UTF-8 byte offset; omitting it selects the end of the input. The CLI prints JSON
+containing a status and each candidate's display value, kind, and exact text edit.
+
 While a transaction is open, completion describes the configuration that transaction is building:
 models and resources its queued statements create are suggested before `COMMIT`, and a model whose
 `DROP` is queued stops being suggested until a later statement recreates it. Only the session bound
@@ -152,6 +161,18 @@ and leaves the prompt, the active domain, and the attached transaction as they w
 nervix-cli --domain production --command \
   "DESCRIBE TRANSACTION '01a0ca64-7062-7302-ac1e-43138ccc2067' OPERATION 2 FORMAT JSON;"
 ```
+
+For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exactly one JSON
+document serialized from the typed report, without terminal decoration or unrelated events.
+Failures print one JSON object with `error.code` and `error.message` on stdout and exit nonzero;
+diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses the normal readable
+terminal output. Inspection output is complete rather than paginated or truncated, so redirect a
+large text or JSON report to a file or downstream process when terminal output is impractical.
+After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
+attached transaction before retrying the commit so the client fences it to the newly reviewed
+planning basis.
+See [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) for the report's
+planned and actual scopes, historical topology, and diagnostic meanings.
 
 `BEGIN` requires an existing active domain and binds the transaction to it; attaching a transaction
 switches the active domain to the transaction's domain. An upload targets the active domain,

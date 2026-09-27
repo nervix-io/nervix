@@ -2,9 +2,9 @@
 //!
 //! Layer: vocabulary.
 //!
-//! - **Owns.** Every NSPL Model, the validated name types, `Timestamp`, branch and node references,
-//!   the index that keys a domain's Models by the node each one configures, structured message
-//!   errors, and the canonical NSPL rendering of a Model.
+//! - **Owns.** Every NSPL Model, validated name and HTTP request-field types, `Timestamp`, branch
+//!   and node references, the index that keys a domain's Models by the node each one configures,
+//!   structured message errors, and the canonical NSPL rendering of a Model.
 //! - **Depends on.** Serialization and primitive crates.
 //! - **Must not know.** How a Model was parsed, validated, scheduled or executed. No parser span,
 //!   no registry state, no Arrow array and no Tokio type belongs here.
@@ -17,8 +17,12 @@
 mod canonical;
 mod cluster_node;
 mod command;
+mod completion;
 mod domain_clock;
+mod emitter_batch;
 mod expression;
+mod http_request;
+mod json_path;
 mod message_error;
 mod model_index;
 mod names;
@@ -36,6 +40,7 @@ mod statement;
 mod timestamp;
 mod udf;
 mod wasm_state_generation;
+mod wasm_state_inspection;
 
 pub use canonical::{
     CanonicalNsplError, alter_avro_wire_schema_to_canonical_nspl,
@@ -47,10 +52,15 @@ pub use command::{
     CommandExecutionReference, CommandExecutionReferenceError,
     CommandExecutionReferenceTimestampError,
 };
+pub use completion::{BuiltinFunctionScope, SemanticReference};
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
     DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,
     DomainClockProgress, DomainClockSkew, DomainClockState, DomainTimeRate,
+};
+pub use emitter_batch::{
+    BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,
+    EmitterBatchRequirement, PayloadSizeLimit,
 };
 pub use expression::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BinaryOperator, CaseBranch, Expression,
@@ -58,6 +68,11 @@ pub use expression::{
     Invocation, Literal, MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator,
     OutputBranch, RangeOperator, RouteConstruction, UnaryOperator,
 };
+pub use http_request::{
+    HttpApplicationHeaders, HttpBodyMode, HttpHeaderName, HttpHeaderValue, HttpMethod, HttpOrigin,
+    HttpRequestFieldError, HttpTarget,
+};
+pub use json_path::{JsonPath, JsonPathError, JsonPathStep};
 pub use message_error::{
     FieldPath, MessageErrorCode, MessageErrorOperation, StructuredMessageError,
 };
@@ -106,18 +121,19 @@ pub use reset_wasm_state::{
     ResolvedResetWasmStateScope,
 };
 pub use resource::{
-    RequestedResourceVersion, ResourceId, ResourceNodeState, ResourceNodeStatus,
-    ResourceReplicaKey, ResourceUpload, ResourceUploadIdentity, ResourceUploadIdentityError,
-    ResourceUploadKey, ResourceUploadState, ResourceUploads, ResourceUploadsError, ResourceVersion,
-    ResourceVersionCounter, ResourceVersionKey, ResourceVersionResolutionError,
-    ResourceVersionStatus,
+    RequestedResourceVersion, ResourceDescription, ResourceEntryContent, ResourceId,
+    ResourceManifestEntry, ResourceNodeState, ResourceNodeStatus, ResourceReplicaKey,
+    ResourceUpload, ResourceUploadIdentity, ResourceUploadIdentityError, ResourceUploadKey,
+    ResourceUploadState, ResourceUploads, ResourceUploadsError, ResourceUsage, ResourceVersion,
+    ResourceVersionCounter, ResourceVersionDescription, ResourceVersionEntries, ResourceVersionKey,
+    ResourceVersionResolutionError, ResourceVersionStatus,
 };
 pub use resource_binding::ResourceRebinding;
 pub use schema::{
-    AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation,
-    AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema, CreateJsonWireSchema,
-    CreateSchema, CreateWireSchema, JsonType, ParseAsType, SchemaField, WireSchemaField,
-    WireSchemaStrictness,
+    AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema, AlterWireSchemaError,
+    AlterWireSchemaOperation, AvroType, CborType, CreateAvroWireSchema, CreateCborWireSchema,
+    CreateJsonWireSchema, CreateSchema, CreateWireSchema, JsonType, ParseAsType, SchemaField,
+    WireSchemaField, WireSchemaStrictness,
 };
 pub use schema_fingerprint::SchemaFingerprint;
 pub use statement::{
@@ -129,31 +145,33 @@ pub use statement::{
     AlterReingestorError, AlterRelay, AlterRelayError, AlterRelayOperation, AlterReorderer,
     AlterReordererError, AlterReordererOperation, AzureBlobConfigEntry, BranchEviction,
     BranchSelection, ClickHouseConfigEntry, ClickHouseValueMapping, ClientConfigEntry,
-    ClientPoolBounds, ClientPoolBoundsError, ClientResourceMount, ClusterSchedule, CodecEncoding,
-    CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations, CodecProtobufConfig,
-    CodecWireFormat, CordonNode, CorrelationTimeoutAction, CorrelationTimeoutPolicy,
-    CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob, CreateClientClickHouse,
-    CreateClientGcs, CreateClientHttp, CreateClientIcebergRest, CreateClientKafka,
-    CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats, CreateClientOtel,
-    CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar, CreateClientRabbitMq,
-    CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs, CreateClientSyslog,
-    CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator, CreateDeduplicator,
-    CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator, CreateInferencer, CreateIngestor,
-    CreateJunction, CreateLookup, CreatePlacement, CreateReingestor, CreateRelay, CreateReorderer,
-    CreateResource, CreateSignalingProtocol, CreateStatement, CreateSubscription, CreateUser,
-    CreateVhost, CreateWasmProcessor, CreateWindowProcessor, DeleteSubscription,
-    DescribeCorrelator, DescribeDeduplicator, DescribeDomain, DescribeEmitter, DescribeEndpoint,
-    DescribeIngestor, DescribeJunction, DescribeLookup, DescribePlacement, DescribeReingestor,
-    DescribeRelay, DescribeReorderer, DescribeResource, DescribeTransaction, DescribeUdf,
-    DescribeWasmProcessor, DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule,
-    DomainStartPoint, DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode,
-    EmitSink, EmitterAckWindow, EmitterPublishingMode, EndpointIngestMode, EndpointType,
-    ErrorPolicies, FlushPolicy, GcsConfigEntry, GeneralErrorPolicy, HttpConfigEntry,
-    IcebergCatalog, IcebergRestConfigEntry, IcebergStorageBackend, IcebergValueMapping,
-    InferencerExecutionMode, InferencerTensorDeclaration, InferencerTensorDimension,
-    InferencerTensorElementType, InferencerTensorMapping, InferencerTensorRepresentation,
-    InferencerTensorSchema, InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode,
-    IngestQuiesceOverflow, IngestSource, IngestTimestampSource, InputCollectPolicy,
+    ClientPoolBounds, ClientPoolBoundsError, ClientResourceMount, ClusterSchedule,
+    CodecBatchContainer, CodecEncoding, CodecEncodingRule, CodecJaqFormat, CodecJaqTransformations,
+    CodecProtobufConfig, CodecWireFormat, CordonNode, CorrelationTimeoutAction,
+    CorrelationTimeoutPolicy, CorrelatorMatchPolicy, CreateBranch, CreateClientAzureBlob,
+    CreateClientClickHouse, CreateClientGcs, CreateClientHttp, CreateClientIcebergRest,
+    CreateClientKafka, CreateClientMongoDb, CreateClientMqtt, CreateClientMySql, CreateClientNats,
+    CreateClientOtel, CreateClientPostgres, CreateClientPrometheus, CreateClientPulsar,
+    CreateClientRabbitMq, CreateClientRedis, CreateClientS3, CreateClientSentry, CreateClientSqs,
+    CreateClientSyslog, CreateClientWebsockets, CreateClientZeroMq, CreateCodec, CreateCorrelator,
+    CreateDeduplicator, CreateDomain, CreateEmitter, CreateEndpoint, CreateGenerator,
+    CreateInferencer, CreateIngestor, CreateJunction, CreateLookup, CreatePlacement,
+    CreateReingestor, CreateRelay, CreateReorderer, CreateResource, CreateSignalingProtocol,
+    CreateStatement, CreateSubscription, CreateUser, CreateVhost, CreateWasmProcessor,
+    CreateWindowProcessor, DeleteSubscription, DescribeCorrelator, DescribeDeduplicator,
+    DescribeDomain, DescribeEmitter, DescribeEndpoint, DescribeIngestor, DescribeJunction,
+    DescribeLookup, DescribePlacement, DescribeReingestor, DescribeRelay, DescribeReorderer,
+    DescribeResource, DescribeTransaction, DescribeUdf, DescribeWasmProcessor,
+    DescribeWindowProcessor, DomainConfig, DomainPace, DomainSchedule, DomainStartPoint,
+    DomainState, DomainStatus, DomainTick, DrainNode, DropModel, DropNode, EmitSink, EmitSinkKind,
+    EmitterAckWindow, EmitterBatchContractError, EmitterBody, EmitterPublishingMode,
+    EndpointIngestMode, EndpointType, ErrorPolicies, FlushPolicy, GcsConfigEntry,
+    GeneralErrorPolicy, HttpConfigEntry, IcebergCatalog, IcebergRestConfigEntry,
+    IcebergStorageBackend, IcebergValueMapping, InferencerExecutionMode,
+    InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+    InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
+    InferencerTensorSchemaError, IngestAcknowledgement, IngestQuiesceMode, IngestQuiesceOverflow,
+    IngestSource, IngestSourceKind, IngestTimestampSource, InputCollectPolicy, InspectionFormat,
     KafkaConfigEntry, KafkaIngestMode, KafkaOffsetMode, KafkaPartitionSchedule, LookupQuery,
     MaterializedRelayState, MessageErrorPolicy, Model, ModelKind, MongoDbConfigEntry,
     MongoDbConflictAction, MongoDbValueMapping, MqttConfigEntry, MqttIngestMode, MqttQos,
@@ -172,15 +190,19 @@ pub use statement::{
     ShowUdfs, SignalingProtobufConfig, SignalingProtocolOnConnect, SignalingStep,
     SignalingWaitStep, SignalingWireFormat, SinkCapabilities, SqsConfigEntry, SqsFifoGroup,
     SqsIngestMode, StartDomain, Statement, StopDomain, SubscriptionBinding,
-    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, TransactionReportFormat,
-    UncordonNode, UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
+    SubscriptionDeliveryBehavior, SubscriptionLiteral, SyslogConfigEntry, UncordonNode,
+    UniquelyKindedModel, UploadResource, VhostTlsResource, WasmProcessorLimits,
     WasmRejectedStatePolicy, WebsocketsConfigEntry, WebsocketsIngestMode, WindowBound,
-    WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
+    WindowStateLimit, WireSchemaLookup, ZeroMqConfigEntry, ZeroMqIngestMode, default_relay_buffer,
 };
 pub use timestamp::{AtomicTimestamp, Timestamp, TimestampError};
 pub use udf::{CreateUdf, UdfArgument, UdfLanguage, UdfReturn};
 pub use wasm_state_generation::{
     InvalidWasmStateGeneration, WasmSavedStateRejection, WasmStateGeneration, WasmStateGenerations,
     WasmStateRecoveries, WasmStateRecovery, WasmStateRecoveryAdmission, WasmStateRecoveryOutcome,
-    WasmStateReset, WasmStateResetPhase, WasmStateResetScope,
+    WasmStateReset, WasmStateResetPhase, WasmStateResetReason, WasmStateResetScope,
+};
+pub use wasm_state_inspection::{
+    WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage, WasmRecoveryInspection,
+    WasmStateInspection, WasmStateResetInspection, WasmStateResetReadiness,
 };

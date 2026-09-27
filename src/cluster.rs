@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use arch_into::ArchInto as _;
 use async_trait::async_trait;
 use chitchat::{
     Chitchat, ChitchatHandle, ChitchatId, ChitchatMessage, Deserializable as _, NodeState,
@@ -46,7 +47,7 @@ use tokio::{
 use tokio_real as chitchat_tokio;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 const KEY_CLUSTER_ID: &str = "cluster_id";
 const KEY_NODE_ID: &str = "node_id";
@@ -89,7 +90,17 @@ pub struct ClusterHandle {
 /// borrowed `str` keys, then iterates the node map without formatting a gossip key or allocating.
 #[derive(Debug, Default)]
 pub(crate) struct SubscriptionInterestIndex {
-    domains: BTreeMap<String, BTreeMap<String, BTreeMap<ClusterNodeName, ClusterNodeIncarnation>>>,
+    domains: BTreeMap<
+        String,
+        BTreeMap<String, BTreeMap<ClusterNodeName, AdvertisedSubscriptionInterest>>,
+    >,
+}
+
+/// One live advertisement, fenced by both the node incarnation and its interest key's version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct AdvertisedSubscriptionInterest {
+    incarnation: ClusterNodeIncarnation,
+    version: u64,
 }
 
 impl SubscriptionInterestIndex {
@@ -103,16 +114,24 @@ impl SubscriptionInterestIndex {
                 let Some((domain, relay)) = subscription_interest_from_key(key) else {
                     continue;
                 };
+                let version = state
+                    .get_versioned(key)
+                    .assured("key_values yields a live entry from this same immutable node state")
+                    .version;
+                let advertisement = AdvertisedSubscriptionInterest {
+                    incarnation: identity.incarnation(),
+                    version,
+                };
                 let relays = index.domains.entry(domain.to_string()).or_default();
                 let interested_nodes = relays.entry(relay.to_string()).or_default();
                 match interested_nodes.entry(identity.node_id().clone()) {
                     std::collections::btree_map::Entry::Occupied(mut current) => {
-                        if identity.incarnation() > *current.get() {
-                            current.insert(identity.incarnation());
+                        if advertisement > *current.get() {
+                            current.insert(advertisement);
                         }
                     }
                     std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(identity.incarnation());
+                        entry.insert(advertisement);
                     }
                 }
             }
@@ -124,16 +143,26 @@ impl SubscriptionInterestIndex {
         &self,
         domain: &str,
         relay: &str,
-    ) -> Option<&BTreeMap<ClusterNodeName, ClusterNodeIncarnation>> {
+    ) -> Option<&BTreeMap<ClusterNodeName, AdvertisedSubscriptionInterest>> {
         let relays = self.domains.get(domain)?;
         relays.get(relay)
     }
 
-    fn contains(&self, subscriber: &ClusterNodeIdentity, domain: &str, relay: &str) -> bool {
+    fn contains(
+        &self,
+        subscriber: &ClusterNodeIdentity,
+        domain: &str,
+        relay: &str,
+        minimum_version: u64,
+    ) -> bool {
         let Some(nodes) = self.nodes(domain, relay) else {
             return false;
         };
-        nodes.get(subscriber.node_id()) == Some(&subscriber.incarnation())
+        let Some(advertisement) = nodes.get(subscriber.node_id()) else {
+            return false;
+        };
+        advertisement.incarnation == subscriber.incarnation()
+            && advertisement.version >= minimum_version
     }
 }
 
@@ -161,11 +190,20 @@ impl SubscriptionInterestPublication {
         self.index.load()
     }
 
-    async fn wait_for(&self, subscriber: &ClusterNodeIdentity, domain: &str, relay: &str) {
+    async fn wait_for(
+        &self,
+        subscriber: &ClusterNodeIdentity,
+        domain: &str,
+        relay: &str,
+        minimum_version: u64,
+    ) {
         let mut changes = self.changed.subscribe();
         loop {
             tokio::task::consume_budget().await;
-            if self.load().contains(subscriber, domain, relay) {
+            if self
+                .load()
+                .contains(subscriber, domain, relay, minimum_version)
+            {
                 return;
             }
             changes.changed().await.assured(
@@ -264,10 +302,9 @@ pub(crate) enum PeerHealthProbeOutcome {
     Healthy(ClusterNodeIdentity),
     Failure,
     CapacityExhausted,
-    Unscheduled,
 }
 
-/// One completed or deliberately unscheduled probe, timestamped on this observing node.
+/// One completed probe, timestamped on this observing node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PeerHealthProbeResult {
     target: PeerHealthProbeTarget,
@@ -359,7 +396,6 @@ pub(crate) enum PeerHealthObservationKind {
     Healthy,
     Failure,
     CapacityExhausted,
-    Unscheduled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,7 +504,6 @@ impl PeerHealthStateSnapshot {
             PeerHealthProbeOutcome::CapacityExhausted => {
                 PeerHealthObservationKind::CapacityExhausted
             }
-            PeerHealthProbeOutcome::Unscheduled => PeerHealthObservationKind::Unscheduled,
         };
         if let Some(current) = peer.observation.as_ref()
             && current.observed_at >= result.observed_at
@@ -617,8 +652,7 @@ impl RetainedPeerHealth {
         }
         match observation.outcome {
             PeerHealthObservationKind::Healthy => PeerHealthStatus::Healthy,
-            PeerHealthObservationKind::CapacityExhausted
-            | PeerHealthObservationKind::Unscheduled => PeerHealthStatus::Unknown,
+            PeerHealthObservationKind::CapacityExhausted => PeerHealthStatus::Unknown,
             PeerHealthObservationKind::Failure => {
                 let Some(failure_since) = observation.failure_since else {
                     return PeerHealthStatus::Unknown;
@@ -747,8 +781,35 @@ struct GossipExchange {
     payload: Vec<u8>,
 }
 
+/// Why a node refused one gossip exchange.
+///
+/// The refusal is the exchange's answer on the wire, so the sending node learns why its message was
+/// not taken without parsing text.
+#[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq, thiserror::Error)]
+enum GossipExchangeRefusal {
+    #[error("a gossip message of {size} bytes exceeds the {limit}-byte bound")]
+    Oversized { size: u64, limit: u64 },
+    #[error("the answering node could not register the sending node as an outbound peer")]
+    PeerRegistration,
+    #[error("the answering node's gossip receiver has shut down")]
+    ReceiverClosed,
+}
+
+impl GossipExchange {
+    /// Refuses a message larger than one gossip exchange may carry.
+    fn check_size(&self) -> Result<(), GossipExchangeRefusal> {
+        if self.payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
+            return Err(GossipExchangeRefusal::Oversized {
+                size: self.payload.len().arch_into(),
+                limit: MAX_GOSSIP_MESSAGE_BYTES.arch_into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 impl InterconnectRequest for GossipExchange {
-    type Response = Result<(), String>;
+    type Response = Result<(), GossipExchangeRefusal>;
 
     const NAME: &'static str = "gossip_exchange";
     const CLASS: PoolClass = PoolClass::Management;
@@ -827,17 +888,21 @@ impl InterconnectGossipTransport {
         &self,
         context: RequestContext,
         request: GossipExchange,
-    ) -> Result<(), String> {
-        if request.payload.len() > MAX_GOSSIP_MESSAGE_BYTES {
-            return Err(format!(
-                "gossip message exceeds {MAX_GOSSIP_MESSAGE_BYTES} bytes"
-            ));
-        }
+    ) -> Result<(), GossipExchangeRefusal> {
+        request.check_size()?;
         let target = PeerTarget::new(request.from, context.peer_advertised_host().to_string());
-        self.inner
+        let registration = self
+            .inner
             .interconnect
-            .register_outbound_target(context.peer_node_id().clone(), target.clone())
-            .map_err(|error| error.to_string())?;
+            .register_outbound_target(context.peer_node_id().clone(), target.endpoint());
+        if let Err(error) = registration {
+            debug!(
+                peer = %context.peer_node_id(),
+                error = %error,
+                "refused a gossip exchange from a peer that could not be registered"
+            );
+            return Err(GossipExchangeRefusal::PeerRegistration);
+        }
         self.inner.routes.insert(
             request.from,
             GossipRoute {
@@ -852,7 +917,7 @@ impl InterconnectGossipTransport {
                 payload: request.payload,
             })
             .await
-            .map_err(|_| "gossip receiver has shut down".to_string())
+            .map_err(|_| GossipExchangeRefusal::ReceiverClosed)
     }
 
     fn refresh_routes(&self, nodes: &BTreeMap<ChitchatId, NodeState>) {
@@ -873,7 +938,7 @@ impl InterconnectGossipTransport {
             if self
                 .inner
                 .interconnect
-                .register_outbound_target(node_id.clone(), target.clone())
+                .register_outbound_target(node_id.clone(), endpoint)
                 .is_ok()
             {
                 self.inner.routes.insert(
@@ -935,7 +1000,7 @@ impl InterconnectGossipTransport {
             )
             .await
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        response.map_err(anyhow::Error::msg)?;
+        response?;
         Ok(())
     }
 }
@@ -1015,11 +1080,15 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
             .as_nanos(),
     )
     .assured("nanoseconds since the epoch stay within a u64 until the year 2554");
-    let advertised_targets = PeerTarget::resolve(&settings.interconnect_advertise_addr).await?;
+    let advertised_targets = settings
+        .interconnect
+        .resolve(&settings.interconnect_advertise_addr)
+        .await
+        .map_err(|report| io::Error::other(report.into_error()))?;
     let gossip_advertise_addr = advertised_targets
         .into_iter()
         .next()
-        .assured("PeerTarget::resolve rejects an endpoint that resolves to no addresses")
+        .assured("a successful resolution holds at least one target")
         .addr;
     let mut seed_targets = Vec::new();
     let seed_nodes = match settings.bootstrap_host.as_deref() {
@@ -1027,7 +1096,11 @@ pub async fn start_cluster(settings: ClusterSettings) -> io::Result<ClusterHandl
             let seed = seed
                 .parse::<NodeEndpoint>()
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-            let targets = PeerTarget::resolve(&seed).await?;
+            let targets = settings
+                .interconnect
+                .resolve(&seed)
+                .await
+                .map_err(|report| io::Error::other(report.into_error()))?;
             let mut addresses = Vec::new();
             for target in targets {
                 addresses.push(target.addr.to_string());
@@ -1390,13 +1463,29 @@ impl ClusterHandle {
         }
     }
 
-    /// Whether this node's own gossip state advertises interest in `relay`.
-    #[cfg(test)]
-    pub(crate) async fn advertises_subscription_interest(&self, domain: &str, relay: &str) -> bool {
+    /// The version of this node's current interest advertisement, absent after withdrawal.
+    pub(crate) async fn local_subscription_interest_version(
+        &self,
+        domain: &str,
+        relay: &str,
+    ) -> Option<u64> {
         let key = subscription_interest_key(domain, relay);
         let chitchat_handle = self.chitchat.clone();
         let mut chitchat = chitchat_handle.lock().await;
-        chitchat.self_node_state().contains_key(&key)
+        let state = chitchat.self_node_state();
+        let advertisement = state.get_versioned(&key)?;
+        if advertisement.is_deleted() {
+            return None;
+        }
+        Some(advertisement.version)
+    }
+
+    /// Whether this node's own gossip state advertises interest in `relay`.
+    #[cfg(test)]
+    pub(crate) async fn advertises_subscription_interest(&self, domain: &str, relay: &str) -> bool {
+        self.local_subscription_interest_version(domain, relay)
+            .await
+            .is_some()
     }
 
     pub(crate) fn subscription_interest_index(&self) -> Guard<Arc<SubscriptionInterestIndex>> {
@@ -1404,15 +1493,17 @@ impl ClusterHandle {
     }
 
     /// Wait until this node's live Chitchat view contains the interest advertised by the exact
-    /// subscriber incarnation. The interconnect request that calls this method owns the deadline.
+    /// subscriber incarnation at or beyond the requested interest key version. The interconnect
+    /// request that calls this method owns the deadline.
     pub(crate) async fn wait_for_subscription_interest(
         &self,
         subscriber: &ClusterNodeIdentity,
         domain: &str,
         relay: &str,
+        minimum_version: u64,
     ) {
         self.subscription_interest
-            .wait_for(subscriber, domain, relay)
+            .wait_for(subscriber, domain, relay, minimum_version)
             .await;
     }
 
@@ -1491,7 +1582,6 @@ impl ClusterHandle {
                     Some(PeerHealthObservationKind::Healthy) => "healthy",
                     Some(PeerHealthObservationKind::Failure) => "failure",
                     Some(PeerHealthObservationKind::CapacityExhausted) => "capacity-exhausted",
-                    Some(PeerHealthObservationKind::Unscheduled) => "unscheduled",
                     None => "none",
                 };
                 let observation_age = match effective.observed_at(node_id) {
@@ -1706,6 +1796,35 @@ pub fn derive_peer_addr(grpc_addr: SocketAddr) -> Option<SocketAddr> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_gossip_exchange_larger_than_one_message_is_refused() {
+        let from = SocketAddr::from(([127, 0, 0, 1], 7946));
+        let largest = GossipExchange {
+            from,
+            payload: vec![0; MAX_GOSSIP_MESSAGE_BYTES],
+        };
+        assert_eq!(largest.check_size(), Ok(()));
+
+        let oversized = GossipExchange {
+            from,
+            payload: vec![0; MAX_GOSSIP_MESSAGE_BYTES + 1],
+        };
+        let refusal = oversized
+            .check_size()
+            .expect_err("a message past the bound is refused");
+        assert_eq!(
+            refusal,
+            GossipExchangeRefusal::Oversized {
+                size: 61_441,
+                limit: 61_440,
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "a gossip message of 61441 bytes exceeds the 61440-byte bound"
+        );
+    }
+
     fn health_identity(node: &str, incarnation: u64) -> ClusterNodeIdentity {
         ClusterNodeIdentity::new(
             ClusterNodeName::parse(node).assured("the test node name is valid"),
@@ -1873,11 +1992,17 @@ mod tests {
         let expected = BTreeMap::from([
             (
                 ClusterNodeName::parse("node-1").assured("the test node name is valid"),
-                ClusterNodeIncarnation::new(7),
+                AdvertisedSubscriptionInterest {
+                    incarnation: ClusterNodeIncarnation::new(7),
+                    version: 1,
+                },
             ),
             (
                 ClusterNodeName::parse("node-2").assured("the test node name is valid"),
-                ClusterNodeIncarnation::new(9),
+                AdvertisedSubscriptionInterest {
+                    incarnation: ClusterNodeIncarnation::new(9),
+                    version: 1,
+                },
             ),
         ]);
         assert_eq!(
@@ -1886,7 +2011,7 @@ mod tests {
                 .assured("both test nodes advertise sales events"),
             &expected
         );
-        assert!(index.contains(&health_identity("node-2", 9), "sales", "events"));
+        assert!(index.contains(&health_identity("node-2", 9), "sales", "events", 1));
         assert!(index.nodes("incomplete", "").is_none());
 
         live_nodes
@@ -1901,7 +2026,57 @@ mod tests {
         assert!(remaining.contains_key(
             &ClusterNodeName::parse("node-1").assured("the test node name is valid")
         ));
-        assert!(!withdrawn.contains(&health_identity("node-2", 9), "sales", "events"));
+        assert!(!withdrawn.contains(&health_identity("node-2", 9), "sales", "events", 1));
+    }
+
+    #[tokio::test]
+    async fn subscription_interest_visibility_requires_the_current_advertisement() {
+        let (node_id, mut state) = subscription_state("node-1", 7, 7101, &[("sales", "events")]);
+        let subscriber = health_identity("node-1", 7);
+        let key = subscription_interest_key("sales", "events");
+        let previous = BTreeMap::from([(node_id.clone(), state.clone())]);
+        let publication = SubscriptionInterestPublication::new();
+        publication.publish(&previous);
+
+        state.delete(&key);
+        let withdrawn = BTreeMap::from([(node_id.clone(), state.clone())]);
+        state.set(&key, "1");
+        let minimum_version = state
+            .get_versioned(&key)
+            .assured("the interest was just advertised again")
+            .version;
+        let mut visible =
+            std::pin::pin!(publication.wait_for(&subscriber, "sales", "events", minimum_version,));
+
+        assert!(
+            !publication
+                .load()
+                .contains(&subscriber, "sales", "events", minimum_version),
+            "reopening must not accept the advertisement that preceded withdrawal"
+        );
+        assert!(futures_util::poll!(&mut visible).is_pending());
+        publication.publish(&withdrawn);
+        assert!(
+            !publication
+                .load()
+                .contains(&subscriber, "sales", "events", minimum_version)
+        );
+        assert!(futures_util::poll!(&mut visible).is_pending());
+        publication.publish(&BTreeMap::from([(node_id, state)]));
+        assert!(
+            publication
+                .load()
+                .contains(&subscriber, "sales", "events", minimum_version)
+        );
+        tokio::time::timeout(Duration::from_secs(30), visible)
+            .await
+            .assured("publishing the renewed interest releases its visibility wait");
+        assert!(!publication.load().contains(
+            &health_identity("node-1", 8),
+            "sales",
+            "events",
+            minimum_version,
+        ));
     }
 
     #[test]
@@ -2099,7 +2274,7 @@ mod tests {
     }
 
     #[test]
-    fn capacity_and_unscheduled_results_break_a_failure_run_without_marking_the_peer_dead() {
+    fn capacity_results_break_a_failure_run_without_marking_the_peer_dead() {
         let timeout = Duration::from_secs(10);
         let started_at = Instant::now();
         let mut state = PeerHealthStateSnapshot::default();
@@ -2143,27 +2318,6 @@ mod tests {
             Some(PeerHealthObservationKind::CapacityExhausted)
         );
         assert!(capacity.unavailable_nodes().is_empty());
-
-        let unscheduled_at = capacity_at
-            .checked_add(Duration::from_secs(1))
-            .assured("the test unscheduled observation fits in the monotonic clock range");
-        state.record_result(
-            PeerHealthProbeResult::new(target, PeerHealthProbeOutcome::Unscheduled, unscheduled_at),
-            timeout,
-        );
-        let unscheduled = state.effective_snapshot(unscheduled_at, timeout);
-        assert_eq!(
-            unscheduled
-                .status(&ClusterNodeName::parse("node-2").assured("the test node name is valid")),
-            Some(PeerHealthStatus::Unknown)
-        );
-        assert_eq!(
-            unscheduled.latest_outcome(
-                &ClusterNodeName::parse("node-2").assured("the test node name is valid")
-            ),
-            Some(PeerHealthObservationKind::Unscheduled)
-        );
-        assert!(unscheduled.unavailable_nodes().is_empty());
     }
 
     #[tokio::test]

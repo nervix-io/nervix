@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU64,
+};
 
 use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
@@ -6,7 +9,9 @@ use serde::{Deserialize, Serialize};
 use sorted_vec::SortedVec;
 use strum::{AsRefStr, EnumString, IntoStaticStr};
 
-use crate::{ClusterNodeIdentity, ClusterNodeName, DomainName, ResourceName, Timestamp, UserName};
+use crate::{
+    ClusterNodeIdentity, ClusterNodeName, DomainName, NodeRef, ResourceName, Timestamp, UserName,
+};
 
 const MAX_UPLOAD_IDENTITY_BYTES: usize = 128;
 
@@ -28,22 +33,24 @@ const MAX_UPLOAD_IDENTITY_BYTES: usize = 128;
 pub struct ResourceUploadIdentity(String);
 
 impl ResourceUploadIdentity {
-    pub fn parse(value: impl Into<String>) -> Result<Self, ResourceUploadIdentityError> {
+    pub fn parse(
+        value: impl Into<String>,
+    ) -> error_stack::Result<Self, ResourceUploadIdentityError> {
         let value = value.into();
         if value.is_empty() {
-            return Err(ResourceUploadIdentityError::Empty);
+            return Err(Report::new(ResourceUploadIdentityError::Empty));
         }
         if value.len() > MAX_UPLOAD_IDENTITY_BYTES {
-            return Err(ResourceUploadIdentityError::TooLong {
+            return Err(Report::new(ResourceUploadIdentityError::TooLong {
                 actual: value.len(),
                 limit: MAX_UPLOAD_IDENTITY_BYTES,
-            });
+            }));
         }
         if !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
-            return Err(ResourceUploadIdentityError::InvalidCharacter);
+            return Err(Report::new(ResourceUploadIdentityError::InvalidCharacter));
         }
         Ok(Self(value))
     }
@@ -121,6 +128,80 @@ pub struct ResourceVersion {
     pub archive_bytes: u64,
     pub created_at: Timestamp,
     pub created_by_node: ClusterNodeName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResourceManifestEntry {
+    pub path: String,
+    pub content: ResourceEntryContent,
+}
+
+/// What one manifest entry names inside a version.
+///
+/// A directory has no bytes of its own, so it carries neither a size nor a checksum. A file
+/// carries both, and they always describe the same bytes because they are written together.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResourceEntryContent {
+    Directory,
+    File { size: u64, checksum: String },
+}
+
+impl ResourceEntryContent {
+    /// The bytes this entry contributes to its version's total. A directory contributes none.
+    pub fn size(&self) -> u64 {
+        match self {
+            Self::Directory => 0,
+            Self::File { size, .. } => *size,
+        }
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::File { .. })
+    }
+}
+
+/// What `DESCRIBE RESOURCE` reports about one declared resource: every version with the entries it
+/// holds, the newest completed version, and the models bound to each version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceDescription {
+    pub resource: ResourceName,
+    /// The newest completed version, which `VERSION LATEST` resolves to. Absent while no version
+    /// has completed.
+    pub latest_version: Option<NonZeroU64>,
+    /// Every version of the resource, in ascending version order.
+    pub versions: Vec<ResourceVersionDescription>,
+    /// Every model bound to a version of the resource, ordered by model.
+    pub usages: Vec<ResourceUsage>,
+}
+
+/// One version of a described resource. The description it belongs to names the resource.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResourceVersionDescription {
+    pub version: NonZeroU64,
+    pub root_checksum: String,
+    pub manifest_checksum: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub created_at: Timestamp,
+    pub created_by_node: ClusterNodeName,
+    pub entries: ResourceVersionEntries,
+}
+
+/// The entries of one described version, as the store of the node that served the description
+/// read them.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ResourceVersionEntries {
+    /// The version's manifest, in path order.
+    Listed(Vec<ResourceManifestEntry>),
+    /// The serving node could not read the version's manifest.
+    Unavailable { reason: String },
+}
+
+/// A model bound to one version of a described resource.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ResourceUsage {
+    pub node: NodeRef,
+    pub version: NonZeroU64,
 }
 
 /// The full scope in which an administrative upload identity is unique.
@@ -630,6 +711,23 @@ impl ResourceVersionStatus {
         self.uploads.get(key)
     }
 
+    /// Every published version of one resource in `domain`, ascending. The versions are sorted by
+    /// domain, identifier and version, so one resource's versions are a contiguous run located by
+    /// binary search.
+    pub fn versions_of(
+        &self,
+        domain: &DomainName,
+        identifier: &ResourceName,
+    ) -> impl Iterator<Item = &ResourceVersion> {
+        let start = self.versions.partition_point(|resource| {
+            (&resource.id.domain, &resource.id.identifier) < (domain, identifier)
+        });
+        let end = self.versions.partition_point(|resource| {
+            (&resource.id.domain, &resource.id.identifier) <= (domain, identifier)
+        });
+        self.versions[start..end].iter()
+    }
+
     /// Locates a resource's catalog slot. `Ok` holds the entry's position and `Err` holds the
     /// position it would be inserted at. The catalog is sorted by domain and then identifier, so
     /// callers resolve a resource by key instead of scanning the catalog.
@@ -710,6 +808,35 @@ mod tests {
             version,
             state,
         }
+    }
+
+    #[test]
+    fn an_upload_identity_outside_the_grammar_reports_the_rule_it_breaks() {
+        let too_long = "u".repeat(MAX_UPLOAD_IDENTITY_BYTES + 1);
+        let cases = [
+            (String::new(), ResourceUploadIdentityError::Empty),
+            (
+                too_long,
+                ResourceUploadIdentityError::TooLong {
+                    actual: MAX_UPLOAD_IDENTITY_BYTES + 1,
+                    limit: MAX_UPLOAD_IDENTITY_BYTES,
+                },
+            ),
+            (
+                "upload one".to_string(),
+                ResourceUploadIdentityError::InvalidCharacter,
+            ),
+        ];
+        for (raw, expected) in cases {
+            let error =
+                ResourceUploadIdentity::parse(raw).expect_err("the identity breaks the grammar");
+            assert_eq!(error.current_context(), &expected);
+        }
+
+        let longest = "u".repeat(MAX_UPLOAD_IDENTITY_BYTES);
+        let identity = ResourceUploadIdentity::parse(longest.clone())
+            .assured("an identity at the byte limit is accepted");
+        assert_eq!(identity.as_str(), longest);
     }
 
     fn completed(root_checksum: &str) -> ResourceUploadState {
@@ -850,5 +977,48 @@ mod tests {
             applying.state,
             ResourceUploadState::Applying { .. }
         ));
+    }
+
+    #[test]
+    fn the_versions_of_one_resource_exclude_other_resources_and_domains() {
+        let version = |domain_name: &str, resource_name: &str, number: u64| ResourceVersion {
+            id: ResourceId::new(domain(domain_name), resource(resource_name), number),
+            root_checksum: format!("root-{number}"),
+            manifest_checksum: format!("manifest-{number}"),
+            file_count: 1,
+            total_bytes: 1,
+            archive_bytes: 1,
+            created_at: Timestamp::from_unix_nanos(0),
+            created_by_node: ClusterNodeName::parse("node-1").assured("a literal node name"),
+        };
+        let status = ResourceVersionStatus {
+            versions: SortedVec::from_unsorted(vec![
+                version("tenant", "zeta", 1),
+                version("tenant", "model", 2),
+                version("other", "model", 1),
+                version("tenant", "alpha", 1),
+                version("tenant", "model", 1),
+                version("zulu", "model", 3),
+            ]),
+            ..ResourceVersionStatus::default()
+        };
+
+        let described = status
+            .versions_of(&domain("tenant"), &resource("model"))
+            .map(|resource| resource.id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            described,
+            vec![
+                ResourceId::new(domain("tenant"), resource("model"), 1),
+                ResourceId::new(domain("tenant"), resource("model"), 2),
+            ]
+        );
+        assert_eq!(
+            status
+                .versions_of(&domain("tenant"), &resource("missing"))
+                .count(),
+            0
+        );
     }
 }

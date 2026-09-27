@@ -165,13 +165,16 @@ pub(crate) fn encode_preview_identity<'fbb>(
         "TransactionPreviewIdentity.transaction_id",
         &preview.transaction_id,
     )?;
-    let planning_basis = wire::Fingerprint::new(preview.planning_basis.fingerprint());
+    let planning_basis = encoder.fingerprint(
+        "TransactionPreviewIdentity.planning_basis",
+        preview.planning_basis.fingerprint(),
+    )?;
     Ok(wire::TransactionPreviewIdentity::create(
         encoder.fbb(),
         &wire::TransactionPreviewIdentityArgs {
             transaction_id: Some(transaction_id),
             position: wire_size(preview.position.accepted_operations()),
-            planning_basis: Some(&planning_basis),
+            planning_basis: Some(planning_basis),
         },
     ))
 }
@@ -185,7 +188,10 @@ pub(crate) fn decode_preview_identity(
         preview.transaction_id(),
     )?;
     let position = decoder.size("TransactionPreviewIdentity.position", preview.position())?;
-    let planning_basis = <[u8; 32]>::from(preview.planning_basis().bytes());
+    let planning_basis = decoder.fingerprint(
+        "TransactionPreviewIdentity.planning_basis",
+        preview.planning_basis(),
+    )?;
     let planning_basis = ImpactPlanningBasis::new(planning_basis);
     Ok(TransactionPreviewIdentity {
         transaction_id,

@@ -17,7 +17,6 @@ use ahash::HashMap;
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::Schema as ArrowSchema;
-use nervix_execution::sync::ArcSwapOption;
 use nervix_models::{
     Assignment, AssignmentTarget, AssignmentTargetScope, BranchName, BranchSelection,
     ClusterNodeIncarnation, ClusterNodeName, CreateBranch, CreateSchema, DomainConfig, DomainName,
@@ -213,7 +212,7 @@ pub(super) fn window_plan(
     let aggregate = window_aggregate(set);
     let compiled =
         compile_window_aggregate_for_test(&aggregate, input_type, &test_schema(output_fields));
-    super::WindowAccumulatorPlan::new([&compiled.route])
+    super::WindowAccumulatorPlan::new([&compiled.route], None, None)
 }
 
 pub(super) fn branch_key(
@@ -745,7 +744,6 @@ pub(super) fn install_test_domain_execution(
             start_version: 0,
             domain_clock: test_domain_clock(domain),
             shutdown,
-            graph: StdArc::new(ArcSwapOption::empty()),
             routing: runtime.stage_domain_routing(domain, routing),
             branched_ingestors: HashMap::default(),
             branched_entrypoints: HashMap::default(),
@@ -770,6 +768,7 @@ pub(super) fn junction_branch_template(
     let processor = named::<ModelName>(processor);
     let input_relay = named::<RelayName>(input_relay);
     super::BranchInstanceTemplate {
+        revision: super::ProcessorPlanRevision::new(),
         source_kind: ModelKind::Junction,
         source: RelayName::from(&processor.clone()),
         root_relay: input_relay.clone(),
@@ -787,7 +786,9 @@ pub(super) fn junction_branch_template(
                 input_collect_policies: HashMap::default(),
                 error_policies: ErrorPolicies::handled_by_log(),
                 from_where: HashMap::default(),
+                compiled_from_where: HashMap::default(),
                 filter_where: None,
+                compiled_filter_where: HashMap::default(),
                 materialized_state: Vec::new(),
                 operation: super::RelayProcessorOperationTemplate::Junction {
                     output_routes: super::RelayProcessorOutputsTemplate { routes: Vec::new() },

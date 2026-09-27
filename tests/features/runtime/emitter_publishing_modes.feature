@@ -174,23 +174,27 @@ Feature: Emitter publishing modes
 
       CREATE EMITTER clickhouse_ack FROM outgoing
         TO CLICKHOUSE clickhouse_main INSERT TO TABLE clickhouse_events
-          VALUES { 'seq' = input.seq } WITH MAX BATCH 2
+          VALUES { 'seq' = input.seq }
           MODE ACK RETRY POLICY BACKOFF 180ms MAX 18s
+        BATCH MAX MESSAGES 2 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE EMITTER postgres_ack FROM outgoing
         TO POSTGRES postgres_main INSERT TO TABLE postgres_events
-          VALUES { 'seq' = input.seq } WITH MAX BATCH 3
+          VALUES { 'seq' = input.seq }
           MODE ACK RETRY POLICY BACKOFF 190ms MAX 19s
+        BATCH MAX MESSAGES 3 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE EMITTER mysql_ack FROM outgoing
         TO MYSQL mysql_main INSERT TO TABLE mysql_events
-          VALUES { 'seq' = input.seq } WITH MAX BATCH 4
+          VALUES { 'seq' = input.seq }
           MODE ACK RETRY POLICY BACKOFF 200ms MAX 20s
+        BATCH MAX MESSAGES 4 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE EMITTER mongodb_ack FROM outgoing
         TO MONGODB mongodb_main INSERT TO COLLECTION mongodb_events
-          VALUES { 'seq' = input.seq } WITH MAX BATCH 5
+          VALUES { 'seq' = input.seq }
           MODE ACK RETRY POLICY BACKOFF 210ms MAX 21s
+        BATCH MAX MESSAGES 5 MAX SIZE 1MiB
         FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       CREATE EMITTER iceberg_ack FROM outgoing
         TO ICEBERG ON S3 object_store TABLE iceberg_events
@@ -359,7 +363,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      WITH MAX BATCH 2
+      BATCH MAX MESSAGES 2 MAX SIZE 1MiB
       """
     And the last command output contains
       """
@@ -371,7 +375,9 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      sink: CLICKHOUSE client=clickhouse_main table=clickhouse_events max_batch=2
+      sink: CLICKHOUSE client=clickhouse_main table=clickhouse_events
+      batch: MAX MESSAGES 2 MAX SIZE 1MiB
+      flush: FLUSH IMMEDIATE
       """
     And the last command output contains
       """
@@ -383,7 +389,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      WITH MAX BATCH 3
+      BATCH MAX MESSAGES 3 MAX SIZE 1MiB
       """
     And the last command output contains
       """
@@ -395,7 +401,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      WITH MAX BATCH 4
+      BATCH MAX MESSAGES 4 MAX SIZE 1MiB
       """
     And the last command output contains
       """
@@ -407,7 +413,7 @@ Feature: Emitter publishing modes
       """
     Then the last command output contains
       """
-      WITH MAX BATCH 5
+      BATCH MAX MESSAGES 5 MAX SIZE 1MiB
       """
     And the last command output contains
       """
@@ -570,9 +576,9 @@ Feature: Emitter publishing modes
           ENCODE USING event_codec
         INHERIT ALL FLUSH IMMEDIATE ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
       """
-    When these NSPL commands fail with "WITH MAX BATCH"
+    When these NSPL commands fail with "BATCH MAX MESSAGES"
       """
-      CREATE EMITTER clickhouse_without_max_batch FROM outgoing
+      CREATE EMITTER clickhouse_without_batch FROM outgoing
         TO CLICKHOUSE clickhouse_main INSERT TO TABLE clickhouse_events
           VALUES { 'seq' = input.seq }
           MODE ACK RETRY POLICY BACKOFF 10ms MAX 1s

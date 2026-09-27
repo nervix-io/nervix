@@ -528,7 +528,9 @@ impl ClientConnection {
         setup_timeout: Duration,
     ) -> Result<OpenedDuplexStream, Report<TransportError>> {
         if self.closed.is_cancelled() {
-            return Err(Report::new(TransportError::Closed(self.key.target.addr)));
+            return Err(Report::new(TransportError::Closed(
+                self.key.endpoint.clone(),
+            )));
         }
         let operation = async {
             let sender = self
@@ -540,11 +542,9 @@ impl ClientConnection {
             let mut request_url = url::Url::parse("https://localhost/")
                 .assured("the fixed HTTPS request base is a valid URL");
             request_url
-                .set_host(Some(&self.key.target.server_name))
+                .set_host(Some(&self.request_host))
                 .map_err(|_| {
-                    Report::new(TransportError::InvalidServerName(
-                        self.key.target.server_name.clone(),
-                    ))
+                    Report::new(TransportError::InvalidServerName(self.request_host.clone()))
                 })?;
             request_url.set_path(path);
             let request = Request::builder()

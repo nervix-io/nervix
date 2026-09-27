@@ -3,14 +3,16 @@
 use flatbuffers::FlatBufferBuilder;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    DomainClockPeriod, DomainClockSkew, DomainPace, DomainStatus, TransactionInspection,
-    TransactionInspectionRejection, TransactionLifecycle, TransactionPosition, TransactionStatus,
-    TransactionStatusError,
+    DomainClockPeriod, DomainClockSkew, DomainPace, DomainStatus, ModelKind, ModelName, NodeRef,
+    PlacementPolicy, TransactionInspection, TransactionInspectionRejection, TransactionLifecycle,
+    TransactionPosition, TransactionStatus, TransactionStatusError, WasmCheckpointCounts,
+    WasmCheckpointInspection, WasmCheckpointStage, WasmStateGeneration, WasmStateInspection,
 };
 
 use super::{
     fixtures::{
-        decode_error, finish_raw, limits, name, operation, raw_server, request, round_trip_reply,
+        decode_error, finish_raw, finish_reply, limits, name, operation, raw_server, request,
+        round_trip_reply,
     },
     samples::{
         command_dispositions, command_outcome, diagnostics, impact_report, leader, row_schema,
@@ -18,8 +20,9 @@ use super::{
     },
 };
 use crate::{
-    AttachDisposition, AttachOutcome, CancelOutcome, CancelState, CancellationStage, DomainInfo,
-    DomainList, DomainSelection, InspectionOutcome, LeaderRedirect, Reply, ReplyBody,
+    AttachDisposition, AttachOutcome, CancelOutcome, CancelState, CancellationStage, Choice,
+    ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, DomainInfo, DomainList,
+    DomainPaceChoice, DomainSelection, InspectionOutcome, LeaderRedirect, Reply, ReplyBody,
     RequestCancelled, RequestRejected, RequestRejection, ServerMessage, SourceSpan,
     SubscribeDisposition, SubscribeOutcome, SubscriptionOpened, SubscriptionType, SuggestOutcome,
     Suggestion, SuggestionKind, UnsubscribeDisposition, UnsubscribeOutcome, WireDecodeError,
@@ -73,6 +76,41 @@ fn a_command_outcome_carries_the_inspection_it_read_beside_its_own_binding() {
         }));
         assert_round_trips(ReplyBody::Command(Box::new(outcome)));
     }
+}
+
+#[test]
+fn a_wasm_description_carries_the_same_typed_checkpoint_facts_as_its_text() {
+    let mut outcome = command_outcome(crate::CommandDisposition::Completed {
+        already_existed: false,
+    });
+    outcome.wasm_state = Some(Box::new(WasmStateInspection {
+        resource: "guest_bundle"
+            .try_into()
+            .assured("the fixture resource name is valid"),
+        resource_version: 3,
+        file: "processors/guest.wasm".to_string(),
+        default_generation: WasmStateGeneration::FIRST,
+        reset: None,
+        reset_readiness: None,
+        recoveries: Vec::new(),
+        omitted_recoveries: 0,
+        checkpoint_counts: WasmCheckpointCounts {
+            total: 1,
+            replica_confirmed: 1,
+            ..WasmCheckpointCounts::default()
+        },
+        checkpoints: vec![WasmCheckpointInspection {
+            branch: None,
+            generation: WasmStateGeneration::FIRST,
+            committed_revision: Some(std::num::NonZeroU64::MIN),
+            latest_revision: Some(std::num::NonZeroU64::MIN),
+            stage: WasmCheckpointStage::ReplicaConfirmed,
+            required_replicas: Some(1),
+            confirmed_replicas: Some(1),
+        }],
+        omitted_checkpoints: 0,
+    }));
+    assert_round_trips(ReplyBody::Command(Box::new(outcome)));
 }
 
 #[test]
@@ -203,29 +241,6 @@ fn status_frame(accepted: u64, applied: u64, failing_operation: Option<u64>) -> 
     )
 }
 
-fn finish_reply(
-    mut builder: FlatBufferBuilder<'_>,
-    body_type: wire::ReplyBody,
-    body: flatbuffers::WIPOffset<flatbuffers::UnionWIPOffset>,
-) -> bytes::Bytes {
-    let reply = wire::Reply::create(
-        &mut builder,
-        &wire::ReplyArgs {
-            request_id: 5,
-            body_type,
-            body: Some(body),
-        },
-    );
-    let root = wire::ServerMessage::create(
-        &mut builder,
-        &wire::ServerMessageArgs {
-            body_type: wire::ServerBody::Reply,
-            body: Some(reply.as_union_value()),
-        },
-    );
-    finish_raw(builder, root, "NXSM")
-}
-
 #[test]
 fn inconsistent_transaction_status_is_refused() {
     let frame = raw_server(status_frame(1, 2, None));
@@ -270,24 +285,134 @@ fn every_attach_disposition_round_trips() {
 #[test]
 fn suggestions_round_trip() {
     assert_round_trips(ReplyBody::Suggest(SuggestOutcome {
+        status: crate::SuggestionStatus::Ready,
+        continuation: None,
         suggestions: vec![
             Suggestion {
                 value: "SCHEMA".to_string(),
                 kind: SuggestionKind::Text,
+                edit: crate::TextEdit {
+                    start: 7,
+                    end: 7,
+                    replacement: "SCHEMA".to_string(),
+                },
             },
             Suggestion {
                 value: "~/models/".to_string(),
                 kind: SuggestionKind::LocalDirectoryLookup,
+                edit: crate::TextEdit {
+                    start: 9,
+                    end: 18,
+                    replacement: "~/models/".to_string(),
+                },
             },
             Suggestion {
                 value: String::new(),
                 kind: SuggestionKind::Text,
+                edit: crate::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             },
         ],
     }));
-    assert_round_trips(ReplyBody::Suggest(SuggestOutcome {
-        suggestions: Vec::new(),
+    for status in crate::reply::ALL_SUGGESTION_STATUSES {
+        assert_round_trips(ReplyBody::Suggest(SuggestOutcome {
+            status: *status,
+            continuation: None,
+            suggestions: Vec::new(),
+        }));
+    }
+}
+
+#[test]
+fn typed_choices_and_lookup_states_round_trip() {
+    let choices = vec![
+        Choice {
+            value: ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+            presentation: ChoicePresentation {
+                label: "PACED".to_string(),
+                detail: Some("advances from wall time".to_string()),
+                group: Some("Clock".to_string()),
+            },
+        },
+        Choice {
+            value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
+            presentation: ChoicePresentation {
+                label: "PREFER COLOCATION".to_string(),
+                detail: None,
+                group: None,
+            },
+        },
+        Choice {
+            value: ChoiceValue::Domain(name("tenant")),
+            presentation: ChoicePresentation {
+                label: "tenant".to_string(),
+                detail: None,
+                group: Some("Domains".to_string()),
+            },
+        },
+        Choice {
+            value: ChoiceValue::Resource(name("bundle")),
+            presentation: ChoicePresentation {
+                label: "bundle".to_string(),
+                detail: Some("Resource".to_string()),
+                group: None,
+            },
+        },
+        Choice {
+            value: ChoiceValue::Model(NodeRef::new(ModelKind::Relay, name::<ModelName>("orders"))),
+            presentation: ChoicePresentation {
+                label: "orders".to_string(),
+                detail: Some("Relay".to_string()),
+                group: Some("Models".to_string()),
+            },
+        },
+    ];
+    assert_round_trips(ReplyBody::Choice(ChoiceOutcome {
+        status: ChoiceStatus::Ready,
+        choices,
+        page_cursor: Some("next-page".to_string()),
     }));
+    for status in [
+        ChoiceStatus::MissingContext,
+        ChoiceStatus::StaleContext,
+        ChoiceStatus::LookupFailed,
+    ] {
+        assert_round_trips(ReplyBody::Choice(ChoiceOutcome {
+            status,
+            choices: Vec::new(),
+            page_cursor: None,
+        }));
+    }
+}
+
+#[test]
+fn suggestion_text_edits_require_an_ordered_range() {
+    let outcome = SuggestOutcome {
+        status: crate::SuggestionStatus::Ready,
+        continuation: None,
+        suggestions: vec![Suggestion {
+            value: "SCHEMA".to_string(),
+            kind: SuggestionKind::Text,
+            edit: crate::TextEdit {
+                start: 8,
+                end: 7,
+                replacement: "SCHEMA".to_string(),
+            },
+        }],
+    };
+    let error = reply(ReplyBody::Suggest(outcome))
+        .encode(&limits())
+        .expect_err("a reversed edit cannot be encoded");
+    assert_eq!(
+        error.current_context(),
+        &crate::WireEncodeError::InvalidValue {
+            field: "TextEdit",
+            kind: "UTF-8 byte range",
+        }
+    );
 }
 
 #[test]
@@ -512,17 +637,29 @@ fn replies_refuse_missing_and_undeclared_enums() {
 
     let mut builder = FlatBufferBuilder::new();
     let value = builder.create_string("SCHEMA");
+    let replacement = builder.create_string("SCHEMA");
+    let edit = wire::TextEdit::create(
+        &mut builder,
+        &wire::TextEditArgs {
+            start: 0,
+            end: 0,
+            replacement: Some(replacement),
+        },
+    );
     let suggestion = wire::Suggestion::create(
         &mut builder,
         &wire::SuggestionArgs {
             value: Some(value),
             kind: Some(wire::SuggestionKind(2)),
+            edit: Some(edit),
         },
     );
     let suggestions = builder.create_vector(&[suggestion]);
     let outcome = wire::SuggestOutcome::create(
         &mut builder,
         &wire::SuggestOutcomeArgs {
+            status: Some(wire::SuggestionStatus::Ready),
+            continuation: None,
             suggestions: Some(suggestions),
         },
     );
@@ -636,6 +773,37 @@ fn diagnostic_reply(span: Option<wire::SourceSpan>, grpc_uri: &str) -> bytes::By
         wire::ReplyBody::AttachOutcome,
         outcome.as_union_value(),
     )
+}
+
+#[test]
+fn a_span_starting_at_zero_is_a_location_distinct_from_no_span() {
+    let at_start = SourceSpan::new(0, 0).assured("an empty span at the start is ordered");
+    let first_word = SourceSpan::new(0, 6).assured("a span from the start is ordered");
+    let mut outcome = command_outcome(crate::CommandDisposition::Failed);
+    outcome.diagnostics = vec![
+        crate::Diagnostic {
+            message: "expected a statement".to_string(),
+            span: Some(at_start),
+        },
+        crate::Diagnostic {
+            message: "unknown keyword".to_string(),
+            span: Some(first_word),
+        },
+        crate::Diagnostic {
+            message: "the domain does not exist".to_string(),
+            span: None,
+        },
+    ];
+    let original = reply(ReplyBody::Command(Box::new(outcome)));
+    let ReplyBody::Command(decoded) = round_trip_reply(&original).body else {
+        panic!("a command reply decodes as a command outcome");
+    };
+    let spans = decoded
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.span)
+        .collect::<Vec<_>>();
+    assert_eq!(spans, vec![Some(at_start), Some(first_word), None]);
 }
 
 #[test]

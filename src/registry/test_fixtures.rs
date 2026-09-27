@@ -335,6 +335,7 @@ pub(in crate::registry) fn jaq_native_codec(
             transformations: CodecJaqTransformations {
                 on_ingestion: on_ingestion.map(str::to_string),
                 on_emitting: on_emitting.map(str::to_string),
+                on_emitting_batch: None,
             },
         },
         schema: named(schema),
@@ -358,9 +359,11 @@ pub(in crate::registry) fn protobuf_codec(
                 value: "notification.proto".to_string(),
             }],
             message: "nervix.test.Notification".to_string(),
+            batch_message: None,
             transformations: CodecJaqTransformations {
                 on_ingestion: on_ingestion.map(str::to_string),
                 on_emitting: on_emitting.map(str::to_string),
+                on_emitting_batch: None,
             },
         }),
         schema: named(schema),
@@ -616,6 +619,7 @@ pub(in crate::registry) fn window_processor(
             messages: Some(5),
             duration: None,
         },
+        state_limit: nervix_models::WindowStateLimit::Unbounded,
         mode: AckMode::Attached,
         filter_where: None,
         materialized_state: Vec::new(),
@@ -718,7 +722,9 @@ pub(in crate::registry) fn emitter(
     Model::Emitter(CreateEmitter {
         name: EmitterName::parse(name).expect("valid identifier"),
         from: ProcessorInputs::single(RelayName::parse(from_relay).expect("valid identifier")),
-        encode_using_codec: Some(CodecName::parse(codec).expect("valid identifier")),
+        body: nervix_models::EmitterBody::Codec {
+            codec: CodecName::parse(codec).expect("valid identifier"),
+        },
         sink: Box::new(EmitSink::Kafka {
             client: ClientName::parse(client).expect("valid identifier"),
             topic: TopicName::parse("topic").expect("valid topic identifier"),
@@ -729,6 +735,7 @@ pub(in crate::registry) fn emitter(
                 max_backoff: "30s".to_string(),
             },
         },
+        batch: None,
         flush_policy: FlushPolicy::Each {
             interval: "100ms".to_string(),
             max_batch_size: "1MiB".to_string(),

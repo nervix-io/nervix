@@ -26,6 +26,8 @@ An emitter defines:
 - the transport-specific sink
 - the sink's explicit publishing mode, confirmation window and bound where applicable, and retry
   pacing
+- an optional batching clause bounding how many records one external write carries and its encoded
+  size, required for database sinks
 - the flush policy used to collect a batch before publishing
 - whether the branch is `ATTACHED` or `DETACHED`
 - route-local codec construction or a direct `VALUES` mapping
@@ -98,7 +100,7 @@ only at the external export boundary.
 
 ## Publishing modes
 
-Every emitter sink requires `MODE <body>` as its final sink subclause, immediately before
+Every emitter sink requires `MODE <body>` before its body selection, immediately before
 `ENCODE USING` when the sink uses a codec. There is no implicit mode, confirmation window, ACK
 timeout, or retry cadence. `SHOW CREATE EMITTER` and `DESCRIBE EMITTER` render the complete mode.
 
@@ -139,12 +141,201 @@ discard a record.
 | OTEL | `ACK` | Successful OTLP Export response; `partial_success` is acknowledged with a warning |
 | ClickHouse, Postgres, MySQL, MongoDB | `ACK` | Successful insert/write result |
 | Iceberg | `ACK` | Successful catalog commit |
+| HTTP | `ACK` | Complete successful response headers |
+
+### HTTP request configuration
+
+An HTTP emitter uses an existing `TYPE HTTP` client and declares the request method, path and body
+selection in this order:
+
+```nspl,ignore
+TO HTTP <client>
+  METHOD <string_expression>
+  PATH <string_expression>
+  MODE ACK RETRY POLICY BACKOFF <duration> MAX <duration>
+  (ENCODE USING <codec> | WITHOUT BODY)
+```
+
+`METHOD` and `PATH` are structured expressions. They may read qualified source fields such as
+`input.method` and `input.path`; parentheses, arrays and string literals keep clause words inside
+the expression. `MODE ACK` has no acknowledgement window or `ACK TIMEOUT`, and `NO_ACK` is not
+available. The ordinary route-local `FLUSH` clause is required.
+
+The referenced client must be a `TYPE HTTP` client in the same domain. Its `endpoint` is an
+`http://` or `https://` origin with a host and optional port, and no credentials, non-root path,
+query or fragment. It requires a positive, schedulable `timeout_ms`; the client's polling `method`
+setting does not supply the emitter's `METHOD`. HTTPS retains certificate and hostname verification.
+The optional `tls_cert_file` and `tls_key_file` settings must be supplied together, and mounted TLS
+files use the client's pinned resource version. Validation does not probe the destination.
+
+Method, path and `write_header` name and value expressions must each be exact, non-null `STRING`
+values. Request expressions read the original `input` and, with a codec, finalized `output` and
+`message`. Without a body, `message` is the source and `output` is unavailable. Sensitive values
+in any request field or body require explicit leakage. Branch fields and source-envelope header
+reads are unavailable. A literal invalid method, target or header rejects configuration; the same
+rules are checked per record for computed values before publication.
+
+Methods are ASCII HTTP tokens of at most 64 bytes. `CONNECT` and `TRACE` are unavailable, and
+`GET` and `HEAD` require `WITHOUT BODY`. `PATH` begins with exactly one `/` and is parsed against
+the client origin. It cannot include a fragment, backslash, invalid percent escape, whitespace or
+control character; normalization must keep it on that origin and must not produce a leading `//`.
+The normalized target is limited to 8 KiB. `write_header` accepts valid HTTP field names and
+UTF-8 values without control characters or leading/trailing whitespace in a nonempty value.
+Transport-owned headers cannot be written. After case-insensitive replacement, at most 128
+application headers and 32 KiB of name/value bytes are allowed.
+
+`ENCODE USING` permits the ordinary transforming construction clauses. `WITHOUT BODY` selects an
+absent request body and permits `WHERE` and `INVOKE` but no `INHERIT`, `SET` or `VALUES`. HTTP
+emitters publish one request per eligible source record, so they do not accept the optional
+`BATCH` clause. `SHOW CREATE EMITTER` preserves both request expressions and the explicit body
+selection.
+
+HTTP emitter configuration can currently be created, altered and inspected. Outbound request
+delivery is not yet available.
+
+`ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
+`SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE
+USING` selects a codec body. `DROP ENCODE` is invalid for HTTP; use a complete `SET TO HTTP ...
+WITHOUT BODY` replacement. The retained construction and error scopes must be valid for the new
+selection.
 
 While confirmations or infrastructure retries are pending, the emitter stops consuming from its
 relays and keeps upstream ACK leases alive. `FLUSH` still controls when and how much work enters a
 flush; `MODE` controls when each record in that flush counts as published. `ATTACHED` and
 `DETACHED` are orthogonal: a detached emitter acknowledges upstream immediately but still performs
 its declared confirmations and retries for error visibility and backpressure.
+
+## Batching
+
+An emitter may declare two hard limits for every batch it publishes, written after the complete sink
+clause and its route construction, and before the flush policy:
+
+```nspl,ignore
+BATCH MAX MESSAGES <n> MAX SIZE <bytes>
+```
+
+`MAX MESSAGES` is the most source records one batch carries, from 1 to 65,536. `MAX SIZE` is the
+most bytes its encoded payload may occupy: a positive whole number followed by `B`, `KB`, `KiB`,
+`MB`, `MiB`, `GB`, `GiB`, `TB` or `TiB`. Neither limit has a default, neither may be omitted, and
+neither is derived from the other or from `FLUSH ... MAX BATCH SIZE`, which measures Arrow memory
+rather than encoded bytes.
+
+```nspl,ignore
+CREATE EMITTER kafka_notifications
+  FROM notifications
+  TO KAFKA kafka_main TOPIC notifications_out
+    MODE ACK PARALLEL MAX 100 ACK TIMEOUT 30s RETRY POLICY BACKOFF 250ms MAX 30s
+    ENCODE USING notification_codec
+  INHERIT ALL
+  BATCH MAX MESSAGES 500 MAX SIZE 1MiB
+  FLUSH EACH 100ms MAX BATCH SIZE 1MiB
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+```
+
+| Sinks | Clause |
+| --- | --- |
+| Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry, Syslog, OTEL, Iceberg | Optional |
+| ClickHouse, Postgres, MySQL, MongoDB | Required: a database write always carries several rows |
+| HTTP | Unavailable: each request contains one source record |
+
+A statement is rejected, naming the offending value, when:
+
+- `MAX MESSAGES` is zero or above 65,536;
+- `MAX SIZE` is zero, fractional, written without a unit, or past the 64-bit byte range;
+- `MAX SIZE` is above 256 KiB on an SQS emitter, the largest SQS message Nervix sends;
+- the clause is absent on a ClickHouse, Postgres, MySQL or MongoDB emitter;
+- the clause is present on a Sentry emitter whose codec declares no `ON EMITTING BATCH`
+  transformation, because one Sentry envelope carries at most one event and only that
+  transformation can say where the members go;
+- the clause is present on an emitter whose protobuf codec declares no `BATCH MESSAGE`, because
+  protobuf has no self-delimiting sequence. Without an `ON EMITTING BATCH` transformation, the batch
+  message must declare exactly one field, `repeated <MESSAGE>`, which the domain build checks
+  against the compiled descriptors.
+
+The codec forms are described in [Schemas and codecs](schemas-and-codecs.md#batch-transformations).
+These checks cover the whole candidate graph, so replacing a codec that a batching emitter uses
+is validated against that emitter too.
+
+`SHOW CREATE EMITTER` renders the clause between the sink clause and `FLUSH`, with the size in the
+unit it was written in. `DESCRIBE EMITTER` reports it on the line after `sink:`, as
+`batch: MAX MESSAGES 500 MAX SIZE 1MiB` or `batch: none`.
+
+The complete contract for batch payloads — packing, containers per wire format, exact size
+measurement and failure attribution for every sink — is defined in
+[Optional emitter batching](https://github.com/nervix-io/nervix/blob/main/docs/specifications/emitter-batching.md).
+The database sinks bound every sequential insert or bulk write by `MAX MESSAGES`, as their sections
+below describe, and OTEL and Iceberg emitters keep their current request and data-file grouping.
+
+### Batch payloads
+
+A Kafka, Pulsar, RabbitMQ, Redis, MQTT, NATS, ZeroMQ, SQS, Sentry or Syslog emitter that declares
+the clause publishes batch payloads instead of one payload per record. Each payload is one message,
+one event or one frame whose value is the codec's
+[batch container](schemas-and-codecs.md#batch-containers): an array for JSON, CBOR, YAML and Avro, a
+single `batch` key for TOML, a single `batch` root element for XML, the codec's `BATCH MESSAGE` for
+protobuf and one RFC 5424 frame for `SYSLOG`, or the single value an `ON EMITTING BATCH`
+transformation built instead.
+
+The emitter walks the Arrow carriers released by one flush in arrival order, and each carrier's
+eligible rows in source order. A payload can span carriers only while their source relay, exact
+named and concrete branch, key, ordered written headers, ordering group and, with a `SYSLOG` codec,
+syslog header other than the timestamp agree. A different value seals the open payload before the
+next row is considered; no row is skipped over or reordered. A carrier retains its own execution
+snapshot and row membership for errors and acknowledgements. A payload with one member keeps the
+container shape, such as a one-element array, and a carrier with no eligible row publishes nothing.
+Batching adds no timer: `FLUSH` alone decides when records leave, and a partial payload is published
+exactly like a full one.
+
+`MAX SIZE` is the exact length of the payload: escaping, UTF-8, base64, field names, separators,
+length prefixes and the container's own brackets all count, and a batch transformation is measured
+by the bytes of its output. Nervix never estimates the size. It encodes the candidate into a buffer
+that refuses to grow past the limit and abandons the encoding at the first byte that would not fit,
+so an oversize payload is never built in full and never reaches the destination. A payload of
+exactly `MAX SIZE` bytes is published. A candidate whose encoding reached the limit is halved: its
+first half is re-encoded under the same limit and the rest returns to the front of the queue. Each
+halving is encoded again, because a batch transformation may write more bytes for fewer members, so
+a candidate of `n` members takes at most `⌈log2(n)⌉ + 1` encodings. The bound covers the payload
+only: keys, headers and the framing a transport adds around the payload are outside it.
+
+A record is rejected alone, through `ON MESSAGE ERROR` with operation `encode`, when its member value
+cannot be produced — its `ON EMITTING` transformation fails, or, without a batch transformation, its
+value is not one the format can write — and when a payload of it alone still exceeds `MAX SIZE`.
+The second case has code `validation` and a message naming the codec, its encoding and the limit,
+such as `emitter 'bounded_events' codec 'event_codec' JSON payload exceeds MAX SIZE 32B`. The records
+around it are packed as usual.
+
+A batch transformation that yields no output, more than one output, fails to evaluate, or yields a
+value the format cannot write fails the whole candidate. Every member follows `ON MESSAGE ERROR`
+with operation `encode`, the same error reference and a message naming the emitter, the codec, the
+cause and the member count, such as
+`emitter 'kafka_notifications' codec 'notification_envelope' ON EMITTING BATCH produced no output
+for a batch of 3 messages`. The code is `evaluation`, or `validation` for a value the format cannot
+write. The message never quotes a payload value, so it does not repeat the program's own error text,
+and Nervix does not subdivide such a batch to look for a member to blame; use a smaller
+`MAX MESSAGES`, or no batching, where per-record attribution matters.
+
+One payload is one publish. Its confirmation delivers every member, and a destination's rejection
+of it rejects every member with one shared error reference. `ACK PARALLEL MAX <n>` therefore counts
+payloads, not records. `nervix_messages_total` keeps counting source records.
+
+A payload whose outcome the emitter did not learn — the destination failed, stopped answering, or
+its confirmation timed out — is retained exactly as it was written. The retry, or a force flush or
+drain before it, writes the same bytes with the same members again, so a duplicate a retry produces
+is the payload the destination may already hold, never a regrouped one. Payloads the destination
+confirmed or rejected in the failed attempt are not written again, and records that arrive while a
+payload is retained go into later payloads. The members of a retained payload keep their upstream
+acknowledgements alive until it resolves; a `DETACHED` emitter still acknowledges upstream at relay
+fan-out and still retries the payload. Where the destination answers for every record itself, as a
+MongoDB bulk write does per document, a retry carries only the records it left unresolved.
+
+Member values and containers are working values that exist only while the released carriers are
+encoded; the records themselves stay in Arrow batches. The packer holds at most `MAX MESSAGES`
+prepared members in one candidate, even when the members come from successive carriers. For a
+codec with jaq transformations, member preparation, batch transformations and every re-encoding
+run in the same job on Nervix's blocking worker pool that already runs `ON EMITTING`, so a slow
+program never stalls the emitter task. Candidate work is bounded by `MAX MESSAGES` and the
+encodings above; `MAX SIZE` bounds what is written.
 
 ## Altering emitters
 
@@ -165,6 +356,8 @@ ALTER EMITTER <emitter>
   | DROP COLLECT
   | SET ATTACHED
   | SET DETACHED
+  | SET BATCH MAX MESSAGES <n> MAX SIZE <bytes>
+  | DROP BATCH
   | SET FLUSH EACH <duration> MAX BATCH SIZE <bytes>
   | SET FLUSH IMMEDIATE
   | SET COMMIT EACH <duration> MAX SIZE <bytes>
@@ -172,11 +365,13 @@ ALTER EMITTER <emitter>
 ```
 
 `SET TO` accepts the same complete transport-specific sink body that follows `TO` in `CREATE
-EMITTER`, including its required `MODE`, SQS FIFO group, database maximum batch, and Iceberg commit
-policy. The existing construction and output flush policy remain in place. `SET MODE` changes only
+EMITTER`, including its required `MODE`, SQS FIFO group, and Iceberg commit policy. The existing
+construction, batching clause and output flush policy remain in place, so changing to a database
+sink requires the emitter to declare a batching clause, in the same statement if necessary. `SET MODE` changes only
 the current sink's publishing mode and rejects a body that the sink does not support. `SET CLIENT`
 changes only the client of the current sink kind. `SET COMMIT` is valid only for Iceberg. `DROP
-ENCODE` fails if the emitter has no codec configured.
+ENCODE` fails if the emitter has no codec configured. `SET BATCH` adds or replaces the batching
+clause. `DROP BATCH` fails when the emitter has no clause and when its sink requires one.
 
 `ADD FROM` rejects an already configured relay. `DROP FROM` cannot remove the final input.
 `ALTER FROM ... SET WHERE` adds or replaces that source's predicate; `ALTER FROM ... DROP WHERE`
@@ -184,8 +379,8 @@ fails when the source has no predicate.
 
 Changing only `FLUSH` is a `DYNAMIC` update. The live emitter keeps its pending Arrow batches,
 installs the new cadence, and receives a force-flush kick, so buffered output is neither discarded
-nor re-encoded. Source-predicate, sink, publishing-mode, client, codec, collection, and attachment
-changes use
+nor re-encoded. Source-predicate, sink, publishing-mode, client, codec, collection, batching, and
+attachment changes use
 `ENTITY_PAUSE`: Nervix gates all of the emitter's source relays, drains collected input and pending
 sink output, replaces that emitter task, and releases the gates. Changing source membership uses
 `DOMAIN_PAUSE` because it changes graph topology. Other relays continue flowing during an entity
@@ -259,9 +454,11 @@ Emitter expressions use the same typed surface as other runtime nodes:
 - comparisons and boolean logic: `=`, `!=`, `>`, `<`, `>=`, `<=`, `AND`, `OR`, `NOT`
 - explicit conversions: `expr AS TYPE`, and `TRY_CAST(expr AS TYPE)`, which yields a typed null
   instead of failing the message
+- JSON extraction: `JSON_VALUE(doc, '$.path' AS TYPE)`, `TRY_JSON_VALUE(doc, '$.path' AS TYPE)`,
+  and `JSON_EXISTS(doc, '$.path')`
 - built-ins: string, null-handling, numeric, regex, and contextual functions such as `lower`, `coalesce`, `abs`, `regexp_substr`, `now`, and `uuid_v4`
 
-See [Filter-Map Functions](filter-map-functions.md) for the full function reference.
+See [Expression Functions](filter-map-functions.md) for the full function reference.
 
 That expression surface applies to the full Nervix internal schema type set:
 
@@ -470,6 +667,14 @@ normal external-sensitivity leakage rules. Nervix relies on content-based dedupl
 operator must enable while provisioning the FIFO queue. Sends to a FIFO queue without it fail as
 publish errors; Nervix never creates or reconfigures the queue.
 
+`FIFO GROUP` is the emitter's ordering group. Nervix evaluates it against each record's input
+row after any `FROM ... WHERE` filter, and every record the emitter sends carries the group its own
+input row produced, whatever the emitter's `WHERE` and construction keep or build. A record whose
+group expression fails for its row, or that reaches `FROM BRANCH` without a branch key, is not sent.
+It follows `ON MESSAGE ERROR` as an `external` error of the `publish` operation whose message begins
+`ordering group`, and the emitter's other records are still sent under their own groups. A record
+the emitter's `WHERE` drops is never sent, so a failure of its group is never reported.
+
 ### Sentry
 
 Sentry emission uses a `TYPE SENTRY` client whose required `dsn` contains the project endpoint and
@@ -509,6 +714,8 @@ Use a JSON wire codec or a JAQ-native codec with JSON output. Sentry emitters re
 USING`, do not accept `write_header`, and still require explicit leakage for sensitive event
 fields. The optional Sentry client keys `timeout_ms`, `tls_ca_file`, `tls_cert_file`, and
 `tls_key_file` have their usual meanings.
+Sentry resolves the DSN endpoint through the node's configured DNS resolver; its HTTP request
+timeout includes that lookup, connection setup, TLS, and the response.
 
 ### OTEL
 
@@ -534,6 +741,9 @@ absent compression key sends an uncompressed request. `timeout_ms` is an optiona
 bound. For `http/protobuf`, Nervix appends `/v1/logs`, `/v1/traces`, or `/v1/metrics` to the endpoint
 path. Mount TLS files and use `tls_ca_file`, `tls_cert_file`, and `tls_key_file` in the same client;
 the certificate and key must be supplied together.
+OTLP/HTTP-protobuf resolves through the node's configured DNS resolver. OTLP/gRPC continues to
+use its gRPC transport resolver. The configured request timeout covers HTTP DNS and connection
+setup as well as the response.
 
 One log record is mapped as follows:
 
@@ -640,8 +850,8 @@ CREATE EMITTER to_ch
     "clickhouse_now" = NOW(),
     "clickhouse_action" = LOWER(input.action)
   }
-  WITH MAX BATCH 500
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
@@ -665,8 +875,8 @@ bounds both sending an insert body and waiting for ClickHouse to finish the inse
 result.
 For HTTPS endpoints, mount a TLS resource and set `'tls_ca_file'` to the mounted CA path.
 
-ClickHouse requires `WITH MAX BATCH <n>`. A larger flush is split into sequential inserts of at
-most `n` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and
+ClickHouse requires the [batching clause](#batching). A larger flush is split into sequential
+inserts of at most `MAX MESSAGES` records, and each successful insert is an acknowledgment. For ClickHouse, Postgres, and
 MySQL, a failed multi-row insert is classified first as record-specific or infrastructure-wide.
 Infrastructure failures retry with backpressure. A record-specific failure is isolated by
 re-executing the chunk one record at a time so healthy rows land and only poison rows follow `ON
@@ -684,20 +894,20 @@ CREATE EMITTER to_pg
     "postgres_now" = NOW() AS STRING,
     "postgres_action" = LOWER(input.action)
   }
-  WITH MAX BATCH 500
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
 Postgres emitters use `VALUES` expressions and insert batches with `INSERT ... SELECT ... FROM
-unnest(...)`. `WITH MAX BATCH <n>` is required and is enforced as the maximum records in each
-sequential insert. The insert result acknowledges those records. On the poison-isolation path,
+unnest(...)`. The [batching clause](#batching) is required, and its `MAX MESSAGES` is enforced as
+the maximum records in each sequential insert. The insert result acknowledges those records. On the poison-isolation path,
 tables without an idempotent `ON CONFLICT` policy may observe duplicates when healthy records are
 re-executed.
 
-Postgres emitters may include an insert conflict policy before `WITH MAX BATCH`:
+Postgres emitters may include an insert conflict policy after `VALUES`:
 
 ```nspl,ignore
 ON CONFLICT ("postgres_user_id") DO UPDATE
@@ -736,19 +946,19 @@ CREATE EMITTER to_mysql
     "mysql_now" = NOW() AS STRING,
     "mysql_action" = LOWER(input.action)
   }
-  WITH MAX BATCH 500
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
 MySQL emitters use `VALUES` expressions and insert batches with a multi-row `INSERT ... VALUES (?,
-...), ...` command. `WITH MAX BATCH <n>` is required and is enforced as the maximum records in each
-sequential insert. The insert result acknowledges those records. Conflict clauses are the user's
+...), ...` command. The [batching clause](#batching) is required, and its `MAX MESSAGES` is
+enforced as the maximum records in each sequential insert. The insert result acknowledges those records. Conflict clauses are the user's
 tool for bounding duplicates when poison isolation re-executes a failed chunk.
 
-MySQL emitters may include an insert conflict policy before `WITH MAX BATCH`:
+MySQL emitters may include an insert conflict policy after `VALUES`:
 
 ```nspl,ignore
 ON CONFLICT DO UPDATE
@@ -782,15 +992,15 @@ CREATE EMITTER to_mongodb
     "mongodb_now" = NOW() AS STRING,
     "mongodb_action" = LOWER(input.action)
   }
-  WITH MAX BATCH 500
   MODE ACK RETRY POLICY BACKOFF 250ms MAX 30s
+  BATCH MAX MESSAGES 500 MAX SIZE 8MiB
   FLUSH EACH 10s MAX BATCH SIZE 1MiB
   ON MESSAGE ERROR LOG
   ON GENERAL ERROR LOG;
 ```
 
-MongoDB emitters use `VALUES` expressions and bulk writes. `WITH MAX BATCH <n>` is required and is
-enforced as the maximum documents in each write. MongoDB reports per-document outcomes, so healthy
+MongoDB emitters use `VALUES` expressions and bulk writes. The [batching clause](#batching) is
+required, and its `MAX MESSAGES` is enforced as the maximum documents in each write. MongoDB reports per-document outcomes, so healthy
 documents acknowledge and poison documents follow `ON MESSAGE ERROR` without a separate isolation
 pass. Transient or infrastructure failures retry only the undelivered documents.
 
@@ -801,7 +1011,7 @@ inserted, and its value is never used as an `ON CONFLICT` target. The rejection 
 record does not retry. Every other record in the same write is unaffected, and a mapped value that
 is genuinely NULL is still written as BSON null.
 
-MongoDB emitters may include an insert conflict policy before `WITH MAX BATCH`:
+MongoDB emitters may include an insert conflict policy after `VALUES`:
 
 ```nspl,ignore
 ON CONFLICT ("mongodb_user_id") DO UPDATE
@@ -864,6 +1074,11 @@ CREATE EMITTER iceberg_notifications
 ```
 
 Iceberg emitters use explicit `VALUES` expressions and do not declare `ENCODE USING`. The `ON S3`, `ON GCS`, or `ON AZURE_BLOB` backend clause selects the object-store implementation. The referenced blob client supplies the object-store connection for table files. The `CATALOG <client>` clause references a separate `TYPE ICEBERG_REST` client that supplies the REST catalog URI and warehouse. The referenced REST catalog namespace and table must already exist; Nervix loads that table and appends data, but does not create catalog namespaces or tables implicitly. The emitter owns the Iceberg table name, mapped output columns, table location, catalog client reference, and flush policy.
+
+The catalog and object-store HTTP clients resolve endpoint names through the node's configured
+DNS resolver. The catalog keeps its configured URL and authentication, while OpenDAL uses the
+resolver for object operations and credential HTTP calls. DNS failures enter the existing sink
+initialization or commit retry path; they do not advance the commit or ACK boundary.
 
 GCS uses the same emitter shape with a `TYPE GCS` client and `gs://` locations:
 
@@ -987,7 +1202,9 @@ delivered. Attachment determines whether that outcome participates in the upstre
 Confirming broker modes and request/response `ACK` modes are at least once. A confirmation timeout
 or lost response is not proof that the service rejected a record, so retry can duplicate it. The
 parallel window limits how many records are exposed to that ambiguity at one time, and Nervix
-resends only records not yet confirmed or definitively rejected. `NO_ACK`, MQTT QoS 0, Core NATS,
+resends only records not yet confirmed or definitively rejected. With the
+[batching clause](#batching) the unit is the batch payload: a retry resends exactly the payloads not
+yet confirmed or rejected, with the bytes and members they were first written with. `NO_ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
 after a crash or downstream failure. External broker durability and idempotence settings remain
 the user's client and service configuration.

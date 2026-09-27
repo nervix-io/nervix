@@ -4,11 +4,12 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use error_stack::Report;
 use meticulous::OptionExt as _;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::definition::{BenchmarkDefinition, is_slug};
+use crate::definition::{BenchmarkDefinition, DefinitionError, is_slug};
 
 const BENCHMARKS_DIRECTORY: &str = "benches/benchmarks";
 const BENCHMARK_MANIFEST: &str = "benchmark.toml";
@@ -71,8 +72,14 @@ pub enum BenchmarkError {
         source: toml::de::Error,
     },
 
-    #[error("benchmark '{slug}' is invalid: {reason}")]
-    InvalidDefinition { slug: String, reason: String },
+    #[error("benchmark '{slug}' directory escapes the benchmark catalog")]
+    EscapingDirectory { slug: String },
+
+    #[error("benchmark '{slug}' is invalid: {error:#}")]
+    InvalidDefinition {
+        slug: String,
+        error: Report<DefinitionError>,
+    },
 
     #[error(
         "benchmark '{slug}' implementation '{implementation}' has invalid template path '{}': {reason}",
@@ -176,9 +183,8 @@ impl BenchmarkCatalog {
         let directory_path = canonical_root.join(slug);
         let directory = canonicalize(&directory_path, "open benchmark directory")?;
         if !directory.starts_with(canonical_root) {
-            return Err(BenchmarkError::InvalidDefinition {
+            return Err(BenchmarkError::EscapingDirectory {
                 slug: slug.to_string(),
-                reason: "benchmark directory escapes the benchmark catalog".to_string(),
             });
         }
 
@@ -198,9 +204,9 @@ impl BenchmarkCatalog {
         })?;
         definition
             .validate(slug)
-            .map_err(|reason| BenchmarkError::InvalidDefinition {
+            .map_err(|error| BenchmarkError::InvalidDefinition {
                 slug: slug.to_string(),
-                reason,
+                error,
             })?;
 
         let engine = upon::Engine::new();

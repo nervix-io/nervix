@@ -475,7 +475,7 @@ pub(super) fn collect_expression_field_paths(
             collect_expression_field_paths(low, fields);
             collect_expression_field_paths(high, fields);
         }
-        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::Json { document: expr, .. } => {
             collect_expression_field_paths(expr, fields);
         }
         Expr::Binary { left, right, .. } => {
@@ -1340,7 +1340,7 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
     if emitter.construction.is_empty() {
         return Ok(None);
     }
-    let codec_route = emitter.encode_using_codec.is_some();
+    let codec_route = emitter.body.codec().is_some();
     if !codec_route
         && (emitter.construction.inherit.is_some()
             || !emitter.construction.assignments.is_empty()
@@ -1437,69 +1437,6 @@ pub(in crate::runtime) fn compile_emitter_filter_map_program(
         context,
     )?;
     Ok(Some(CompiledEmitterFilterMapProgram { body, codec_route }))
-}
-
-pub(in crate::runtime) fn compile_sqs_fifo_group_program(
-    domain: &DomainName,
-    emitter: &CreateEmitter,
-    input_schema: StdArc<arrow_schema::Schema>,
-    input_sensitivity: VmSchemaSensitivity,
-    context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let EmitSink::Sqs {
-        fifo_group: Some(SqsFifoGroup::Expression(expression)),
-        ..
-    } = emitter.sink.as_ref()
-    else {
-        return Ok(None);
-    };
-    let field = FieldName::parse("fifo_group")
-        .assured("this is a constant literal that satisfies the identifier grammar");
-    let output_schema = StdArc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-        field.as_str(),
-        ArrowDataType::Utf8,
-        false,
-    )]));
-    let parsed = lower_transforming_route(
-        &RouteConstruction {
-            assignments: vec![Assignment {
-                target: nervix_models::AssignmentTarget::bare(field),
-                value: expression.clone(),
-            }],
-            ..RouteConstruction::default()
-        },
-        input_schema.as_ref(),
-        output_schema.as_ref(),
-    )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "SQS FIFO GROUP expression for emitter '{}' is invalid: {reason}",
-            emitter.name.as_str()
-        ),
-    })?;
-    let error_sites = compiled_message_error_sites(&parsed, &[MessageErrorOperation::Set], None)
-        .map_err(|reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!("{reason:#}"),
-        })?;
-    compile_emitter_filter_map_part(
-        RuntimeCompileTarget {
-            domain,
-            identifier: &ModelName::from(&emitter.name),
-        },
-        parsed,
-        RuntimeVmSchemaPair {
-            input: input_schema,
-            input_sensitivity,
-            output: output_schema,
-            output_sensitivity: VmSchemaSensitivity::default(),
-        },
-        true,
-        error_sites,
-        context,
-    )
-    .map(Some)
 }
 
 pub(super) fn compile_emitter_filter_map_part(
@@ -2024,97 +1961,6 @@ pub(super) fn compile_generator_set_program(
         lookup_hash_maps: Vec::new(),
         error_sites,
     })
-}
-
-/// Compiles an output route's FILTER-MAP program once and caches it on the route.
-///
-/// Kept separate from evaluation so every selected route is compiled before the batch scope is
-/// built: the scope's materialized snapshot has to cover all of their programs.
-pub(super) fn compile_processor_output_program(
-    context: &mut ProcessorOutputDispatchContext<'_>,
-    output: &mut RelayProcessorOutputNode,
-    batch: &RelayRecordBatch,
-    output_schema: &Arc<CompiledSchema>,
-) -> Result<(), PlannedGeneralError> {
-    if output.compiled_program.is_some() {
-        return Ok(());
-    }
-    let routing = context
-        .branch
-        .domain_routing()
-        .map_err(|reason| PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: reason.to_string(),
-        })?;
-    let input_relays = context.filter_source.relays(context.input_relays);
-    let materialized_stream_specs = routing.materialized_stream_specs.clone();
-    let Some(input_relay) = input_relays.first() else {
-        return Err(PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: format!(
-                "{} '{}' has no input relay for branch-aware output compilation",
-                context.node_kind.as_str(),
-                context.processor.as_str(),
-            ),
-        });
-    };
-    let Some(current_branching) = routing.relay_branchings.get(input_relay).cloned() else {
-        return Err(PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: format!(
-                "{} '{}' input relay '{}' has no resolved branch declaration",
-                context.node_kind.as_str(),
-                context.processor.as_str(),
-                input_relay.as_str(),
-            ),
-        });
-    };
-    let input_sensitivity = processor_output_input_sensitivity(context.branch, &input_relays);
-    let compile_context = RuntimeVmCompileContext {
-        available_materialized_streams: &materialized_stream_specs,
-        available_lookups: &routing.lookups,
-        current_branching: &current_branching,
-        udfs: Some(&routing.udfs),
-    };
-    let compiled = match context.filter_source {
-        ProcessorOutputFilterSource::OutputRelay => compile_finalized_output_filter_program(
-            &context.branch.domain,
-            context.processor,
-            output.construction.where_clause.as_ref(),
-            output_schema.arrow_schema(),
-            output_schema.vm_sensitivity(),
-            compile_context,
-        ),
-        ProcessorOutputFilterSource::InputRelays | ProcessorOutputFilterSource::Inferencer(_) => {
-            compile_processor_output_filter_map_program(
-                RuntimeCompileTarget {
-                    domain: &context.branch.domain,
-                    identifier: context.processor,
-                },
-                &input_relays,
-                &output.relay,
-                &output.construction,
-                RuntimeVmSchemaPair {
-                    input: batch.arrow_schema(),
-                    input_sensitivity,
-                    output: output_schema.arrow_schema(),
-                    output_sensitivity: output_schema.vm_sensitivity(),
-                },
-                context.filter_source.inferencer_tensors(),
-                compile_context,
-            )
-        }
-    };
-    match compiled {
-        Ok(program) => {
-            output.compiled_program = program;
-            Ok(())
-        }
-        Err(error) => Err(PlannedGeneralError {
-            acks: batch.acks.clone(),
-            reason: error.to_string(),
-        }),
-    }
 }
 
 pub(super) fn relay_schema_for_runtime(

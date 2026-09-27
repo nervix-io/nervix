@@ -20,6 +20,8 @@ pub enum RequestKind {
     Command,
     #[strum(serialize = "suggest")]
     Suggest,
+    #[strum(serialize = "choice lookup")]
+    Choice,
     #[strum(serialize = "list domains")]
     ListDomains,
     #[strum(serialize = "select domain")]
@@ -51,6 +53,7 @@ impl From<&ClientRequest> for RequestKind {
         match request {
             ClientRequest::Command(_) => Self::Command,
             ClientRequest::Suggest(_) => Self::Suggest,
+            ClientRequest::Choice(_) => Self::Choice,
             ClientRequest::ListDomains => Self::ListDomains,
             ClientRequest::SelectDomain(_) => Self::SelectDomain,
             ClientRequest::AttachTransaction(_) => Self::AttachTransaction,
@@ -88,6 +91,10 @@ pub enum ClientError {
     BuildAuthenticationMetadata(#[source] InvalidMetadataValue),
     #[error("session exchange closed")]
     SessionClosed,
+    #[error("a subscription operation task stopped before completing")]
+    SubscriptionTask(#[source] tokio::task::JoinError),
+    #[error("subscription operation failed")]
+    SubscriptionOperation(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("session exchange failed: {0}")]
     Transport(#[source] Box<tonic::Status>),
     #[error("the {request} request exceeded its deadline")]
@@ -111,6 +118,8 @@ pub enum ClientError {
     NoActiveDomain,
     #[error("cursor {cursor} is not a character boundary of a {length}-byte input")]
     InvalidCursor { cursor: usize, length: usize },
+    #[error("completion page size {size} must be between 1 and 100")]
+    InvalidCompletionPageSize { size: u16 },
     #[error("'{name}' is not a valid resource name")]
     InvalidResourceName {
         name: String,
@@ -236,6 +245,7 @@ impl ClientError {
             ReplyBody::Command(_)
             | ReplyBody::Attach(_)
             | ReplyBody::Suggest(_)
+            | ReplyBody::Choice(_)
             | ReplyBody::DomainList(_)
             | ReplyBody::DomainSelection(_)
             | ReplyBody::Inspection(_)

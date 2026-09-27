@@ -35,15 +35,25 @@ The suite is the `scenarios` test target, `tests/scenarios.rs`, running the feat
 | Scenario steps and hooks | One runner task: Cucumber polls every running scenario, and the suite watchdog around them, from the task the binary's main thread blocks on | `tests/scenarios.rs` |
 | In-process nodes | One Tokio task per node on the binary's multi-threaded runtime, which has one worker thread per CPU | The cluster fixture, `tests/common/cluster.rs` |
 | Server processes | Child processes executing the `nervix-server` binary | The server-process fixture, `tests/common/server_process.rs` |
+| CLI sessions | Child processes executing `nervix-cli`; a scenario reader retains at most 256 output lines | The scenario world, `tests/scenarios.rs` |
 | Test dependencies | Containers started on first use and shared by every scenario of the run | `nervix-test-environment`, through `tests/common/dependencies.rs` |
+| HTTP receivers | Tasks on the binary's runtime, one listener and one task per connection, owned by the scenario that started them | The HTTP receiver fixture, `tests/common/http_receiver.rs` |
+| Client probes | A child process per probe of another language, or one blocking task for the in-process probe of the shared Rust binding, owned by the scenario that started it | The client probe fixture, `tests/common/client_conformance.rs` |
+
+`tests-deps` builds the CLI and NSPL formatter in the normal target directory. The full and focused
+client coverage recipes build a standalone instrumented CLI beside their instrumented server binary
+and place the normal NSPL formatter there. The scenario runner selects the covered CLI through
+`NERVIX_TEST_CLI_PATH`, so its one-shot completion and command paths contribute to the same LCOV
+report as the CLI's binary unit tests and the server's public scenarios.
 
 The number of scenarios that run at once is the number of CPUs times the concurrency factor, set by
 `NERVIX_TEST_CONCURRENCY_FACTOR` or `--concurrency-factor` and `1` by default. Cucumber's
 `--concurrency` sets an absolute number instead. The CI `tests` job sets the factor to `2`, which is
 32 concurrent scenarios on its 16-CPU runner. Three limits apply beneath that number: a scenario
 tagged `@exclusive` runs alone, at most one scenario of the coordinated WASM state-reset feature
-runs at a time, and at most two web console scenarios run at a time. Cucumber retries a failed
-scenario twice; `--retry 0` turns retries off for a focused run.
+runs at a time, and at most two scenarios from the web console REPL, execution graph, or transaction
+inspector features run at a time. Cucumber retries a failed scenario twice; `--retry 0` turns
+retries off for a focused run.
 
 ## Product Deadlines And Harness Deadlines
 
@@ -99,7 +109,10 @@ second module runs the operation, it is named after the owner.
 | The node startups of one cluster construction | `node_startup.rs`, run by `cluster.rs` | 84 seconds per node, shared by the whole construction | The node that ran out ends the construction |
 | A node a scenario stops itself | `cluster.rs` | The longest of five minutes, the configured shutdown timeout, and the configured drain phases | The task is aborted and joined, and the step fails |
 | Scenario cleanup of a whole cluster | `cluster_teardown.rs` | 60 seconds for every node together | Still-running tasks are aborted and joined and recorded as forced |
+| Stopping a scenario's HTTP receivers | `http_receiver.rs`, run by `tests/scenarios.rs` | 6 seconds for every receiver together: 5 for its connections, 1 for its accept loop | Still-running connections, then the accept loop, are aborted and joined and recorded as forced |
+| An HTTP receiver wait: captured requests or a recorded fault | `http_receiver.rs`, run by `tests/scenarios.rs` | 60 seconds from the start of the wait | The step fails with the captured count, the fault count, and the latest fault |
 | A server process's readiness, exit, or log line | `server_process.rs` | 120, 120, and 60 seconds | The step fails, quoting the last 80 lines of the process log |
+| A one-shot CLI command or a subscription output assertion | `tests/scenarios.rs` | 60 seconds for a command, 30 seconds for an expected subscription line | The step fails with the process result or retained output lines |
 | One draw from the port pool | `port_pool.rs` | 65,536 consecutive draws that land on reserved ports | The draw fails with the pool exhausted |
 | The whole scenario run | `suite_watchdog.rs` | 37 minutes, injectable | Every active scenario is reported, live nodes get a 60-second cleanup window, and the process exits `124` |
 | Stopping the test dependencies after the run | `suite_watchdog.rs` | 2 minutes | The containers are left to the runner |
@@ -199,6 +212,8 @@ not be encoded; a connection, session, or response-stream error carrying the tra
 session that ended before the result; a frame from the node that does not decode, or a reply to the
 command that is not a command result; or, when the caller needs the status text, an unsuccessful
 command result with its disposition, message, and diagnostics.
+Client diagnostic scenarios inspect the failed disposition and source span from that result, so
+the assertion uses the delivered diagnostic rather than parsing the displayed message.
 
 A **status wait** polls one node every 200 milliseconds until its parsed status satisfies a
 condition, within 40 seconds from the start of the wait. The waits the harness performs are a
@@ -367,6 +382,10 @@ queued -> started -> body complete -> teardown started -> teardown diagnostics -
 `finished` is published only once cleanup has completed. A scenario holding any other phase has not
 finished, and a scenario whose log ends at a phase marker is still inside that phase.
 
+Browser assertions that wait for an acknowledged subscription tab to disappear poll for up to 10
+seconds. This bounds the server reply and browser update together; on expiry, the step reports the
+tab text that remains visible.
+
 The **active-scenario registry** holds every scenario that has started and not yet ended. A scenario
 registers in its before hook, before it acquires its permits, so a scenario that never gets them is
 visible while it waits. Its entry holds:
@@ -407,8 +426,10 @@ teardown started      release paused health responses, domain-clock progress pau
      |                commit delays
 teardown diagnostics  every node's status at once within 10 s; the scenario's context
      |
-stopping              drop HTTP load, held uploads, server processes, and observers;
-     |                close the browser and the session; stop the cluster within 60 s;
+stopping              abort CLI output readers and kill their child processes;
+     |                drop HTTP load, held uploads, server processes, and observers;
+     |                stop HTTP receivers within 6 s; close the browser and the session;
+     |                stop the cluster within 60 s;
      |                release proxies, silent peers, permits, and fixture ports
 finished
 ```
@@ -464,9 +485,11 @@ passed when retried.
 Harness state goes back only after the tasks that used it have ended, so the next scenario never
 finds a port, a fault, or a proxy taken.
 
-- Background HTTP load, held uploads, and server processes are dropped first. Dropping a server
-  process kills it and returns its ports.
-- Broker and syslog observers, the browser, and the session are closed before the cluster stops.
+- CLI output readers are aborted and their `kill_on_drop` child processes are dropped before node
+  teardown. Background HTTP load, held uploads, and server processes are also dropped first.
+  Dropping a server process kills it and returns its ports.
+- Broker and syslog observers, HTTP receivers, the browser, and the session are closed before the
+  cluster stops.
 - The TCP proxies and silent interconnect peers a scenario placed in front of its nodes are released
   once those nodes have ended.
 - The scenario's concurrency permits are released, and the ZeroMQ and syslog ports it drew for its
@@ -481,6 +504,8 @@ longest of five minutes, the node's configured shutdown timeout, and its configu
 the application drain when graceful drain is enabled plus the runtime's branch stop timeout for the
 configured domain drain. A scenario that configures a longer product deadline raises the watchdog
 with it, so the harness never cuts a product deadline short.
+Node-specific stop steps resolve a saved scenario placeholder before selecting the node, including
+the graceful stop used to exercise ownership handoff during drain.
 
 A stop that ends cleanly is followed by a check that the node released its node and consensus
 database locks. The step fails when the node's task panicked, when the watchdog passed and the task
@@ -501,6 +526,8 @@ running the same suite, which is why a node startup retries a lost bind on fresh
 | --- | --- | --- |
 | In-process node | 7: gRPC, gRPC over HTTPS, HTTP, HTTPS, observability, web console, and interconnect | After its task has ended: at cluster cleanup, when a scenario stops every node, and when a failed startup attempt moves to fresh ports |
 | Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit | At the end of cleanup |
+| HTTP receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
+| DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
 | Server process | 6 | When the process is dropped |
 | A node moved to a new interconnect address | 1 new interconnect port | The port it gave up stays reserved for the rest of the run |
 
@@ -543,10 +570,116 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
+Harness Redis connections use an explicit ten-second budget for connection setup and each command
+response to tolerate scheduling delay under parallel load. The driver's one-second connection and 500ms
+response defaults are too short under concurrent scenario load: the three-node JAQ transformation
+scenario reached a running ingestor but its publishing client timed out. The budget belongs to the
+test client used for individual publishes, bursts, and subscriber-count observations. A request
+failure still fails the step; a publish with an ambiguous result is never retried. The existing
+bounded subscriber wait only republishes when Redis confirms that the publish reached zero
+subscribers. Focused harness regressions delay setup and publish replies by two seconds and verify
+that a silent broker still reaches the connection deadline.
+
 After the run, the suite stops its dependencies within 2 minutes. A stop that does not finish is
 abandoned and its containers are left to the runner, because waiting without a bound is how a run
 that already has its result loses it to the job's own timeout. Dropping the runtime then waits at
 most 60 seconds for blocking tasks a scenario left parked in a driver.
+
+## HTTP Receivers
+
+A scenario about a node sending HTTP requests to an external endpoint starts an in-process HTTP/1.1
+receiver in its place, because only a receiver the harness controls can capture exactly what arrived
+and choose exactly how to answer: a status sequence, a delayed, held, or lost response, a stalled
+body, or malformed framing. A receiver can serve TLS with a certificate for chosen names and can
+require the client certificate it issued, whose files a node mounts as a resource.
+
+Everything a receiver holds is bounded, and exceeding a bound is recorded as a fault, not captured.
+
+| Bound | Limit |
+| --- | --- |
+| One request head | 256 KiB and 512 header fields, room for a request at every HTTP emitter limit at once |
+| One request body | 16 MiB |
+| Captured requests | 4,096 per receiver |
+| Kept faults | 256 per receiver; later faults are counted but not kept |
+
+Every await a receiver connection makes also waits for the receiver's stop, so a held response or
+a stalled body ends as soon as cleanup begins. The receivers of a scenario stop together in the
+`stopping` phase, before the cluster, under one 6-second budget: 5 seconds for every connection to
+end on its own, after which the rest are aborted and joined, and 1 second to join the accept loop,
+after which it is aborted and joined too. The derivation asserts that this budget is shorter than
+the cluster's cleanup budget. Each stop is recorded in the scenario log:
+
+```text
+HTTP receiver cleanup: <name>: stopped <n> connection(s) in <elapsed> of a 6s budget, <n> forced, <n> panicked; captured <n> request(s), recorded <n> fault(s)
+scenario cleanup forced: HTTP receiver <name>: <the same record>
+```
+
+The second line appears only when a connection or the accept loop had to be aborted, or panicked.
+A receiver's port is drawn with the scenario's fixture ports and goes back with them at the end of
+cleanup, once the nodes that dialed it have ended.
+
+## DNS Authorities
+
+A scenario about how nodes find one another by name selects its cluster's peer addressing before the
+cluster starts, with `Given cluster peers are addressed by "<addressing>"`. Every other cluster uses
+literal IPv4 loopback endpoints, starts no DNS fixture, and lets its nodes load the host's own
+resolver configuration, as a production node does.
+
+| Addressing | Each node listens on | Each node advertises | Its name answers with |
+| --- | --- | --- | --- |
+| `literal IPv4 endpoints` | `127.0.0.1` | `127.0.0.1` | No fixture |
+| `literal IPv6 endpoints` | `::1` | `::1` | No fixture |
+| `DNS names` | `127.0.2.<n>` | `node-<n>.nervix.test` | Its listen address |
+| `DNS names behind an unreachable address` | `127.0.2.<n>` | `node-<n>.nervix.test` | `127.0.4.<n>`, where nothing listens, then its listen address |
+| `single-label DNS names` | `127.0.2.<n>` | `node-<n>`, completed by the search domain | Its listen address |
+| `hosts file names` | `127.0.2.<n>` | `node-<n>.nervix.test` | Nothing: the hosts file lists the name and the fixture never answers it |
+
+A cluster addressed by names starts one in-process DNS authority on a loopback UDP port drawn from
+the port pool. The harness writes a resolver configuration with the search domain `nervix.test`,
+`ndots:1`, and one-second queries with one retry, and a hosts file, into the cluster's directory,
+and starts every node with that configuration and the authority as its only name server. Every
+answer carries a one-second TTL, positive or negative, so a zone change reaches a node within
+seconds of the cached answer expiring. A scenario can move a stopped node to `127.0.3.<n>` behind
+the same name, and answer a node's name as a name that does not exist, a name with no address, or
+not at all. A name outside the zone does not exist, with a negative TTL of zero. Every test
+certificate names `localhost`, `127.0.0.1`, `::1`, `node-<n>`, and `node-<n>.nervix.test`, so each
+addressing presents the name its peers expect.
+
+The authority answers from memory and holds nothing else: it counts questions for at most 1,024
+names, and a scenario can assert that its nodes asked nothing for their names. It answers until the
+cluster is dropped at the end of cleanup, after every node has stopped, so no node's lookup outlives
+it; dropping it aborts its answer loop, and its port goes back to the pool. How long a node waits
+for an answer is product behavior, bounded by its connection setup deadline and described in [Peer
+Name Resolution](./interconnect.md#peer-name-resolution); the scenario's own waits are status waits.
+
+The resolver crate's focused checks use the same authority, started on an unused port of their own,
+to observe DNS messages directly: TTL expiry, negative caching, refusals, silence, the lookup
+budget, the concurrency bound, and runtime teardown. `just test-dns` runs them.
+
+## Client Probes
+
+The cross-language conformance scenarios in `client_conformance.feature` run a small client of each
+runtime against a scenario's cluster, or against the checked-in conformance corpus. The in-process
+probe drives the shared Rust binding's C ABI from a blocking task of the binary's runtime, because
+every call of the binding blocks its caller; every other probe is a child process that the fixture
+starts with its target in `NERVIX_PROBE_*` variables and its standard input closed. A probe prints
+one report line per observation on standard output, and the fixture keeps every line it read.
+
+A probe's waits are bounded twice. The step that starts it waits at most 180 seconds for the line
+that says its subscription is open, and the step that reads its report waits the duration the step
+names for the probe to end, 180 seconds against a cluster and 60 against the corpus. Each probe also
+ends itself: it gives up on its rows after 120 seconds, or on its whole run after 170. A failure
+quotes every report line read so far, the exit status, and the probe's standard error. Dropping the
+fixture kills a child process, so a failed scenario never leaves a probe running; the in-process
+probe ends when its session fails against the stopped cluster, or at its own deadline.
+
+Every example of a runtime other than the in-process probe is tagged `@client_conformance_toolchain`
+and one `@client_probe_<runtime>` tag, and the suite excludes the first tag unless a run selects its
+own tags, because those examples need toolchains the suite's job does not install. `just
+test-client-conformance` builds every probe artifact and runs them; its first argument is the tag
+expression that selects runtimes. The `client-conformance` CI job runs it on its own runner with a
+60-minute limit and a 15-minute suite budget, which leaves the builds before the scenarios up to 40
+minutes of the limit and keeps the same 5-minute reserve.
 
 ## The Suite Watchdog
 
@@ -730,7 +863,7 @@ Its limits:
 
 ## Qualification Evidence
 
-`just test-harness-liveness` runs the 48 focused regressions that hold this contract in about four
+`just test-harness-liveness` runs the 56 focused regressions that hold this contract in about four
 seconds. They drive stand-in session services on real loopback sockets and stand-in node tasks, most
 of them on a paused clock, and CI runs them before the scenario suite.
 
@@ -743,6 +876,7 @@ of them on a paused clock, and CI runs them before the scenario suite.
 | Diagnostics are concurrent and never keep cleanup from starting | `status_snapshots_keep_a_healthy_node_while_another_node_stalls`, `failed_and_stalled_diagnostics_end_by_their_deadline_so_cleanup_starts`, `a_stalled_diagnostic_still_reaches_every_node_stop_in_a_cluster_of_one_and_of_three` |
 | One cleanup budget per cluster, and truthful phases | `stuck_nodes_spend_one_cleanup_budget_in_a_cluster_of_one_and_of_three`, `a_single_node_cleanup_keeps_how_its_task_ended`, `a_panicking_node_is_the_only_cleanup_failure_a_three_node_cluster_reports`, `the_finished_phase_is_published_only_once_cleanup_has_completed`, `an_active_scenario_publishes_its_phase_and_the_age_of_that_phase` |
 | The port pool is bounded and gives ports back | `a_draw_that_keeps_landing_on_reserved_ports_ends_at_the_draw_limit`, `an_exhausted_draw_gives_back_the_ports_it_had_reserved`, `a_draw_the_operating_system_refuses_is_reported_as_its_own_failure`, `ports_drawn_from_the_operating_system_are_distinct_and_reserved`, `a_released_port_can_be_drawn_again` |
+| An HTTP receiver answers as scripted, records what it cannot capture, and stops within its budget | `the_receiver_captures_requests_and_answers_its_script_in_order`, `a_lost_response_is_captured_and_the_connection_closes_without_an_answer`, `chunked_bodies_interim_responses_and_raw_bytes_are_served_as_scripted`, `held_responses_and_stalled_bodies_end_within_the_stop_budget`, `requests_beyond_the_receiver_bounds_are_faults_not_captures`, `a_tls_receiver_accepts_the_client_certificate_it_issued_and_refuses_others`, `a_tls_receiver_is_refused_by_a_client_that_dials_a_name_its_certificate_lacks`, `every_documented_script_form_parses_and_unknown_forms_are_refused` |
 | The suite watchdog names what was running and ends the run | `a_run_that_finishes_inside_its_budget_keeps_what_it_produced`, `a_stalled_scenario_body_is_named_with_its_attempt_phase_and_nodes`, `a_stalled_teardown_diagnostic_is_named_by_the_phase_it_is_in`, `a_node_that_never_stops_is_named_at_the_end_of_the_cleanup_window`, `a_cluster_that_outlives_its_scenario_is_named_as_unclaimed`, `a_retried_scenario_publishes_which_attempt_is_running`, `the_suite_budget_is_injectable_and_defaults_to_the_suite_policy`, `a_timed_out_suite_is_reported_apart_from_a_passing_and_a_failing_one`, `a_failing_suite_ends_the_process_by_unwinding`, `a_dependency_stop_that_never_returns_is_abandoned_at_its_budget`, `a_dependency_stop_that_finishes_keeps_what_it_reported` |
 
 The high-parallelism qualification was recorded on 23 September 2026 for the change that landed as

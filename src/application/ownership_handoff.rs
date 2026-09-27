@@ -2149,7 +2149,7 @@ impl SessionServiceImpl {
             .await;
         self.release_cluster_entity_gates_and_wait_recording(handoff.gate, impact)
             .await
-            .map_err(OwnershipHandoffError::transport)?;
+            .map_err(|error| OwnershipHandoffError::transport(format!("{error:#}")))?;
         Ok(())
     }
 

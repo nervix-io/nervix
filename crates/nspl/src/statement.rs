@@ -153,7 +153,7 @@ pub fn parse_statement_tokens(tokens: &[Token]) -> Result<Statement, Vec<ParseEr
     }
 }
 
-pub fn parse_statement(input: &str) -> Result<Statement, ParseFromSourceError> {
+pub fn parse_statement(input: &str) -> error_stack::Result<Statement, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -180,58 +180,71 @@ pub fn suggest_statement(input: &str, cursor: usize) -> Vec<String> {
         // A statement that already parses has no expectations left to derive suggestions from,
         // because end of input is not representable as one. These few continuations are optional
         // tails of an otherwise complete statement, so they are named here.
-        let trimmed = source.trim_end();
-        let normalized = trimmed.to_ascii_uppercase();
-        // Nothing may follow a terminated statement, so a trailing `;` ends the offers.
-        let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
-        let optional_tail = if open && normalized == "START" {
-            vec![";".to_string(), "AT".to_string()]
-        } else if open && normalized.starts_with("START AT ") && !normalized.contains(" TIME RATE ")
-        {
-            vec![";".to_string(), "TIME RATE".to_string()]
-        } else if open
-            && normalized.starts_with("DESCRIBE RESOURCE ")
-            && !normalized.contains(" VERSION ")
-        {
-            vec!["VERSION".to_string()]
-        } else if open && let Statement::DescribeTransaction(describe) = &statement {
-            crate::describe_transaction::describe_transaction_tail(describe, &tokens)
-        } else if open && let Statement::RebindResource(rebind) = &statement {
-            if matches!(
-                rebind.selection,
-                nervix_models::RebindResourceSelection::Members(_)
-            ) {
-                vec![",".to_string(), ";".to_string()]
-            } else {
-                vec![";".to_string(), "FOR".to_string()]
-            }
-        } else if open
-            && normalized.starts_with("CREATE ")
-            && normalized.contains(" DOMAIN ")
-            && !normalized.contains(" PLACEMENT ")
-        {
-            vec![";".to_string(), "PLACEMENT".to_string()]
-        } else if open
-            && normalized.starts_with("CREATE ")
-            && normalized.contains(" PLACEMENT ")
-            && !normalized.contains(" DOMAIN ")
-            && !normalized.contains(" RANK ")
-        {
-            vec![";".to_string(), "RANK".to_string()]
-        } else if open
-            && (normalized.starts_with("RELOCATE ")
-                || normalized.starts_with("DESCRIBE RELOCATION "))
-            && normalized.ends_with(" PREFERENCES")
-        {
-            vec![";".to_string(), "FOR".to_string()]
-        } else {
-            Vec::new()
-        };
-        return filter_by_prefix(optional_tail, &prefix);
+        return statement_tail(&statement, &tokens, &source, &prefix);
     }
 
     suggestions_from_errors(out.into_errors(), &prefix)
 }
+
+pub(crate) fn statement_tail(
+    statement: &Statement,
+    tokens: &[Token],
+    source: &str,
+    prefix: &str,
+) -> Vec<String> {
+    let trimmed = source.trim_end();
+    let normalized = trimmed.to_ascii_uppercase();
+    // Nothing may follow a terminated statement, so a trailing `;` ends the offers.
+    let open = source.len() > trimmed.len() && !trimmed.ends_with(';');
+    let optional_tail = if open && normalized == "START" {
+        vec![";".to_string(), "AT".to_string()]
+    } else if open && normalized.starts_with("START AT ") && !normalized.contains(" TIME RATE ") {
+        vec![";".to_string(), "TIME RATE".to_string()]
+    } else if open
+        && normalized.starts_with("DESCRIBE RESOURCE ")
+        && !normalized.contains(" VERSION ")
+    {
+        vec!["VERSION".to_string()]
+    } else if open && let Statement::DescribeTransaction(describe) = &statement {
+        crate::describe_transaction::describe_transaction_tail(describe, tokens)
+    } else if open && matches!(&statement, Statement::DescribeWasmProcessor(_)) {
+        crate::describe_wasm_processor::describe_wasm_processor_tail(tokens)
+    } else if open && let Statement::RebindResource(rebind) = &statement {
+        if matches!(
+            rebind.selection,
+            nervix_models::RebindResourceSelection::Members(_)
+        ) {
+            vec![",".to_string(), ";".to_string()]
+        } else {
+            vec![";".to_string(), "FOR".to_string()]
+        }
+    } else if open
+        && normalized.starts_with("CREATE ")
+        && normalized.contains(" DOMAIN ")
+        && !normalized.contains(" PLACEMENT ")
+    {
+        vec![";".to_string(), "PLACEMENT".to_string()]
+    } else if open
+        && normalized.starts_with("CREATE ")
+        && normalized.contains(" PLACEMENT ")
+        && !normalized.contains(" DOMAIN ")
+        && !normalized.contains(" RANK ")
+    {
+        vec![";".to_string(), "RANK".to_string()]
+    } else if open
+        && (normalized.starts_with("RELOCATE ") || normalized.starts_with("DESCRIBE RELOCATION "))
+        && normalized.ends_with(" PREFERENCES")
+    {
+        vec![";".to_string(), "FOR".to_string()]
+    } else {
+        Vec::new()
+    };
+    filter_by_prefix(optional_tail, prefix)
+}
+
+#[cfg(test)]
+#[path = "statement_json_completion_tests.rs"]
+mod json_completion_tests;
 
 #[cfg(test)]
 mod tests {
@@ -449,7 +462,7 @@ mod tests {
             };
         }
 
-        match g.next_u8() % 10 {
+        match g.next_u8() % 12 {
             0..=3 => {
                 let operator = g.choose(&[
                     BinaryOperator::Or,
@@ -511,6 +524,37 @@ mod tests {
                     nervix_models::ParseAsType::Datetime,
                 ]),
             },
+            9 | 10 => {
+                let document = Box::new(gen_expression(g, depth - 1));
+                let path = gen_json_path(g);
+                let target = g.choose(&[
+                    nervix_models::ParseAsType::I64,
+                    nervix_models::ParseAsType::String,
+                    nervix_models::ParseAsType::Vec {
+                        element: Box::new(nervix_models::ParseAsType::U8),
+                    },
+                    nervix_models::ParseAsType::Array {
+                        element: Box::new(nervix_models::ParseAsType::Array {
+                            element: Box::new(nervix_models::ParseAsType::F32),
+                            len: nonzero_ext::nonzero!(3_u32),
+                        }),
+                        len: nonzero_ext::nonzero!(2_u32),
+                    },
+                ]);
+                match g.next_u8() % 3 {
+                    0 => Expression::JsonValue {
+                        document,
+                        path,
+                        target,
+                    },
+                    1 => Expression::TryJsonValue {
+                        document,
+                        path,
+                        target,
+                    },
+                    _ => Expression::JsonExists { document, path },
+                }
+            }
             _ => Expression::Range {
                 operator: g.choose(&[RangeOperator::Between, RangeOperator::NotBetween]),
                 operand: Box::new(gen_expression(g, depth - 1)),
@@ -518,6 +562,24 @@ mod tests {
                 high: Box::new(gen_expression(g, depth - 1)),
             },
         }
+    }
+
+    /// A JSON path whose canonical form needs each quoting the renderer can choose.
+    fn gen_json_path(g: &mut ByteGen) -> nervix_models::JsonPath {
+        use nervix_models::{JsonPath, JsonPathStep};
+
+        let step_count = g.next_u8() % 4;
+        let mut steps = Vec::new();
+        for _ in 0..step_count {
+            let step = match g.next_u8() % 4 {
+                0 => JsonPathStep::Element(u32::from(g.next_u8())),
+                1 => JsonPathStep::Member(format!("m_{}", g.ident().as_str())),
+                2 => JsonPathStep::Member("odd \"key\" \\ it's".to_string()),
+                _ => JsonPathStep::Member("caf\u{e9}".to_string()),
+            };
+            steps.push(step);
+        }
+        JsonPath::new(steps).expect("the generator takes fewer steps than a path allows")
     }
 
     fn gen_model(bytes: &[u8]) -> Model<RequestedResourceVersion> {
@@ -929,9 +991,10 @@ mod tests {
                     Model::Emitter(CreateEmitter {
                         name: g.name(),
                         from: ProcessorInputs::single(g.name()),
-                        encode_using_codec: Some(g.name()),
+                        body: nervix_models::EmitterBody::Codec { codec: g.name() },
                         sink: Box::new(sink),
                         publishing_mode,
+                        batch: None,
                         flush_policy: FlushPolicy::Each {
                             interval: "100ms".to_string(),
                             max_batch_size: "1MiB".to_string(),
@@ -993,9 +1056,10 @@ mod tests {
             18 => Model::Emitter(CreateEmitter {
                 name: g.name(),
                 from: ProcessorInputs::single(g.name()),
-                encode_using_codec: Some(g.name()),
+                body: nervix_models::EmitterBody::Codec { codec: g.name() },
                 sink: Box::new(EmitSink::ZeroMq { client: g.name() }),
                 publishing_mode: emitter_publishing_mode(),
+                batch: None,
                 flush_policy: FlushPolicy::Each {
                     interval: "100ms".to_string(),
                     max_batch_size: "1MiB".to_string(),
@@ -1025,12 +1089,13 @@ mod tests {
             20 => Model::Emitter(CreateEmitter {
                 name: g.name(),
                 from: ProcessorInputs::single(g.name()),
-                encode_using_codec: Some(g.name()),
+                body: nervix_models::EmitterBody::Codec { codec: g.name() },
                 sink: Box::new(EmitSink::Nats {
                     client: g.name(),
                     subject: g.name(),
                 }),
                 publishing_mode: emitter_publishing_mode(),
+                batch: None,
                 flush_policy: FlushPolicy::Each {
                     interval: "100ms".to_string(),
                     max_batch_size: "1MiB".to_string(),
@@ -1529,7 +1594,8 @@ mod tests {
                      LOG DECODE USING sch BY u_branch FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON \
                      GENERAL ERROR LOG;";
 
-        parse_statement(input).expect_err("bare BY is not a branch selection mode");
+        let error = parse_statement(input).expect_err("bare BY is not a branch selection mode");
+        assert!(!error.current_context().diagnostics().is_empty());
     }
 
     #[test]
@@ -1747,7 +1813,7 @@ mod tests {
         let error = parse_statement("ALTER RELAY notifications SET CAPACITY 0;")
             .expect_err("parse should fail");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty());
@@ -1979,6 +2045,7 @@ mod tests {
             parsed,
             Statement::DescribeWasmProcessor(nervix_models::DescribeWasmProcessor {
                 name: WasmProcessorName::parse("filter_even").expect("valid name"),
+                format: nervix_models::InspectionFormat::Text,
             })
         );
     }
@@ -1988,6 +2055,17 @@ mod tests {
         let input = "DESCRIBE RESOURCE fraud_model ";
         let suggestions = suggest_statement(input, input.len());
         assert!(suggestions.contains(&"VERSION".to_string()));
+    }
+
+    #[test]
+    fn wasm_description_offers_the_shared_inspection_format() {
+        let input = "DESCRIBE WASM PROCESSOR filter_even ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"FORMAT".to_string()));
+        let input = "DESCRIBE WASM PROCESSOR filter_even FORMAT ";
+        let suggestions = suggest_statement(input, input.len());
+        assert!(suggestions.contains(&"JSON".to_string()));
+        assert!(suggestions.contains(&"TEXT".to_string()));
     }
 
     #[test]
@@ -2006,8 +2084,9 @@ mod tests {
 
     #[test]
     fn rejects_client_only_upload_resource_statement() {
-        parse_statement("UPLOAD RESOURCE fraud_model VERSION '/tmp/model';")
+        let error = parse_statement("UPLOAD RESOURCE fraud_model VERSION '/tmp/model';")
             .expect_err("UPLOAD RESOURCE is a client-side command");
+        assert!(!error.current_context().diagnostics().is_empty());
     }
 
     #[test]

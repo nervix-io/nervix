@@ -291,7 +291,7 @@ General notes:
 
 Useful built-ins include string, null-handling, numeric, regex, and contextual functions such as `lower`, `coalesce`, `abs`, `regexp_like`, `now`, and `uuid_v7`.
 
-See [Filter-Map Functions](filter-map-functions.md) for the full function reference.
+See [Expression Functions](filter-map-functions.md) for the full function reference.
 
 Common expression patterns include:
 
@@ -300,6 +300,9 @@ Common expression patterns include:
 - arithmetic expressions such as `(amount + fee) / divisor`
 - explicit casts such as `raw AS INT64`, and tolerant conversions such as
   `TRY_CAST(raw AS INT64)`, which yield a typed null instead of failing the message
+- typed reads of JSON text held in a `STRING` field, such as
+  `JSON_VALUE(raw, '$.order.id' AS INT64)`; see
+  [JSON Documents](filter-map-functions.md#json-documents)
 
 The expression type surface matches the full Nervix internal schema type set:
 
@@ -363,6 +366,10 @@ Transport-specific schemes and keys:
 - `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
+
+HTTP polling and Prometheus resolve endpoint names through the node's configured DNS resolver.
+The request timeout covers name resolution, connection establishment, TLS, and the response.
+The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.

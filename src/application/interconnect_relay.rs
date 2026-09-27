@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 
 use ahash::HashMap;
-use error_stack::Report;
+use error_stack::{Report, ResultExt as _};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use nervix_interconnect::{ControlEnvelope, Envelope, RelayAdmission, RelayPayload};
 use nervix_models::{ClusterNodeName, DomainName, RelayName};
@@ -19,6 +19,13 @@ use tracing::warn;
 
 use super::session_service::SessionServiceImpl;
 use crate::runtime::{DomainRoutingCache, Runtime, SharedDomainRouting};
+
+#[derive(Debug, thiserror::Error)]
+pub(in crate::application) enum ControlDispatchError {
+    #[error("failed to send interconnect control to '{node}'")]
+    Send { node: ClusterNodeName },
+}
+
 #[derive(Debug)]
 pub(in crate::application) struct InterconnectRelayPayload {
     peer_node_id: ClusterNodeName,
@@ -224,12 +231,14 @@ impl SessionServiceImpl {
         &self,
         node_id: &ClusterNodeName,
         envelope: ControlEnvelope,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), ControlDispatchError> {
         self.inner
             .interconnect
             .send(node_id, Envelope::Control(envelope))
             .await
-            .map_err(|error| format!("failed to send interconnect control to '{node_id}': {error}"))
+            .change_context(ControlDispatchError::Send {
+                node: node_id.clone(),
+            })
     }
 }
 
@@ -239,6 +248,30 @@ mod tests {
     use nervix_interconnect::{ControlEnvelope, Envelope};
 
     use super::{super::test_fixtures::named, *};
+
+    #[tokio::test]
+    async fn control_dispatch_preserves_the_transport_failure_and_target() {
+        use super::super::test_fixtures::{TestService, build_test_service};
+
+        let TestService {
+            service,
+            registry,
+            path,
+        } = build_test_service(false).await;
+        service.inner.interconnect.shutdown().await;
+        let peer = named("unavailable_peer");
+        let error = service
+            .dispatch_interconnect_control(&peer, ControlEnvelope::Terminate)
+            .await
+            .expect_err("a stopped transport cannot dispatch control");
+        assert!(
+            matches!(error.current_context(), ControlDispatchError::Send { node } if node == &peer)
+        );
+        assert!(error.contains::<nervix_interconnect::TransportError>());
+        drop(service);
+        drop(registry);
+        std::fs::remove_dir_all(path).expect("the test database is removed");
+    }
 
     #[test]
     fn interconnect_control_lane_rejects_a_relay_without_transport_admission() {

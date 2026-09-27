@@ -7,6 +7,9 @@ and connectors receive time from that capability instead of choosing a clock the
 
 This chapter describes the internal architecture. See [Domains And Time](./domains-and-time.md)
 for the NSPL surface and operator-facing behavior.
+Explicit transactional `START` and `STOP` establish or revoke generations at ordered step
+boundaries; [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) owns how
+those lifecycle steps affect later planned scopes and the retained impact report.
 
 The central rule is that a paced clock is a committed mapping, not a stream of ticks. Each node
 projects its own current UTC observation through the same mapping. Tick progress records which
@@ -257,7 +260,12 @@ the currently installed domain clock. The snapshot belongs only to that initiali
 it is not inherited from the branch instance being replaced. Publication cancels the old branch
 instance and all timeout handles it owned. A fresh initialization may request its own timeouts, but
 no deadline armed by the replaced instance can fire in the new state lifetime even though domain
-logical time continued across the reset.
+logical time continued across the reset. See [Coordinated Reset](./wasm-state.md#coordinated-reset).
+
+Checkpoint and reset inspection samples existing state without taking a domain execution snapshot
+or advancing the logical frontier. A reported checkpoint revision and reset generation describe
+durability and lifetime identity, not domain time; neither may establish or alter the clock used
+by a later guest callback.
 
 An NSPL reset uses this same clock contract. Repeating its durable command reference resumes the
 same guest-state lifetime replacement without changing the domain clock mapping.
@@ -320,6 +328,10 @@ generator cadence begin immediately, while Prometheus polling begins after one i
 misses multiple occurrences, the cadence returns the newest due instant once and advances directly
 to the first future boundary. Consumers that need both meanings keep the scheduled due instant
 separate from the fresh execution snapshot taken when work actually runs.
+
+[Connector Crates And The Connector Contract](./connector-contract.md#source-boundary) defines
+the paced source's host and connector responsibilities; this chapter owns the cadence's time
+mapping and missed-occurrence behavior.
 
 The architecture keeps four time classes distinct:
 

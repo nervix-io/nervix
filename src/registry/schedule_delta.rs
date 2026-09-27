@@ -612,10 +612,13 @@ mod tests {
         let emitter = CreateEmitter {
             name: named("event_sink"),
             from: nervix_models::ProcessorInputs::single(named("events")),
-            encode_using_codec: Some(named("event_codec")),
+            body: nervix_models::EmitterBody::Codec {
+                codec: named("event_codec"),
+            },
             sink: Box::new(EmitSink::ZeroMq {
                 client: named("sink_a"),
             }),
+            batch: None,
             flush_policy: FlushPolicy::Each {
                 interval: "30s".to_string(),
                 max_batch_size: "1MiB".to_string(),
@@ -832,10 +835,11 @@ mod tests {
         let mut publishing = existing.clone();
         let request = CommandExecutionReference::parse("reset-counting-guest")
             .expect("the reset reference must be valid");
-        assert!(
-            publishing.nodes[0]
-                .begin_wasm_state_reset(request.clone(), WasmStateResetScope::Unbranched,)
-        );
+        assert!(publishing.nodes[0].begin_wasm_state_reset(
+            request.clone(),
+            WasmStateResetScope::Unbranched,
+            nervix_models::WasmStateResetReason::Operator,
+        ));
         let publishing_reset = publishing.nodes[0]
             .wasm_state_reset()
             .expect("the reset was published")

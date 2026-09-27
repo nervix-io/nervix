@@ -20,6 +20,7 @@ use argon2::{
     password_hash::{PasswordHash, SaltString, rand_core::OsRng},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use error_stack::Report;
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use http_body_util::Full;
 use hyper::{
@@ -123,23 +124,31 @@ pub(in crate::application) enum GrpcAuthenticationError {
     Failed,
 }
 
+#[derive(Debug, Error)]
+pub(in crate::application) enum PasswordHashError {
+    #[error("password hash computation failed")]
+    Compute,
+    #[error("password hash task failed")]
+    Task,
+}
+
 impl From<GrpcAuthenticationError> for Status {
     fn from(error: GrpcAuthenticationError) -> Self {
         Self::unauthenticated(error.to_string())
     }
 }
 
-async fn hash_password(password: String) -> Result<String, String> {
+async fn hash_password(password: String) -> error_stack::Result<String, PasswordHashError> {
     tokio::task::spawn_blocking(move || {
         let mut rng = OsRng;
         let salt = SaltString::generate(&mut rng);
         password_argon2()
             .hash_password(password.as_bytes(), &salt)
             .map(|hash| hash.to_string())
-            .map_err(|error| error.to_string())
+            .map_err(|_| Report::new(PasswordHashError::Compute))
     })
     .await
-    .map_err(|error| format!("password hash task failed: {error}"))?
+    .map_err(|_| Report::new(PasswordHashError::Task))?
 }
 
 pub(in crate::application) async fn verify_password_hash(
@@ -187,7 +196,7 @@ fn password_argon2() -> Argon2<'static> {
 pub(in crate::application) async fn user_credentials(
     name: UserName,
     password: String,
-) -> Result<UserCredentials, String> {
+) -> error_stack::Result<UserCredentials, PasswordHashError> {
     let password_hash = hash_password(password).await?;
     Ok(UserCredentials {
         name,

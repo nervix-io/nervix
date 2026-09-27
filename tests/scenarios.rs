@@ -8,11 +8,12 @@ use std::{
     fmt,
     fs::{OpenOptions, create_dir_all},
     io::Write,
+    net::{Ipv4Addr, SocketAddr},
     num::NonZeroU64,
     os::unix::process::ExitStatusExt as _,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
     sync::{Arc as StdArc, Mutex as StdMutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -35,7 +36,10 @@ use cucumber::{
     given, then, when,
     writer::{self, Stats as _},
 };
-use futures_util::{TryStreamExt, future::try_join_all};
+use futures_util::{
+    TryStreamExt,
+    future::{join_all, try_join_all},
+};
 use iceberg::{
     Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent,
     arrow::arrow_schema_to_schema_auto_assign_ids,
@@ -86,22 +90,30 @@ use sqlx::{
     },
 };
 use tempfile::TempDir;
+use tokio::io::AsyncBufReadExt as _;
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use uuid::Uuid;
 
 use crate::common::{
+    client_conformance::{ClientProbe, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE, corpus_report},
     cluster::{
         BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
-        TEST_AUTH_USERNAME, TestClusterConfig, TestSession, WebsocketExchangeAction,
-        client_connect_options, client_domain,
+        TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
+        WebsocketExchangeAction, client_connect_options, client_domain,
     },
+    cluster_teardown::CLUSTER_TEARDOWN_BUDGET,
     dependencies::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
         MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
         RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
+    http_receiver::{
+        ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET, ReceiverFault,
+        ReceiverResponse, ReceiverTlsOptions, ReceiverTransport,
+    },
+    peer_addressing::{FixtureAnswer, PeerAddressing},
     phase_deadline::{BeforeDeadline, PhaseDeadline},
     raw_session::{TestUpload, TestUploadPart, WireOutcome as _},
     scenario_phase::{ActiveScenario, ActiveScenarioRegistration, ScenarioIdentity, ScenarioPhase},
@@ -141,8 +153,11 @@ const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
-const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
-    ["Web console NSPL REPL", "Web console execution graph"];
+const WEB_CONSOLE_FEATURE_NAMES: [&str; 3] = [
+    "Web console NSPL REPL",
+    "Web console execution graph",
+    "Web console transaction inspector",
+];
 const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
@@ -226,6 +241,15 @@ struct FollowerCommandsMemoryObservation {
     task: AbortOnDropHandle<f64>,
 }
 
+/// Evidence retained across the replication and restart phases of the large transaction report
+/// qualification scenario.
+#[derive(Debug)]
+struct TransactionQualificationObservation {
+    leader: String,
+    retention_before: nervix_consensus::RaftLogRetention,
+    committed_inspection: Option<Box<nervix_models::TransactionInspection>>,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     scenario_execution_permit: Option<ScenarioExecutionPermit>,
@@ -241,6 +265,9 @@ struct ScenarioWorld {
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
     session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// Candidates collected by a public session completion paging scenario.
+    last_completion_values: Vec<String>,
+    last_completion_page_count: usize,
     /// The reply to the last upload stream a scenario shaped itself.
     last_upload_reply: Option<nervix_client_wire::UploadReply>,
     last_subscription_payload: Option<String>,
@@ -250,9 +277,16 @@ struct ScenarioWorld {
     last_publish_at: Option<Instant>,
     last_command_error: Option<String>,
     last_command_output: Option<String>,
+    last_cli_output: Option<Output>,
+    cli_subscription_process: Option<tokio::process::Child>,
+    cli_subscription_lines: Option<StdArc<StdMutex<VecDeque<String>>>>,
+    cli_subscription_reader: Option<AbortOnDropHandle<()>>,
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
+    /// The exact source of the last request a named client submitted, which the spans of that
+    /// request's diagnostics index.
+    last_client_request: Option<String>,
     /// Reused when a coordinated WASM reset is retried after an ambiguous or failed response.
     wasm_state_reset_reference: Option<nervix_models::CommandExecutionReference>,
     /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
@@ -298,6 +332,7 @@ struct ScenarioWorld {
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
+    transaction_qualification: Option<TransactionQualificationObservation>,
     cluster_config: TestClusterConfig,
     temp_root: Option<TempDir>,
     formatter_root: Option<TempDir>,
@@ -306,6 +341,8 @@ struct ScenarioWorld {
     formatter_original_files: BTreeMap<String, String>,
     last_cluster_operation_elapsed: Option<Duration>,
     browser_page: Option<playwright_rs::Page>,
+    /// Canvas positions and routes captured before changing an inspector's presentation view.
+    inspector_geometry: Option<String>,
     browser_context: Option<playwright_rs::BrowserContext>,
     browser: Option<playwright_rs::Browser>,
     playwright: Option<Playwright>,
@@ -318,6 +355,8 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The HTTP receivers a scenario started, by the name its steps give them.
+    http_receivers: BTreeMap<String, HttpReceiver>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
@@ -326,6 +365,8 @@ struct ScenarioWorld {
     /// When the last signal was sent to the server process, taken before the signal is delivered
     /// so an exit measured against it can only look later, never earlier.
     last_server_signal_at: Option<Instant>,
+    /// The cross-language client probe a scenario started, until a step reads its report.
+    client_probe: Option<ClientProbe>,
 }
 
 impl fmt::Debug for ScenarioWorld {
@@ -393,6 +434,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.avro_http_optional_fields.len(),
             )
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
+            .field("transaction_qualification", &self.transaction_qualification)
             .field("temp_root_initialized", &self.temp_root.is_some())
             .field("browser_initialized", &self.browser.is_some())
             .field(
@@ -408,6 +450,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("http_receivers", &self.http_receivers)
             .field(
                 "silent_interconnect_peer_count",
                 &self.silent_interconnect_peers.len(),
@@ -420,6 +463,7 @@ impl fmt::Debug for ScenarioWorld {
             .field("server_process_http_load", &self.server_process_http_load)
             .field("held_resource_upload", &self.held_resource_upload.is_some())
             .field("last_server_signal_at", &self.last_server_signal_at)
+            .field("client_probe", &self.client_probe)
             .finish()
     }
 }
@@ -837,6 +881,250 @@ async fn given_http_mock_server_is_running(world: &mut ScenarioWorld) {
         .await
         .expect("HTTP mock server test container should start");
     refresh_dependency_configuration(world);
+}
+
+/// How long a step waits for an HTTP receiver to observe what a node sends it. Generous, because a
+/// wait for something to happen ends as soon as it does.
+const HTTP_RECEIVER_WAIT: Duration = Duration::from_secs(60);
+
+async fn start_http_receiver(
+    world: &mut ScenarioWorld,
+    name: String,
+    transport: ReceiverTransport,
+) {
+    initialize_scenario_identity(world);
+    let name = expand_placeholders(world, &name);
+    assert!(
+        !world.http_receivers.contains_key(&name),
+        "HTTP receiver '{name}' is already running"
+    );
+    let port = draw_scenario_port(world, "HTTP receiver");
+    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    let receiver = match HttpReceiver::start(address, transport).await {
+        Ok(receiver) => receiver,
+        Err(error) => panic!("HTTP receiver '{name}' failed to start: {error:?}"),
+    };
+    world
+        .placeholders
+        .insert(format!("http_receiver.{name}"), receiver.origin());
+    world.placeholders.insert(
+        format!("http_receiver_port.{name}"),
+        receiver.port().to_string(),
+    );
+    world.http_receivers.insert(name, receiver);
+}
+
+fn http_receiver<'world>(world: &'world ScenarioWorld, name: &str) -> &'world HttpReceiver {
+    let name = expand_placeholders(world, name);
+    match world.http_receivers.get(&name) {
+        Some(receiver) => receiver,
+        None => panic!("HTTP receiver '{name}' is not running"),
+    }
+}
+
+fn certificate_hosts(world: &ScenarioWorld, hosts: &str) -> Vec<String> {
+    let hosts = expand_placeholders(world, hosts)
+        .split(',')
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        !hosts.is_empty(),
+        "an HTTPS receiver needs at least one certificate host"
+    );
+    hosts
+}
+
+#[given(expr = "HTTP receiver {string} is running")]
+async fn given_http_receiver_is_running(world: &mut ScenarioWorld, name: String) {
+    start_http_receiver(world, name, ReceiverTransport::Plain).await;
+}
+
+#[given(expr = "HTTPS receiver {string} is running with a certificate for {string}")]
+async fn given_https_receiver_is_running(world: &mut ScenarioWorld, name: String, hosts: String) {
+    let options = ReceiverTlsOptions {
+        certificate_hosts: certificate_hosts(world, &hosts),
+        client_certificate: ClientCertificatePolicy::NotRequested,
+    };
+    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+}
+
+#[given(
+    expr = "HTTPS receiver {string} is running with a certificate for {string} and requires a \
+            client certificate"
+)]
+async fn given_https_receiver_requiring_client_certificates_is_running(
+    world: &mut ScenarioWorld,
+    name: String,
+    hosts: String,
+) {
+    let options = ReceiverTlsOptions {
+        certificate_hosts: certificate_hosts(world, &hosts),
+        client_certificate: ClientCertificatePolicy::Required,
+    };
+    start_http_receiver(world, name, ReceiverTransport::Tls(options)).await;
+}
+
+/// Places the receiver's CA certificate and the client identity it issued where the node can mount
+/// them as a resource directory: `ca.pem`, `client.pem`, and `client-key.pem`.
+#[given(
+    expr = "node {string} has the TLS files of HTTP receiver {string} in resource directory \
+            {string}"
+)]
+async fn given_node_has_http_receiver_tls_files(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    name: String,
+    placeholder: String,
+) {
+    let files = match http_receiver(world, &name).tls_files() {
+        Some(files) => files.to_path_buf(),
+        None => panic!("HTTP receiver '{name}' does not serve TLS"),
+    };
+    let base_dir = world
+        .cluster()
+        .node_base_dir(&node_id)
+        .expect("node base dir should exist");
+    let resource_dir = base_dir.join("fixtures").join(&placeholder);
+    if resource_dir.exists() {
+        std::fs::remove_dir_all(&resource_dir).expect("old fixture directory should be removed");
+    }
+    std::fs::create_dir_all(&resource_dir).expect("fixture directory should be created");
+    for file in HttpReceiver::tls_file_names() {
+        std::fs::copy(files.join(file), resource_dir.join(file)).unwrap_or_else(|error| {
+            panic!("failed to copy HTTP receiver TLS file '{file}': {error}")
+        });
+    }
+    world
+        .placeholders
+        .insert(placeholder, resource_dir.display().to_string());
+}
+
+/// Each line is one response, taken by the next request in order. The forms are those
+/// `ReceiverResponse` parses: `respond <status>` with `;`-separated clauses, `lose response`,
+/// `hold response`, and `raw <bytes>`.
+#[given(expr = "HTTP receiver {string} answers with")]
+async fn given_http_receiver_answers_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    #[step] step: &Step,
+) {
+    let script = expand_placeholders(world, docstring(step));
+    let mut responses = Vec::new();
+    for line in script
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        match line.parse::<ReceiverResponse>() {
+            Ok(response) => responses.push(response),
+            Err(error) => panic!("invalid HTTP receiver script line: {error}"),
+        }
+    }
+    http_receiver(world, &name).script(responses);
+}
+
+#[given(expr = "HTTP receiver {string} answers unscripted requests with {string}")]
+async fn given_http_receiver_answers_unscripted_requests_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    response: String,
+) {
+    let response = match expand_placeholders(world, &response).parse::<ReceiverResponse>() {
+        Ok(response) => response,
+        Err(error) => panic!("invalid HTTP receiver response: {error}"),
+    };
+    http_receiver(world, &name).answer_unscripted_requests_with(response);
+}
+
+#[then(expr = "HTTP receiver {string} eventually receives at least {int} request(s)")]
+async fn then_http_receiver_eventually_receives_requests(
+    world: &mut ScenarioWorld,
+    name: String,
+    expected: usize,
+) {
+    let receiver = http_receiver(world, &name);
+    if let Err(error) = receiver
+        .wait_for_requests(expected, HTTP_RECEIVER_WAIT)
+        .await
+    {
+        panic!("HTTP receiver '{name}': {error}");
+    }
+}
+
+/// Compares one captured request, counted from 1, with the docstring: `<METHOD> <target>`, then
+/// the headers the request must carry with exactly these values, then an empty line, then the
+/// exact body. Header names compare without case; headers the docstring does not name are not
+/// checked. A docstring without a body requires a request with zero content bytes.
+#[then(expr = "HTTP receiver {string} request {int} is")]
+async fn then_http_receiver_request_is(
+    world: &mut ScenarioWorld,
+    name: String,
+    position: usize,
+    #[step] step: &Step,
+) {
+    // Cucumber keeps the newlines that open and close a docstring; neither is part of a request.
+    let expected = expand_placeholders(world, docstring(step))
+        .trim_matches('\n')
+        .to_string();
+    let receiver = http_receiver(world, &name);
+    let captured = receiver.captured();
+    let Some(index) = position.checked_sub(1) else {
+        panic!("HTTP receiver requests are counted from 1");
+    };
+    let Some(request) = captured.get(index) else {
+        panic!(
+            "HTTP receiver '{name}' captured {} request(s), not request {position}",
+            captured.len()
+        );
+    };
+    // Without an empty line the docstring names no body, which is a request with zero content
+    // bytes.
+    let (head, body) = match expected.split_once("\n\n") {
+        Some((head, body)) => (head, body),
+        None => (expected.as_str(), ""),
+    };
+    let mut head_lines = head.lines();
+    let request_line = head_lines.next().unwrap_or_default();
+    assert_eq!(
+        request_line,
+        format!("{} {}", request.method, request.target),
+        "HTTP receiver '{name}' request {position} has another request line:\n{request}"
+    );
+    for header in head_lines {
+        let Some((header_name, value)) = header.split_once(':') else {
+            panic!("expected header line '{header}' has no ':'");
+        };
+        let values = request.header_values(header_name.trim());
+        assert_eq!(
+            values,
+            vec![value.trim().as_bytes()],
+            "HTTP receiver '{name}' request {position} does not carry exactly one '{}' header \
+             with the expected value:\n{request}",
+            header_name.trim()
+        );
+    }
+    assert_eq!(
+        request.body,
+        body.as_bytes(),
+        "HTTP receiver '{name}' request {position} has another body:\n{request}"
+    );
+}
+
+#[then(expr = "HTTP receiver {string} eventually records a failed TLS handshake")]
+async fn then_http_receiver_records_failed_tls_handshake(world: &mut ScenarioWorld, name: String) {
+    let receiver = http_receiver(world, &name);
+    let waited = receiver
+        .wait_for_fault(
+            "failed TLS handshake",
+            ReceiverFault::is_tls_handshake,
+            HTTP_RECEIVER_WAIT,
+        )
+        .await;
+    if let Err(error) = waited {
+        panic!("HTTP receiver '{name}': {error}");
+    }
 }
 
 #[given(expr = "clock source recorder {string} is reset")]
@@ -1920,6 +2208,109 @@ fn then_client_wire_baseline_artifact_exists(world: &mut ScenarioWorld) {
     );
 }
 
+/// How long a probe may take to open its session and subscription. Starting a JVM or compiling
+/// nothing still costs seconds on a loaded machine, so this bounds a wait, not a race.
+const CLIENT_PROBE_SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[when(
+    expr = "the {string} client probe subscribes as {string} to relay {string} on node {string} \
+            expecting {int} rows"
+)]
+async fn when_client_probe_subscribes(
+    world: &mut ScenarioWorld,
+    runtime: String,
+    subscription: String,
+    relay: String,
+    node_id: String,
+    rows: usize,
+) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let node_id = expand_placeholders(world, &node_id);
+    let cluster = world.cluster();
+    let grpc_uri = cluster
+        .grpc_uri(&node_id)
+        .expect("the probe's node belongs to the cluster");
+    let console = cluster
+        .web_console_url(&node_id)
+        .expect("the probe's node belongs to the cluster");
+    let mut websocket_uri =
+        url::Url::parse(&console).expect("the harness builds a valid console URL");
+    websocket_uri
+        .set_scheme("ws")
+        .expect("an http URL can take the ws scheme");
+    websocket_uri.set_path("/console/ws");
+    let target = ProbeTarget {
+        grpc_uri,
+        websocket_uri: websocket_uri.to_string(),
+        username: TEST_AUTH_USERNAME.to_string(),
+        password: TEST_AUTH_PASSWORD.to_string(),
+        domain: world.domain.clone(),
+        relay: expand_placeholders(world, &relay),
+        subscription: expand_placeholders(world, &subscription),
+        rows,
+    };
+    append_cucumber_log_line(&format!(
+        "client probe {runtime:?}: node={node_id} target={target:?}"
+    ));
+    let mut probe = ClientProbe::start(runtime, target)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    probe
+        .wait_for_line(SUBSCRIBED_LINE, CLIENT_PROBE_SUBSCRIBE_TIMEOUT)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
+
+#[when(expr = "the {string} client probe decodes the conformance corpus")]
+async fn when_client_probe_decodes_the_corpus(world: &mut ScenarioWorld, runtime: String) {
+    let runtime: ProbeRuntime = runtime
+        .parse()
+        .expect("the step names a known probe runtime");
+    let probe = ClientProbe::start_corpus(runtime)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    world.client_probe = Some(probe);
+}
+
+#[then(expr = "within {string} the client probe reports the conformance corpus")]
+async fn then_client_probe_reports_the_corpus(world: &mut ScenarioWorld, within: String) {
+    let within =
+        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let probe = world
+        .client_probe
+        .take()
+        .verified("a preceding step started a client probe");
+    let report = probe
+        .finish(within)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let expected = corpus_report().expect("the conformance corpus report is checked in");
+    report
+        .check(&expected)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+#[then(expr = "within {string} the client probe reports")]
+async fn then_client_probe_reports(world: &mut ScenarioWorld, within: String, #[step] step: &Step) {
+    let within =
+        humantime::parse_duration(&within).expect("step duration must be a valid duration");
+    let probe = world
+        .client_probe
+        .take()
+        .verified("a preceding step started a client probe");
+    let report = probe
+        .finish(within)
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let expected = expand_placeholders(world, docstring(step));
+    report
+        .check(&expected)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
 #[then(expr = "the server process exits with status {int}")]
 async fn then_server_process_exits_with_status(world: &mut ScenarioWorld, expected: i32) {
     let process = world
@@ -2081,6 +2472,282 @@ fn nspl_format_binary() -> PathBuf {
         "nervix-nspl-format must be built beside nervix-server; run `just test-scenarios`"
     );
     candidate
+}
+
+/// Resolves the public CLI, including the instrumented binary used by process coverage.
+fn scenario_cli_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("NERVIX_TEST_CLI_PATH") {
+        return PathBuf::from(path);
+    }
+    let candidate = Path::new(env!("CARGO_BIN_EXE_nervix-server"))
+        .parent()
+        .assured("the server binary has a parent directory")
+        .join("nervix-cli");
+    assert!(candidate.exists(), "tests-deps must build nervix-cli");
+    candidate
+}
+
+impl ScenarioWorld {
+    async fn execute_cli(&mut self, command: String, node: String, password: &str) {
+        let command = expand_placeholders(self, &command);
+        let node = expand_placeholders(self, &node);
+        let grpc_uri = self
+            .cluster()
+            .grpc_uri(&node)
+            .assured("the scenario names a cluster node");
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            tokio::process::Command::new(scenario_cli_binary())
+                .args([
+                    "--server",
+                    &grpc_uri,
+                    "--domain",
+                    &self.domain,
+                    "--username",
+                    TEST_AUTH_USERNAME,
+                    "--password",
+                    password,
+                    "--command",
+                    &command,
+                ])
+                .output(),
+        )
+        .await;
+        let output = match result {
+            Ok(Ok(output)) => output,
+            Ok(Err(error)) => panic!("the scenario CLI process failed to start: {error}"),
+            Err(_) => panic!("the CLI command did not complete within 60 seconds"),
+        };
+        self.last_cli_output = Some(output);
+    }
+}
+
+#[when(expr = "the CLI executes {string} on node {string}")]
+async fn when_cli_executes_on_node(world: &mut ScenarioWorld, command: String, node: String) {
+    world.execute_cli(command, node, TEST_AUTH_PASSWORD).await;
+}
+
+#[when(expr = "the CLI executes {string} on node {string} with password {string}")]
+async fn when_cli_executes_with_password(
+    world: &mut ScenarioWorld,
+    command: String,
+    node: String,
+    password: String,
+) {
+    world.execute_cli(command, node, &password).await;
+}
+
+#[then(expr = "the CLI output contains {string}")]
+fn then_cli_output_contains(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(&expected),
+        "CLI status: {}; stdout: {stdout}; stderr: {stderr}",
+        output.status
+    );
+}
+
+#[when(expr = "the CLI suggests for {string} on node {string}")]
+async fn when_cli_suggests_for(world: &mut ScenarioWorld, input: String, node: String) {
+    let mut input = expand_placeholders(world, &input).replace("\\n", "\n");
+    let cursor = input
+        .find('|')
+        .assured("the scenario input marks its completion cursor");
+    input.remove(cursor);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(scenario_cli_binary())
+            .args([
+                "--server",
+                &grpc_uri,
+                "--domain",
+                &world.domain,
+                "--username",
+                TEST_AUTH_USERNAME,
+                "--password",
+                TEST_AUTH_PASSWORD,
+                "--suggest",
+                &input,
+                "--cursor",
+                &cursor.to_string(),
+            ])
+            .output(),
+    )
+    .await
+    .assured("the CLI suggestion request completes within one minute")
+    .assured("the CLI suggestion process starts");
+    world.last_cli_output = Some(output);
+}
+
+#[then(expr = "the CLI suggestion {string} applied to {string} yields {string}")]
+fn then_cli_suggestion_applies(
+    world: &mut ScenarioWorld,
+    value: String,
+    input: String,
+    expected: String,
+) {
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    assert!(
+        output.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .assured("the successful CLI suggestion mode prints JSON");
+    assert_eq!(response["status"], "Ready");
+    let suggestion = response["suggestions"]
+        .as_array()
+        .assured("the CLI suggestion response has an array")
+        .iter()
+        .find(|candidate| candidate["value"] == value)
+        .assured("the expected candidate appears in the CLI response");
+    let start = usize::try_from(
+        suggestion["edit"]["start"]
+            .as_u64()
+            .assured("the edit start is an unsigned offset"),
+    )
+    .assured("the edit start fits the test process address space");
+    let end = usize::try_from(
+        suggestion["edit"]["end"]
+            .as_u64()
+            .assured("the edit end is an unsigned offset"),
+    )
+    .assured("the edit end fits the test process address space");
+    let replacement = suggestion["edit"]["replacement"]
+        .as_str()
+        .assured("the edit replacement is a string");
+    let source = expand_placeholders(world, &input)
+        .replace("\\n", "\n")
+        .replace('|', "");
+    let mut actual = source.clone();
+    actual.replace_range(start..end, replacement);
+    assert_eq!(
+        actual,
+        expand_placeholders(world, &expected).replace("\\n", "\n")
+    );
+}
+
+#[then(expr = "the CLI output does not contain {string}")]
+fn then_cli_output_does_not_contain(world: &mut ScenarioWorld, unexpected: String) {
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains(&unexpected),
+        "CLI output contained {unexpected:?}: {stdout}"
+    );
+}
+
+#[then(expr = "the CLI fails with {string}")]
+fn then_cli_fails_with(world: &mut ScenarioWorld, expected: String) {
+    let output = world
+        .last_cli_output
+        .as_ref()
+        .verified("the preceding step ran the CLI");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains(&expected),
+        "CLI status: {}; stderr: {stderr}",
+        output.status
+    );
+}
+
+#[when(expr = "the CLI subscribes to relay {string} on node {string}")]
+async fn when_cli_subscribes_to_relay(world: &mut ScenarioWorld, relay: String, node: String) {
+    let relay = expand_placeholders(world, &relay);
+    let node = expand_placeholders(world, &node);
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&node)
+        .assured("the scenario names a cluster node");
+    let mut process = tokio::process::Command::new(scenario_cli_binary())
+        .args([
+            "--server",
+            &grpc_uri,
+            "--domain",
+            &world.domain,
+            "--username",
+            TEST_AUTH_USERNAME,
+            "--password",
+            TEST_AUTH_PASSWORD,
+            "subscribe",
+            "watch",
+            &relay,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|error| panic!("the scenario CLI process failed to start: {error}"));
+    let stdout = process
+        .stdout
+        .take()
+        .verified("the CLI process was started with piped stdout");
+    let lines = StdArc::new(StdMutex::new(VecDeque::new()));
+    let reader_lines = lines.clone();
+    let task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            tokio::task::consume_budget().await;
+            let mut retained = reader_lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if retained.len() == 256 {
+                retained.pop_front();
+            }
+            retained.push_back(line);
+        }
+    });
+    world.cli_subscription_reader = Some(AbortOnDropHandle::new(task));
+    world.cli_subscription_lines = Some(lines);
+    world.cli_subscription_process = Some(process);
+}
+
+#[then(expr = "the CLI subscription output eventually contains {string}")]
+async fn then_cli_subscription_output_contains(world: &mut ScenarioWorld, expected: String) {
+    let expected = expand_placeholders(world, &expected);
+    let lines = world
+        .cli_subscription_lines
+        .as_ref()
+        .verified("the preceding step started the CLI subscription");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let found = {
+            let retained = lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            retained.iter().any(|line| line.contains(&expected))
+        };
+        if found {
+            return;
+        }
+        if Instant::now() >= deadline {
+            let retained = lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("CLI subscription output did not contain {expected:?}: {retained:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// The directory holding the NSPL files a formatter scenario writes.
@@ -4069,6 +4736,73 @@ async fn when_wasm_checkpoints_reach_stable_storage_again(world: &mut ScenarioWo
     world.fault_injection.restore_wasm_checkpoint_storage();
 }
 
+/// The checkpoint window of one WASM processor in the scenario's domain that a pause selects.
+struct WasmCheckpointPauseTarget {
+    domain: nervix_models::DomainName,
+    processor: nervix_models::ModelName,
+    window: nervix_server::WasmCheckpointWindow,
+}
+
+impl WasmCheckpointPauseTarget {
+    fn of(world: &ScenarioWorld, processor: &str, window: &str) -> Self {
+        let domain = nervix_models::DomainName::try_from(world.domain.as_str())
+            .expect("the scenario domain must be valid");
+        let processor = nervix_models::ModelName::try_from(processor)
+            .expect("the scenario WASM processor name must be valid");
+        let window = window
+            .parse::<nervix_server::WasmCheckpointWindow>()
+            .unwrap_or_else(|_| panic!("unknown WASM checkpoint window '{window}'"));
+        Self {
+            domain,
+            processor,
+            window,
+        }
+    }
+}
+
+#[given(expr = "the next guest-state checkpoint of WASM processor {string} pauses {word}")]
+#[when(expr = "the next guest-state checkpoint of WASM processor {string} pauses {word}")]
+async fn when_next_wasm_checkpoint_pauses(
+    world: &mut ScenarioWorld,
+    processor: String,
+    window: String,
+) {
+    let target = WasmCheckpointPauseTarget::of(world, &processor, &window);
+    world
+        .fault_injection
+        .pause_wasm_checkpoint(target.domain, target.processor, target.window);
+}
+
+#[then(expr = "a guest-state checkpoint of WASM processor {string} is held {word}")]
+async fn then_wasm_checkpoint_is_held(
+    world: &mut ScenarioWorld,
+    processor: String,
+    window: String,
+) {
+    let target = WasmCheckpointPauseTarget::of(world, &processor, &window);
+    let reached = tokio::time::timeout(
+        Duration::from_secs(30),
+        world.fault_injection.wait_for_wasm_checkpoint_pause(
+            target.domain,
+            target.processor.clone(),
+            target.window,
+        ),
+    )
+    .await;
+    assert!(
+        reached.is_ok(),
+        "no guest-state checkpoint of WASM processor '{}' reached the armed {} window within \
+         thirty seconds",
+        target.processor.as_str(),
+        target.window.as_ref()
+    );
+}
+
+#[when("every held WASM guest-state checkpoint is released")]
+async fn when_every_held_wasm_checkpoint_is_released(world: &mut ScenarioWorld) {
+    world.fault_injection.release_all_wasm_checkpoint_pauses();
+}
+
 #[when("fresh WASM reset guest initialization fails on every node")]
 async fn when_fresh_wasm_reset_guest_initialization_fails(world: &mut ScenarioWorld) {
     world
@@ -4812,6 +5546,227 @@ async fn given_production_sticky_scheduler_is_configured(world: &mut ScenarioWor
         "the scheduler must be configured before cluster startup"
     );
     world.cluster_config.scheduler_mode = Some(SchedulerMode::Sticky);
+}
+
+#[given(expr = "cluster peers are addressed by {string}")]
+async fn given_cluster_peers_are_addressed_by(world: &mut ScenarioWorld, addressing: String) {
+    assert!(
+        world.cluster.is_none(),
+        "peer addressing must be configured before cluster startup"
+    );
+    world.cluster_config.peer_addressing = addressing
+        .parse::<PeerAddressing>()
+        .unwrap_or_else(|_| panic!("unknown peer addressing '{addressing}'"));
+}
+
+#[when(expr = "node {string} moves to another address behind its name")]
+async fn when_node_moves_behind_its_name(world: &mut ScenarioWorld, node_id: String) {
+    let node_id = expand_placeholders(world, &node_id);
+    world
+        .cluster_mut()
+        .move_behind_its_name(&node_id)
+        .unwrap_or_else(|error| panic!("node '{node_id}' could not move behind its name: {error}"));
+}
+
+#[when(expr = "the DNS fixture answers the name of node {string} with {string}")]
+async fn when_the_dns_fixture_answers_node_name_with(
+    world: &mut ScenarioWorld,
+    node_id: String,
+    answer: String,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let answer = answer
+        .parse::<FixtureAnswer>()
+        .unwrap_or_else(|_| panic!("unknown DNS fixture answer '{answer}'"));
+    world
+        .cluster()
+        .answer_node_name(&node_id, answer)
+        .unwrap_or_else(|error| {
+            panic!("the DNS fixture could not answer for '{node_id}': {error}")
+        });
+}
+
+#[given("the HTTP mock endpoint is published under fixture DNS")]
+async fn given_http_mock_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    const NAME: &str = "http-source.nervix.test";
+    let endpoint = world
+        .placeholders
+        .get("mock_http_addr")
+        .expect("the HTTP mock server was started");
+    let mut url = url::Url::parse(endpoint).expect("the HTTP mock address is a URL");
+    let address = url
+        .host_str()
+        .expect("the HTTP mock address has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the HTTP mock listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service(NAME, address)
+        .expect("the cluster has a DNS fixture");
+    url.set_host(Some(NAME))
+        .expect("the fixture name is a valid URL host");
+    world.placeholders.insert(
+        "mock_http_dns_addr".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+}
+
+#[then("the DNS fixture eventually receives a question for the HTTP mock")]
+async fn then_dns_fixture_queried_http_mock(world: &mut ScenarioWorld) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name("http-source.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+}
+
+#[given("the Iceberg endpoints are published under fixture DNS")]
+async fn given_iceberg_endpoints_have_fixture_dns(world: &mut ScenarioWorld) {
+    for (source, name, target) in [
+        (
+            "iceberg_rest_addr",
+            "iceberg-catalog.nervix.test",
+            "iceberg_rest_dns_addr",
+        ),
+        (
+            "rustfs_addr",
+            "iceberg-objects.nervix.test",
+            "rustfs_dns_addr",
+        ),
+    ] {
+        let endpoint = world
+            .placeholders
+            .get(source)
+            .expect("the Iceberg dependency was started");
+        let mut url = url::Url::parse(endpoint).expect("the Iceberg endpoint is a URL");
+        let address = url
+            .host_str()
+            .expect("the Iceberg endpoint has a host")
+            .parse::<std::net::IpAddr>()
+            .expect("the dependency listens on a literal address");
+        world
+            .cluster()
+            .publish_dns_service(name, address)
+            .expect("the cluster has a DNS fixture");
+        url.set_host(Some(name))
+            .expect("the fixture name is a valid URL host");
+        world.placeholders.insert(
+            target.to_string(),
+            url.to_string().trim_end_matches('/').to_string(),
+        );
+    }
+}
+
+#[then("the DNS fixture eventually receives Iceberg catalog and object-store questions")]
+async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let catalog = world
+                .cluster()
+                .dns_questions_for_name("iceberg-catalog.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            let objects = world
+                .cluster()
+                .dns_questions_for_name("iceberg-objects.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            if catalog > 0 && objects > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the Iceberg clients did not ask the configured DNS fixture within 30 seconds");
+}
+
+fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
+    let endpoint = world
+        .placeholders
+        .get(source)
+        .expect("the HTTP dependency was started");
+    let mut url = url::Url::parse(endpoint).expect("the HTTP endpoint is a URL");
+    let address = url
+        .host_str()
+        .expect("the HTTP endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the dependency listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service(name, address)
+        .expect("the cluster has a DNS fixture");
+    url.set_host(Some(name))
+        .expect("the fixture name is a valid URL host");
+    world.placeholders.insert(
+        target.to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+}
+
+#[given("the Prometheus endpoint is published under fixture DNS")]
+async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(
+        world,
+        "prometheus_addr",
+        "prometheus.nervix.test",
+        "prometheus_dns_addr",
+    );
+}
+
+#[given("the Sentry endpoint is published under fixture DNS")]
+async fn given_sentry_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
+}
+
+#[given("the OTEL HTTP endpoint is published under fixture DNS")]
+async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(
+        world,
+        "otel_collector_http_addr",
+        "otel-http.nervix.test",
+        "otel_collector_dns_addr",
+    );
+}
+
+#[then(expr = "the DNS fixture eventually receives a question for {string}")]
+async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name(&name)
+                .expect("the cluster has a DNS fixture");
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+}
+
+#[then("the DNS fixture received no questions for node names")]
+async fn then_the_dns_fixture_received_no_questions_for_node_names(world: &mut ScenarioWorld) {
+    let questions = world
+        .cluster()
+        .dns_questions_for_node_names()
+        .expect("the cluster is addressed by names");
+    assert_eq!(
+        questions, 0,
+        "nodes asked the DNS fixture for names the hosts file lists"
+    );
 }
 
 #[given("temporary files use a custom temp directory")]
@@ -6765,6 +7720,7 @@ async fn when_node_is_gracefully_stopped(world: &mut ScenarioWorld, node_id: Str
         world.cluster_config.graceful_shutdown_drain,
         "graceful shutdown drain must be configured before cluster startup"
     );
+    let node_id = expand_placeholders(world, &node_id);
     let started = Instant::now();
     world
         .cluster_mut()
@@ -7841,6 +8797,24 @@ async fn when_sink_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: 
     world
         .cluster()
         .clear_sink_client_fault_on_all_nodes(&emitter);
+}
+
+/// The sink still writes every record of the emitter's next write, but the emitter receives the
+/// answers for only the first `resolved` of them, as from a broker that stops answering after it
+/// accepted the rest, and retries the write as one whose outcome it never learned.
+#[when(
+    expr = "the sink of emitter {string} stalls after resolving {int} record(s) of its next \
+            publish"
+)]
+async fn when_emitter_sink_stalls_after_resolving(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    resolved: usize,
+) {
+    let emitter = expand_placeholders(world, &emitter);
+    world
+        .cluster()
+        .stall_emitter_sink_after_resolving_on_all_nodes(&emitter, resolved);
 }
 
 #[when(expr = "ingestor {string} enters fault mode")]
@@ -9292,20 +10266,34 @@ async fn when_these_nspl_commands_are_executed_through_the_client_on_a_follower_
     }
 }
 
-async fn connect_named_client_to_node(world: &mut ScenarioWorld, name: String, node_id: String) {
+async fn connect_named_client_to_node(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+    seed_nodes: Vec<String>,
+) {
     let name = expand_placeholders(world, &name);
     let node_id = expand_placeholders(world, &node_id);
     let grpc_uri = world
         .cluster()
         .grpc_uri(&node_id)
         .expect("failed to resolve client node gRPC URI");
-    let client = Client::connect_with_options(
-        &grpc_uri,
-        client_domain(&world.domain),
-        client_connect_options(&grpc_uri).expect("failed to build client tls options"),
-    )
-    .await
-    .unwrap_or_else(|error| panic!("failed to connect client '{name}' to '{node_id}': {error}"));
+    let mut options =
+        client_connect_options(&grpc_uri).expect("failed to build client tls options");
+    for seed_node in seed_nodes {
+        let seed_uri = world
+            .cluster()
+            .grpc_uri(&seed_node)
+            .expect("failed to resolve seed node gRPC URI");
+        options
+            .seed_servers
+            .push(url::Url::parse(&seed_uri).expect("cluster gRPC seed URIs are valid URLs"));
+    }
+    let client = Client::connect_with_options(&grpc_uri, client_domain(&world.domain), options)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to connect client '{name}' to '{node_id}': {error}")
+        });
     assert!(
         world
             .transaction_clients
@@ -9321,13 +10309,23 @@ async fn given_named_client_is_connected_to_node(
     name: String,
     node_id: String,
 ) {
-    connect_named_client_to_node(world, name, node_id).await;
+    connect_named_client_to_node(world, name, node_id, Vec::new()).await;
+}
+
+#[given(expr = "client {string} is connected to node {string} with cluster seeds")]
+async fn given_named_client_is_connected_with_cluster_seeds(
+    world: &mut ScenarioWorld,
+    name: String,
+    node_id: String,
+) {
+    let seeds = world.cluster().node_ids();
+    connect_named_client_to_node(world, name, node_id, seeds).await;
 }
 
 #[given(expr = "client {string} is connected to the leader node")]
 async fn given_named_client_is_connected_to_leader(world: &mut ScenarioWorld, name: String) {
     let leader = current_leader_node(world).await;
-    connect_named_client_to_node(world, name, leader).await;
+    connect_named_client_to_node(world, name, leader, Vec::new()).await;
 }
 
 #[given(
@@ -9432,6 +10430,7 @@ async fn when_named_client_submits_command_request(
         world.last_command_error = Some(outcome.message.clone());
     }
     world.last_client_outcome = Some(outcome);
+    world.last_client_request = Some(request);
 }
 
 #[when(expr = "client {string} fails to execute these NSPL commands")]
@@ -9830,6 +10829,70 @@ async fn then_last_accepted_operation_is(world: &mut ScenarioWorld, expected: us
     assert_eq!(admission.operation.get(), expected);
 }
 
+#[then(expr = "the last client request failed with one diagnostic spanning bytes {int} to {int}")]
+fn then_last_client_request_has_diagnostic_span(
+    world: &mut ScenarioWorld,
+    expected_start: u32,
+    expected_end: u32,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .verified("the scenario submitted a named client request above");
+    assert_eq!(
+        outcome.disposition,
+        nervix_client_core::CommandDisposition::Failed
+    );
+    assert_eq!(outcome.diagnostics.len(), 1);
+    let span = outcome.diagnostics[0]
+        .span
+        .verified("the parser diagnostic for this malformed command has a source span");
+    assert_eq!(span.start(), expected_start);
+    assert_eq!(span.end(), expected_end);
+}
+
+/// Reads the text the one diagnostic of the last failed client request underlines in the source
+/// that request submitted.
+#[then(expr = "the last client request diagnostic underlines {string}")]
+fn then_last_client_request_diagnostic_underlines(world: &mut ScenarioWorld, expected: String) {
+    let request = world
+        .last_client_request
+        .as_deref()
+        .verified("the scenario submitted a named client request above");
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .verified("the scenario submitted a named client request above");
+    assert_eq!(outcome.diagnostics.len(), 1, "{:?}", outcome.diagnostics);
+    let span = outcome.diagnostics[0]
+        .span
+        .verified("the diagnostic for this malformed request has a source span");
+    let start: usize = span.start().arch_into();
+    let end: usize = span.end().arch_into();
+    assert_eq!(
+        request.get(start..end),
+        Some(expected.as_str()),
+        "the diagnostic must underline the rejected text in the submitted request {request:?}"
+    );
+}
+
+#[then(expr = "the last client request diagnostic message contains {string}")]
+fn then_last_client_request_diagnostic_message_contains(
+    world: &mut ScenarioWorld,
+    expected: String,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .verified("the scenario submitted a named client request above");
+    assert_eq!(outcome.diagnostics.len(), 1, "{:?}", outcome.diagnostics);
+    let message = &outcome.diagnostics[0].message;
+    assert!(
+        message.contains(&expected),
+        "expected the diagnostic message to contain {expected:?}, got {message:?}"
+    );
+}
+
 /// Compares the typed inspection the last named client command carried with `field: value` lines.
 #[then("the last inspection reports")]
 async fn then_last_inspection_reports(world: &mut ScenarioWorld, #[step] step: &Step) {
@@ -9868,11 +10931,115 @@ async fn then_last_inspection_reports(world: &mut ScenarioWorld, #[step] step: &
                 None => "none".to_string(),
             },
             "report operations" => inspection.report.operations().len().to_string(),
+            "execution steps" => inspection.report.execution_steps().len().to_string(),
+            "applied steps" => inspection
+                .report
+                .execution_steps()
+                .iter()
+                .filter(|step| {
+                    matches!(
+                        &step.actual().outcome,
+                        nervix_models::ExecutionStepOutcome::Applied
+                    )
+                })
+                .count()
+                .to_string(),
             "quiesce level" => inspection.report.summary().level().as_str().to_string(),
             other => panic!("unknown inspection field '{other}'"),
         };
         assert_eq!(actual, value.trim(), "inspection field '{field}'");
     }
+}
+
+#[when("the CLI successfully executes this JSON inspection")]
+async fn when_cli_executes_json_inspection(world: &mut ScenarioWorld, #[step] step: &Step) {
+    run_cli_inspection(world, step, true, CliConnectionCase::Leader).await;
+}
+
+#[when("the CLI successfully executes this text inspection")]
+async fn when_cli_executes_text_inspection(world: &mut ScenarioWorld, #[step] step: &Step) {
+    run_cli_inspection(world, step, true, CliConnectionCase::Leader).await;
+}
+
+#[when("the CLI refuses this JSON inspection")]
+async fn when_cli_refuses_json_inspection(world: &mut ScenarioWorld, #[step] step: &Step) {
+    run_cli_inspection(world, step, false, CliConnectionCase::Leader).await;
+}
+
+#[when("the CLI executes this JSON inspection with a missing CA file")]
+async fn when_cli_json_inspection_has_missing_ca(world: &mut ScenarioWorld, #[step] step: &Step) {
+    run_cli_inspection(world, step, false, CliConnectionCase::MissingCa).await;
+}
+
+#[when("the CLI executes this JSON inspection with an invalid server URL")]
+async fn when_cli_json_inspection_has_invalid_server(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    run_cli_inspection(world, step, false, CliConnectionCase::InvalidServer).await;
+}
+
+#[derive(Clone, Copy)]
+enum CliConnectionCase {
+    Leader,
+    MissingCa,
+    InvalidServer,
+}
+
+async fn run_cli_inspection(
+    world: &mut ScenarioWorld,
+    step: &Step,
+    succeeds: bool,
+    connection: CliConnectionCase,
+) {
+    let leader = current_leader_node(world).await;
+    let grpc_uri = world
+        .cluster()
+        .grpc_uri(&leader)
+        .expect("the leader has a gRPC URI");
+    let executable = std::env::var_os("NERVIX_TEST_CLI_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+            target_dir.join("debug/nervix-cli")
+        });
+    let query = expand_placeholders(world, docstring(step));
+    let server = match connection {
+        CliConnectionCase::InvalidServer => "not-a-server-url",
+        CliConnectionCase::Leader | CliConnectionCase::MissingCa => &grpc_uri,
+    };
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .arg("--server")
+        .arg(server)
+        .arg("--domain")
+        .arg(&world.domain)
+        .arg("--username")
+        .arg(TEST_AUTH_USERNAME)
+        .arg("--password")
+        .arg(TEST_AUTH_PASSWORD)
+        .arg("--command")
+        .arg(query);
+    if let CliConnectionCase::MissingCa = connection {
+        command
+            .arg("--tls-ca-cert")
+            .arg("/nonexistent/nervix-ca.pem");
+    }
+    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .expect("the standalone CLI inspection finishes within one minute")
+        .expect("the standalone CLI process starts and returns");
+    let stdout = String::from_utf8(output.stdout).expect("JSON stdout is UTF-8");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.success(),
+        succeeds,
+        "CLI exit status for JSON inspection; stdout: {stdout}; stderr: {stderr}"
+    );
+    world.last_command_output = Some(stdout);
+    world.last_command_error = Some(stderr.into_owned());
 }
 
 /// Compares values in the JSON document the last command printed, one `pointer = literal` per line.
@@ -10439,6 +11606,235 @@ async fn read_transaction_impact_report(
         .map_err(|error| error.to_string())
 }
 
+#[given(expr = "a stopped transaction qualification graph with {int} relays is configured")]
+async fn given_stopped_transaction_qualification_graph(
+    world: &mut ScenarioWorld,
+    relay_count: usize,
+) {
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to open the transaction qualification setup session: {error}")
+        });
+    session
+        .run_command("CREATE SCHEMA qualification_event ( value I64 );")
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to create the transaction qualification schema: {error}")
+        });
+    for index in 0..relay_count {
+        tokio::task::consume_budget().await;
+        let relay = format!("qualification_relay_{index:04}");
+        let command =
+            format!("CREATE RELAY {relay} SCHEMA qualification_event UNBRANCHED CAPACITY 1;");
+        session
+            .run_command(&command)
+            .await
+            .unwrap_or_else(|error| panic!("failed to create relay '{relay}': {error}"));
+    }
+}
+
+#[given("the leader raft log position and retained bytes are remembered")]
+async fn given_leader_raft_log_retention_is_remembered(world: &mut ScenarioWorld) {
+    let leader = running_leader_node(world).await;
+    let retention_before = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader))
+        .raft_log_retention();
+    world.transaction_qualification = Some(TransactionQualificationObservation {
+        leader,
+        retention_before,
+        committed_inspection: None,
+    });
+}
+
+#[when(expr = "client {string} queues {int} transaction qualification schema changes")]
+async fn when_named_client_queues_transaction_qualification_changes(
+    world: &mut ScenarioWorld,
+    name: String,
+    change_count: usize,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_client_outcome = None;
+    let name = expand_placeholders(world, &name);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let begun = client
+        .execute("BEGIN;")
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' could not begin a transaction: {error}"));
+    assert!(
+        begun.succeeded(),
+        "client '{name}' must begin the qualification transaction: {}",
+        begun.message
+    );
+    for index in 0..change_count {
+        tokio::task::consume_budget().await;
+        let field = format!("qualification_field_{index:03}");
+        let command =
+            format!("ALTER SCHEMA qualification_event ADD FIELD {field} STRING OPTIONAL;");
+        let outcome = client
+            .execute(command.clone())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("client '{name}' qualification command failed: {command}: {error}")
+            });
+        assert!(
+            outcome.succeeded(),
+            "client '{name}' qualification command must succeed: {command}: {}",
+            outcome.message
+        );
+        world.last_command_output = Some(outcome.message.clone());
+        world.last_client_outcome = Some(outcome);
+    }
+}
+
+#[then(
+    expr = "the last JSON inspection matches its typed result, exceeds {int} bytes, and reports \
+            {int} operations and {int} execution steps"
+)]
+async fn then_last_json_inspection_is_complete_and_large(
+    world: &mut ScenarioWorld,
+    minimum_bytes: usize,
+    expected_operations: usize,
+    expected_steps: usize,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .verified("the scenario executed a transaction inspection above");
+    let inspection = outcome
+        .inspection
+        .as_ref()
+        .verified("the successful inspection carries its typed result");
+    let rendered: serde_json::Value =
+        serde_json::from_str(&outcome.message).assured("FORMAT JSON renders one JSON document");
+    let typed = serde_json::to_value(inspection)
+        .assured("a typed transaction inspection has a JSON representation");
+    assert_eq!(
+        rendered, typed,
+        "the JSON presentation must contain the exact typed inspection"
+    );
+    assert!(
+        outcome.message.len() > minimum_bytes,
+        "the expanded inspection must exceed {minimum_bytes} bytes, but contained {} bytes",
+        outcome.message.len()
+    );
+    assert_eq!(inspection.report.operations().len(), expected_operations);
+    assert_eq!(inspection.report.execution_steps().len(), expected_steps);
+}
+
+#[then(expr = "the remembered raft log grew by more than {int} bytes")]
+async fn then_remembered_raft_log_grew_by_more_than(world: &mut ScenarioWorld, minimum_bytes: u64) {
+    let observation = world
+        .transaction_qualification
+        .as_ref()
+        .verified("the scenario remembered the leader's Raft log before queueing");
+    let retention_after = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&observation.leader))
+        .raft_log_retention();
+    let growth = retention_after
+        .retained_bytes
+        .checked_sub(observation.retention_before.retained_bytes)
+        .assured("the default retention policy does not purge this bounded transaction range");
+    assert!(
+        growth > minimum_bytes,
+        "the committed transaction log range must exceed {minimum_bytes} bytes; it grew by \
+         {growth} bytes from {:?} to {:?}",
+        observation.retention_before,
+        retention_after
+    );
+    assert!(
+        retention_after.last_log_index > observation.retention_before.last_log_index,
+        "queueing the transaction must advance the committed log range"
+    );
+}
+
+#[then(
+    expr = "within {string} node {string} retains transaction {string} with {int} report \
+            operations"
+)]
+async fn then_node_retains_transaction_report(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    transaction_id: String,
+    expected_operations: usize,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&node_id));
+    let deadline =
+        Instant::now() + humantime::parse_duration(&duration).assured("the step duration is valid");
+    let mut observed = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' did not retain transaction '{transaction_id}' with \
+             {expected_operations} operations within {duration}; last observation: {observed}"
+        );
+        if let Some(transaction) = observer.current_transaction(&transaction_id).await {
+            if let Some(identity) = transaction.latest_preview() {
+                match observer.current_transaction_report(identity).await {
+                    Ok(report) if report.operations().len() == expected_operations => return,
+                    Ok(report) => {
+                        observed = format!("{} report operations", report.operations().len());
+                    }
+                    Err(error) => observed = error.to_string(),
+                }
+            } else {
+                observed = "transaction has no preview".to_string();
+            }
+        } else {
+            observed = "transaction is absent".to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then("the last transaction inspection is remembered for restart comparison")]
+async fn then_last_transaction_inspection_is_remembered(world: &mut ScenarioWorld) {
+    let inspection = world
+        .last_client_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.inspection.clone())
+        .verified("the preceding command returned a typed transaction inspection");
+    world
+        .transaction_qualification
+        .as_mut()
+        .verified("the scenario remembered its pre-transaction Raft state")
+        .committed_inspection = Some(inspection);
+}
+
+#[then("the last transaction inspection matches the report remembered before restart")]
+async fn then_last_transaction_inspection_matches_remembered(world: &mut ScenarioWorld) {
+    let actual = world
+        .last_client_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.inspection.as_ref())
+        .verified("the post-restart command returned a typed transaction inspection");
+    let expected = world
+        .transaction_qualification
+        .as_ref()
+        .and_then(|observation| observation.committed_inspection.as_ref())
+        .verified("the scenario remembered the committed inspection before restart");
+    assert_eq!(
+        actual, expected,
+        "restart must preserve the complete retained transaction report"
+    );
+}
+
 #[then(
     expr = "transaction {string} report step {int} eventually records planned quiesce {string}, \
             actual quiesce {string}, execution {string}, and outcomes {string}"
@@ -10677,6 +12073,31 @@ async fn when_selector_is_pressed_with(world: &mut ScenarioWorld, selector: Stri
         .press(&key, None)
         .await
         .expect("selector must accept key press");
+}
+
+#[when(expr = "the web console submits {string} {int} times")]
+async fn when_web_console_submits_repeatedly(
+    world: &mut ScenarioWorld,
+    command: String,
+    count: usize,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .assured("the scenario opened the console before submitting commands");
+    let command = expand_placeholders(world, &command);
+    let input = page.locator(".prompt-row input");
+    for _ in 0..count {
+        tokio::task::consume_budget().await;
+        input
+            .fill(&command, None)
+            .await
+            .unwrap_or_else(|error| panic!("console input could not be filled: {error}"));
+        input
+            .press("Enter", None)
+            .await
+            .unwrap_or_else(|error| panic!("console input could not be submitted: {error}"));
+    }
 }
 
 #[when(expr = "selector {string} is typed with {string}")]
@@ -11184,6 +12605,38 @@ async fn then_last_command_output_contains(world: &mut ScenarioWorld, #[step] st
     );
 }
 
+/// Runs `SHOW CREATE EMITTER` for every emitter the table names and requires its rendering to
+/// contain the clause beside it. The first row names the columns.
+#[then("SHOW CREATE EMITTER on the leader node renders these clauses")]
+async fn then_show_create_emitter_renders_these_clauses(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let table = step
+        .table
+        .as_ref()
+        .expect("the step lists each emitter with the clause it must render");
+    let leader = current_leader_node(world).await;
+    for row in table.rows.iter().skip(1) {
+        let [emitter, clause] = row.as_slice() else {
+            panic!("each row names an emitter and one clause, got {row:?}");
+        };
+        let output = world
+            .cluster()
+            .run_command(
+                &leader,
+                &world.domain,
+                &format!("SHOW CREATE EMITTER {emitter};"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("SHOW CREATE EMITTER {emitter} failed: {error}"));
+        assert!(
+            output.contains(clause.as_str()),
+            "expected SHOW CREATE EMITTER {emitter} to contain {clause:?}, got: {output}"
+        );
+    }
+}
+
 #[then("the last command output is saved as the relocation plan")]
 async fn then_last_command_output_is_saved_as_the_relocation_plan(world: &mut ScenarioWorld) {
     let output = world
@@ -11234,7 +12687,7 @@ async fn then_selector_contains_text_exactly_times(
     let page = world
         .browser_page
         .as_ref()
-        .expect("a browser page must be opened before selector assertions");
+        .assured("the scenario opened the console before asserting its elements");
     let selector = expand_placeholders(world, &selector);
     let expected = expand_placeholders(world, &expected);
     let locator = page.locator(&selector);
@@ -11257,6 +12710,29 @@ async fn then_selector_contains_text_exactly_times(
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+#[then(expr = "selector {string} has at most {int} elements")]
+async fn then_selector_has_at_most_elements(
+    world: &mut ScenarioWorld,
+    selector: String,
+    limit: usize,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .assured("the scenario opened the console before asserting its elements");
+    let selector = expand_placeholders(world, &selector);
+    let count = page
+        .locator(&selector)
+        .all_inner_texts()
+        .await
+        .unwrap_or_else(|error| panic!("selector text could not be read: {error}"))
+        .len();
+    assert!(
+        count <= limit,
+        "expected at most {limit} elements for '{selector}', got {count}"
+    );
 }
 
 #[then(expr = "selector {string} contains {string}")]
@@ -11411,6 +12887,48 @@ async fn then_selector_does_not_exist(world: &mut ScenarioWorld, selector: Strin
         if Instant::now() >= deadline {
             return;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "selector {string} exists")]
+async fn then_selector_exists(world: &mut ScenarioWorld, selector: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let script = format!(
+        r#"() => document.querySelector({selector}) ? 'OK' : 'selector is absent'"#,
+        selector = serde_json::to_string(&selector)
+            .assured("the test selector serializes as JavaScript string text")
+    );
+    assert_graph_probe(page, &script, &format!("selector '{selector}' to exist")).await;
+}
+
+#[then(expr = "selector {string} eventually disappears")]
+async fn then_selector_eventually_disappears(world: &mut ScenarioWorld, selector: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before selector assertions");
+    let selector = expand_placeholders(world, &selector);
+    let locator = page.locator(&selector);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let texts = locator
+            .all_inner_texts()
+            .await
+            .expect("selector text must be readable");
+        if texts.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected selector '{selector}' to disappear after its server acknowledgement, still \
+             showing {texts:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -12271,6 +13789,232 @@ async fn then_graph_geometry_does_not_change(world: &mut ScenarioWorld) {
         first, second,
         "statistics updates must not move the drawing"
     );
+}
+
+const INSPECTOR_GEOMETRY_SCRIPT: &str = r#"
+    () => JSON.stringify({
+        items: Array.from(document.querySelectorAll('.transaction-inspector .inspector-item'))
+            .map((item) => [item.dataset.kind, item.dataset.name, item.style.left, item.style.top]),
+        relations: Array.from(document.querySelectorAll('.transaction-inspector .inspector-edge'))
+            .map((edge) => [edge.dataset.source, edge.dataset.target, edge.dataset.relation, edge.getAttribute('d')])
+    })
+"#;
+
+#[when("the inspector geometry is remembered")]
+async fn when_inspector_geometry_is_remembered(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    world.inspector_geometry = Some(
+        page.evaluate::<(), String>(INSPECTOR_GEOMETRY_SCRIPT, None::<&()>)
+            .await
+            .expect("inspector geometry must be readable"),
+    );
+}
+
+#[then("the inspector geometry matches the remembered drawing")]
+async fn then_inspector_geometry_matches(world: &mut ScenarioWorld) {
+    let expected = world
+        .inspector_geometry
+        .as_ref()
+        .expect("inspector geometry must be remembered first");
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let actual = page
+        .evaluate::<(), String>(INSPECTOR_GEOMETRY_SCRIPT, None::<&()>)
+        .await
+        .expect("inspector geometry must be readable");
+    assert_eq!(
+        actual, *expected,
+        "switching impact views must keep geometry stable"
+    );
+}
+
+#[then("the inspector drawing fits its viewport")]
+async fn then_inspector_drawing_fits(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let script = r#"
+        () => {
+            const stage = document.querySelector('.inspector-stage');
+            const canvas = document.querySelector('.inspector-canvas');
+            if (!stage || !canvas) return 'inspector canvas is absent';
+            const frame = stage.getBoundingClientRect();
+            const drawing = canvas.getBoundingClientRect();
+            const margin = 3;
+            if (drawing.left < frame.left - margin || drawing.top < frame.top - margin ||
+                drawing.right > frame.right + margin || drawing.bottom > frame.bottom + margin) {
+                return `canvas ${drawing.left},${drawing.top},${drawing.right},${drawing.bottom} exceeds stage ${frame.left},${frame.top},${frame.right},${frame.bottom}`;
+            }
+            return 'OK';
+        }
+    "#;
+    assert_graph_probe(
+        page,
+        script,
+        "the impact canvas including any domain outline to fit",
+    )
+    .await;
+}
+
+#[then("inspector item labels and role marks do not overlap")]
+async fn then_inspector_item_labels_do_not_overlap(world: &mut ScenarioWorld) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let script = r#"
+        () => {
+            const items = document.querySelectorAll('.transaction-inspector .inspector-item');
+            if (!items.length) return 'inspector items are absent';
+            for (const item of items) {
+                const kind = item.querySelector('.inspector-kind');
+                const name = item.querySelector('.inspector-name');
+                const marks = item.querySelector('.inspector-marks');
+                if (!kind || !name || !marks || !kind.textContent.trim() || !name.textContent.trim()) {
+                    return `missing label for ${item.dataset.name}`;
+                }
+                if (kind.getBoundingClientRect().bottom > name.getBoundingClientRect().top + 1) {
+                    return `kind overlaps name for ${item.dataset.name}`;
+                }
+                if (marks.textContent.trim() && name.getBoundingClientRect().bottom > marks.getBoundingClientRect().top + 1) {
+                    return `name overlaps role marks for ${item.dataset.name}`;
+                }
+            }
+            return 'OK';
+        }
+    "#;
+    assert_graph_probe(
+        page,
+        script,
+        "inspector labels and role marks to remain separate",
+    )
+    .await;
+}
+
+#[then(expr = "inspector branch group {string} contains item {string}")]
+async fn then_inspector_branch_group_contains_item(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+) {
+    then_inspector_branch_group_containment(world, branch, item, true).await;
+}
+
+#[then(expr = "inspector branch group {string} does not contain item {string}")]
+async fn then_inspector_branch_group_does_not_contain_item(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+) {
+    then_inspector_branch_group_containment(world, branch, item, false).await;
+}
+
+async fn then_inspector_branch_group_containment(
+    world: &mut ScenarioWorld,
+    branch: String,
+    item: String,
+    expected: bool,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let branch = expand_placeholders(world, &branch);
+    let item = expand_placeholders(world, &item);
+    let script = format!(
+        r#"
+        () => {{
+            const group = document.querySelector(`.transaction-inspector .inspector-branch[data-branch=${{JSON.stringify({branch})}}]`);
+            const item = Array.from(document.querySelectorAll('.transaction-inspector .inspector-item'))
+                .find((candidate) => candidate.dataset.name === {item});
+            if (!group || !item) return `missing group=${{Boolean(group)}} item=${{Boolean(item)}}`;
+            const outline = group.getBoundingClientRect();
+            const box = item.getBoundingClientRect();
+            const centerX = (box.left + box.right) / 2;
+            const centerY = (box.top + box.bottom) / 2;
+            const contained = outline.left <= centerX && centerX <= outline.right &&
+                outline.top <= centerY && centerY <= outline.bottom;
+            return contained === {expected} ? 'OK' : `containment is ${{contained}}`;
+        }}
+        "#,
+        branch = serde_json::to_string(&branch).assured("a test branch serializes as JSON text"),
+        item = serde_json::to_string(&item).assured("a test item serializes as JSON text"),
+    );
+    assert_graph_probe(
+        page,
+        &script,
+        "an inspector branch group to hold exactly its members",
+    )
+    .await;
+}
+
+#[then(expr = "inspector search result {string} is visible in its viewport")]
+async fn then_inspector_search_result_is_visible(world: &mut ScenarioWorld, name: String) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let script = format!(
+        r#"
+        () => {{
+            const stage = document.querySelector('.inspector-stage');
+            const item = Array.from(document.querySelectorAll('.transaction-inspector .inspector-item'))
+                .find((item) => item.dataset.name === {name});
+            if (!stage || !item) return 'inspector search result is absent';
+            const frame = stage.getBoundingClientRect();
+            const result = item.getBoundingClientRect();
+            if (result.left < frame.left || result.top < frame.top ||
+                result.right > frame.right || result.bottom > frame.bottom) {{
+                return 'search result ' + [result.left, result.top, result.right, result.bottom] +
+                    ' is outside inspector viewport ' + [frame.left, frame.top, frame.right, frame.bottom];
+            }}
+            return 'OK';
+        }}
+        "#,
+        name = serde_json::to_string(&name).assured("a test name serializes as JSON text"),
+    );
+    assert_graph_probe(page, &script, "the inspector search result to be framed").await;
+}
+
+#[then(
+    expr = "inspector data and materialized-state routes from {string} to {string} are distinct"
+)]
+async fn then_inspector_parallel_relations_are_distinct(
+    world: &mut ScenarioWorld,
+    source: String,
+    target: String,
+) {
+    let page = world
+        .browser_page
+        .as_ref()
+        .expect("a browser page must be opened before inspector assertions");
+    let script = format!(
+        r#"
+        () => {{
+            const edges = Array.from(document.querySelectorAll('.transaction-inspector .inspector-edge'))
+                .filter((edge) => edge.dataset.source === {source} && edge.dataset.target === {target});
+            const data = edges.find((edge) => edge.dataset.relation === 'Topology(Dataflow)');
+            const state = edges.find((edge) => edge.dataset.relation === 'Topology(MaterializedState)');
+            if (!data || !state) return 'parallel relations are absent';
+            if (data.getAttribute('d') === state.getAttribute('d')) return 'parallel relations share a route';
+            return 'OK';
+        }}
+        "#,
+        source = serde_json::to_string(&source).assured("a test source serializes as JSON text"),
+        target = serde_json::to_string(&target).assured("a test target serializes as JSON text"),
+    );
+    assert_graph_probe(
+        page,
+        &script,
+        "parallel inspector relations to use separate routes",
+    )
+    .await;
 }
 
 /// Poll a probe that returns "OK" or a description of what is wrong.
@@ -14769,6 +16513,28 @@ async fn then_within_duration_describe_wasm_processor_on_leader_contains(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[then(expr = "the last client outcome reports WASM reset phase {string} at generation {int}")]
+fn then_last_client_outcome_reports_wasm_reset(
+    world: &mut ScenarioWorld,
+    phase: String,
+    generation: u64,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .assured("the preceding step executed a client command");
+    let state = outcome
+        .wasm_state
+        .as_ref()
+        .assured("the preceding command described a WASM processor");
+    let reset = state
+        .reset
+        .as_ref()
+        .assured("the preceding transaction published a WASM state reset");
+    assert_eq!(reset.reset.phase().as_ref(), phase);
+    assert_eq!(u64::from(reset.generation), generation);
 }
 
 /// Assert that one of two emitters reports the given text.
@@ -17432,6 +19198,117 @@ async fn then_named_client_receives_subscription_payload(
     world.last_subscription_payload = Some(payload);
 }
 
+#[when(
+    expr = "within {string} client {string} receives a subscription payload from repeated http \
+            posts to node {string} with host {string} path {string}"
+)]
+async fn when_named_client_receives_from_repeated_http_posts(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    node_id: String,
+    host: String,
+    path: String,
+    #[step] step: &Step,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the scenario delivery deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let node_id = expand_placeholders(world, &node_id);
+    let host = expand_placeholders(world, &host);
+    let path = expand_placeholders(world, &path);
+    let payload = expand_placeholders(world, docstring(step));
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let deadline = Instant::now() + duration;
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' did not receive a row from repeated posts within {duration:?}"
+        );
+        world
+            .cluster()
+            .publish_http(&node_id, &host, &path, &payload)
+            .await
+            .unwrap_or_else(|error| panic!("failed to post http payload: {error}"));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(Duration::from_secs(1));
+        match tokio::time::timeout(wait, client.next_subscription()).await {
+            Ok(Ok(nervix_client_core::SubscriptionEvent::Rows(rows))) => {
+                let lines = rows.display_lines().unwrap_or_else(|error| {
+                    panic!("client '{client_name}' rows do not render: {error}")
+                });
+                if let Some(line) = lines.into_iter().next() {
+                    world.last_subscription_payload = Some(line);
+                    return;
+                }
+            }
+            Ok(Ok(_)) | Err(_) => {}
+            Ok(Err(error)) => panic!("client '{client_name}' subscription stream closed: {error}"),
+        }
+    }
+}
+
+#[then(expr = "within {string} client {string} observes subscription {string} interrupted")]
+async fn then_named_client_observes_subscription_interrupted(
+    world: &mut ScenarioWorld,
+    duration: String,
+    client_name: String,
+    subscription_name: String,
+) {
+    let duration = humantime::parse_duration(&duration)
+        .assured("the interruption deadline is a valid duration");
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"))
+        .clone();
+    let event = tokio::time::timeout(duration, client.next_subscription())
+        .await
+        .unwrap_or_else(|_| panic!("client '{client_name}' did not report an interruption"))
+        .unwrap_or_else(|error| panic!("client '{client_name}' event failed: {error}"));
+    let nervix_client_core::SubscriptionEvent::Interrupted(interrupted) = event else {
+        panic!("client '{client_name}' did not report an interruption: {event:?}");
+    };
+    assert_eq!(interrupted.subscription.name.as_str(), subscription_name);
+}
+
+#[then(expr = "client {string} subscription {string} is active")]
+async fn then_named_client_subscription_is_active(
+    world: &mut ScenarioWorld,
+    client_name: String,
+    subscription_name: String,
+) {
+    let client_name = expand_placeholders(world, &client_name);
+    let subscription_name = expand_placeholders(world, &subscription_name);
+    let client = world
+        .transaction_clients
+        .get(&client_name)
+        .unwrap_or_else(|| panic!("client '{client_name}' must be connected"));
+    let name = nervix_models::SubscriptionName::parse(&subscription_name)
+        .assured("the scenario subscription name is valid");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        tokio::task::consume_budget().await;
+        let lifecycle = client.subscription_lifecycle(&name);
+        if let Some(nervix_client_core::SubscriptionLifecycle::Active(_)) = lifecycle {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client '{client_name}' subscription '{subscription_name}' did not become active: \
+             {lifecycle:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[then(expr = "node {string} eventually accepts websocket traffic for host {string} path {string}")]
 async fn then_node_eventually_accepts_websocket_traffic(
     world: &mut ScenarioWorld,
@@ -18502,8 +20379,53 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     duration: String,
     #[step] step: &Step,
 ) {
+    receive_subscription_fragment_sets(world, &duration, step).await;
+}
+
+/// Like the step above, and every payload matching a fragment set carries the same value in the
+/// named JSON field, such as the one error reference the members of a failed batch share.
+#[then(
+    expr = "within {string} the relay subscription receives payloads containing all fragments \
+            that share one {string}"
+)]
+async fn then_within_duration_the_stream_subscription_receives_fragments_sharing_one_field(
+    world: &mut ScenarioWorld,
+    duration: String,
+    field: String,
+    #[step] step: &Step,
+) {
+    let matched = receive_subscription_fragment_sets(world, &duration, step).await;
+    let values = matched
+        .iter()
+        .map(|payload| {
+            let payload: serde_json::Value =
+                serde_json::from_str(payload).unwrap_or_else(|error| {
+                    panic!("subscription payload {payload:?} is not JSON: {error}")
+                });
+            payload
+                .get(&field)
+                .cloned()
+                .unwrap_or_else(|| panic!("subscription payload {payload} has no field {field:?}"))
+        })
+        .collect::<Vec<_>>();
+    let Some(first) = values.first() else {
+        panic!("no subscription payload matched the expected fragment sets");
+    };
+    assert!(
+        values.iter().all(|value| value == first),
+        "payloads matching the fragment sets carry different {field:?} values: {values:?}"
+    );
+}
+
+/// Waits until every docstring line's `|`-separated fragments are all found in one subscription
+/// payload, and returns the payloads that matched, in the order they arrived.
+async fn receive_subscription_fragment_sets(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    step: &Step,
+) -> Vec<String> {
     let duration =
-        humantime::parse_duration(&duration).expect("step duration must be a valid duration");
+        humantime::parse_duration(duration).expect("step duration must be a valid duration");
     let expected_fragment_sets = docstring(step)
         .lines()
         .map(str::trim)
@@ -18529,6 +20451,7 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
     let deadline = Instant::now() + duration;
     let mut remaining = expected_fragment_sets;
     let mut observed = Vec::new();
+    let mut matched = Vec::new();
 
     while !remaining.is_empty() {
         let now = Instant::now();
@@ -18560,8 +20483,10 @@ async fn then_within_duration_the_stream_subscription_receives_payloads_containi
             .position(|fragments| fragments.iter().all(|fragment| payload.contains(fragment)))
         {
             remaining.remove(index);
+            matched.push(payload);
         }
     }
+    matched
 }
 
 #[then("the relay subscription does not receive a payload")]
@@ -19786,6 +21711,90 @@ async fn then_mongodb_collection_eventually_contains_document(
     }
 }
 
+/// Every docstring line is one expected document, as the JSON the other MongoDB assertions project
+/// each document to. The collection must hold exactly those documents, duplicates included, and
+/// still hold exactly them a moment later: a write the emitter must not repeat never arrives, so
+/// the closing check only strengthens the assertion.
+#[then("the MongoDB collection eventually holds exactly these documents")]
+async fn then_mongodb_collection_eventually_holds_exactly_these_documents(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let mut expected = Vec::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // A map keyed in sorted order makes one canonical text for equal documents, whatever order
+        // the docstring wrote their fields in.
+        let document: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(&expand_placeholders(world, line)).unwrap_or_else(|error| {
+                panic!("expected MongoDB document {line:?} is not a JSON object: {error}")
+            });
+        expected
+            .push(serde_json::to_string(&document).expect("a JSON object serializes back to JSON"));
+    }
+    expected.sort();
+    let collection = world
+        .mongodb_collection
+        .as_ref()
+        .expect("a MongoDB collection must be prepared before assertion")
+        .clone();
+    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
+        .await
+        .expect("failed to connect to MongoDB");
+    let collection = client
+        .database("nervix")
+        .collection::<MongoDbDocument>(&collection);
+    let read_documents = || async {
+        let documents = collection
+            .find(mongodb_doc! {})
+            .await
+            .expect("failed to query MongoDB collection")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("failed to read MongoDB documents");
+        let mut observed = Vec::with_capacity(documents.len());
+        for document in documents {
+            let mut projected = BTreeMap::new();
+            projected.insert(
+                "mongodb_action".to_string(),
+                serde_json::json!(document.get_str("mongodb_action").unwrap_or_default()),
+            );
+            projected.insert(
+                "mongodb_user_id".to_string(),
+                mongodb_document_user_id(&document),
+            );
+            observed.push(
+                serde_json::to_string(&projected).expect("a JSON object serializes back to JSON"),
+            );
+        }
+        observed.sort();
+        observed
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let observed = read_documents().await;
+        if observed == expected {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for exactly the expected MongoDB documents; expected {expected:?}, \
+             observed {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let observed = read_documents().await;
+    assert_eq!(
+        observed, expected,
+        "the MongoDB collection changed after it held exactly the expected documents"
+    );
+}
+
 #[then(expr = "the MongoDB collection eventually contains exactly {int} documents")]
 async fn then_mongodb_collection_eventually_contains_exactly_documents(
     world: &mut ScenarioWorld,
@@ -20726,6 +22735,156 @@ async fn then_within_duration_the_observed_broker_receives_exactly_messages(
     );
 }
 
+/// Every docstring line is one exact payload. The broker must deliver exactly those payloads, in
+/// any order, and nothing else: a payload the emitter was required to withhold must never arrive,
+/// so the closing window only strengthens the assertion.
+#[then(expr = "within {string} the observed broker receives exactly these payloads")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_payloads(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let payload = expand_placeholders(world, line);
+        *expected.entry(payload.into_bytes()).or_insert(0) += 1;
+    }
+    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+}
+
+/// Like the step above, for payloads that are not all text. Each docstring line is `text:`
+/// followed by the exact payload text, or `hex:` followed by the exact payload bytes in hex.
+#[then(expr = "within {string} the observed broker receives exactly these encoded payloads")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded_payloads(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let payload = if let Some(text) = line.strip_prefix("text:") {
+            expand_placeholders(world, text).into_bytes()
+        } else if let Some(hex) = line.strip_prefix("hex:") {
+            decode_hex_payload(hex)
+        } else {
+            panic!("encoded payload line must start with 'text:' or 'hex:', found {line:?}");
+        };
+        *expected.entry(payload).or_insert(0) += 1;
+    }
+    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+}
+
+fn decode_hex_payload(hex: &str) -> Vec<u8> {
+    let digits = hex
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<Vec<_>>();
+    assert!(
+        digits.len() % 2 == 0,
+        "hex payload must hold an even number of digits: {hex:?}"
+    );
+    digits
+        .chunks(2)
+        .map(|pair| {
+            let pair = pair.iter().collect::<String>();
+            u8::from_str_radix(&pair, 16)
+                .unwrap_or_else(|error| panic!("invalid hex byte {pair:?} in {hex:?}: {error}"))
+        })
+        .collect()
+}
+
+fn describe_broker_payload(payload: &[u8]) -> String {
+    let hex = payload
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!(
+        "{:?} (hex {hex}, {} bytes)",
+        String::from_utf8_lossy(payload),
+        payload.len()
+    )
+}
+
+async fn receive_exactly_these_broker_payloads(
+    world: &mut ScenarioWorld,
+    duration: &str,
+    mut remaining: BTreeMap<Vec<u8>, usize>,
+) {
+    let duration =
+        humantime::parse_duration(duration).expect("step duration must be a valid duration");
+    assert!(
+        !remaining.is_empty(),
+        "step docstring must contain at least one expected payload"
+    );
+    let describe_remaining = |remaining: &BTreeMap<Vec<u8>, usize>| {
+        remaining
+            .iter()
+            .map(|(payload, count)| format!("{count} x {}", describe_broker_payload(payload)))
+            .collect::<Vec<_>>()
+    };
+
+    let deadline = Instant::now() + duration;
+    let mut observed = Vec::new();
+    while !remaining.is_empty() {
+        tokio::task::consume_budget().await;
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for broker payloads; expected remaining {:?}, observed {observed:?}",
+            describe_remaining(&remaining)
+        );
+        let message = world
+            .broker_observer
+            .as_mut()
+            .expect("a broker observer must exist before assertion")
+            .try_next_message(deadline.saturating_duration_since(now))
+            .await
+            .expect("failed while waiting for exact broker payloads");
+        let Some(message) = message else {
+            panic!(
+                "timed out waiting for broker payloads; expected remaining {:?}, observed \
+                 {observed:?}",
+                describe_remaining(&remaining)
+            );
+        };
+        let Some(count) = remaining.get_mut(&message.bytes) else {
+            panic!(
+                "observed an unexpected broker payload {}; expected remaining {:?}, observed \
+                 before it {observed:?}",
+                describe_broker_payload(&message.bytes),
+                describe_remaining(&remaining)
+            );
+        };
+        *count -= 1;
+        if *count == 0 {
+            remaining.remove(&message.bytes);
+        }
+        world.last_broker_payload = Some(message.payload.clone());
+        observed.push(describe_broker_payload(&message.bytes));
+    }
+
+    let extra = world
+        .broker_observer
+        .as_mut()
+        .expect("a broker observer must exist before assertion")
+        .try_next_message(Duration::from_secs(2))
+        .await
+        .expect("failed while checking for an unexpected broker payload");
+    assert!(
+        extra.is_none(),
+        "observed a broker payload beyond the expected ones: {:?}; observed {observed:?}",
+        extra.map(|message| describe_broker_payload(&message.bytes))
+    );
+}
+
 #[then(
     expr = "within {string} the observed broker receives {int} messages in sequence by field \
             {string} with headers"
@@ -21063,6 +23222,31 @@ async fn run_dependency_lifecycle_helper(scope: String) -> SuiteOutcome {
     std::future::pending::<SuiteOutcome>().await
 }
 
+/// Stops every HTTP receiver the scenario started, together under one budget, and records how
+/// each stop went. A receiver's port goes back with the scenario's other fixture ports at the end
+/// of cleanup.
+async fn stop_http_receivers(world: &mut ScenarioWorld) {
+    let receivers = std::mem::take(&mut world.http_receivers);
+    let stops = join_all(receivers.into_iter().map(|(name, receiver)| async move {
+        let stop = receiver.stop().await;
+        (name, stop)
+    }))
+    .await;
+    for (name, stop) in stops {
+        append_cucumber_log_line(&format!("HTTP receiver cleanup: {name}: {stop}"));
+        if stop.was_forced() {
+            append_cucumber_log_line(&format!(
+                "scenario cleanup forced: HTTP receiver {name}: {stop}"
+            ));
+        }
+    }
+}
+
+const _: () = assert!(
+    RECEIVER_STOP_BUDGET.as_nanos() < CLUSTER_TEARDOWN_BUDGET.as_nanos(),
+    "stopping the HTTP receivers must cost less than stopping the cluster"
+);
+
 /// Everything a scenario run may be configured with beyond cucumber's own options.
 #[derive(Clone, Copy, Debug, clap::Args)]
 struct ScenarioRunArgs {
@@ -21077,7 +23261,8 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
         cucumber::cli::Opts::<_, cucumber::runner::basic::Cli, _, ScenarioRunArgs>::parsed();
     if cli.tags_filter.is_none() {
         cli.tags_filter = Some(
-            "(not @client_wire_expected_failure) and (not @client_wire_baseline)"
+            "(not @client_wire_expected_failure) and (not @client_wire_baseline) and (not \
+             @http_emitter_expected_failure) and (not @client_conformance_toolchain)"
                 .parse()
                 .assured("the built-in opt-in scenario tag expression is valid"),
         );
@@ -21196,6 +23381,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.fault_injection.release_all_health_responses();
                 world.fault_injection.release_all_domain_clock_progress();
                 world.fault_injection.release_all_command_pauses();
+                world.fault_injection.release_all_wasm_checkpoint_pauses();
 
                 world.enter_phase(ScenarioPhase::Diagnostics, "");
                 // Scenarios run many at a time, so a status line says which scenario left it.
@@ -21218,11 +23404,15 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 ));
 
                 world.enter_phase(ScenarioPhase::Stopping, "");
+                world.cli_subscription_reader = None;
+                world.cli_subscription_process = None;
+                world.cli_subscription_lines = None;
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
+                stop_http_receivers(world).await;
                 close_browser(world).await;
                 world.active_session = None;
                 world.active_session_node = None;

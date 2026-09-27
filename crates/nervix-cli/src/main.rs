@@ -10,6 +10,7 @@
 //!   else.
 
 use std::{
+    collections::BTreeSet,
     io::{self, Write},
     ops::Range,
     path::{Path, PathBuf},
@@ -24,20 +25,21 @@ use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 use byte_unit::{Byte, UnitType};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
-use error_stack::Report as StackReport;
+use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_client_core::{
-    AutocompleteSuggestion, Client, ClientError as CoreClientError, CommandDisposition,
-    CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic, DomainName,
-    LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition, StatementOutcome,
-    SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
+    AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
+    CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic,
+    DomainName, LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition,
+    StatementOutcome, SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
     SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
     TransactionStatus,
 };
-use nervix_models::ClusterNodeName;
+use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
-    parse_client_statements, parse_upload_resource_query, upload_resource_path_fragment,
+    ClientStatement, parse_client_statements, parse_upload_resource_query,
+    upload_resource_path_fragment, upload_resource_path_range,
 };
-use nervix_recovery::{Discarded as _, NoReceiver as _, Reported as _};
+use nervix_recovery::{Discarded as _, Reported as _};
 use reedline::{
     Completer, DefaultHinter, DefaultPrompt, DefaultPromptSegment, Emacs, FileBackedHistory,
     KeyCode, KeyModifiers, ListMenu, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal,
@@ -48,6 +50,13 @@ use tokio::{runtime::Handle, signal, task::block_in_place};
 use triomphe::Arc;
 
 const HISTORY_FILE: &str = ".nervix_client_history";
+const EVENT_BUFFER_RECORDS: usize = 128;
+const EVENT_LINE_BYTES: usize = 8 * 1024;
+const EVENT_BUFFER_BYTES: usize = EVENT_BUFFER_RECORDS * EVENT_LINE_BYTES;
+const EVENT_LINE_SUFFIX: &str = "… [line truncated]";
+const EVENT_LINE_PREFIX_BYTES: usize = EVENT_LINE_BYTES - EVENT_LINE_SUFFIX.len();
+const _: () = assert!(EVENT_LINE_BYTES > EVENT_LINE_SUFFIX.len());
+const _: () = assert!(EVENT_BUFFER_BYTES == 1024 * 1024);
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "nervix-cli")]
@@ -72,8 +81,14 @@ struct Args {
     #[arg(long, env = "NERVIX_PASSWORD")]
     password: Option<String>,
     /// Run NSPL statements once and exit instead of starting the interactive REPL
-    #[arg(long)]
+    #[arg(long, conflicts_with = "suggest")]
     command: Option<String>,
+    /// Print completion candidates for NSPL input as JSON and exit
+    #[arg(long, conflicts_with = "command")]
+    suggest: Option<String>,
+    /// UTF-8 byte cursor in --suggest input; defaults to the end
+    #[arg(long, requires = "suggest")]
+    cursor: Option<usize>,
     #[command(subcommand)]
     subcommand: Option<Command>,
 }
@@ -150,8 +165,44 @@ enum ClientError {
     ReadLine,
     #[error("failed to read password")]
     ReadPassword,
-    #[error("invalid subscription WHERE expression: {reason}")]
-    InvalidSubscriptionWhere { reason: String },
+    #[error("invalid subscription WHERE expression")]
+    InvalidSubscriptionWhere,
+    #[error("transaction inspection failed: {message}")]
+    InspectionFailed { message: String },
+    #[error("completion pagination repeated a continuation")]
+    RepeatedSuggestionPage,
+}
+
+async fn collect_suggestions(
+    client: &Client,
+    input: String,
+    cursor: usize,
+) -> Result<AutocompleteOutcome, StackReport<ClientError>> {
+    let mut continuation = None;
+    let mut seen = BTreeSet::new();
+    let mut suggestions = Vec::new();
+    loop {
+        tokio::task::consume_budget().await;
+        let page = client
+            .suggest(input.clone(), cursor, 100, continuation.take())
+            .await
+            .map_err(|error| StackReport::new(ClientError::from(error)))?;
+        if page.status != nervix_client_core::SuggestionStatus::Ready {
+            return Ok(page);
+        }
+        suggestions.extend(page.suggestions);
+        let Some(next) = page.continuation else {
+            return Ok(AutocompleteOutcome {
+                status: nervix_client_core::SuggestionStatus::Ready,
+                suggestions,
+                continuation: None,
+            });
+        };
+        if !seen.insert(next.clone()) {
+            return Err(StackReport::new(ClientError::RepeatedSuggestionPage));
+        }
+        continuation = Some(next);
+    }
 }
 
 impl Completer for GrpcCompleter {
@@ -160,17 +211,24 @@ impl Completer for GrpcCompleter {
             Ok(prefix) => prefix.clone(),
             Err(_) => String::new(),
         };
-        let combined = format!("{}{}", prefix, &line[..pos.min(line.len())]);
-        let cursor = combined.len();
+        let pos = line.floor_char_boundary(pos.min(line.len()));
+        let Some(cursor) = prefix.len().checked_add(pos) else {
+            return Vec::new();
+        };
+        let combined = format!("{prefix}{line}");
         let client = self.client.clone();
         let runtime = self.runtime.clone();
 
-        let suggestions = block_in_place(|| {
-            runtime.block_on(async move { client.suggest(combined, cursor).await.ok() })
-        })
-        .unwrap_or_default();
+        let outcome =
+            block_in_place(|| runtime.block_on(collect_suggestions(&client, combined, cursor)));
+        let Ok(outcome) = outcome else {
+            return Vec::new();
+        };
+        if outcome.status != nervix_client_core::SuggestionStatus::Ready {
+            return Vec::new();
+        }
+        let suggestions = outcome.suggestions;
 
-        let start = word_start(line, pos);
         if suggestions
             .iter()
             .any(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup)
@@ -178,35 +236,61 @@ impl Completer for GrpcCompleter {
             let lookup_hint = suggestions
                 .iter()
                 .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
-            if let Some(local) = complete_local_upload_paths(line, pos, lookup_hint) {
+            if let Some(local) = complete_local_upload_paths(line, pos, prefix.len(), lookup_hint) {
                 return local;
             }
         }
 
-        suggestions
-            .into_iter()
-            .filter(|suggestion| suggestion.kind == ClientSuggestionKind::Text)
-            .map(|suggestion| Suggestion {
-                value: suggestion.value,
-                description: None,
-                style: None,
-                extra: None,
-                span: reedline::Span::new(start, pos),
-                append_whitespace: true,
-            })
-            .collect()
+        Self::text_suggestions(line, prefix.len(), suggestions)
     }
 }
 
-fn word_start(line: &str, pos: usize) -> usize {
-    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let boundary = line[..pos.min(line.len())]
-        .char_indices()
-        .rev()
-        .find(|(_, c)| !is_word(*c));
-    match boundary {
-        Some((index, character)) => index + character.len_utf8(),
-        None => 0,
+impl GrpcCompleter {
+    fn text_suggestions(
+        line: &str,
+        buffer_prefix_len: usize,
+        suggestions: Vec<AutocompleteSuggestion>,
+    ) -> Vec<Suggestion> {
+        suggestions
+            .into_iter()
+            .filter(|suggestion| suggestion.kind == ClientSuggestionKind::Text)
+            .filter_map(|suggestion| {
+                let start = usize::try_from(suggestion.edit.start).ok()?;
+                let end = usize::try_from(suggestion.edit.end).ok()?;
+                let start = start.checked_sub(buffer_prefix_len)?;
+                let end = end.checked_sub(buffer_prefix_len)?;
+                if start > end || line.get(start..end).is_none() {
+                    return None;
+                }
+                Some(Suggestion {
+                    value: suggestion.edit.replacement,
+                    description: Some(suggestion.value),
+                    style: None,
+                    extra: None,
+                    span: reedline::Span::new(start, end),
+                    append_whitespace: end == line.len(),
+                })
+            })
+            .collect()
+    }
+
+    fn local_path_range(
+        line: &str,
+        pos: usize,
+        buffer_prefix_len: usize,
+        hint: &AutocompleteSuggestion,
+    ) -> Option<std::ops::Range<usize>> {
+        let start = usize::try_from(hint.edit.start)
+            .ok()?
+            .checked_sub(buffer_prefix_len)?;
+        let end = usize::try_from(hint.edit.end)
+            .ok()?
+            .checked_sub(buffer_prefix_len)?;
+        line.get(start..end)?;
+        if end < pos || line.get(start..pos)? != hint.value {
+            return None;
+        }
+        Some(start..end)
     }
 }
 
@@ -294,14 +378,69 @@ async fn main() -> Result<(), StackReport<ClientError>> {
         None => {}
     }
 
+    if let Some(command) = args.command.as_deref()
+        && is_json_inspection_command(command)
+    {
+        return run_json_inspection_mode(&args, command).await;
+    }
+
     let connect_options = connect_options_from_args(&args)?;
     let client =
         Client::connect_with_options(&args.server, Some(args.domain.clone()), connect_options)
             .await
             .map_err(|err| StackReport::new(ClientError::from(err)))?;
-    let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
-    spawn_event_collectors(client.clone(), event_sender);
-
+    if let Some(input) = args.suggest.as_deref() {
+        let cursor = args.cursor.unwrap_or(input.len());
+        let outcome = collect_suggestions(&client, input.to_string(), cursor).await?;
+        let local_hint = outcome
+            .suggestions
+            .iter()
+            .find(|suggestion| suggestion.kind == ClientSuggestionKind::LocalDirectoryLookup);
+        let suggestions = if let Some(hint) = local_hint {
+            complete_local_upload_paths(input, cursor, 0, Some(hint))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|suggestion| {
+                    serde_json::json!({
+                        "value": suggestion.value,
+                        "kind": "LocalDirectoryLookup",
+                        "edit": {
+                            "start": suggestion.span.start,
+                            "end": suggestion.span.end,
+                            "replacement": suggestion.value,
+                        },
+                    })
+                })
+                .collect::<Vec<_>>()
+        } else {
+            outcome
+                .suggestions
+                .iter()
+                .map(|suggestion| {
+                    serde_json::json!({
+                        "value": suggestion.value,
+                        "kind": format!("{:?}", suggestion.kind),
+                        "edit": {
+                            "start": suggestion.edit.start,
+                            "end": suggestion.edit.end,
+                            "replacement": suggestion.edit.replacement,
+                        },
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": format!("{:?}", outcome.status),
+                "suggestions": suggestions,
+            })
+        );
+        return Ok(());
+    }
+    let (event_sender, mut event_receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+    let event_sender = EventLineSender::new(event_sender);
+    spawn_event_collectors(client.clone(), event_sender.clone());
     if let Some(command) = args.command {
         execute_and_print(&client, command).await?;
         return Ok(());
@@ -325,7 +464,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
             client.domain().await.as_ref(),
             client.transaction_status().await.as_ref(),
         );
-        drain_event_queue(&mut event_receiver);
+        drain_event_queue(&mut event_receiver, &event_sender);
         let prompt = if buffer.is_empty() {
             DefaultPrompt::new(
                 DefaultPromptSegment::Basic(format!("nervix[{prompt_domain}]")),
@@ -364,7 +503,7 @@ async fn main() -> Result<(), StackReport<ClientError>> {
                 if command_buffer_is_complete(&buffer) {
                     let payload = std::mem::take(&mut buffer);
                     execute_and_print(&client, payload).await?;
-                    drain_event_queue(&mut event_receiver);
+                    drain_event_queue(&mut event_receiver, &event_sender);
                 }
             }
             Ok(Signal::CtrlD) | Ok(Signal::CtrlC) => break,
@@ -376,6 +515,74 @@ async fn main() -> Result<(), StackReport<ClientError>> {
     }
 
     Ok(())
+}
+
+/// A one-shot JSON inspection reserves stdout for exactly one machine-readable document.
+fn is_json_inspection_command(query: &str) -> bool {
+    let Ok(statements) = parse_client_statements(query) else {
+        return false;
+    };
+    let [ClientStatement::Server(Statement::DescribeTransaction(describe))] = statements.as_slice()
+    else {
+        return false;
+    };
+    describe.format == InspectionFormat::Json
+}
+
+async fn run_json_inspection_mode(
+    args: &Args,
+    query: &str,
+) -> Result<(), StackReport<ClientError>> {
+    let options = match connect_options_from_args(args) {
+        Ok(options) => options,
+        Err(error) => {
+            print_json_inspection_error("CLIENT_CONFIGURATION", &error.to_string());
+            return Err(error);
+        }
+    };
+    let client = match Client::connect_with_options(
+        &args.server,
+        Some(args.domain.clone()),
+        options,
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(error) => {
+            print_json_inspection_error("CONNECTION_FAILED", &error.to_string());
+            return Err(StackReport::new(ClientError::from(error)));
+        }
+    };
+    spawn_event_loggers(client.clone(), EventOutput::Stderr);
+    let outcome = match client.execute(query).await {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            print_json_inspection_error("REQUEST_FAILED", &error.to_string());
+            return Err(StackReport::new(ClientError::from(error)));
+        }
+    };
+    if !outcome.succeeded() {
+        print_json_inspection_error("INSPECTION_REFUSED", &outcome.message);
+        return Err(StackReport::new(ClientError::InspectionFailed {
+            message: outcome.message,
+        }));
+    }
+    if outcome.inspection.is_none() {
+        let message = "the inspection response contained no typed report";
+        print_json_inspection_error("REPORT_MISSING", message);
+        return Err(StackReport::new(ClientError::InspectionFailed {
+            message: message.to_string(),
+        }));
+    }
+    println!("{}", outcome.message);
+    Ok(())
+}
+
+fn print_json_inspection_error(code: &str, message: &str) {
+    println!(
+        "{}",
+        serde_json::json!({ "error": { "code": code, "message": message } })
+    );
 }
 
 fn create_line_editor(completer: GrpcCompleter) -> Result<Reedline, StackReport<ClientError>> {
@@ -408,12 +615,11 @@ fn create_line_editor(completer: GrpcCompleter) -> Result<Reedline, StackReport<
 fn complete_local_upload_paths(
     line: &str,
     pos: usize,
+    buffer_prefix_len: usize,
     lookup_hint: Option<&AutocompleteSuggestion>,
 ) -> Option<Vec<Suggestion>> {
     let hinted = match lookup_hint {
-        Some(hint)
-            if !hint.value.is_empty() || line[..pos.min(line.len())].contains(" VERSION '") =>
-        {
+        Some(hint) if !hint.value.is_empty() || line.get(..pos)?.contains(" VERSION '") => {
             Some(hint.value.as_str())
         }
         _ => None,
@@ -422,9 +628,12 @@ fn complete_local_upload_paths(
         Some(path_fragment) => path_fragment,
         None => upload_resource_path_fragment(line, pos)?,
     };
-    // The suggested fragment may be longer than the text typed so far, in which case the
-    // replacement span starts at the beginning of the line.
-    let span_start = pos.saturating_sub(path_fragment.len());
+    let hinted_range = match lookup_hint {
+        Some(hint) => GrpcCompleter::local_path_range(line, pos, buffer_prefix_len, hint),
+        None => None,
+    };
+    let local_range = upload_resource_path_range(line, pos);
+    let replacement_range = hinted_range.or(local_range).unwrap_or(0..pos);
     let path = Path::new(path_fragment);
     let (base_dir, partial_name) = if path_fragment.is_empty() {
         (PathBuf::from("."), String::new())
@@ -432,8 +641,8 @@ fn complete_local_upload_paths(
         (expand_user_path(path), String::new())
     } else {
         let parent = match path.parent() {
-            Some(parent) => parent.to_path_buf(),
-            None => PathBuf::from("."),
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            Some(_) | None => PathBuf::from("."),
         };
         let file_name = match path.file_name() {
             Some(name) => name.to_string_lossy().to_string(),
@@ -479,7 +688,7 @@ fn complete_local_upload_paths(
             description: None,
             style: None,
             extra: None,
-            span: reedline::Span::new(span_start, pos),
+            span: reedline::Span::new(replacement_range.start, replacement_range.end),
             append_whitespace: false,
         });
     }
@@ -534,15 +743,14 @@ async fn run_subscribe_mode(options: SubscribeModeOptions) -> Result<(), StackRe
     )
     .await
     .map_err(|err| StackReport::new(ClientError::from(err)))?;
-    spawn_event_loggers(client.clone());
+    spawn_event_loggers(client.clone(), EventOutput::Stdout);
     let request = subscribe_request(
         &options.name,
         &options.relay,
         options.delivery_behavior,
         options.batch_sample_rate.as_deref(),
         options.where_clause.as_deref(),
-    )
-    .map_err(|reason| StackReport::new(ClientError::InvalidSubscriptionWhere { reason }))?;
+    )?;
     let query = request.to_query();
     let result = client
         .subscribe(&request)
@@ -848,16 +1056,82 @@ fn human_bytes(bytes: u64) -> String {
     format!("{adjusted:.1}")
 }
 
-fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::UnboundedSender<String>) {
+#[derive(Clone)]
+struct EventLineSender {
+    sender: tokio::sync::mpsc::Sender<String>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl EventLineSender {
+    fn new(sender: tokio::sync::mpsc::Sender<String>) -> Self {
+        Self {
+            sender,
+            dropped: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Event readers never wait for a terminal. A full queue drops the new line and records the
+    /// gap for the printer; every retained line has a fixed maximum byte length.
+    fn push(&self, mut line: String) {
+        if line.len() > EVENT_LINE_BYTES {
+            let boundary = line.floor_char_boundary(EVENT_LINE_PREFIX_BYTES);
+            line.truncate(boundary);
+            line.push_str(EVENT_LINE_SUFFIX);
+        }
+        match self.sender.try_send(line) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.dropped
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                        // The displayed gap count clamps once it reaches its representable limit.
+                        Some(match count.checked_add(1) {
+                            Some(next) => next,
+                            None => count,
+                        })
+                    })
+                    .discarded("the updated drop count is read when the terminal next drains");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    fn take_dropped(&self) -> u64 {
+        self.dropped.swap(0, Ordering::Relaxed)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EventOutput {
+    Stdout,
+    Stderr,
+}
+
+impl EventOutput {
+    fn print(self, line: &str) {
+        match self {
+            Self::Stdout => println!("{line}"),
+            Self::Stderr => eprintln!("{line}"),
+        }
+    }
+}
+
+fn print_event_gap(dropped: u64, output: EventOutput) {
+    if dropped > 0 {
+        output.print(&format!(
+            "[events] notice: {dropped} event lines were omitted because terminal output could \
+             not keep up"
+        ));
+    }
+}
+
+fn spawn_event_collectors(client: Client, sender: EventLineSender) {
     let subscription_client = client.clone();
     let subscription_sender = sender.clone();
     tokio::spawn(async move {
         while let Ok(event) = subscription_client.next_subscription().await {
             tokio::task::consume_budget().await;
             for line in format_subscription_event(&event) {
-                subscription_sender
-                    .send(line)
-                    .means_shutdown("terminal event printer");
+                subscription_sender.push(line);
             }
         }
     });
@@ -865,36 +1139,33 @@ fn spawn_event_collectors(client: Client, sender: tokio::sync::mpsc::UnboundedSe
     tokio::spawn(async move {
         while let Ok(event) = client.next_server_event().await {
             tokio::task::consume_budget().await;
-            sender
-                .send(format_server_event(&event))
-                .means_shutdown("terminal event printer");
+            sender.push(format_server_event(&event));
         }
     });
 }
 
-fn spawn_event_loggers(client: Client) {
-    let subscription_client = client.clone();
-    tokio::spawn(async move {
-        while let Ok(event) = subscription_client.next_subscription().await {
-            tokio::task::consume_budget().await;
-            for line in format_subscription_event(&event) {
-                println!("{line}");
-            }
+fn spawn_event_loggers(client: Client, output: EventOutput) {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+    let sender = EventLineSender::new(sender);
+    let dropped = sender.dropped.clone();
+    spawn_event_collectors(client, sender);
+    tokio::task::spawn_blocking(move || {
+        while let Some(line) = receiver.blocking_recv() {
+            print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
+            output.print(&line);
         }
-    });
-
-    tokio::spawn(async move {
-        while let Ok(event) = client.next_server_event().await {
-            tokio::task::consume_budget().await;
-            println!("{}", format_server_event(&event));
-        }
+        print_event_gap(dropped.swap(0, Ordering::Relaxed), output);
     });
 }
 
-fn drain_event_queue(receiver: &mut tokio::sync::mpsc::UnboundedReceiver<String>) {
-    while let Ok(line) = receiver.try_recv() {
-        println!("{line}");
+fn drain_event_queue(receiver: &mut tokio::sync::mpsc::Receiver<String>, sender: &EventLineSender) {
+    for _ in 0..EVENT_BUFFER_RECORDS {
+        let Ok(line) = receiver.try_recv() else {
+            break;
+        };
+        EventOutput::Stdout.print(&line);
     }
+    print_event_gap(sender.take_dropped(), EventOutput::Stdout);
 }
 
 /// The terminal lines of one subscription event: one line per row of a batch, or one notice.
@@ -929,6 +1200,14 @@ fn format_subscription_event(event: &SubscriptionEvent) -> Vec<String> {
         SubscriptionEvent::Ended(ended) => vec![format!(
             "[events] subscription [{subscription}] notice: the subscription ended: {}",
             ended.message
+        )],
+        SubscriptionEvent::Interrupted(_) => vec![format!(
+            "[events] subscription [{subscription}] notice: delivery was interrupted; rows may be \
+             missing before restoration"
+        )],
+        SubscriptionEvent::ConsumerOverflow(_) => vec![format!(
+            "[events] subscription [{subscription}] notice: the client event buffer filled; \
+             delivery ended with a gap"
         )],
     }
 }
@@ -977,7 +1256,7 @@ fn subscribe_request(
     delivery_behavior: SubscriptionDeliveryBehavior,
     batch_sample_rate: Option<&str>,
     where_clause: Option<&str>,
-) -> Result<SubscriptionRequest, String> {
+) -> Result<SubscriptionRequest, StackReport<ClientError>> {
     let request = match delivery_behavior {
         SubscriptionDeliveryBehavior::Blocking => SubscriptionRequest::new(name, relay).blocking(),
         SubscriptionDeliveryBehavior::Dropping => SubscriptionRequest::new(name, relay).dropping(),
@@ -986,14 +1265,12 @@ fn subscribe_request(
         Some(batch_sample_rate) => request.with_batch_sample_rate(batch_sample_rate),
         None => request,
     };
-    where_clause
-        .map(nervix_nspl::parse_expression)
-        .transpose()
-        .map_err(|error| format!("invalid subscription WHERE expression: {error:?}"))
-        .map(|where_clause| match where_clause {
-            Some(where_clause) => request.with_where_clause(where_clause),
-            None => request,
-        })
+    let Some(where_clause) = where_clause else {
+        return Ok(request);
+    };
+    let where_clause = nervix_nspl::parse_expression(where_clause)
+        .change_context(ClientError::InvalidSubscriptionWhere)?;
+    Ok(request.with_where_clause(where_clause))
 }
 
 fn print_diagnostics(source_id: &str, source: &str, diagnostics: &[Diagnostic]) {
@@ -1043,6 +1320,73 @@ mod tests {
     use meticulous::{OptionExt as _, ResultExt as _};
 
     use super::*;
+
+    #[test]
+    fn event_line_queue_bounds_records_and_bytes_without_waiting_for_the_printer() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(EVENT_BUFFER_RECORDS);
+        let sink = EventLineSender::new(sender);
+        for _ in 0..EVENT_BUFFER_RECORDS {
+            sink.push("é".repeat(EVENT_LINE_BYTES));
+        }
+        sink.push("one more line".to_string());
+        assert_eq!(sink.take_dropped(), 1);
+        let mut retained_bytes = 0;
+        for _ in 0..EVENT_BUFFER_RECORDS {
+            let line = receiver
+                .try_recv()
+                .verified("the test filled the bounded queue with this many lines");
+            assert!(line.len() <= EVENT_LINE_BYTES);
+            assert!(line.ends_with(EVENT_LINE_SUFFIX));
+            retained_bytes += line.len();
+        }
+        assert!(retained_bytes <= EVENT_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn draining_events_resets_the_visible_gap_after_a_full_queue() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let sink = EventLineSender::new(sender);
+        sink.push("first".to_string());
+        sink.push("second".to_string());
+        sink.push("dropped".to_string());
+
+        drain_event_queue(&mut receiver, &sink);
+
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            sink.take_dropped(),
+            0,
+            "the gap was reported during the drain"
+        );
+    }
+
+    #[test]
+    fn an_event_gap_clamps_and_a_closed_printer_discards_new_lines() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let sink = EventLineSender::new(sender);
+        sink.push("retained".to_string());
+        sink.dropped.store(u64::MAX, Ordering::Relaxed);
+        sink.push("overflow".to_string());
+        assert_eq!(sink.take_dropped(), u64::MAX);
+
+        drop(receiver);
+        sink.push("printer stopped".to_string());
+        assert_eq!(sink.take_dropped(), 0);
+    }
+
+    #[test]
+    fn one_shot_json_mode_requires_one_complete_inspection_statement() {
+        assert!(is_json_inspection_command(
+            "DESCRIBE TRANSACTION 'tx-1' OPERATION 1 FORMAT JSON;"
+        ));
+        assert!(!is_json_inspection_command("DESCRIBE TRANSACTION;"));
+        assert!(!is_json_inspection_command(
+            "DESCRIBE TRANSACTION FORMAT JSON; SHOW TRANSACTIONS;"
+        ));
+        assert!(!is_json_inspection_command(
+            "DESCRIBE TRANSACTION FORMAT JSON; ???"
+        ));
+    }
 
     #[test]
     fn args_defaults_are_applied_without_subcommand() {
@@ -1199,11 +1543,24 @@ mod tests {
     }
 
     #[test]
-    fn word_start_tracks_identifier_boundaries() {
-        assert_eq!(word_start("CREATE SCHE", "CREATE SCHE".len()), 7);
-        assert_eq!(word_start("tenant_id", "tenant_id".len()), 0);
-        assert_eq!(word_start("WHERE (tenant", "WHERE (tenant".len()), 7);
-        assert_eq!(word_start("tenant", usize::MAX), 0);
+    fn subscribe_request_rejects_an_unparsable_where_clause() {
+        let error = subscribe_request(
+            "live_myss",
+            "myss",
+            SubscriptionDeliveryBehavior::Blocking,
+            None,
+            Some("input.tenant ="),
+        )
+        .expect_err("an incomplete WHERE expression must be rejected");
+
+        assert!(matches!(
+            error.current_context(),
+            ClientError::InvalidSubscriptionWhere
+        ));
+        assert!(
+            format!("{error:#}").starts_with("invalid subscription WHERE expression: parse error"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
@@ -1259,6 +1616,35 @@ mod tests {
     }
 
     #[test]
+    fn typed_completion_edit_replaces_a_word_before_a_unicode_suffix() {
+        let line = "SHOW CLUSTR;😊";
+        let suggestions = GrpcCompleter::text_suggestions(
+            line,
+            0,
+            vec![AutocompleteSuggestion {
+                value: "CLUSTER".to_string(),
+                kind: ClientSuggestionKind::Text,
+                edit: nervix_client_core::TextEdit {
+                    start: 5,
+                    end: 11,
+                    replacement: "CLUSTER".to_string(),
+                },
+            }],
+        );
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].span, reedline::Span::new(5, 11));
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                &line[..suggestions[0].span.start],
+                suggestions[0].value,
+                &line[suggestions[0].span.end..]
+            ),
+            "SHOW CLUSTER;😊"
+        );
+    }
+
+    #[test]
     fn local_upload_path_completion_lists_matching_directories() {
         let temp =
             std::env::temp_dir().join(format!("nervix-cli-upload-complete-{}", std::process::id()));
@@ -1271,9 +1657,15 @@ mod tests {
         let suggestions = complete_local_upload_paths(
             &line,
             line.len(),
+            0,
             Some(&AutocompleteSuggestion {
                 value: format!("{}/pro", temp.display()),
                 kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             }),
         )
         .expect("local path completion should be available");
@@ -1285,7 +1677,43 @@ mod tests {
                 .iter()
                 .any(|suggestion| suggestion.value.contains("other-dir"))
         );
+        let path_prefix = format!("{}/pro", temp.display());
+        let source_start = "UPLOAD RESOURCE proto VERSION '".len();
+        let cursor = source_start + path_prefix.len();
+        let mid_line = format!("UPLOAD RESOURCE proto VERSION '{path_prefix}to';");
+        let mid_suggestions = complete_local_upload_paths(
+            &mid_line,
+            cursor,
+            0,
+            Some(&AutocompleteSuggestion {
+                value: path_prefix,
+                kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: u32::try_from(source_start).assured("the test source fits u32"),
+                    end: u32::try_from(cursor + 2).assured("the test source fits u32"),
+                    replacement: String::new(),
+                },
+            }),
+        )
+        .assured("local path completion is available in the middle of a path");
+        assert!(mid_suggestions.iter().any(|suggestion| {
+            suggestion.span == reedline::Span::new(source_start, cursor + 2)
+                && suggestion.value.ends_with("/proto-dir/")
+        }));
         std::fs::remove_dir_all(&temp).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn local_upload_path_completion_reads_a_bare_relative_filename() {
+        let line = "UPLOAD RESOURCE bundle VERSION 'Cargo.tml'";
+        let cursor = line.find("ml'").assured("the test input marks its cursor");
+        let suggestions = complete_local_upload_paths(line, cursor, 0, None)
+            .assured("the package directory can be read for local completion");
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "Cargo.toml")
+        );
     }
 
     #[test]
@@ -1301,9 +1729,15 @@ mod tests {
         let suggestions = complete_local_upload_paths(
             "",
             0,
+            0,
             Some(&AutocompleteSuggestion {
                 value: format!("{}/", temp.display()),
                 kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             }),
         )
         .expect("local path completion should be available");
@@ -1333,9 +1767,15 @@ mod tests {
         let suggestions = complete_local_upload_paths(
             "",
             0,
+            0,
             Some(&AutocompleteSuggestion {
                 value: format!("~/{basename}"),
                 kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             }),
         )
         .expect("local path completion should be available");
@@ -1347,9 +1787,15 @@ mod tests {
         let nested_suggestions = complete_local_upload_paths(
             "",
             0,
+            0,
             Some(&AutocompleteSuggestion {
                 value: format!("~/{basename}/"),
                 kind: ClientSuggestionKind::LocalDirectoryLookup,
+                edit: nervix_client_core::TextEdit {
+                    start: 0,
+                    end: 0,
+                    replacement: String::new(),
+                },
             }),
         )
         .expect("nested local path completion should be available");
@@ -1656,6 +2102,70 @@ mod tests {
             [
                 "[events] subscription [live] from [orders]: {\"id\":1}",
                 "[events] subscription [live] from [orders]: {\"id\":2}",
+            ]
+        );
+    }
+
+    #[test]
+    fn subscription_rows_display_branch_null_and_redaction_from_typed_cells() {
+        use nervix_client_core::wire::{
+            RowBranch, ServerEvent as WireEvent, ServerMessage, SessionLimits,
+            SubscriptionRowsEncoder,
+        };
+        use nervix_models::{FieldName, ParseAsType, SchemaField};
+
+        let field = |name: &str, ty: ParseAsType, optional: bool, sensitive: bool| SchemaField {
+            name: FieldName::parse(name).assured("the test field name is valid"),
+            ty,
+            optional,
+            sensitive,
+        };
+        let mut batch = SubscriptionRowsEncoder::branched(
+            live_subscription(),
+            &SessionLimits::DEFAULT,
+            |key| key.push_string("north"),
+        )
+        .assured("the branch key fits the frame");
+        batch
+            .push_row(|cells| {
+                cells.push_u64(7)?;
+                cells.push_null()?;
+                cells.push_redacted()
+            })
+            .assured("the typed row fits the frame");
+        let frame = batch
+            .finish()
+            .assured("the batch fits the frame")
+            .verify(&SessionLimits::DEFAULT)
+            .assured("the encoded frame verifies");
+        let ServerMessage::Event(WireEvent::SubscriptionRows(rows)) =
+            ServerMessage::decode(&frame).assured("the encoded frame decodes")
+        else {
+            panic!("the frame contains typed subscription rows");
+        };
+        let branch = RowBranch::new(
+            nervix_models::BranchName::parse("by_tenant").assured("the test branch name is valid"),
+            vec![field("tenant", ParseAsType::String, false, false)],
+        )
+        .assured("the branch has a key field");
+        let schema = nervix_client_core::RowSchema {
+            fields: vec![
+                field("id", ParseAsType::U64, false, false),
+                field("note", ParseAsType::String, true, false),
+                field("secret", ParseAsType::String, false, true),
+            ],
+            branch: Some(branch),
+        };
+        let event = SubscriptionEvent::Rows(nervix_client_core::SubscriptionRowsEvent {
+            relay: nervix_models::RelayName::parse("orders").assured("the relay name is valid"),
+            schema: Arc::new(schema),
+            rows,
+        });
+        assert_eq!(
+            format_subscription_event(&event),
+            [
+                "[events] subscription [live] from [orders]: key={\"tenant\":\"north\"} \
+                 payload={\"id\":7,\"secret\":\"<masked>\"}"
             ]
         );
     }

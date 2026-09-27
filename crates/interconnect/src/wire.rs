@@ -31,8 +31,8 @@ const INITIAL_MESSAGE_CHARGE: u64 = 4 * 1024;
 
 /// Changes whenever the one supported interconnect contract changes.
 pub(crate) const WIRE_CONTRACT_FINGERPRINT: [u8; 32] = [
-    0xe9, 0xc5, 0x19, 0x59, 0x06, 0x87, 0x82, 0x77, 0x4a, 0x7f, 0xcc, 0xb2, 0xf1, 0x62, 0xfd, 0xf0,
-    0xb2, 0x3b, 0xd6, 0x7f, 0x8f, 0x75, 0xfd, 0x33, 0x84, 0x1a, 0x0a, 0xd8, 0x53, 0xf3, 0x0b, 0xc4,
+    0x60, 0xa2, 0x14, 0xe5, 0xa1, 0x98, 0x2d, 0xc7, 0x15, 0x25, 0x79, 0xab, 0xd3, 0x0a, 0x58, 0xbf,
+    0x53, 0x1e, 0x5b, 0xc6, 0x13, 0x3e, 0xcc, 0xdf, 0xe8, 0x9b, 0x43, 0x0f, 0xe8, 0xd4, 0x2e, 0x37,
 ];
 
 #[derive(Debug, Clone, Archive, Serialize, Deserialize, PartialEq, Eq)]
@@ -316,4 +316,79 @@ where
     let mut deserializer = Pool::default();
     deserialize_using::<T, _, RkyvError>(archived, &mut deserializer)
         .map_err(|error| TransportError::Decode(error.to_string()))
+}
+
+#[cfg(all(test, feature = "turmoil"))]
+mod simulation_checks {
+    use std::{
+        num::NonZeroUsize,
+        time::{Duration, SystemTime},
+    };
+
+    use meticulous::OptionExt as _;
+    use nervix_execution::{CpuClass, Executor, MemoryClass};
+
+    use super::{RelayGrantDisposition, RelayGrantResponse, decode_rkyv, encode_rkyv};
+    use crate::simulation_runner::{
+        HostSupervisor, NetworkParameters, SimulationBounds, SimulationConfig, Topology,
+    };
+
+    #[test]
+    fn seeded_wire_round_trips_use_the_execution_owner() {
+        for seed in 1..=12 {
+            let topology = if seed % 2 == 0 {
+                Topology::Ipv6
+            } else {
+                Topology::Ipv4
+            };
+            let configuration = SimulationConfig {
+                seed,
+                epoch: SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+                topology,
+                network: NetworkParameters::LOSSLESS,
+                bounds: SimulationBounds {
+                    simulated_duration: Duration::from_secs(1),
+                    tick: Duration::from_millis(1),
+                    max_steps: NonZeroUsize::new(200).assured("200 is nonzero"),
+                    wall_duration: Duration::from_secs(3),
+                },
+            };
+            let result = configuration.run("wire round trip", |simulation| {
+                simulation.host("worker", || async {
+                    HostSupervisor::run(async {
+                        let executor = Executor::default();
+                        let response = RelayGrantResponse {
+                            receiver_epoch: 41,
+                            disposition: RelayGrantDisposition::BodyReceived,
+                        };
+                        let bytes = encode_rkyv(
+                            &executor,
+                            MemoryClass::Management,
+                            CpuClass::Control,
+                            4096,
+                            response.clone(),
+                        )
+                        .await?;
+                        let decoded = decode_rkyv::<RelayGrantResponse>(
+                            &executor,
+                            MemoryClass::Management,
+                            CpuClass::Control,
+                            bytes,
+                        )
+                        .await?;
+                        assert_eq!(decoded.into_value(), response);
+
+                        let snapshot = executor.snapshot();
+                        assert_eq!(snapshot.control_cpu.admitted, 2);
+                        assert_eq!(snapshot.control_cpu.completed, 2);
+                        assert_eq!(snapshot.control_cpu.running, 0);
+                        assert_eq!(snapshot.management_memory.reserved_bytes, 0);
+                        Ok::<(), super::TransportError>(())
+                    })
+                    .await
+                });
+            });
+            assert!(result.is_ok(), "seed {seed}: {result:?}");
+        }
+    }
 }

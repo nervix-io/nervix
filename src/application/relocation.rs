@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use error_stack::Report;
 use meticulous::OptionExt as _;
 use nervix_consensus::{DomainMutationLease, DomainPlanningInputs};
 use nervix_models::{
@@ -26,9 +27,38 @@ use super::{
     session_service::SessionServiceImpl,
 };
 use crate::registry::{
-    ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationUnit,
+    ActiveGraph, RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
     ownership_handoff_relays_for_schedule,
 };
+
+#[derive(Debug, thiserror::Error)]
+enum RelocationError {
+    #[error("domain '{domain}' does not exist")]
+    DomainNotFound { domain: DomainName },
+    #[error("domain '{domain}' is paused by a model alteration")]
+    DomainPaused { domain: DomainName },
+    #[error("domain '{domain}' has no active schedule")]
+    NoActiveSchedule { domain: DomainName },
+    #[error("relocation plan failed: {source}")]
+    Graph { source: RelocationPlanError },
+    #[error("node '{node}' is not a raft member")]
+    DestinationNotMember { node: ClusterNodeName },
+    #[error("node '{node}' is not a live raft voter")]
+    DestinationNotLiveVoter { node: ClusterNodeName },
+    #[error("node '{node}' is terminating")]
+    DestinationTerminating { node: ClusterNodeName },
+    #[error("node '{node}' is cordoned")]
+    DestinationCordoned { node: ClusterNodeName },
+    #[error("{kind} '{name}' is not scheduled in domain '{domain}'", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
+    MemberNotScheduled { domain: DomainName, member: NodeRef },
+    #[error("{kind} '{name}' has no owner in domain '{domain}'", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
+    MemberWithoutOwner { domain: DomainName, member: NodeRef },
+    #[error("{kind} '{name}' is owned by unavailable node '{owner}'; relocate it after failover reassigns it", kind = .member.kind.as_str(), name = .member.identifier.as_str())]
+    MemberOwnerUnavailable {
+        member: NodeRef,
+        owner: ClusterNodeName,
+    },
+}
 
 /// One unit member with the assignment the relocation gives it.
 struct RelocationPlanMember {
@@ -131,7 +161,7 @@ impl SessionServiceImpl {
     ) -> CommandResult {
         match self.plan_relocation(domain, &relocation).await {
             Ok(plan) => command_ok(plan.render()),
-            Err(message) => command_error(message),
+            Err(error) => command_error(format!("{error:#}")),
         }
     }
 
@@ -160,7 +190,7 @@ impl SessionServiceImpl {
 
         let plan = match self.plan_relocation(domain, &relocation).await {
             Ok(plan) => plan,
-            Err(message) => return command_error(message),
+            Err(error) => return command_error(format!("{error:#}")),
         };
         let total = plan.members.len();
         let moved = plan.moved_count();
@@ -281,28 +311,27 @@ impl SessionServiceImpl {
         &self,
         domain: &DomainName,
         relocation: &Relocation,
-    ) -> Result<RelocationPlan, String> {
+    ) -> error_stack::Result<RelocationPlan, RelocationError> {
         let inputs = self.inner.consensus.domain_planning_inputs(domain).await;
         let Some(domain_state) = inputs.state() else {
-            return Err(format!("domain '{}' does not exist", domain.as_str()));
+            return Err(Report::new(RelocationError::DomainNotFound {
+                domain: domain.clone(),
+            }));
         };
         if let DomainStatus::Paused = domain_state.status {
-            return Err(format!(
-                "domain '{}' is paused by a model alteration",
-                domain.as_str()
-            ));
+            return Err(Report::new(RelocationError::DomainPaused {
+                domain: domain.clone(),
+            }));
         }
         let Some(graph) = self.inner.registry.active_graph(domain) else {
-            return Err(format!(
-                "domain '{}' has no active schedule",
-                domain.as_str()
-            ));
+            return Err(Report::new(RelocationError::NoActiveSchedule {
+                domain: domain.clone(),
+            }));
         };
         let Some(current) = inputs.schedule() else {
-            return Err(format!(
-                "domain '{}' has no active schedule",
-                domain.as_str()
-            ));
+            return Err(Report::new(RelocationError::NoActiveSchedule {
+                domain: domain.clone(),
+            }));
         };
 
         let unit = graph
@@ -313,7 +342,7 @@ impl SessionServiceImpl {
                 relocation.strategy,
                 &relocation.overrides,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|source| Report::new(RelocationError::Graph { source }))?;
 
         // Failover reassigns from the same liveness signal, so a relocation must read it the same
         // way or it would plan a handoff from an owner failover is already taking over.
@@ -442,18 +471,26 @@ impl SessionServiceImpl {
         inputs: &DomainPlanningInputs,
         live_nodes: &BTreeSet<ClusterNodeName>,
         placement_candidate_nodes: &BTreeSet<ClusterNodeName>,
-    ) -> Result<(), String> {
+    ) -> error_stack::Result<(), RelocationError> {
         if !inputs.topology().members().contains(destination) {
-            return Err(format!("node '{destination}' is not a raft member"));
+            return Err(Report::new(RelocationError::DestinationNotMember {
+                node: destination.clone(),
+            }));
         }
         if !inputs.topology().voters().contains(destination) || !live_nodes.contains(destination) {
-            return Err(format!("node '{destination}' is not a live raft voter"));
+            return Err(Report::new(RelocationError::DestinationNotLiveVoter {
+                node: destination.clone(),
+            }));
         }
         if !placement_candidate_nodes.contains(destination) {
-            return Err(format!("node '{destination}' is terminating"));
+            return Err(Report::new(RelocationError::DestinationTerminating {
+                node: destination.clone(),
+            }));
         }
         if inputs.topology().cordoned().contains(destination) {
-            return Err(format!("node '{destination}' is cordoned"));
+            return Err(Report::new(RelocationError::DestinationCordoned {
+                node: destination.clone(),
+            }));
         }
         Ok(())
     }
@@ -618,30 +655,24 @@ fn relocation_member_owner<'a>(
     schedule: &'a DomainSchedule,
     member: &NodeRef,
     live_nodes: &BTreeSet<ClusterNodeName>,
-) -> Result<&'a ClusterNodeName, String> {
+) -> error_stack::Result<&'a ClusterNodeName, RelocationError> {
     let Some(node) = schedule.nodes.get(member) else {
-        return Err(format!(
-            "{} '{}' is not scheduled in domain '{}'",
-            member.kind.as_str(),
-            member.identifier.as_str(),
-            domain.as_str()
-        ));
+        return Err(Report::new(RelocationError::MemberNotScheduled {
+            domain: domain.clone(),
+            member: member.clone(),
+        }));
     };
     let Some(owner) = node.execution_node() else {
-        return Err(format!(
-            "{} '{}' has no owner in domain '{}'",
-            member.kind.as_str(),
-            member.identifier.as_str(),
-            domain.as_str()
-        ));
+        return Err(Report::new(RelocationError::MemberWithoutOwner {
+            domain: domain.clone(),
+            member: member.clone(),
+        }));
     };
     if !live_nodes.contains(owner) {
-        return Err(format!(
-            "{} '{}' is owned by unavailable node '{owner}'; relocate it after failover reassigns \
-             it",
-            member.kind.as_str(),
-            member.identifier.as_str()
-        ));
+        return Err(Report::new(RelocationError::MemberOwnerUnavailable {
+            member: member.clone(),
+            owner: owner.clone(),
+        }));
     }
     Ok(owner)
 }
@@ -731,28 +762,35 @@ mod tests {
     fn rejects_a_member_whose_owner_is_unavailable() {
         let schedule = schedule(vec![junction_node("route", "node-3", &[])]);
         let domain = schedule.domain.clone();
-        assert_eq!(
-            relocation_member_owner(
-                &domain,
-                &schedule,
-                &member("route"),
-                &live(&["node-1", "node-2"])
-            )
-            .expect_err("an unavailable owner must be rejected"),
-            "junction 'route' is owned by unavailable node 'node-3'; relocate it after failover \
-             reassigns it"
-        );
+        let error = relocation_member_owner(
+            &domain,
+            &schedule,
+            &member("route"),
+            &live(&["node-1", "node-2"]),
+        )
+        .expect_err("an unavailable owner must be rejected");
+        let expected_member = member("route");
+        assert!(matches!(
+            error.current_context(),
+            RelocationError::MemberOwnerUnavailable { member, owner }
+                if member == &expected_member && owner == &node_name("node-3")
+        ));
     }
 
     #[test]
     fn rejects_a_member_that_is_not_scheduled() {
         let schedule = schedule(Vec::new());
         let domain = schedule.domain.clone();
-        assert_eq!(
+        let error =
             relocation_member_owner(&domain, &schedule, &member("route"), &live(&["node-1"]))
-                .expect_err("an unscheduled member must be rejected"),
-            "junction 'route' is not scheduled in domain 'relocation_test'"
-        );
+                .expect_err("an unscheduled member must be rejected");
+        let expected_member = member("route");
+        assert!(matches!(
+            error.current_context(),
+            RelocationError::MemberNotScheduled { domain, member }
+                if domain == &DomainName::parse("relocation_test").expect("valid domain")
+                    && member == &expected_member
+        ));
     }
 
     #[test]

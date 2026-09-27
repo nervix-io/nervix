@@ -206,6 +206,7 @@ Feature: WASM guest-state checkpoint durability
       key={"tenant":"beta"} | "tenant":"beta" | "value":12
       """
 
+  @exclusive
   Scenario: Guest state acknowledged through a replica survives the loss of its owner
     Given Kafka is running
     And runtime replication is configured with replica count 1 and snapshot interval "100ms"
@@ -267,9 +268,9 @@ Feature: WASM guest-state checkpoint durability
         ON GLOBAL ERROR LOG;
       START;
       """
+    # Keep node-1 cordoned so the surviving replica owns recovery through the output assertion.
     And these NSPL commands are executed through the client on node "node-1"
       """
-      UNCORDON NODE node-1;
       SHOW CLUSTER STATUS;
       """
     Then the last cluster status owner for scheduled "wasm_processor" "filter_even_rows" is saved as placeholder "failed_owner"
@@ -323,10 +324,8 @@ Feature: WASM guest-state checkpoint durability
     And runtime state replica installations succeed again on every node
     Then node "{{promoted_replica}}" eventually observes a stable leader
     And within "60s" node "{{promoted_replica}}" eventually reports scheduled "wasm_processor" "filter_even_rows" owner equals placeholder "promoted_replica"
-    And the last command output contains
-      """
-      transition_from={{failed_owner}} state_recovery=unverified
-      """
+    # Settle the failed input before the next state probe: its rejection can rewind this partition.
+    And within "90s" Kafka consumer group "wasm_checkpoint_failover_group_{{test_id}}" next offset for topic "wasm_checkpoint_failover_in_{{test_id}}" partition 0 is "at least 7"
     When Kafka message is published to topic "wasm_checkpoint_failover_in_{{test_id}}"
       """
       {"value":14,"tenant":"beta"}

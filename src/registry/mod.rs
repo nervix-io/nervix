@@ -10,12 +10,14 @@
 //! - **Must not know.** How a validated node runs. No Tokio task, no Arrow batch, no connector and
 //!   no branch-local state belongs here, and a decision must be computable without a cluster.
 //!
+mod domain_activation_plan;
 mod domain_state;
 mod entity_gate;
 mod error;
 mod graph;
 mod mutation;
 mod placement;
+mod processor_plan;
 mod relocation;
 mod schedule_delta;
 mod scheduler;
@@ -25,6 +27,10 @@ mod test_fixtures;
 mod transaction;
 mod validation;
 
+pub(crate) use domain_activation_plan::{
+    DomainActivationPlan, DomainActivationPlanError, PlannedCodec, PlannedCodecWireFormat,
+    PlannedRelayRetention, PlannedSignalingProtocol,
+};
 pub(crate) use entity_gate::{
     EntityGatePlan, entity_pause_relays_for_schedule, gate_boundary,
     ownership_handoff_relays_for_schedule, scheduled_impact_coverage,
@@ -38,7 +44,16 @@ pub(crate) use mutation::{PlannedMutations, RegistryMutation};
 pub(crate) use placement::{
     PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
 };
-pub(crate) use relocation::{RelocationCoverage, RelocationMemberReason, RelocationUnit};
+pub(crate) use processor_plan::{
+    BranchInstanceAckBoundary, BranchedIngestorSpec, BranchedNodeSpecs, BranchedProcessorNodeSpec,
+    BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
+    BranchedProcessorSpec, branched_node_specs_from_scheduled_nodes,
+};
+#[cfg(test)]
+pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
+pub(crate) use relocation::{
+    RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
+};
 pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;
