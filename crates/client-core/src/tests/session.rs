@@ -1709,3 +1709,317 @@ async fn upload_permission_denial_is_reported_without_retry() {
     };
     assert_eq!(status.code(), tonic::Code::PermissionDenied);
 }
+
+fn attach_reply(clock: crate::DomainClockObservation, message: &str) -> ReplyBody {
+    ReplyBody::DomainClockAttach(crate::DomainClockAttachOutcome {
+        disposition: crate::DomainClockAttachDisposition::Attached {
+            domain: domain("tenant"),
+            clock,
+        },
+        message: message.to_string(),
+    })
+}
+
+fn clock_in(
+    generation: u64,
+    state: crate::DomainClockObservedState,
+) -> crate::DomainClockObservation {
+    crate::DomainClockObservation { generation, state }
+}
+
+#[tokio::test]
+async fn domain_clock_statements_are_sent_as_typed_requests_for_the_active_domain() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    let attaching = client.clone();
+    let attach = tokio::spawn(async move { attaching.execute("ATTACH DOMAIN CLOCK;").await });
+    let request = exchange.next_request().await;
+    let ClientRequest::AttachDomainClock(sent) = request.request else {
+        panic!("ATTACH DOMAIN CLOCK is sent as an attach request");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    let unpaced = clock_in(1, crate::DomainClockObservedState::Unpaced);
+    let message = "attached to the clock of domain 'tenant': generation 1, unpaced";
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(unpaced.clone(), message),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+    assert!(outcome.succeeded());
+    assert_eq!(outcome.message, message);
+    assert_eq!(outcome.execution_reference, None);
+    let attached = client
+        .domain_clock(&domain("tenant"))
+        .assured("the client follows the attached clock");
+    assert_eq!(attached.clock(), &unpaced);
+
+    let stopped = clock_in(1, crate::DomainClockObservedState::Stopped);
+    let frame = crate::DomainClockObserved {
+        domain: domain("tenant"),
+        clock: stopped.clone(),
+    }
+    .encode(&limits())
+    .assured("a clock frame fits the default limits");
+    exchange.send(frame).await;
+    let event = within_deadline(client.next_domain_clock_event())
+        .await
+        .assured("the clock frame reaches the event stream");
+    assert_eq!(
+        event,
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped.clone(),
+        })
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the client still follows the clock")
+            .clock(),
+        &stopped
+    );
+
+    let detaching = client.clone();
+    let detach = tokio::spawn(async move { detaching.execute("detach domain clock").await });
+    let request = exchange.next_request().await;
+    let ClientRequest::DetachDomainClock(sent) = request.request else {
+        panic!("DETACH DOMAIN CLOCK is sent as a detach request");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockDetach(crate::DomainClockDetachOutcome {
+                disposition: crate::DomainClockDetachDisposition::Detached(domain("tenant")),
+                message: "detached from the clock of domain 'tenant'".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(detach)
+        .await
+        .assured("the detach task completes")
+        .assured("the detach succeeds");
+    assert!(outcome.succeeded());
+    assert_eq!(client.domain_clock(&domain("tenant")), None);
+
+    let refusing = client.clone();
+    let refused = tokio::spawn(async move { refusing.execute("DETACH DOMAIN CLOCK;").await });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockDetach(crate::DomainClockDetachOutcome {
+                disposition: crate::DomainClockDetachDisposition::NotAttached(domain("tenant")),
+                message: "this session does not follow the clock of domain 'tenant'".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let outcome = within_deadline(refused)
+        .await
+        .assured("the detach task completes")
+        .assured("the refusal is an outcome");
+    assert!(!outcome.succeeded());
+    assert_eq!(
+        outcome.message,
+        "this session does not follow the clock of domain 'tenant'"
+    );
+}
+
+#[tokio::test]
+async fn domain_clock_statements_need_an_active_domain_and_no_transaction() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let _exchange = server.next_exchange().await;
+
+    client.set_domain(None).await;
+    for statement in ["ATTACH DOMAIN CLOCK;", "DETACH DOMAIN CLOCK;"] {
+        assert!(matches!(
+            within_deadline(client.execute(statement)).await,
+            Err(ClientError::NoActiveDomain)
+        ));
+    }
+
+    client
+        .adopt_transaction_status(
+            nervix_models::TransactionStatus::new(
+                "tx".to_string(),
+                domain("tenant"),
+                nervix_models::TransactionLifecycle::Open,
+                nervix_models::TransactionPosition::new(0),
+                0,
+            )
+            .assured("an empty open transaction is consistent"),
+        )
+        .await;
+    let outcome = within_deadline(client.execute("ATTACH DOMAIN CLOCK;"))
+        .await
+        .assured("a refused local statement is an outcome");
+    assert!(!outcome.succeeded());
+    assert_eq!(
+        outcome.message,
+        "client-local commands are not allowed while a transaction is active"
+    );
+    let outcome = within_deadline(client.execute("ATTACH DOMAIN CLOCK; SHOW CLUSTER STATUS;"))
+        .await
+        .assured("a refused batch is an outcome");
+    assert_eq!(
+        outcome.message,
+        "client-local commands must be executed separately"
+    );
+}
+
+#[tokio::test]
+async fn domain_clock_requests_return_their_typed_outcomes_and_refusals() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+
+    let attaching = client.clone();
+    let attach =
+        tokio::spawn(async move { attaching.attach_domain_clock(domain("missing")).await });
+    let request = exchange.next_request().await;
+    let not_found = crate::DomainClockAttachOutcome {
+        disposition: crate::DomainClockAttachDisposition::DomainNotFound(domain("missing")),
+        message: "domain 'missing' does not exist".to_string(),
+    };
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockAttach(not_found.clone()),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(attach)
+            .await
+            .assured("the attach task completes")
+            .assured("a refusal is an outcome"),
+        not_found
+    );
+    assert_eq!(client.domain_clock(&domain("missing")), None);
+
+    let detaching = client.clone();
+    let detach = tokio::spawn(async move { detaching.detach_domain_clock(domain("tenant")).await });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::Rejected(crate::wire::RequestRejected {
+                rejection: crate::wire::RequestRejection::UnsupportedRequest,
+                field: None,
+                message: "not served".to_string(),
+            }),
+            &limits(),
+        )
+        .await;
+    let error = within_deadline(detach)
+        .await
+        .assured("the detach task completes")
+        .expect_err("a rejected request is an error");
+    assert!(matches!(
+        error.current_context(),
+        ClientError::RequestRejected {
+            request: crate::RequestKind::DetachDomainClock,
+            ..
+        }
+    ));
+
+    let attaching = client.clone();
+    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::DomainClockDetach(crate::DomainClockDetachOutcome {
+                disposition: crate::DomainClockDetachDisposition::Failed,
+                message: String::new(),
+            }),
+            &limits(),
+        )
+        .await;
+    let error = within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .expect_err("a reply of another kind is an error");
+    assert!(matches!(
+        error.current_context(),
+        ClientError::UnexpectedReply {
+            request: crate::RequestKind::AttachDomainClock,
+        }
+    ));
+}
+
+#[tokio::test]
+async fn an_attached_clock_is_attached_again_on_a_new_session_and_reports_its_clock() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let attaching = client.clone();
+    let attach = tokio::spawn(async move { attaching.attach_domain_clock(domain("tenant")).await });
+    let request = exchange.next_request().await;
+    exchange
+        .reply(
+            request.request_id,
+            attach_reply(clock_in(1, crate::DomainClockObservedState::Unpaced), ""),
+            &limits(),
+        )
+        .await;
+    within_deadline(attach)
+        .await
+        .assured("the attach task completes")
+        .assured("the attachment succeeds");
+
+    drop(exchange);
+    assert_eq!(
+        within_deadline(client.next_domain_clock_event())
+            .await
+            .assured("the interruption is an event"),
+        crate::DomainClockEvent::Interrupted(crate::DomainClockInterruption {
+            domain: domain("tenant"),
+        })
+    );
+
+    let reading = client.clone();
+    let next = tokio::spawn(async move { reading.next_domain_clock_event().await });
+    let mut restored = server.next_exchange().await;
+    let request = restored.next_request().await;
+    let ClientRequest::AttachDomainClock(sent) = request.request else {
+        panic!("the first request on the new session attaches the followed clock again");
+    };
+    assert_eq!(sent.domain, domain("tenant"));
+    let stopped = clock_in(2, crate::DomainClockObservedState::Stopped);
+    restored
+        .reply(
+            request.request_id,
+            attach_reply(stopped.clone(), ""),
+            &limits(),
+        )
+        .await;
+    assert_eq!(
+        within_deadline(next)
+            .await
+            .assured("the event task completes")
+            .assured("the restored clock is reported"),
+        crate::DomainClockEvent::Observed(crate::DomainClockObserved {
+            domain: domain("tenant"),
+            clock: stopped.clone(),
+        })
+    );
+    assert_eq!(
+        client
+            .domain_clock(&domain("tenant"))
+            .assured("the restored clock is followed")
+            .clock(),
+        &stopped
+    );
+}

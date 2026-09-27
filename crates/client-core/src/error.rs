@@ -38,6 +38,10 @@ pub enum RequestKind {
     Cancel,
     #[strum(serialize = "upload resource")]
     UploadResource,
+    #[strum(serialize = "attach domain clock")]
+    AttachDomainClock,
+    #[strum(serialize = "detach domain clock")]
+    DetachDomainClock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, strum::Display)]
@@ -61,6 +65,8 @@ impl From<&ClientRequest> for RequestKind {
             ClientRequest::Subscribe(_) => Self::Subscribe,
             ClientRequest::Unsubscribe(_) => Self::Unsubscribe,
             ClientRequest::Cancel(_) => Self::Cancel,
+            ClientRequest::AttachDomainClock(_) => Self::AttachDomainClock,
+            ClientRequest::DetachDomainClock(_) => Self::DetachDomainClock,
         }
     }
 }
@@ -251,7 +257,9 @@ impl ClientError {
             | ReplyBody::Inspection(_)
             | ReplyBody::Subscribe(_)
             | ReplyBody::Unsubscribe(_)
-            | ReplyBody::Cancel(_) => Self::UnexpectedReply { request },
+            | ReplyBody::Cancel(_)
+            | ReplyBody::DomainClockAttach(_)
+            | ReplyBody::DomainClockDetach(_) => Self::UnexpectedReply { request },
         }
     }
 }

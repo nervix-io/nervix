@@ -55,8 +55,9 @@ pub use command::{
 pub use completion::{BuiltinFunctionScope, SemanticReference};
 pub use domain_clock::{
     DomainAdmissionWindow, DomainClockAdvancement, DomainClockAuthority,
-    DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockPeriod,
-    DomainClockProgress, DomainClockSkew, DomainClockState, DomainTimeRate,
+    DomainClockAuthorityRevision, DomainClockBoundary, DomainClockError, DomainClockObservation,
+    DomainClockObservedState, DomainClockPeriod, DomainClockProgress, DomainClockSkew,
+    DomainClockState, DomainTimeRate, PacedDomainClock,
 };
 pub use emitter_batch::{
     BatchMessageLimit, ByteSizeUnit, EmitterBatchLimitError, EmitterBatchPolicy,

@@ -9,7 +9,12 @@ CREATE SUBSCRIPTION acme_notifications TO notifications WHERE tenant = 'acme';
 CREATE SUBSCRIPTION sampled_telemetry TO telemetry DROPPING BATCH SAMPLE RATE 0.1 WHERE input.tenant = 'acme';
 DELETE SUBSCRIPTION acme_notifications;
 DESCRIBE RELAY notifications WHERE (tenant = 'acme');
+ATTACH DOMAIN CLOCK;
+DETACH DOMAIN CLOCK;
 ```
+
+Following a domain clock is not a subscription; see
+[Domain Clock Attachment](#domain-clock-attachment).
 
 Current session behavior:
 
@@ -103,6 +108,57 @@ validity, 15 minutes by default. The reference is a UUIDv7 whose creation time b
 may be retried. The CLI, web console, and Rust client reuse the reference through redirects and
 reconnects. Reuse for changed content fails. While a long command waits, transport keepalives, server events, and
 subscription delivery continue independently. See [Command Completion](command-completion.md).
+
+## Domain Clock Attachment
+
+A session can follow the clock of a domain: its `START` generation and what the serving node has
+installed for it. `ATTACH DOMAIN CLOCK;` starts following the clock of the active domain and
+`DETACH DOMAIN CLOCK;` stops following it. Clients send them as an `AttachDomainClockRequest` and a
+`DetachDomainClockRequest` naming the active domain, so each addresses the domain active when it
+runs. Selecting another domain with `USE` does not change what the session follows, and a session
+follows several domain clocks by attaching while each domain is active.
+
+An attachment is keyed by its domain alone. It is not a subscription: it reads no relay, has no
+name or generation of its own, and a session follows each domain clock at most once. The observed
+clock carries the `START` generation and one state:
+
+- **Stopped.** The generation exists but executes no domain work.
+- **Uninstalled.** A paced generation is running, but the serving node has no assigned clock
+  authority or mapping for it, so it cannot execute paced work.
+- **Unpaced.** The domain reads actual UTC.
+- **Paced.** The committed mapping the domain executes with: `PERIOD`, `SKEW`, the logical origin,
+  the UTC anchor, and the time rate. Timestamps are signed Unix nanoseconds, period and skew are
+  unsigned nanoseconds, and the rate is a double.
+
+An attachment moves through one lifecycle:
+
+- **Attached.** The reply carries the clock as the serving node has it installed, and no frame about
+  the domain precedes it. A second attach is refused as already attached, and a domain the serving
+  node does not have is refused as not found. When the reply cannot be delivered, because the
+  request was cancelled, the session ended, or the reply did not fit the session limits, the
+  attachment is abandoned before it delivers anything.
+- **Following.** Each later change of the installed clock arrives as a `DomainClockObserved` frame
+  carrying the new clock: `STOP` delivers stopped, a `START` delivers its generation and mapping,
+  and a paced generation left without an assigned clock authority delivers uninstalled, then its
+  mapping again once an authority is assigned. A frame carries the clock installed when it is sent.
+  Changes made while an earlier frame waits for room on the session arrive together as the newest
+  clock, and a change that leaves the clock as the client last received it sends nothing: moving the
+  authority to another node and the pause that alters a running model are not observed. Tick
+  progress is not delivered; a client projects logical time from the mapping, as every node does.
+- **Detached.** `DETACH DOMAIN CLOCK` stops delivery before its reply, so nothing about the domain
+  follows the reply. A detach without an attachment is refused as not attached.
+- **Ended by the server.** When the domain no longer exists on the serving node, the session
+  receives `DomainClockAttachmentEnded` with reason `DomainRemoved`, the last frame about that
+  attachment. A request sent after that frame finds the attachment gone: an attach attaches again
+  and a detach is refused as not attached.
+- **Session end.** The attachment ends with the session, and nothing is sent about it. The Rust
+  client and the CLI attach every clock they followed again on their next session, which delivers
+  the clock as it is then.
+
+Both statements run in order with the session's commands and are refused, with the session-local
+refusal, while the session holds a transaction. Neither is persisted or becomes transaction
+content. See [Domains And Time](domains-and-time.md#following-a-domain-clock) for what a client
+computes from a paced clock.
 
 ## Suggestions
 

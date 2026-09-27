@@ -98,3 +98,19 @@ Feature: CLI public session dispatch
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: CLI attaches its session to the active domain's clock
+    Given a <cluster_size> node nervix cluster is started
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE PACED DOMAIN {{domain}} WITH PERIOD 1s SKEW 100ms;
+      START AT '2030-01-01T00:00:00Z' TIME RATE 2.0;
+      """
+    Then the current leader node is saved as placeholder "leader"
+    When the CLI executes "ATTACH DOMAIN CLOCK;" on node "{{leader}}"
+    Then the CLI output contains "attached to the clock of domain '{{domain}}': generation 1, paced"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
