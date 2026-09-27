@@ -566,7 +566,10 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
         --package nervix-connector-sentry \
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
-        --package nervix-connector-rabbitmq
+        --package nervix-connector-rabbitmq \
+        --package nervix-connector-syslog \
+        --package nervix-connector-websockets \
+        --package nervix-interconnect
     cargo llvm-cov --no-report --features testing --package nervix-server --lib
     run_scenario() {
         cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
@@ -578,6 +581,10 @@ coverage-dns-clients output="target/dns-clients.lcov": tests-deps
     run_scenario tests/features/runtime/otel_emission.feature 'OTEL.*metric.*HTTP'
     run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
     run_scenario tests/features/runtime/rabbitmq_dns_resolution.feature 'RabbitMQ|AMQPS'
+    run_scenario tests/features/runtime/syslog_dns_resolution.feature 'Syslog'
+    run_scenario tests/features/runtime/websocket_client_ingestion.feature 'Websocket client ingestor connects'
+    run_scenario tests/features/runtime/websocket_client_tls_resource_mounts.feature 'Websocket client keeps'
+    run_scenario tests/features/runtime/websocket_dns_resolution.feature 'WebSocket clients reconnect'
     just coverage-dns-clients-report {{ quote(output) }}
 
 # Export the profiles collected by `coverage-dns-clients` without rebuilding its test binaries.
@@ -591,7 +598,10 @@ coverage-dns-clients-report output="target/dns-clients.lcov":
         --package nervix-connector-sentry \
         --package nervix-connector-otel \
         --package nervix-connector-iceberg \
-        --package nervix-connector-rabbitmq
+        --package nervix-connector-rabbitmq \
+        --package nervix-connector-syslog \
+        --package nervix-connector-websockets \
+        --package nervix-interconnect
 
 # Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
 # The same checks run under ordinary and nondeterminism-detection schedules, with one test thread
@@ -925,6 +935,16 @@ validate-dns-dependencies:
         if ! rg -q '^tcp-stream v[^ ]+ .*rustls--aws_lc_rs' <<< "${graph}" || \
             rg -q '^tcp-stream v[^ ]+ .*rustls--ring' <<< "${graph}"; then
             echo "${package} does not select AWS-LC for RabbitMQ TLS" >&2
+            exit 1
+        fi
+    done
+    # Syslog and WebSocket client transports resolve through the node resolver before opening
+    # their own concrete-address sockets, even when built without the server's feature graph.
+    for package in nervix-connector-syslog nervix-connector-websockets; do
+        graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
+        if ! rg -q '^nervix-dns v' <<< "${graph}" || \
+            ! rg -q '^hickory-resolver v0\.26\.[0-9]+ .*tokio' <<< "${graph}"; then
+            echo "${package} lacks the node resolver for its outbound connections" >&2
             exit 1
         fi
     done

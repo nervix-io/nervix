@@ -56,6 +56,13 @@ resolver's own lookup error. The sink changes it into a configuration failure fo
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
+Syslog emission and WebSocket-client ingestion retain DNS failures from the node resolver beneath
+their existing infrastructure contexts: `SinkStartError::Initialize` while a Syslog sender opens
+and `SourceError::Resume` while a WebSocket source connects or reconnects. The resolver's typed
+missing-name, no-address, timeout, invalid-name or transport cause stays in the error report.
+Address, TLS and WebSocket-upgrade failures remain connection outcomes. None is a record rejection,
+and a DNS result by itself never marks a Syslog record delivered.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in

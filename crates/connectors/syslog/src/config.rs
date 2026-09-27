@@ -17,7 +17,7 @@ use nonzero_ext::nonzero;
 use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use thiserror::Error;
-use url::Url;
+use url::{Host, Url};
 
 pub const DEFAULT_MAX_MESSAGE_SIZE: NonZeroUsize = nonzero!(131_072usize);
 pub const MAX_UDP_PAYLOAD_SIZE: usize = 65_507;
@@ -102,6 +102,7 @@ pub struct SyslogClientConfig {
     pub protocol: SyslogProtocol,
     pub addr: String,
     pub server_name: String,
+    pub(crate) port: u16,
     pub max_message_size: NonZeroUsize,
     pub framing: SyslogFraming,
     entries: Vec<nervix_models::ClientConfigEntry>,
@@ -125,7 +126,7 @@ impl SyslogClientConfig {
             }
         };
         let addr = Self::required_value(entries, "addr")?;
-        let server_name = Self::validate_addr(&addr)?;
+        let (server_name, port) = Self::validate_addr(&addr)?;
         let max_message_size = Self::optional_value(entries, "max_message_size")
             .map(|value| {
                 value
@@ -206,6 +207,7 @@ impl SyslogClientConfig {
             protocol,
             addr,
             server_name,
+            port,
             max_message_size,
             framing,
             entries: entries.to_vec(),
@@ -260,7 +262,7 @@ impl SyslogClientConfig {
         Ok(())
     }
 
-    fn validate_addr(addr: &str) -> Result<String, SyslogConfigError> {
+    fn validate_addr(addr: &str) -> Result<(String, u16), SyslogConfigError> {
         let parsed = Url::parse(&format!("syslog://{addr}")).map_err(|source| {
             SyslogConfigError::AddressParse {
                 value: addr.to_string(),
@@ -278,16 +280,21 @@ impl SyslogClientConfig {
             });
         }
         let host = parsed
-            .host_str()
+            .host()
             .ok_or_else(|| SyslogConfigError::AddressHostMissing {
                 value: addr.to_string(),
             })?;
-        if parsed.port().is_none() {
-            return Err(SyslogConfigError::AddressPortMissing {
+        let port = parsed
+            .port()
+            .ok_or_else(|| SyslogConfigError::AddressPortMissing {
                 value: addr.to_string(),
-            });
-        }
-        Ok(host.to_string())
+            })?;
+        let host = match host {
+            Host::Domain(name) => name.to_string(),
+            Host::Ipv4(address) => address.to_string(),
+            Host::Ipv6(address) => address.to_string(),
+        };
+        Ok((host, port))
     }
 
     pub fn tls_client_config(&self) -> Result<StdArc<rustls::ClientConfig>, SyslogConfigError> {

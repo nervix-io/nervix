@@ -289,6 +289,17 @@ sequenceDiagram
   node, independent of leadership and placement. This includes Syslog and server endpoint
   listeners. The host owns their lifecycle across joins, restarts, elections, and shutdown;
   their transport implementations remain in their owning integration or server edge.
+- **Named Syslog and WebSocket clients.** Outbound Syslog UDP, TCP and TLS senders and WebSocket
+  `ws` and `wss` sources resolve through the node's asynchronous resolver for each new connection
+  attempt. The node resolver owns DNS cache and TTL policy; the connectors keep their framing,
+  upgrade, TLS, signaling and retry behavior. DNS and ordered address attempts share a physical
+  connection budget. Syslog UDP binds a socket in each attempted address's IP family and sends to
+  the first address whose socket setup succeeds. TCP and TLS senders and WebSocket clients try
+  successive answers within that budget.
+  TLS verifies the configured name, and a WebSocket upgrade retains its original URL authority,
+  path and query. The source host cancels a pending resume when shutdown or quiesce changes its
+  lifecycle state. DNS and connection failures remain infrastructure outcomes for the host to retry;
+  a resolved address alone never completes a Syslog record or an input acknowledgement.
 - **WebSocket signaling.** The WebSocket crate owns the compiled signaling engine shared by
   client sources and server endpoint sessions. Its send, wait, and accept-data steps govern when
   frames become payload; the host still owns intake and routing. Domain activation resolves the
