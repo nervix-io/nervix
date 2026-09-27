@@ -174,6 +174,14 @@ pub(super) fn emitter_init_error(error: impl std::fmt::Display) -> Report<Emitte
 }
 
 impl EmitterSinkContext {
+    pub(super) fn dns(&self) -> Result<DnsResolver, Report<EmitterRuntimeError>> {
+        let Some(dns) = self.runtime.dns() else {
+            return Err(Report::new(EmitterRuntimeError::InitializeSink)
+                .attach_printable("the node DNS resolver is not installed"));
+        };
+        Ok(dns.clone())
+    }
+
     pub(super) fn sink_host(&self) -> SinkHost {
         SinkHost::new(self.clone())
     }
@@ -1774,6 +1782,23 @@ mod tests {
             ordering_group: None,
             materialized_state,
         }
+    }
+
+    #[test]
+    fn sink_context_reports_missing_node_dns_as_initialization_failure() {
+        let context = sink_context();
+        let error = context
+            .dns()
+            .err()
+            .assured("the fixture runtime has no DNS resolver");
+        assert!(matches!(
+            error.current_context(),
+            EmitterRuntimeError::InitializeSink
+        ));
+        assert_eq!(
+            emitter_error_message(&error),
+            "the node DNS resolver is not installed"
+        );
     }
 
     #[test]

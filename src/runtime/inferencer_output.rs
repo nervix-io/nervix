@@ -6,7 +6,6 @@ pub(super) async fn flush_branch_inferencer_output(
     output_index: usize,
 ) {
     let InferencerFlushContext {
-        graph,
         branch,
         node_kind,
         processor,
@@ -18,7 +17,6 @@ pub(super) async fn flush_branch_inferencer_output(
         inputs,
         output_schema,
         compiled_input_program,
-        input_relays,
         session,
         materialized_state,
         execution_now,
@@ -355,14 +353,11 @@ pub(super) async fn flush_branch_inferencer_output(
     };
     if let Some(acks) = dispatch_processor_output(
         ProcessorOutputDispatchContext {
-            graph,
             branch,
             node_kind,
             source_kind: ModelKind::Inferencer,
             processor,
             error_policies,
-            input_relays,
-            filter_source: ProcessorOutputFilterSource::Inferencer(inferencer_tensors),
             materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(materialized_state),
             execution_now,
         },

@@ -16,6 +16,7 @@ mod error;
 mod graph;
 mod mutation;
 mod placement;
+mod processor_plan;
 mod relocation;
 mod schedule_delta;
 mod scheduler;
@@ -38,6 +39,13 @@ pub(crate) use mutation::{PlannedMutations, RegistryMutation};
 pub(crate) use placement::{
     PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
 };
+pub(crate) use processor_plan::{
+    BranchInstanceAckBoundary, BranchedIngestorSpec, BranchedNodeSpecs, BranchedProcessorNodeSpec,
+    BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
+    BranchedProcessorSpec, branched_node_specs_from_scheduled_nodes,
+};
+#[cfg(test)]
+pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
 pub(crate) use relocation::{
     RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
 };

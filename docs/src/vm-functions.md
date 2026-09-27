@@ -45,7 +45,7 @@ Five rules hold throughout:
 | Engines and infrastructure | `nervix-vm` | Lowering Models into VM programs, the semantic catalog of every operator, cast, and builtin, type and sensitivity checking, compilation into instructions over typed registers, every kernel, and window aggregate lowering and route compilation. |
 | Engines and infrastructure | `nervix-roto` | Compiling a `CREATE UDF`, and the `FunctionInjector` that answers the VM's UDF calls over Arrow arrays under a watchdog. |
 | Decisions | Registry validation | Compiling every expression it can check with the same compiler the runtime uses when a statement is applied, so a statement is rejected with exactly the error execution would report. |
-| Data plane | Runtime bindings and hosts | Compiling runtime programs against runtime schemas, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
+| Data plane | Runtime plan binding and hosts | Binding runtime programs against installed schemas once per typed node revision, projecting carrier batches into VM input, supplying the execution context and injectors, turning row errors into structured message errors, and owning branch-local window accumulators. |
 | Control plane | Subscriptions | Compiling a session subscription's `WHERE` into a read-only predicate when the subscription is created. |
 
 For ordinary expression completion, the session resolver asks `FunctionName` for the VM's sorted
@@ -56,11 +56,11 @@ with header-function expectations. The resolver adds `read_header` and `read_hea
 source that can read headers, and `write_header` only for a sink that can write them. UDF candidates
 come from the selected domain's Models after the session's queued transaction changes.
 
-The data plane does not yet receive compiled plans. It compiles its programs from the Models its
-active graph carries, as the header of `src/runtime/vm_compile.rs` states. That contradicts the
-layer order, in which the data plane never reads a Model. `just ratchet` counts the remaining
-sites as `model_matches_in_data_plane`, and a planner that hands the data plane validated programs
-removes them.
+Registry planning converts the validated scheduled Models into typed processor specifications.
+Before a node revision is installed, runtime plan binding lowers every processor expression against
+the installed schemas, branch declarations, lookups and UDF catalog. The complete map of bound
+processor plans is published with the domain routing snapshot. Processor supervisors and concrete
+branch tasks consume those plans and never read the active graph or a semantic Model.
 
 ## The Expression Pipeline
 
@@ -311,10 +311,12 @@ patterns, sets, matchers, and pattern caches. `CompiledPredicate` wraps a progra
 general construction program cannot be passed where only a read-only filter is allowed.
 
 The VM has no notion of plan activation. The host holds each program as a
-`triomphe::Arc<CompiledProgram>` and replaces it when the Model it was compiled from changes. A
-prepared artifact therefore lives exactly as long as its program. A route that `ALTER` replaces
-compiles fresh artifacts, and a batch always runs against the patterns and sets its own program
-prepared.
+`triomphe::Arc<CompiledProgram>` inside a published typed processor plan. A prepared artifact lives
+exactly as long as that plan. An unchanged scheduled node reuses the exact plan allocation across a
+domain revision. A change to its topology, schema fingerprint, resolved branch contract or
+processor specification binds a fresh plan before publication. Existing branches adopt it by its
+typed revision identity between batches, while a newly appearing branch starts from the same
+published allocation.
 
 ### Where Programs Are Compiled
 
@@ -326,11 +328,12 @@ against runtime schemas:
 
 | Program | Compiled for execution |
 | --- | --- |
-| Routes of junctions, deduplicators, reorderers, inferencers, reingestors, correlators, and WASM processors, and processor `FROM ... WHERE` and `FILTER WHERE` | Lazily, on the first batch of each concrete branch instance, then cached on that instance's route. Every branch instance compiles and holds its own copy, prepared artifacts included. The cache is cleared when the route's Model or message-error policy changes. |
-| `DEDUPLICATE ON`, reorderer `BY`, and `CORRELATE WHERE` | On the first batch of each branch instance |
+| Routes of junctions, deduplicators, reorderers, inferencers, correlators, window processors and WASM processors, and processor `FROM ... WHERE` and `FILTER WHERE` | Once when the installed typed processor revision is bound, before its domain routing snapshot is published. Every concrete branch shares the plan's programs and prepared artifacts. A valid route that needs no VM program records that prepared absence and uses direct Arrow projection. |
+| `DEDUPLICATE ON`, reorderer `BY`, and `CORRELATE WHERE` | Once when the installed typed processor revision is bound, then shared by every concrete branch |
 | Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | When the ingestor starts |
+| Reingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | When the reingestor starts |
 | Emitter `FROM ... WHERE`, routes, HTTP `METHOD` and `PATH`, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | When the emitter task starts |
-| Window argument and output programs, and inferencer `INPUTS` | Once per processor template when the plan is built, then shared by every branch |
+| Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |
 | Generator routes | When the domain's execution is built |
 | Materialized-state `DEFAULT` | Compiled and executed in one step when the default binds |
 | `ON MESSAGE ERROR SEND TO ... SET` | Once for each error record it builds |

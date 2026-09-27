@@ -551,6 +551,45 @@ coverage-scenarios output *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo llvm-cov --features testing --test scenarios --no-default-ignore-filename-regex --lcov --output-path {{ quote(output) }} -- {{ args }}
 
+# Collect the changed DNS client units and their public one-/three-node paths into one LCOV
+# profile so patch coverage can be checked before opening the PR.
+coverage-dns-clients output="target/dns-clients.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --all-targets \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-http \
+        --package nervix-connector-prometheus \
+        --package nervix-connector-sentry \
+        --package nervix-connector-otel \
+        --package nervix-connector-iceberg
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib
+    run_scenario() {
+        cargo llvm-cov --no-report --features testing --package nervix-server --test scenarios -- \
+            --input "$1" --name "$2" --retry 0 --concurrency 1
+    }
+    run_scenario tests/features/runtime/http_client_ingestion.feature 'DNS.*fixture'
+    run_scenario tests/features/runtime/prometheus_ingestion.feature 'Prometheus.*delivers'
+    run_scenario tests/features/runtime/sentry_emission.feature 'Sentry.*publishes'
+    run_scenario tests/features/runtime/otel_emission.feature 'OTEL.*metric.*HTTP'
+    run_scenario tests/features/runtime/iceberg_emission.feature 'DNS.*fixture|Iceberg.*holds.*ACK'
+    just coverage-dns-clients-report {{ quote(output) }}
+
+# Export the profiles collected by `coverage-dns-clients` without rebuilding its test binaries.
+coverage-dns-clients-report output="target/dns-clients.lcov":
+    cargo llvm-cov report --lcov --output-path {{ quote(output) }} \
+        --package nervix-server \
+        --package nervix-dns \
+        --package nervix-connector \
+        --package nervix-connector-http \
+        --package nervix-connector-prometheus \
+        --package nervix-connector-sentry \
+        --package nervix-connector-otel \
+        --package nervix-connector-iceberg
+
 # Measure the Shuttle-only test paths, which production-mode workspace coverage cannot compile.
 # The same checks run under ordinary and nondeterminism-detection schedules, with one test thread
 # so Shuttle's scheduler state is not shared between tests.
@@ -842,9 +881,32 @@ audit:
 ratchet *args:
     python3 scripts/ratchet.py {{ args }}
 
-validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
+validate: fmt lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-http-dns-dependencies
 
-validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict
+# Check each connector as a consumer root. Cargo tree limits feature unification to that root;
+# the full workspace build alone can hide a missing resolver feature in a leaf connector.
+validate-http-dns-dependencies:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for package in nervix-connector-http nervix-connector-prometheus nervix-connector-sentry nervix-connector-otel nervix-connector-iceberg; do
+        graph="$(cargo tree --package "${package}" --edges normal --format '{p} {f}' --prefix none)"
+        if ! rg -q '^reqwest v0\.13\.[0-9]+ .*hickory-dns' <<< "${graph}"; then
+            echo "${package} lacks Reqwest 0.13 Hickory DNS" >&2
+            exit 1
+        fi
+        if [[ "${package}" == nervix-connector-iceberg ]] && \
+            ! rg -q '^reqwest v0\.12\.[0-9]+ .*hickory-dns' <<< "${graph}"; then
+            echo "${package} lacks Reqwest 0.12 Hickory DNS" >&2
+            exit 1
+        fi
+        if [[ "${package}" == nervix-connector-iceberg ]] && \
+            rg -q '^reqwest v0\.12\.[0-9]+ [^ ]*__rustls-ring' <<< "${graph}"; then
+            echo "${package} selected Reqwest 0.12's Ring TLS provider" >&2
+            exit 1
+        fi
+    done
+
+validate-ci: fmt-check lint validate-skill validate-nspl-docs validate-clock-boundaries validate-typed-errors validate-shuttle-dependencies validate-turmoil-dependencies validate-simulation-feature-conflict validate-http-dns-dependencies
 
 # Shuttle's runner and synchronization wrappers belong only to modeled builds. Production package
 # graphs use the real synchronization crates directly and contain no Shuttle package.

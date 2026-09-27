@@ -52,8 +52,8 @@ writer.
 
 | State | Publication owner and scope | Reader contract |
 | --- | --- | --- |
-| Active graph | The runtime lifecycle publishes one optional graph for each domain on a node. Installation replaces the complete graph, and stop or removal publishes absence. | A unit of work sees one complete graph or no active graph. An in-flight reader may finish against the graph it already loaded. |
-| Domain routing snapshot | Each domain retains one stable publication handle across execution rebuilds. Schedule application stages and replaces the relay services, schemas, branch declarations, materialized-state ownership, lookups, UDFs, codecs, and signaling protocols together. | A task sees the old routing revision or the new routing revision, never a mixture of their fields. Long-lived tasks use a local pointer cache instead of returning to the domain execution registry per batch. |
+| Active graph | The runtime lifecycle publishes one optional graph for each domain on a node as a control-plane observation surface for sessions and inspection. Installation replaces the complete graph, and stop or removal publishes absence. | Control-plane readers see one complete graph or no active graph. Processor tasks never read it. |
+| Domain routing snapshot | Each domain retains one stable publication handle across execution rebuilds. Schedule application stages and replaces the relay services, schemas, branch declarations, materialized-state ownership, lookups, UDFs, codecs, signaling protocols, and the complete map of bound processor plans together. Each plan carries a typed identity and prepared VM and WASM artifacts for one installed node revision. | A task sees the old routing revision or the new routing revision, never a mixture of their fields. Long-lived tasks use a local pointer cache instead of returning to the domain execution registry per batch. Existing processor branches compare typed plan identities between batches; new branches resolve their template from the same published map. |
 | Node identity and remote dispatcher | The node runtime publishes this once after cluster join, when the authenticated interconnect and process incarnation are known. Relay boundaries created afterwards retain the same dispatcher handle. | Readers borrow the stable node identity, incarnation, transport, admission service, and ACK registry without a write-once lock or repeated name allocation. |
 | Relay owner state | Each relay boundary publishes its scheduled owner, installed owner buffer, remote runtime-consumer set, and immutable branch-reset gate set. Schedule and relay lifecycle operations replace these values at their cutover points. | A batch borrows the current owner and buffer, then takes permits only from reset gates whose typed scope selects its branch. Multi-step ownership changes use the whole-relay dispatch gate described below so teardown cannot race an admitted dispatch. |
 | Subscription interest | The cluster live-state watcher rebuilds an immutable index from domain and relay to interested node incarnations and advertisement versions whenever gossip changes. | A relay owner performs borrowed lookups in one published index. It neither formats gossip keys nor waits on the gossip mutex per batch. Subscription creation waits until every live node has observed the exact subscriber incarnation and at least the current advertisement version before reporting success. |
@@ -66,6 +66,12 @@ An atomic replacement gives consistency for the value it publishes. A transition
 owners still needs a protocol. Graph and schedule changes use quiescence and relay gates; clock and
 state operations carry generations; subscription creation uses a visibility handshake. Publication
 removes read-side contention without weakening those transition contracts.
+
+Schedule application prepares every changed local processor plan before publication. A preparation
+failure leaves the preceding routing revision and its active graph observable. Publication swaps the
+complete typed routing snapshot first and then updates the active graph used by control-plane
+clients. Unchanged processor specifications, schema fingerprints and resolved branch contracts keep
+their exact plan allocation, including prepared programs and compiled WASM modules.
 
 ## Mutable Execution State
 

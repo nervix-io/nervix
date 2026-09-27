@@ -148,7 +148,9 @@ Feature: OTEL emission
   Scenario Outline: OTEL metric emitters export over OTLP HTTP protobuf
     Given OpenTelemetry Collector is running
     And runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
+    And the OTEL HTTP endpoint is published under fixture DNS
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -190,7 +192,7 @@ Feature: OTEL emission
       CREATE CLIENT otel_http
       TYPE OTEL
       CONFIG {
-        'endpoint' = '{{otel_collector_http_addr}}',
+        'endpoint' = '{{otel_collector_dns_addr}}',
         'protocol' = 'http/protobuf',
         'compression' = 'gzip',
         'timeout_ms' = 5000
@@ -224,6 +226,7 @@ Feature: OTEL emission
       }
       """
     Then OpenTelemetry Collector eventually contains "nervix.test.request.count"
+    And the DNS fixture eventually receives a question for "otel-http.nervix.test"
 
     Examples:
       | cluster_size | replica_count |

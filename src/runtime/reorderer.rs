@@ -106,13 +106,11 @@ pub(super) fn reorder_key_part(array: &VmTypedArray, row: usize) -> ReorderKeyPa
 }
 
 pub(super) struct ReordererFlushContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
-    pub(super) input_relays: &'a [RelayName],
     pub(super) materialized_state: &'a [nervix_models::MaterializedStateDependency],
     pub(super) execution_now: Timestamp,
 }
@@ -122,12 +120,10 @@ pub(super) async fn flush_branch_reorderer_output(
     output_buffer: &mut ReordererOutputBuffer,
     output_index: usize,
 ) {
-    let graph = context.graph;
     let node_kind = context.node_kind;
     let processor = context.processor;
     let error_policies = context.error_policies;
     let output_routes = context.output_routes;
-    let input_relays = context.input_relays;
     let materialized_state = context.materialized_state;
     let execution_now = context.execution_now;
     let branch = context.branch;
@@ -158,14 +154,11 @@ pub(super) async fn flush_branch_reorderer_output(
     };
     if let Some(acks) = dispatch_processor_output(
         ProcessorOutputDispatchContext {
-            graph,
             branch,
             node_kind,
             source_kind: ModelKind::Reorderer,
             processor,
             error_policies,
-            input_relays,
-            filter_source: ProcessorOutputFilterSource::InputRelays,
             materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(materialized_state),
             execution_now,
         },
