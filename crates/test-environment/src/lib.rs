@@ -128,6 +128,7 @@ pub const KAFKA_DOCKER_ADDR: &str = "kafka_docker_addr";
 pub const KAFKA_DOCKER_NETWORK: &str = "kafka_docker_network";
 pub const PULSAR_ADDR: &str = "pulsar_addr";
 pub const PULSAR_TLS_ADDR: &str = "pulsar_tls_addr";
+pub const PULSAR_ADMIN_ADDR: &str = "pulsar_admin_addr";
 pub const RABBITMQ_ADDR: &str = "rabbitmq_addr";
 pub const RABBITMQ_TLS_ADDR: &str = "rabbitmq_tls_addr";
 pub const REDIS_ADDR: &str = "redis_addr";
@@ -429,11 +430,14 @@ impl DependencyEnvironment {
             return Ok(());
         }
         let tls = self.ensure_tls()?.clone();
+        // The broker announces a 1 MiB maxMessageSize instead of Pulsar's 5 MiB default, the limit
+        // the MQTT and NATS test brokers keep too, so one scenario message exceeds each of them.
         let start_script = br#"#!/bin/sh
 set -eu
 config=/tmp/standalone-tls.conf
 cp /pulsar/conf/standalone.conf "$config"
 cat >>"$config" <<'EOF'
+maxMessageSize=1048576
 brokerServicePortTls=6651
 webServicePortTls=8443
 tlsEnabled=true
@@ -468,12 +472,15 @@ exec /pulsar/bin/pulsar standalone --no-functions-worker --no-stream-storage -c 
             .await?;
         let plaintext_port = mapped_port(&container, 6650, "Pulsar").await?;
         let tls_port = mapped_port(&container, 6651, "Pulsar TLS").await?;
+        let admin_port = mapped_port(&container, 8080, "Pulsar admin").await?;
         self.endpoints
             .insert(PULSAR_ADDR, format!("pulsar://127.0.0.1:{plaintext_port}"));
         self.endpoints.insert(
             PULSAR_TLS_ADDR,
             format!("pulsar+ssl://127.0.0.1:{tls_port}"),
         );
+        self.endpoints
+            .insert(PULSAR_ADMIN_ADDR, format!("http://127.0.0.1:{admin_port}"));
         self.containers.push(RunningContainer::Generic(container));
         Ok(())
     }

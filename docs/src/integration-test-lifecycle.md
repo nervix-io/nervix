@@ -578,6 +578,12 @@ it ends; `NERVIX_TESTCONTAINERS_MODE=reusable`, which `just test-scenarios-reuse
 for the next run instead. Scenarios still provision the topics, queues, tables, and other entities
 they use explicitly.
 
+The Pulsar broker announces a `maxMessageSize` of 1 MiB rather than Pulsar's 5 MiB default, the
+same limit the MQTT and NATS brokers keep, so one scenario message can exceed each broker's limit.
+Its admin API serves the topic-level `maxMessageSize` policy a scenario sets on its own topic; the
+step waits up to 60 seconds for the broker to read the policy back, which shows that the policy
+applies to the next message.
+
 Harness Redis connections use an explicit ten-second budget for connection setup and each command
 response to tolerate scheduling delay under parallel load. The driver's one-second connection and 500ms
 response defaults are too short under concurrent scenario load: the three-node JAQ transformation

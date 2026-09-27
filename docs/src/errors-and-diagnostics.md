@@ -56,6 +56,13 @@ resolver's own lookup error. The sink changes it into a configuration failure fo
 address or CA file and an initialization failure otherwise, leading with the connection error's
 message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
 
+A Pulsar message refused for good is a `PulsarRecordError`, owned by the Pulsar sink: a message
+larger than the maximum message size the broker announced, which carries the measured size of its
+metadata and payload and the limit as typed fields, or a message the broker answered with
+`NotAllowedError`, which carries the broker's reason. Either becomes a record rejection with code
+`external` and operation `publish`. Every other failure of the client, its connection or the broker
+stays an infrastructure failure of the attempt, which the emitter retries.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
