@@ -97,7 +97,7 @@ use uuid::Uuid;
 use crate::common::{
     client_conformance::{ClientProbe, ProbeRuntime, ProbeTarget, SUBSCRIBED_LINE, corpus_report},
     cluster::{
-        BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
+        BrokerMessage, BrokerObserver, Cluster, DOMAIN_CLOCK_AUTHORITY_OBSERVATION_TIMEOUT,
         HttpsPublishLoopOutcome, InterconnectCredentialFault, StallableTcpProxy,
         TEST_AUTH_PASSWORD, TEST_AUTH_USERNAME, TestClusterConfig, TestSession,
         WebsocketExchangeAction, client_connect_options, client_domain,
@@ -17354,6 +17354,13 @@ async fn given_nats_subject_is_observed(world: &mut ScenarioWorld, subject: Stri
 #[given(expr = "ZeroMQ emission endpoint {string} is observed")]
 async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     let addr = expand_placeholders(world, &addr);
+    observe_zeromq_emission_endpoint(world, addr).await;
+}
+
+/// Binds the observing pull socket at `addr`. The scenario's own emission address can be taken by
+/// another process between its allocation and this bind, so for that address a fresh port replaces
+/// it, and the `{{zeromq_emit_addr}}` placeholder the emitter's client reads follows the socket.
+async fn observe_zeromq_emission_endpoint(world: &mut ScenarioWorld, addr: String) {
     match world.cluster().observe_zeromq(&addr).await {
         Ok(observer) => {
             world.broker_observer = Some(observer);
@@ -17382,6 +17389,126 @@ async fn given_zeromq_emission_endpoint_is_observed(world: &mut ScenarioWorld, a
         "failed to observe a generated ZeroMQ endpoint after {ZEROMQ_OBSERVER_BIND_ATTEMPTS} \
          fresh port allocations"
     );
+}
+
+/// A broker or message destination that one scenario outline publishes to for every transport.
+///
+/// Each fixture starts its external system before the cluster, then provisions and observes the
+/// destination a row names exactly as that transport's own emission steps do, so one outline can
+/// cover every broker and message emitter without restating their setup.
+#[derive(Clone, Copy, Debug)]
+enum EmissionTargetFixture {
+    Kafka,
+    Pulsar,
+    RabbitMq,
+    Redis,
+    Mqtt,
+    /// Core NATS, where the destination is a subject.
+    Nats,
+    /// A subject captured by a JetStream stream of the same name, provisioned with it.
+    NatsJetStream,
+    /// The destination is the address the observer binds its pull socket to.
+    ZeroMq,
+    /// A standard queue, or a FIFO queue with content-based deduplication when its name ends in
+    /// `.fifo`.
+    Sqs,
+}
+
+impl EmissionTargetFixture {
+    fn parse(value: &str) -> Self {
+        match value {
+            "Kafka" => Self::Kafka,
+            "Pulsar" => Self::Pulsar,
+            "RabbitMQ" => Self::RabbitMq,
+            "Redis" => Self::Redis,
+            "MQTT" => Self::Mqtt,
+            "NATS" => Self::Nats,
+            "NATS JetStream" => Self::NatsJetStream,
+            "ZeroMQ" => Self::ZeroMq,
+            "SQS" => Self::Sqs,
+            other => panic!("unsupported emission target '{other}'"),
+        }
+    }
+
+    async fn start(self, world: &mut ScenarioWorld) {
+        initialize_scenario_identity(world);
+        let started = match self {
+            Self::Kafka => world.dependencies.start_kafka(&world.test_id).await,
+            Self::Pulsar => world.dependencies.start_pulsar(&world.test_id).await,
+            Self::RabbitMq => world.dependencies.start_rabbitmq(&world.test_id).await,
+            Self::Redis => world.dependencies.start_redis(&world.test_id).await,
+            Self::Mqtt => world.dependencies.start_mqtt(&world.test_id).await,
+            Self::Nats | Self::NatsJetStream => world.dependencies.start_nats(&world.test_id).await,
+            Self::Sqs => world.dependencies.start_sqs(&world.test_id).await,
+            Self::ZeroMq => Ok(()),
+        };
+        started.unwrap_or_else(|error| panic!("{self:?} test dependency should start: {error}"));
+        refresh_dependency_configuration(world);
+    }
+
+    async fn observe(self, world: &mut ScenarioWorld, destination: String) {
+        let observed = match self {
+            Self::Kafka => {
+                world
+                    .cluster()
+                    .ensure_kafka_topic_partitions(&destination, 1)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to create Kafka topic '{destination}': {error}")
+                    });
+                world.cluster().observe_kafka(&destination).await
+            }
+            Self::Pulsar => world.cluster().observe_pulsar(&destination).await,
+            Self::RabbitMq => {
+                world
+                    .cluster()
+                    .ensure_rabbitmq_queue(&destination)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to declare RabbitMQ queue '{destination}': {error}")
+                    });
+                world.cluster().observe_rabbitmq(&destination).await
+            }
+            Self::Redis => world.cluster().observe_redis(&destination).await,
+            Self::Mqtt => world.cluster().observe_mqtt(&destination).await,
+            Self::Nats => world.cluster().observe_nats(&destination).await,
+            Self::NatsJetStream => {
+                world
+                    .cluster()
+                    .provision_nats_stream(&destination, &destination)
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("failed to provision NATS JetStream stream '{destination}': {error}")
+                    });
+                world.cluster().observe_nats(&destination).await
+            }
+            Self::ZeroMq => {
+                observe_zeromq_emission_endpoint(world, destination).await;
+                return;
+            }
+            Self::Sqs => world.cluster().observe_sqs(&destination).await,
+        };
+        let observer = observed
+            .unwrap_or_else(|error| panic!("failed to observe {self:?} '{destination}': {error}"));
+        world.broker_observer = Some(observer);
+    }
+}
+
+#[given(expr = "the {string} emission target is running")]
+async fn given_emission_target_is_running(world: &mut ScenarioWorld, target: String) {
+    EmissionTargetFixture::parse(&target).start(world).await;
+}
+
+#[given(expr = "the {string} emission target {string} is observed")]
+async fn given_emission_target_is_observed(
+    world: &mut ScenarioWorld,
+    target: String,
+    destination: String,
+) {
+    let destination = expand_placeholders(world, &destination);
+    EmissionTargetFixture::parse(&target)
+        .observe(world, destination)
+        .await;
 }
 
 #[given(expr = "Syslog UDP emission endpoint {string} is observed")]
@@ -22744,16 +22871,18 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_payload
     duration: String,
     #[step] step: &Step,
 ) {
-    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
+    let mut expected = BTreeMap::<ExpectedBrokerPayload, usize>::new();
     for line in docstring(step).lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
         let payload = expand_placeholders(world, line);
-        *expected.entry(payload.into_bytes()).or_insert(0) += 1;
+        *expected
+            .entry(ExpectedBrokerPayload(payload.into_bytes()))
+            .or_insert(0) += 1;
     }
-    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+    receive_exactly_these_broker_messages(world, &duration, expected).await;
 }
 
 /// Like the step above, for payloads that are not all text. Each docstring line is `text:`
@@ -22764,7 +22893,7 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded
     duration: String,
     #[step] step: &Step,
 ) {
-    let mut expected = BTreeMap::<Vec<u8>, usize>::new();
+    let mut expected = BTreeMap::<ExpectedBrokerPayload, usize>::new();
     for line in docstring(step).lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -22777,9 +22906,76 @@ async fn then_within_duration_the_observed_broker_receives_exactly_these_encoded
         } else {
             panic!("encoded payload line must start with 'text:' or 'hex:', found {line:?}");
         };
-        *expected.entry(payload).or_insert(0) += 1;
+        *expected.entry(ExpectedBrokerPayload(payload)).or_insert(0) += 1;
     }
-    receive_exactly_these_broker_payloads(world, &duration, expected).await;
+    receive_exactly_these_broker_messages(world, &duration, expected).await;
+}
+
+/// Like the payload step, where every table row is one exact message: its payload and the key,
+/// headers and FIFO group the broker delivered it with. An empty cell is a message delivered
+/// without that attribute. Headers are `name=value` pairs separated by `;`, in the order the
+/// observer reports them, which is the written order for Kafka and NATS and name order for the
+/// brokers that keep none.
+#[then(expr = "within {string} the observed broker receives exactly these messages")]
+async fn then_within_duration_the_observed_broker_receives_exactly_these_messages(
+    world: &mut ScenarioWorld,
+    duration: String,
+    #[step] step: &Step,
+) {
+    let table = step
+        .table
+        .as_ref()
+        .expect("the step lists every expected message in a table");
+    let mut rows = table.rows.iter();
+    let header = rows
+        .next()
+        .expect("the message table starts with its column names");
+    assert_eq!(
+        header.as_slice(),
+        ["payload", "key", "headers", "group"],
+        "the message table names its columns payload, key, headers and group"
+    );
+    let mut expected = BTreeMap::<ExpectedBrokerMessage, usize>::new();
+    for row in rows {
+        let [payload, key, headers, group] = row.as_slice() else {
+            panic!("each expected message row has four cells, got {row:?}");
+        };
+        let message = ExpectedBrokerMessage {
+            payload: expand_placeholders(world, payload).into_bytes(),
+            key: expected_message_attribute(world, key),
+            headers: expected_message_headers(world, headers),
+            group: expected_message_attribute(world, group),
+        };
+        *expected.entry(message).or_insert(0) += 1;
+    }
+    receive_exactly_these_broker_messages(world, &duration, expected).await;
+}
+
+/// A key or group cell: absent when empty, otherwise the exact value.
+fn expected_message_attribute(world: &ScenarioWorld, cell: &str) -> Option<String> {
+    let cell = cell.trim();
+    if cell.is_empty() {
+        return None;
+    }
+    Some(expand_placeholders(world, cell))
+}
+
+fn expected_message_headers(world: &ScenarioWorld, cell: &str) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    for pair in cell.split(';') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = pair.split_once('=') else {
+            panic!("expected message header '{pair}' must be written name=value");
+        };
+        headers.push((
+            expand_placeholders(world, name),
+            expand_placeholders(world, value),
+        ));
+    }
+    headers
 }
 
 fn decode_hex_payload(hex: &str) -> Vec<u8> {
@@ -22813,21 +23009,75 @@ fn describe_broker_payload(payload: &[u8]) -> String {
     )
 }
 
-async fn receive_exactly_these_broker_payloads(
+/// What an exact broker assertion compares for every message the observer delivers.
+trait BrokerMessageExpectation: Ord {
+    /// The expectation `message` satisfies.
+    fn delivered(message: &BrokerMessage) -> Self;
+
+    fn describe(&self) -> String;
+}
+
+/// A message's payload bytes, whatever key, headers or group it was delivered with.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ExpectedBrokerPayload(Vec<u8>);
+
+impl BrokerMessageExpectation for ExpectedBrokerPayload {
+    fn delivered(message: &BrokerMessage) -> Self {
+        Self(message.bytes.clone())
+    }
+
+    fn describe(&self) -> String {
+        describe_broker_payload(&self.0)
+    }
+}
+
+/// A message's payload bytes together with the key, headers and FIFO group it was delivered with.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ExpectedBrokerMessage {
+    payload: Vec<u8>,
+    key: Option<String>,
+    headers: Vec<(String, String)>,
+    group: Option<String>,
+}
+
+impl BrokerMessageExpectation for ExpectedBrokerMessage {
+    fn delivered(message: &BrokerMessage) -> Self {
+        Self {
+            payload: message.bytes.clone(),
+            key: message.key.clone(),
+            headers: message.headers.clone(),
+            group: message.group.clone(),
+        }
+    }
+
+    fn describe(&self) -> String {
+        format!(
+            "{} with key {:?}, headers {:?} and group {:?}",
+            describe_broker_payload(&self.payload),
+            self.key,
+            self.headers,
+            self.group
+        )
+    }
+}
+
+/// Receives messages until every expected one has arrived, in any order, and fails on the first
+/// message nothing expects and on any message that follows the expected ones.
+async fn receive_exactly_these_broker_messages<Expected: BrokerMessageExpectation>(
     world: &mut ScenarioWorld,
     duration: &str,
-    mut remaining: BTreeMap<Vec<u8>, usize>,
+    mut remaining: BTreeMap<Expected, usize>,
 ) {
     let duration =
         humantime::parse_duration(duration).expect("step duration must be a valid duration");
     assert!(
         !remaining.is_empty(),
-        "step docstring must contain at least one expected payload"
+        "the step must list at least one expected message"
     );
-    let describe_remaining = |remaining: &BTreeMap<Vec<u8>, usize>| {
+    let describe_remaining = |remaining: &BTreeMap<Expected, usize>| {
         remaining
             .iter()
-            .map(|(payload, count)| format!("{count} x {}", describe_broker_payload(payload)))
+            .map(|(expected, count)| format!("{count} x {}", expected.describe()))
             .collect::<Vec<_>>()
     };
 
@@ -22838,7 +23088,7 @@ async fn receive_exactly_these_broker_payloads(
         let now = Instant::now();
         assert!(
             now < deadline,
-            "timed out waiting for broker payloads; expected remaining {:?}, observed {observed:?}",
+            "timed out waiting for broker messages; expected remaining {:?}, observed {observed:?}",
             describe_remaining(&remaining)
         );
         let message = world
@@ -22847,28 +23097,30 @@ async fn receive_exactly_these_broker_payloads(
             .expect("a broker observer must exist before assertion")
             .try_next_message(deadline.saturating_duration_since(now))
             .await
-            .expect("failed while waiting for exact broker payloads");
+            .expect("failed while waiting for exact broker messages");
         let Some(message) = message else {
             panic!(
-                "timed out waiting for broker payloads; expected remaining {:?}, observed \
+                "timed out waiting for broker messages; expected remaining {:?}, observed \
                  {observed:?}",
                 describe_remaining(&remaining)
             );
         };
-        let Some(count) = remaining.get_mut(&message.bytes) else {
+        let delivered = Expected::delivered(&message);
+        let Some(count) = remaining.get_mut(&delivered) else {
             panic!(
-                "observed an unexpected broker payload {}; expected remaining {:?}, observed \
+                "observed an unexpected broker message {}; expected remaining {:?}, observed \
                  before it {observed:?}",
-                describe_broker_payload(&message.bytes),
+                delivered.describe(),
                 describe_remaining(&remaining)
             );
         };
         *count -= 1;
         if *count == 0 {
-            remaining.remove(&message.bytes);
+            remaining.remove(&delivered);
         }
         world.last_broker_payload = Some(message.payload.clone());
-        observed.push(describe_broker_payload(&message.bytes));
+        world.last_broker_headers = message.headers;
+        observed.push(delivered.describe());
     }
 
     let extra = world
@@ -22877,11 +23129,11 @@ async fn receive_exactly_these_broker_payloads(
         .expect("a broker observer must exist before assertion")
         .try_next_message(Duration::from_secs(2))
         .await
-        .expect("failed while checking for an unexpected broker payload");
+        .expect("failed while checking for an unexpected broker message");
     assert!(
         extra.is_none(),
-        "observed a broker payload beyond the expected ones: {:?}; observed {observed:?}",
-        extra.map(|message| describe_broker_payload(&message.bytes))
+        "observed a broker message beyond the expected ones: {:?}; observed {observed:?}",
+        extra.map(|message| Expected::delivered(&message).describe())
     );
 }
 

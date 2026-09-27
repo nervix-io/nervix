@@ -12,7 +12,10 @@ use arch_into::ArchInto as _;
 use async_nats::Client as NatsClient;
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
-use aws_sdk_sqs::{Client as SqsClient, types::QueueAttributeName};
+use aws_sdk_sqs::{
+    Client as SqsClient,
+    types::{MessageSystemAttributeName, QueueAttributeName},
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use error_stack::Report;
 use fjall::Database;
@@ -3691,24 +3694,35 @@ pub(crate) struct BrokerMessage {
     pub(crate) payload: String,
     /// The payload exactly as the broker delivered it.
     pub(crate) bytes: Vec<u8>,
+    /// The headers the broker delivered with the payload: Kafka and NATS headers in their written
+    /// order, and Pulsar properties, RabbitMQ headers and SQS message attributes sorted by name,
+    /// because those brokers keep no order of their own.
     pub(crate) headers: Vec<(String, String)>,
+    /// The key the broker delivered with the payload: a Kafka record key or a Pulsar partition key.
+    pub(crate) key: Option<String>,
+    /// The ordering group the broker delivered the payload in: an SQS FIFO message group.
+    pub(crate) group: Option<String>,
 }
 
 impl BrokerMessage {
-    fn payload(payload: String) -> Self {
-        Self {
-            bytes: payload.as_bytes().to_vec(),
-            payload,
-            headers: Vec::new(),
-        }
-    }
-
     fn from_bytes(bytes: &[u8], headers: Vec<(String, String)>) -> Self {
         Self {
             payload: String::from_utf8_lossy(bytes).to_string(),
             bytes: bytes.to_vec(),
             headers,
+            key: None,
+            group: None,
         }
+    }
+
+    fn with_key(mut self, key: Option<String>) -> Self {
+        self.key = key;
+        self
+    }
+
+    fn with_group(mut self, group: Option<String>) -> Self {
+        self.group = group;
+        self
     }
 }
 
@@ -4809,9 +4823,11 @@ async fn observe_mqtt(
                 }
                 Ok(MqttEvent::Incoming(Incoming::Publish(publish))) => {
                     if publish.topic.as_ref() == topic.as_bytes() {
-                        let payload = String::from_utf8_lossy(publish.payload.as_ref()).to_string();
-                        let _ = payload_tx.send(BrokerMessage::payload(payload)).await;
-                        break;
+                        let message =
+                            BrokerMessage::from_bytes(publish.payload.as_ref(), Vec::new());
+                        if payload_tx.send(message).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Ok(MqttEvent::Incoming(_))
@@ -4861,12 +4877,17 @@ async fn observe_rabbitmq(
 
     let task = tokio::spawn(async move {
         let _connection = connection;
-        if let Some(delivery) = consumer.next().await
-            && let Ok(delivery) = delivery
-        {
-            let payload = String::from_utf8_lossy(&delivery.data).to_string();
+        while let Some(delivery) = consumer.next().await {
+            tokio::task::consume_budget().await;
+            let Ok(delivery) = delivery else {
+                break;
+            };
+            let headers = rabbitmq_delivery_headers(&delivery.properties);
+            let message = BrokerMessage::from_bytes(&delivery.data, headers);
             let _ = delivery.ack(BasicAckOptions::default()).await;
-            let _ = payload_tx.send(BrokerMessage::payload(payload)).await;
+            if payload_tx.send(message).await.is_err() {
+                break;
+            }
         }
     });
 
@@ -4874,6 +4895,26 @@ async fn observe_rabbitmq(
         payload_rx,
         task: Some(task),
     })
+}
+
+/// The string headers of one RabbitMQ delivery in name order, which is the order the AMQP field
+/// table keeps. The emitter writes every header as a long string, so any other value type is one
+/// no Nervix emitter wrote and is reported as its debug form.
+fn rabbitmq_delivery_headers(properties: &BasicProperties) -> Vec<(String, String)> {
+    let Some(table) = properties.headers().as_ref() else {
+        return Vec::new();
+    };
+    let mut headers = Vec::with_capacity(table.inner().len());
+    for (name, value) in table {
+        let value = match value {
+            lapin::types::AMQPValue::LongString(value) => {
+                String::from_utf8_lossy(value.as_bytes()).to_string()
+            }
+            other => format!("{other:?}"),
+        };
+        headers.push((name.as_str().to_string(), value));
+    }
+    headers
 }
 
 async fn observe_redis(
@@ -4889,12 +4930,8 @@ async fn observe_redis(
         let mut messages = pubsub.on_message();
         while let Some(message) = messages.next().await {
             tokio::task::consume_budget().await;
-            let payload = String::from_utf8_lossy(message.get_payload_bytes()).to_string();
-            if payload_tx
-                .send(BrokerMessage::payload(payload))
-                .await
-                .is_err()
-            {
+            let message = BrokerMessage::from_bytes(message.get_payload_bytes(), Vec::new());
+            if payload_tx.send(message).await.is_err() {
                 break;
             }
         }
@@ -4956,8 +4993,11 @@ async fn observe_kafka(
                             values
                         })
                         .unwrap_or_default();
+                    let key = message
+                        .key()
+                        .map(|key| String::from_utf8_lossy(key).to_string());
                     let _ = payload_tx
-                        .send(BrokerMessage::from_bytes(bytes, headers))
+                        .send(BrokerMessage::from_bytes(bytes, headers).with_key(key))
                         .await;
                 }
                 Err(_) => continue,
@@ -5030,15 +5070,23 @@ async fn observe_pulsar_with_addr(
             let task = tokio::spawn(async move {
                 while let Some(message) = consumer.next().await {
                     tokio::task::consume_budget().await;
-                    match message {
-                        Ok(message) => {
-                            let payload = message.payload.data.to_vec();
-                            let payload = String::from_utf8_lossy(&payload).to_string();
-                            let _ = consumer.ack(&message).await;
-                            let _ = payload_tx.send(BrokerMessage::payload(payload)).await;
-                            break;
-                        }
-                        Err(_) => continue,
+                    let Ok(message) = message else {
+                        continue;
+                    };
+                    // Pulsar keeps message properties as an unordered map, so they are compared
+                    // in name order.
+                    let mut properties = message
+                        .metadata()
+                        .properties
+                        .iter()
+                        .map(|property| (property.key.clone(), property.value.clone()))
+                        .collect::<Vec<_>>();
+                    properties.sort();
+                    let observed = BrokerMessage::from_bytes(&message.payload.data, properties)
+                        .with_key(message.key());
+                    let _ = consumer.ack(&message).await;
+                    if payload_tx.send(observed).await.is_err() {
+                        break;
                     }
                 }
             });
@@ -5083,6 +5131,8 @@ async fn observe_sqs(
             .queue_url(queue_url.clone())
             .max_number_of_messages(1)
             .wait_time_seconds(1)
+            .message_attribute_names("All")
+            .message_system_attribute_names(MessageSystemAttributeName::MessageGroupId)
             .send()
             .await
         {
@@ -5091,6 +5141,22 @@ async fn observe_sqs(
                 continue;
             };
             let payload = message.body().unwrap_or_default().to_string();
+            // SQS keeps message attributes as an unordered map, so they are compared in name
+            // order.
+            let mut attributes = Vec::new();
+            if let Some(message_attributes) = message.message_attributes() {
+                for (name, value) in message_attributes {
+                    let value = value.string_value().unwrap_or_default().to_string();
+                    attributes.push((name.clone(), value));
+                }
+            }
+            attributes.sort();
+            let group = match message.attributes() {
+                Some(system) => system
+                    .get(&MessageSystemAttributeName::MessageGroupId)
+                    .cloned(),
+                None => None,
+            };
             if let Some(receipt_handle) = message.receipt_handle() {
                 let _ = client
                     .delete_message()
@@ -5099,11 +5165,9 @@ async fn observe_sqs(
                     .send()
                     .await;
             }
-            if payload_tx
-                .send(BrokerMessage::payload(payload))
-                .await
-                .is_err()
-            {
+            let observed =
+                BrokerMessage::from_bytes(payload.as_bytes(), attributes).with_group(group);
+            if payload_tx.send(observed).await.is_err() {
                 break;
             }
         }
@@ -5166,18 +5230,27 @@ async fn observe_zeromq(addr: &str) -> io::Result<BrokerObserver> {
     let (payload_tx, payload_rx) = mpsc::channel(1);
 
     let task = tokio::spawn(async move {
-        while let Ok(message) = socket.recv().await {
+        loop {
             tokio::task::consume_budget().await;
+            // zmq.rs's pull socket stops polling its peers as soon as one of them has nothing to
+            // read, so a message another peer already delivered can wait until some peer sends
+            // again. Abandoning a pending receive consumes nothing, so a receive that stays pending
+            // for a poll interval starts over and reads what the stalled peer left behind.
+            let received = match timeout(POLL_INTERVAL, socket.recv()).await {
+                Ok(received) => received,
+                Err(_) => continue,
+            };
+            let Ok(message) = received else {
+                break;
+            };
             let frames = message.into_vec();
-            if let Some(frame) = frames.first() {
-                let payload = String::from_utf8_lossy(frame).to_string();
-                if payload_tx
-                    .send(BrokerMessage::payload(payload))
+            if let Some(frame) = frames.first()
+                && payload_tx
+                    .send(BrokerMessage::from_bytes(frame, Vec::new()))
                     .await
                     .is_err()
-                {
-                    break;
-                }
+            {
+                break;
             }
         }
     });

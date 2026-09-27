@@ -186,6 +186,17 @@ the host subdivides a candidate that does not fit; Arrow memory accounting still
 `FLUSH`. The connector sees one encoded record per completed payload and answers for it under the
 record's identity, without learning which rows the payload carries.
 
+The connector owns the destination's own limit on each record, whether the record carries one row
+or a whole batch payload, because only the connector knows what it writes around the payload.
+Where it can learn that limit it measures the complete message and rejects a record that cannot
+fit before writing it, with a reason naming the size and the limit, so the rejection follows the
+message error policy instead of failing the transport: the MQTT sink measures the `PUBLISH` packet
+against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
+express, the SQS sink counts attributes and the FIFO group against 256 KiB, and the Kafka producer
+and the NATS client check `message.max.bytes` and `max_payload` with the key and headers they
+write. A limit the connector cannot learn stays with the destination, and whatever the destination
+reports when a message exceeds it is classified like any other publish failure.
+
 The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
 key, headers, ordering group and member positions, in the emitter buffer beside the batches the
 members came from, and marks the members prepared so that no later attempt packs them again. A

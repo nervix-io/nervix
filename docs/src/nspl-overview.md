@@ -273,6 +273,9 @@ failover, commit-step, expiry, and limit semantics.
 `DESCRIBE TRANSACTION` reads one transaction's impact report without changing
 that transaction:
 
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) explains the planned
+and actual scopes, affected topology, and retained outcomes reported by this statement.
+
 ```nspl,ignore
 DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];
 ```
