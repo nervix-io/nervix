@@ -248,3 +248,46 @@ Feature: Session protocol
       | cluster_size |
       | 1            |
       | 3            |
+
+  Scenario Outline: A domain clock attachment reply precedes its frames, a detach reply follows them, and a transaction refuses both
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      START;
+      """
+    And a clock session is opened on the leader node
+    When the clock session sends request "attach" attaching the clock of domain "{{domain}}" and then request "stop" with this NSPL command
+      """
+      STOP;
+      """
+    Then request "attach" of the clock session attached the clock of domain "{{domain}}" as unpaced at generation 1
+    And request "stop" of the clock session completed
+    And within "10s" the clock session observes domain "{{domain}}" stopped at generation 1
+    And the clock session received the reply to request "attach" before every frame about domain "{{domain}}"
+    When the clock session executes this NSPL command
+      """
+      BEGIN;
+      """
+    And the clock session sends request "attach inside" attaching the clock of domain "{{domain}}"
+    Then request "attach inside" of the clock session is refused because the session holds a transaction
+    When the clock session sends request "detach inside" detaching the clock of domain "{{domain}}"
+    Then request "detach inside" of the clock session is refused because the session holds a transaction
+    When the clock session executes this NSPL command
+      """
+      REVERT;
+      """
+    And the clock session sends request "detach" detaching the clock of domain "{{domain}}" and then request "start" with this NSPL command
+      """
+      START;
+      """
+    Then request "detach" of the clock session detached the clock of domain "{{domain}}"
+    And request "start" of the clock session completed
+    And the clock session receives no frame about domain "{{domain}}" within "1s"
+    And the clock session received no frame about domain "{{domain}}" after the reply to request "detach"
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

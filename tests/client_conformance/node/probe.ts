@@ -722,6 +722,29 @@ function commandLines(id: bigint, outcome: wire.CommandOutcome): string[] {
   return lines;
 }
 
+/** Renders a domain clock as the serving node has it installed. */
+function clockLine(clock: wire.DomainClockObservation): string {
+  const generation = clock.generation();
+  switch (clock.stateType()) {
+    case wire.DomainClockObservedState.StoppedDomainClock:
+      return `CLOCK generation=${generation} state=stopped`;
+    case wire.DomainClockObservedState.UninstalledDomainClock:
+      return `CLOCK generation=${generation} state=uninstalled`;
+    case wire.DomainClockObservedState.UnpacedDomainClock:
+      return `CLOCK generation=${generation} state=unpaced`;
+    case wire.DomainClockObservedState.PacedDomainClock: {
+      const paced = member(clock.state(new wire.PacedDomainClock()) as wire.PacedDomainClock | null);
+      // A rate is positive and finite, so no engine rewrites its bits when it becomes a Number.
+      const bits = new DataView(new ArrayBuffer(8));
+      bits.setFloat64(0, member(paced.timeRate()));
+      const rate = bits.getBigUint64(0).toString(16).padStart(16, '0');
+      return `CLOCK generation=${generation} state=paced period=${paced.periodNanos()} skew=${paced.skewNanos()} origin=${paced.logicalOriginUnixNanos()} anchor=${paced.utcAnchorUnixNanos()} rate=f64:${rate}`;
+    }
+    default:
+      throw new Error(`undeclared domain clock state ${clock.stateType()}`);
+  }
+}
+
 function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
   const message = wire.ServerMessage.getRootAsServerMessage(frameBuffer(frame, 'NXSM'));
   switch (message.bodyType()) {
@@ -773,6 +796,59 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
           }
           return lines;
         }
+        case wire.ReplyBody.DomainClockAttachOutcome: {
+          const outcome = member(
+            reply.body(new wire.DomainClockAttachOutcome()) as wire.DomainClockAttachOutcome | null,
+          );
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.DomainClockAttachDisposition.DomainClockAttached: {
+              const attached = member(
+                outcome.disposition(new wire.DomainClockAttached()) as wire.DomainClockAttached | null,
+              );
+              return [
+                `REPLY ${id} DOMAIN_CLOCK_ATTACH attached domain=${attached.domain()} message=${message}`,
+                clockLine(member(attached.clock())),
+              ];
+            }
+            case wire.DomainClockAttachDisposition.DomainClockAlreadyAttached: {
+              const already = member(
+                outcome.disposition(new wire.DomainClockAlreadyAttached()) as wire.DomainClockAlreadyAttached | null,
+              );
+              return [`REPLY ${id} DOMAIN_CLOCK_ATTACH already_attached domain=${already.domain()} message=${message}`];
+            }
+            case wire.DomainClockAttachDisposition.DomainNotFound: {
+              const notFound = member(outcome.disposition(new wire.DomainNotFound()) as wire.DomainNotFound | null);
+              return [`REPLY ${id} DOMAIN_CLOCK_ATTACH domain_not_found domain=${notFound.domain()} message=${message}`];
+            }
+            case wire.DomainClockAttachDisposition.RequestFailed:
+              return [`REPLY ${id} DOMAIN_CLOCK_ATTACH failed message=${message}`];
+            default:
+              throw new Error(`undeclared attach disposition ${outcome.dispositionType()}`);
+          }
+        }
+        case wire.ReplyBody.DomainClockDetachOutcome: {
+          const outcome = member(
+            reply.body(new wire.DomainClockDetachOutcome()) as wire.DomainClockDetachOutcome | null,
+          );
+          const message = text(bytesOf((encoding) => outcome.message(encoding)));
+          switch (outcome.dispositionType()) {
+            case wire.DomainClockDetachDisposition.DomainClockDetached: {
+              const detached = member(
+                outcome.disposition(new wire.DomainClockDetached()) as wire.DomainClockDetached | null,
+              );
+              return [`REPLY ${id} DOMAIN_CLOCK_DETACH detached domain=${detached.domain()} message=${message}`];
+            }
+            case wire.DomainClockDetachDisposition.DomainClockNotAttached: {
+              const notAttached = member(
+                outcome.disposition(new wire.DomainClockNotAttached()) as wire.DomainClockNotAttached | null,
+              );
+              return [`REPLY ${id} DOMAIN_CLOCK_DETACH not_attached domain=${notAttached.domain()} message=${message}`];
+            }
+            default:
+              throw new Error(`the corpus holds no ${outcome.dispositionType()} detach disposition`);
+          }
+        }
         default:
           throw new Error(`the corpus holds no ${wire.ReplyBody[reply.bodyType()]} reply`);
       }
@@ -798,6 +874,18 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
       const handle = member(ended.subscription());
       return [
         `EVENT ENDED name=${handle.name()} generation=${handle.generation()} reason=${wire.SubscriptionEndReason[member(ended.reason())]} message=${text(bytesOf((encoding) => ended.message(encoding)))}`,
+      ];
+    }
+    case wire.ServerBody.DomainClockObserved: {
+      const observed = member(message.body(new wire.DomainClockObserved()) as wire.DomainClockObserved | null);
+      return [`EVENT DOMAIN_CLOCK domain=${observed.domain()}`, clockLine(member(observed.clock()))];
+    }
+    case wire.ServerBody.DomainClockAttachmentEnded: {
+      const ended = member(
+        message.body(new wire.DomainClockAttachmentEnded()) as wire.DomainClockAttachmentEnded | null,
+      );
+      return [
+        `EVENT DOMAIN_CLOCK_ENDED domain=${ended.domain()} reason=${wire.DomainClockAttachmentEndReason[member(ended.reason())]}`,
       ];
     }
     default:
@@ -852,6 +940,18 @@ function clientLines(frame: Uint8Array): string[] {
     case wire.ClientRequest.CancelRequest: {
       const cancel = member(message.request(new wire.CancelRequest()) as wire.CancelRequest | null);
       return [`REQUEST ${id} CANCEL target=${cancel.targetRequestId()}`];
+    }
+    case wire.ClientRequest.AttachDomainClockRequest: {
+      const attach = member(
+        message.request(new wire.AttachDomainClockRequest()) as wire.AttachDomainClockRequest | null,
+      );
+      return [`REQUEST ${id} ATTACH_DOMAIN_CLOCK domain=${attach.domain()}`];
+    }
+    case wire.ClientRequest.DetachDomainClockRequest: {
+      const detach = member(
+        message.request(new wire.DetachDomainClockRequest()) as wire.DetachDomainClockRequest | null,
+      );
+      return [`REQUEST ${id} DETACH_DOMAIN_CLOCK domain=${detach.domain()}`];
     }
     default:
       throw new Error(`the corpus holds no ${wire.ClientRequest[message.requestType()]} request`);

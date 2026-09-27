@@ -238,6 +238,21 @@ behavior, while [Inspecting A Transaction](./control-plane.md#inspecting-a-trans
 retained command outcomes and [ALTER Lock And Quiesce Classification](./control-plane.md#alter-lock-and-quiesce-classification)
 describes impact inspection.
 
+A domain clock attachment answers with its own typed disposition rather than a command disposition,
+and every refusal names the domain it concerns. An attach is `Attached` with the observed clock,
+`AlreadyAttached` when the session already follows that domain's clock, `DomainNotFound` when the
+serving node has no such domain, or `Failed` when the request could not run; a detach is
+`Detached`, `NotAttached` when the session does not follow that clock, or `Failed`. While the
+session holds a transaction, both fail with the session-local refusal that other session-scoped
+statements receive. The server ends an attachment with a frame whose typed reason is
+`DomainRemoved`, and the Rust client reports a lost session as an interruption of each clock it
+follows before it attaches again. Each disposition's message is display text for a client that
+prints it; a client decides from the variant. The Rust client's `execute` turns any disposition but
+`Attached` or `Detached` into a `Failed` command outcome carrying that message, and its clock helper
+reports a stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
+`DomainClockReadError`. See
+[Domain Clock Attachment](./sessions.md#domain-clock-attachment).
+
 ## Sensitive Data And Observability
 
 Error variants and public diagnostics identify operation, field, entity, and placement rather than

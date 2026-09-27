@@ -122,14 +122,19 @@ offending span highlighted in place rather than described by offset.
 
 ### Asynchronous Output
 
-Subscription deliveries and server notifications arrive independently of the prompt and are printed
-above it:
+Subscription deliveries, server notifications, and changes of an attached domain clock arrive
+independently of the prompt and are printed above it:
 
 ```text
 [events] subscription [watch] from [orders]: {"order_id":"o-1001","amount":1500}
 [events] server ERROR: emitter 'redis_orders' publish failed
 [events] topology INFO: raft transition: node-2 became leader
+[events] domain clock [simulation]: generation 2, stopped
 ```
+
+A domain clock line follows every change after the attach reply. When the server ends an
+attachment, or the session holding it is interrupted and the clock is attached again on the next
+session, the line reads `[events] domain clock [<domain>] notice: ...` with the reason.
 
 ### Leaving
 
@@ -148,9 +153,21 @@ applying one model change:
 | `DESCRIBE TRANSACTION ['<id>'] [OPERATION <n>] [FORMAT TEXT \| JSON]` | read the attached transaction, or one named by id, without changing it |
 | `UPLOAD RESOURCE <name> VERSION '<dir>'` | stream a local directory as a new version of that resource in the active domain |
 | `CREATE SUBSCRIPTION` / `DELETE SUBSCRIPTION` | start and stop a read-only relay subscription |
+| `ATTACH DOMAIN CLOCK` / `DETACH DOMAIN CLOCK` | start and stop following the active domain's clock |
 
-`USE`, `LIST DOMAINS`, and `UPLOAD RESOURCE` must be submitted on their own, and never inside a
-transaction. Read-only statements, subscriptions, `CREATE DOMAIN`, `CREATE USER`, and node
+`USE`, `LIST DOMAINS`, `UPLOAD RESOURCE`, and the domain clock statements must be submitted on
+their own, and never inside a transaction. `ATTACH DOMAIN CLOCK` prints the clock the serving node
+has installed, then each change above the prompt as described in
+[Asynchronous Output](#asynchronous-output):
+
+```text
+nervix[simulation]> ATTACH DOMAIN CLOCK;
+attached to the clock of domain 'simulation': generation 1, paced: period 1s, skew 100ms, logical origin 2030-01-01T00:00:00Z, UTC anchor 2026-09-27T09:30:00.125Z, time rate 2
+```
+
+A second attach is refused because the session already follows that clock, and a detach without an
+attachment is refused because it does not. The CLI attaches the clocks it follows again after a
+reconnect. See [Domain Clock Attachment](sessions.md#domain-clock-attachment). Read-only statements, subscriptions, `CREATE DOMAIN`, `CREATE USER`, and node
 administration are also rejected while queueing transaction content. `DESCRIBE TRANSACTION` is the
 exception: while a transaction is open it reads that transaction's impact report without queueing
 anything or consuming an operation number, so the next queued statement keeps the number it would
