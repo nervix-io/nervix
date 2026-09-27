@@ -181,6 +181,18 @@ same plan shape feeds running and passive builds. Passive builds retain the plan
 relay identities and endpoint routes, while admission remains stopped. A server-side listener stays
 bound on every live node independently of graph placement or domain leadership.
 
+A second in-memory decision, the domain's entrypoint plans, resolves every ingestor's source,
+client, codec and routes and every reingestor's inputs, node filter and routes. It records how a
+route's records get their branch key as one of three states: unbranched, keeping the incoming key,
+or constructing a new key with a lowered program. The two branched states carry the branch and the
+retention of the relay the route writes, so the branch a route declares and the branch its
+entrypoint retains are one value, and a route whose declaration disagrees with its relay fails
+planning. An ingestor's transport class is read from the one source it declares rather than stored
+beside it. A Kafka ingestor's offsets are either a consumer group or domain offsets together with
+their placement. The planner lowers every filter, route and branch construction before a node binds
+them, so a bound route always carries its compiled program and a running task has no
+missing-program or undeclared-branch state to check.
+
 The owner reports a semantic typed error; contextual propagation uses `error-stack`. A
 per-record conversion error is reported at the record boundary without formatting a fresh
 message on every hot-path operation. Diagnostics contain the relevant identity, operation, and

@@ -95,7 +95,11 @@ for review. The corpus covers what the live relay does not: fixed and variable l
 a NaN with a payload, infinity, a nullable and a sensitive branch key field, command outcomes with
 diagnostics, a leader redirect with and without a known leader, an unknown outcome, a rejection, a
 subscription ending, and client requests with a present-zero and an absent optional position, a
-preview fingerprint, and the largest request identity.
+preview fingerprint, and the largest request identity. It also covers the domain clock attachment:
+the attach and detach requests, a paced clock attached at the largest generation with the extreme
+signed timestamps and a time rate read by its bits, clock frames in the stopped, uninstalled and
+unpaced states, every refusal of an attach and a detach, and the end of an attachment with its
+typed reason.
 
 `A <runtime> client reads every frame of the conformance corpus the Rust encoder wrote` holds the Go
 reader and the TypeScript reader on Node.js and Bun to the same report. Together with the live
@@ -118,6 +122,8 @@ the independent interoperation with Rust in both encoding directions.
 - The probes connect over plaintext. TLS selection is the Rust client's and is not reimplemented by
   the binding.
 - C and C++ consume the binding. No independent C or C++ reader is maintained.
-- Only the Rust client restores subscriptions after reconnection. The Go and TypeScript clients
-  show that the protocol is implementable, not that they recover; a binding host inherits the Rust
-  client's recovery.
+- Only the Rust client restores subscriptions and domain clock attachments after reconnection. The
+  Go and TypeScript clients show that the protocol is implementable, not that they recover; a
+  binding host inherits the Rust client's recovery.
+- The binding does not expose domain clock attachment. Its hosts read the attach reply and clock
+  frames only as the corpus readers do.

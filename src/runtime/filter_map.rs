@@ -2594,9 +2594,9 @@ mod tests {
                 },
             ],
         }));
-        let program = compile_ingestor_filter_map_program(
+        let program = bind_ingestor_route_for_test(
             &domain("default"),
-            named::<ModelName>("logic_ingestor"),
+            &named::<ModelName>("logic_ingestor"),
             IngestMetadataKind::Headers,
             true,
             &construction(
@@ -2622,8 +2622,7 @@ mod tests {
                 udfs: None,
             },
         )
-        .expect("filter-map must compile")
-        .expect("program must exist");
+        .expect("filter-map must compile");
 
         let record = test_runtime_row([
             (

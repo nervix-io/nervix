@@ -4,7 +4,8 @@
 //!
 //! - **Owns.** Connecting to the session service, TLS selection, the dispatcher that pairs every
 //!   reply of a session exchange with the request it answers, submitting statements, transaction
-//!   state, completion suggestions, subscription streams and resource upload.
+//!   state, completion suggestions, subscription streams, the domain clocks the session follows and
+//!   resource upload.
 //! - **Depends on.** The session wire contract, the language layer — an edge may name the parser,
 //!   and this one does so for client-side parsing and completion — and the vocabulary.
 //! - **Must not know.** The registry, the runtime, or anything else inside the server. Everything
@@ -17,6 +18,7 @@ extern crate shuttle_tokio_stream as tokio_stream;
 
 mod client;
 mod connection;
+mod domain_clock;
 mod error;
 mod events;
 mod exchange;
@@ -26,6 +28,9 @@ mod upload;
 
 pub use client::{Client, ExecutionHandle};
 pub use connection::{ConnectOptions, TlsRequirement};
+pub use domain_clock::{
+    AttachedDomainClock, DomainClockEvent, DomainClockInterruption, DomainClockReadError,
+};
 pub use error::{ClientError, EventStreamKind, RequestKind};
 use error_stack::ResultExt as _;
 pub use events::{
@@ -35,18 +40,21 @@ pub use events::{
 pub use nervix_client_wire as wire;
 pub use nervix_client_wire::{
     Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
-    ChoiceTarget, ChoiceValue, CommandDisposition, Diagnostic, DomainInfo, DomainPaceChoice,
-    ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect, Leadership, NoticeLevel,
-    OutcomeOrigin, RowConformanceError, RowSchema, SourceSpan, StatementDisposition,
+    ChoiceTarget, ChoiceValue, CommandDisposition, Diagnostic, DomainClockAttachDisposition,
+    DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainInfo,
+    DomainPaceChoice, ExecutionReferenceConflict, LeaderEndpoints, LeaderRedirect, Leadership,
+    NoticeLevel, OutcomeOrigin, RowConformanceError, RowSchema, SourceSpan, StatementDisposition,
     StatementOutcome, SubscriptionDeliveryLost, SubscriptionEnded, SubscriptionHandle,
     SubscriptionOpened, SubscriptionRows, SubscriptionRowsSkipped, SuggestionKind,
     SuggestionStatus, TextEdit, UnknownOutcomeCause, UploadFailure,
 };
 pub use nervix_models::{
-    CommandExecutionReference, DomainName, ImpactPlanningBasis, ResourceUploadIdentity,
-    SubscriptionDeliveryBehavior, TransactionImpactReport, TransactionInspection,
-    TransactionLifecycle, TransactionOperationAdmission, TransactionOperationNumber,
-    TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
+    CommandExecutionReference, DomainAdmissionWindow, DomainClockObservation,
+    DomainClockObservedState, DomainName, ImpactPlanningBasis, PacedDomainClock,
+    ResourceUploadIdentity, SubscriptionDeliveryBehavior, Timestamp, TransactionImpactReport,
+    TransactionInspection, TransactionLifecycle, TransactionOperationAdmission,
+    TransactionOperationNumber, TransactionPosition, TransactionPreviewIdentity, TransactionStatus,
 };
 pub use outcome::{CommandOutcome, ResourceUploadOutcome};
 pub use subscriptions::{SubscriptionInterruption, SubscriptionLifecycle};
