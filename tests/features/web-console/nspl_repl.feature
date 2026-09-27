@@ -232,6 +232,11 @@ Feature: Web console NSPL REPL
     When selector ".prompt-row input" is filled with "CREATE SCHEMA after_switchover ( value I64 );"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "quiesce level: DYNAMIC"
+    When selector ".transaction-indicator" is pressed with "Enter"
+    Then selector ".transaction-inspector .inspector-summary" contains "2 accepted"
+    And selector ".transaction-inspector .inspector-item[data-name='before_switchover']" contains "SCHEMA"
+    And selector ".transaction-inspector .inspector-item[data-name='after_switchover']" contains "SCHEMA"
+    When selector ".transaction-inspector button[aria-label='Close transaction inspector']" is pressed with "Enter"
     When selector ".prompt-row input" is filled with "COMMIT;"
     And selector ".prompt-row input" is pressed with "Enter"
     Then selector ".terminal" contains "quiesce level: DYNAMIC" exactly 3 times

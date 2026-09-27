@@ -93,7 +93,7 @@ pub(super) struct RejectedEmitterRecord {
     pub(super) structured_error: Option<StructuredMessageError>,
 }
 
-type EmitterPublishResult = Result<Option<PublishReport>, EmitterPublishFailure>;
+pub(super) type EmitterPublishResult = Result<Option<PublishReport>, EmitterPublishFailure>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum EmitterPublishBatchOwner {
@@ -103,19 +103,19 @@ pub(super) enum EmitterPublishBatchOwner {
 }
 
 pub(super) struct EmitterPublishFailure {
-    pub(super) error: Report<EmitterRuntimeError>,
-    pub(super) batch_owner: EmitterPublishBatchOwner,
+    error: Report<EmitterRuntimeError>,
+    batch_owner: EmitterPublishBatchOwner,
 }
 
 impl EmitterPublishFailure {
-    fn caller(error: Report<EmitterRuntimeError>) -> Self {
+    pub(super) fn caller(error: Report<EmitterRuntimeError>) -> Self {
         Self {
             error,
             batch_owner: EmitterPublishBatchOwner::Caller,
         }
     }
 
-    fn buffer(error: Report<EmitterRuntimeError>) -> Self {
+    pub(super) fn buffer(error: Report<EmitterRuntimeError>) -> Self {
         Self {
             error,
             batch_owner: EmitterPublishBatchOwner::Buffer,
@@ -127,6 +127,14 @@ impl EmitterPublishFailure {
             error,
             batch_owner: EmitterPublishBatchOwner::Sink,
         }
+    }
+
+    pub(super) fn error(&self) -> &Report<EmitterRuntimeError> {
+        &self.error
+    }
+
+    pub(super) fn into_parts(self) -> (Report<EmitterRuntimeError>, EmitterPublishBatchOwner) {
+        (self.error, self.batch_owner)
     }
 
     pub(super) fn drain_failed_batches(
@@ -580,8 +588,7 @@ impl EmitterSinkState {
             let _confirmation_wait = context
                 .runtime
                 .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-            let publish =
-                Box::pin(self.publish_buffered_batches(context, buffer.pending.as_mut_slice()));
+            let publish = Box::pin(self.publish_buffered_batches(context, buffer.pending_mut()));
             let published = await_until_emitter_stop_deadline(
                 control.stop_rx,
                 await_emitter_confirmation(&pending_acks, publish),
@@ -775,7 +782,7 @@ pub(super) async fn finish_rejected_records(
                 "record rejection references missing emitter batch {batch_index}"
             ))
         })?;
-        let execution_now = batch.execution_now;
+        let execution_now = batch.execution_now();
         let error = if let Some(error) = rejected.structured_error {
             error
         } else {
@@ -788,19 +795,32 @@ pub(super) async fn finish_rejected_records(
                 std::iter::empty(),
             )
         };
-        let record = batch.batch.runtime_row(row_index).map_err(|reason| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
-        })?;
-        let key = batch.batch.keys.get(row_index).cloned().ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "record rejection row {row_index} has no branch key"
-            ))
-        })?;
-        let acks = batch.batch.acks.get(row_index).cloned().ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "record rejection row {row_index} has no acknowledgment set"
-            ))
-        })?;
+        let record = batch
+            .relay_batch()
+            .runtime_row(row_index)
+            .map_err(|reason| {
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
+            })?;
+        let key = batch
+            .relay_batch()
+            .keys
+            .get(row_index)
+            .cloned()
+            .ok_or_else(|| {
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "record rejection row {row_index} has no branch key"
+                ))
+            })?;
+        let acks = batch
+            .relay_batch()
+            .acks
+            .get(row_index)
+            .cloned()
+            .ok_or_else(|| {
+                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                    "record rejection row {row_index} has no acknowledgment set"
+                ))
+            })?;
         batch
             .mark_rejected_after_delivery(
                 row_index,
@@ -934,7 +954,7 @@ mod tests {
         let context = sink_context();
         let mut sink = EmitterSinkState::Open(Box::new(UnencodableSink));
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+        buffer.set_flush_policy(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
             max_batch_size: u64::MAX,
         });
@@ -960,7 +980,7 @@ mod tests {
         };
 
         assert_eq!(*error.current_context(), EmitterRuntimeError::EncodeBatch);
-        assert_eq!(buffer.pending.len(), 1);
+        assert_eq!(buffer.pending().len(), 1);
     }
 
     #[test]
@@ -989,7 +1009,7 @@ mod tests {
         let context = sink_context();
         let mut sink = EmitterSinkState::Open(Box::new(UnencodableSink));
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
         buffer
             .push(
                 &sink_context(),
@@ -1006,14 +1026,14 @@ mod tests {
         };
 
         assert_eq!(*error.current_context(), EmitterRuntimeError::EncodeBatch);
-        assert_eq!(buffer.pending.len(), 1);
-        assert_eq!(buffer.pending[0].message_count(), 1);
+        assert_eq!(buffer.pending().len(), 1);
+        assert_eq!(buffer.pending()[0].message_count(), 1);
     }
 
     #[test]
     fn publish_failure_drains_exactly_the_batches_owned_by_the_buffer() {
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+        buffer.set_flush_policy(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
             max_batch_size: u64::MAX,
         });
@@ -1052,14 +1072,14 @@ mod tests {
             2,
             "the current caller clone must not be duplicated"
         );
-        assert_eq!(input_value(&failed[0].batch), 1);
-        assert_eq!(input_value(&failed[1].batch), 2);
+        assert_eq!(input_value(failed[0].relay_batch()), 1);
+        assert_eq!(input_value(failed[1].relay_batch()), 2);
     }
 
     #[test]
     fn caller_owned_publish_failure_includes_current_after_older_buffered_batches() {
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Immediate);
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
         buffer
             .push(
                 &sink_context(),
@@ -1082,8 +1102,8 @@ mod tests {
         assert!(current.is_none());
         assert!(buffer.is_empty());
         assert_eq!(failed.len(), 2);
-        assert_eq!(input_value(&failed[0].batch), 1);
-        assert_eq!(input_value(&failed[1].batch), 2);
+        assert_eq!(input_value(failed[0].relay_batch()), 1);
+        assert_eq!(input_value(failed[1].relay_batch()), 2);
     }
 
     #[cfg(feature = "testing")]
@@ -1105,7 +1125,7 @@ mod tests {
             reason: "test sink intentionally has no client".to_string(),
         };
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+        buffer.set_flush_policy(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
             max_batch_size: u64::MAX,
         });
@@ -1122,12 +1142,12 @@ mod tests {
             Ok(published) => published,
             Err(failure) => panic!(
                 "a batch below the flush boundary must only be buffered: {}",
-                emitter_error_message(&failure.error)
+                emitter_error_message(failure.error())
             ),
         };
 
         assert!(published.is_none());
-        assert_eq!(buffer.pending.len(), 1);
-        assert_eq!(buffer.pending[0].message_count(), 1);
+        assert_eq!(buffer.pending().len(), 1);
+        assert_eq!(buffer.pending()[0].message_count(), 1);
     }
 }

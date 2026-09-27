@@ -361,12 +361,8 @@ impl DomainState {
                         identifier,
                         &processor.output_routes,
                     )?;
-                    processor.execution_mode().map_err(|error| {
-                        Report::new(RegistryError::InvalidModel {
-                            domain: domain.as_str().to_string(),
-                            identifier: identifier.as_str().to_string(),
-                            reason: error.to_string(),
-                        })
+                    processor.execution_mode().map_err(|rejection| {
+                        RegistryError::invalid_model(domain, identifier.as_str(), rejection)
                     })?;
                     add_processor_output_edges(
                         domain,

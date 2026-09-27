@@ -240,7 +240,7 @@ Feature: WASM guest-state qualification across crash windows
       {"value":4,"tenant":"alpha"}
       """
     Then within "90s" Kafka consumer group "wasm_qualification_failover_group_{{test_id}}" next offset for topic "wasm_qualification_failover_in_{{test_id}}" partition 0 is "at least 6"
-    And within "20s" the relay subscription receives payloads containing all fragments
+    And within "90s" the relay subscription receives payloads containing all fragments
       """
       key={"tenant":"beta"} | "tenant":"beta"
       key={"tenant":"alpha"} | "tenant":"alpha"

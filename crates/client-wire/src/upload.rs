@@ -354,11 +354,9 @@ fn decode_upload_identity(
     let value = decoder.check_text(field, value)?;
     match ResourceUploadIdentity::parse(value) {
         Ok(identity) => Ok(identity),
-        Err(error) => Err(
-            Report::new(error).change_context(WireDecodeError::InvalidValue {
-                field,
-                kind: "upload identity",
-            }),
-        ),
+        Err(error) => Err(error.change_context(WireDecodeError::InvalidValue {
+            field,
+            kind: "upload identity",
+        })),
     }
 }
