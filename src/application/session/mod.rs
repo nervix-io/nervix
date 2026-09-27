@@ -51,9 +51,8 @@ use nervix_execution::{AdmissionError, CpuClass, ExecutionError, MemoryClass};
 use nervix_models::{
     CreateSubscription, DeleteSubscription, DomainName, TransactionInspectionRequest, UserName,
 };
-use nervix_nspl::{
-    client_statement::{ClientStatement, ParsedClientStatement, parse_client_statement_sources},
-    schema::ParseFromSourceError,
+use nervix_nspl::client_statement::{
+    ClientStatement, ParsedClientStatement, parse_client_statement_sources,
 };
 use parking_lot::{Mutex, RwLock};
 use tokio::{
@@ -71,7 +70,7 @@ use self::{
 use super::{
     command_result::CommandResult,
     model_mutation::command_error,
-    session_service::{SessionServiceImpl, error_response},
+    session_service::{SessionServiceImpl, rejected_source_response},
     subscription::{OpenedSubscription, SessionDelivery, SessionSubscriptions, SessionView},
     transaction::TransactionInspectionOutcome,
 };
@@ -911,11 +910,8 @@ async fn open_subscription(
     }
     let statements = match parse_client_statement_sources(&statement) {
         Ok(statements) => statements,
-        Err(ParseFromSourceError::Lex { diagnostics, .. }) => {
-            return Err(Box::new(error_response("lex error", &diagnostics)));
-        }
-        Err(ParseFromSourceError::Parse { diagnostics, .. }) => {
-            return Err(Box::new(error_response("parse error", &diagnostics)));
+        Err(report) => {
+            return Err(Box::new(rejected_source_response(report.current_context())));
         }
     };
     let Some(subscription) = single_create_subscription(statements) else {

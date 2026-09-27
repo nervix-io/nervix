@@ -774,41 +774,49 @@ fn parse_tokens(tokens: &[SpannedToken]) -> Result<RouteConstruction, Vec<ParseE
     parser().then_ignore(end()).parse(input).into_result()
 }
 
-pub fn parse_route_construction(input: &str) -> Result<RouteConstruction, ParseFromSourceError> {
+pub fn parse_route_construction(
+    input: &str,
+) -> error_stack::Result<RouteConstruction, ParseFromSourceError> {
     let source = input.to_string();
-    let tokens = lex(input).map_err(|errors| ParseFromSourceError::Lex {
-        source: source.clone(),
-        diagnostics: errors
-            .into_iter()
-            .map(|error| Diagnostic {
-                message: format!("{error:?}"),
-                span: error.span().into_range(),
-            })
-            .collect(),
+    let tokens = lex(input).map_err(|errors| {
+        Report::new(ParseFromSourceError::Lex {
+            text: source.clone(),
+            diagnostics: errors
+                .into_iter()
+                .map(|error| Diagnostic {
+                    message: format!("{error:?}"),
+                    span: error.span().into_range(),
+                })
+                .collect(),
+        })
     })?;
-    parse_tokens(&tokens).map_err(|errors| ParseFromSourceError::Parse {
-        source,
-        diagnostics: errors
-            .into_iter()
-            .map(|error| Diagnostic {
-                message: format!("{error:?}"),
-                span: error.span().into_range(),
-            })
-            .collect(),
+    parse_tokens(&tokens).map_err(|errors| {
+        Report::new(ParseFromSourceError::Parse {
+            text: source,
+            diagnostics: errors
+                .into_iter()
+                .map(|error| Diagnostic {
+                    message: format!("{error:?}"),
+                    span: error.span().into_range(),
+                })
+                .collect(),
+        })
     })
 }
 
-pub fn parse_expression(input: &str) -> Result<Expression, ParseFromSourceError> {
+pub fn parse_expression(input: &str) -> error_stack::Result<Expression, ParseFromSourceError> {
     let source = input.to_string();
-    let tokens = lex(input).map_err(|errors| ParseFromSourceError::Lex {
-        source: source.clone(),
-        diagnostics: errors
-            .into_iter()
-            .map(|error| Diagnostic {
-                message: format!("{error:?}"),
-                span: error.span().into_range(),
-            })
-            .collect(),
+    let tokens = lex(input).map_err(|errors| {
+        Report::new(ParseFromSourceError::Lex {
+            text: source.clone(),
+            diagnostics: errors
+                .into_iter()
+                .map(|error| Diagnostic {
+                    message: format!("{error:?}"),
+                    span: error.span().into_range(),
+                })
+                .collect(),
+        })
     })?;
     let end_span = match tokens.last() {
         Some(token) => token.span.end..token.span.end,
@@ -825,8 +833,27 @@ pub fn parse_expression(input: &str) -> Result<Expression, ParseFromSourceError>
         .then_ignore(end())
         .parse(input)
         .into_result()
-        .map_err(|errors| ParseFromSourceError::Parse {
-            source,
+        .map_err(|errors| {
+            Report::new(ParseFromSourceError::Parse {
+                text: source,
+                diagnostics: errors
+                    .into_iter()
+                    .map(|error| Diagnostic {
+                        message: format!("{error:?}"),
+                        span: error.span().into_range(),
+                    })
+                    .collect(),
+            })
+        })
+}
+
+pub fn parse_expression_list(
+    input: &str,
+) -> error_stack::Result<Vec<Expression>, ParseFromSourceError> {
+    let source = input.to_string();
+    let tokens = lex(input).map_err(|errors| {
+        Report::new(ParseFromSourceError::Lex {
+            text: source.clone(),
             diagnostics: errors
                 .into_iter()
                 .map(|error| Diagnostic {
@@ -835,19 +862,6 @@ pub fn parse_expression(input: &str) -> Result<Expression, ParseFromSourceError>
                 })
                 .collect(),
         })
-}
-
-pub fn parse_expression_list(input: &str) -> Result<Vec<Expression>, ParseFromSourceError> {
-    let source = input.to_string();
-    let tokens = lex(input).map_err(|errors| ParseFromSourceError::Lex {
-        source: source.clone(),
-        diagnostics: errors
-            .into_iter()
-            .map(|error| Diagnostic {
-                message: format!("{error:?}"),
-                span: error.span().into_range(),
-            })
-            .collect(),
     })?;
     let end_span = match tokens.last() {
         Some(token) => token.span.end..token.span.end,
@@ -867,15 +881,17 @@ pub fn parse_expression_list(input: &str) -> Result<Vec<Expression>, ParseFromSo
         .then_ignore(end())
         .parse(input)
         .into_result()
-        .map_err(|errors| ParseFromSourceError::Parse {
-            source,
-            diagnostics: errors
-                .into_iter()
-                .map(|error| Diagnostic {
-                    message: format!("{error:?}"),
-                    span: error.span().into_range(),
-                })
-                .collect(),
+        .map_err(|errors| {
+            Report::new(ParseFromSourceError::Parse {
+                text: source,
+                diagnostics: errors
+                    .into_iter()
+                    .map(|error| Diagnostic {
+                        message: format!("{error:?}"),
+                        span: error.span().into_range(),
+                    })
+                    .collect(),
+            })
         })
 }
 

@@ -256,7 +256,8 @@ pub fn parse_create_codec_tokens(
 
 pub fn parse_create_codec(
     input: &str,
-) -> Result<CreateStatement<CreateCodec<RequestedResourceVersion>>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateCodec<RequestedResourceVersion>>, ParseFromSourceError>
+{
     let LexedInput {
         source,
         spanned_tokens,

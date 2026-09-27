@@ -68,7 +68,10 @@ pub fn parse_create_lookup_tokens(
 
 pub fn parse_create_lookup(
     input: &str,
-) -> Result<CreateStatement<CreateLookup<RequestedResourceVersion>>, ParseFromSourceError> {
+) -> error_stack::Result<
+    CreateStatement<CreateLookup<RequestedResourceVersion>>,
+    ParseFromSourceError,
+> {
     let LexedInput {
         source,
         spanned_tokens,

@@ -36,7 +36,7 @@ pub fn parse_describe_deduplicator_tokens(
 
 pub fn parse_describe_deduplicator(
     input: &str,
-) -> Result<DescribeDeduplicator, ParseFromSourceError> {
+) -> error_stack::Result<DescribeDeduplicator, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

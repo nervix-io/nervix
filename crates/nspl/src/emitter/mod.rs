@@ -245,7 +245,7 @@ fn sqs_fifo_group_expression<'src>()
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, crate::parser_support::expression_error_message(error))
+                Rich::custom(span, error.current_context().embedded_expression_message())
             })
         })
         .boxed()
@@ -481,7 +481,7 @@ fn clickhouse_value_expr<'src>()
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
             crate::parse_expression(&source).map_err(|error| {
-                Rich::custom(span, crate::parser_support::expression_error_message(error))
+                Rich::custom(span, error.current_context().embedded_expression_message())
             })
         })
 }
@@ -1389,7 +1389,7 @@ pub fn parse_alter_emitter_tokens(tokens: &[Token]) -> Result<AlterEmitter, Vec<
 
 pub fn parse_create_emitter(
     input: &str,
-) -> Result<CreateStatement<CreateEmitter>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateEmitter>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -1399,7 +1399,7 @@ pub fn parse_create_emitter(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_emitter(input: &str) -> Result<AlterEmitter, ParseFromSourceError> {
+pub fn parse_alter_emitter(input: &str) -> error_stack::Result<AlterEmitter, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -2232,7 +2232,7 @@ mod tests {
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse must fail");
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error, got {error:?}");
         };
         assert!(
@@ -2784,7 +2784,7 @@ mod tests {
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse must fail");
-        match error {
+        match error.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. } => {
                 assert!(
                     diagnostics.iter().any(|diagnostic| diagnostic
@@ -3010,7 +3010,10 @@ mod tests {
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
-        parse_create_emitter(input).expect_err("mysql conflict target must fail");
+        assert!(
+            parse_create_emitter(input).is_err(),
+            "mysql conflict target must fail"
+        );
     }
 
     #[test]
@@ -3199,7 +3202,10 @@ mod tests {
                 FLUSH EACH 10s MAX BATCH SIZE 1MiB ON MESSAGE ERROR LOG ON GENERAL ERROR LOG;
         "#;
 
-        parse_create_emitter(input).expect_err("mongodb conflict target must fail");
+        assert!(
+            parse_create_emitter(input).is_err(),
+            "mongodb conflict target must fail"
+        );
     }
 
     #[test]
@@ -3217,7 +3223,7 @@ mod tests {
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse must fail");
-        match error {
+        match error.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. } => {
                 assert!(
                     diagnostics
@@ -3737,7 +3743,7 @@ mod tests {
         "#;
 
         let error = parse_create_emitter(input).expect_err("parse should fail");
-        match error {
+        match error.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. } => {
                 assert!(!diagnostics.is_empty());
             }

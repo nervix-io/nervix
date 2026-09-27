@@ -160,7 +160,7 @@ pub fn describe_relocation_parser<'src>()
         .boxed()
 }
 
-pub fn parse_relocate(input: &str) -> Result<Relocation, ParseFromSourceError> {
+pub fn parse_relocate(input: &str) -> error_stack::Result<Relocation, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -183,7 +183,9 @@ pub fn parse_relocate(input: &str) -> Result<Relocation, ParseFromSourceError> {
     }
 }
 
-pub fn parse_describe_relocation(input: &str) -> Result<Relocation, ParseFromSourceError> {
+pub fn parse_describe_relocation(
+    input: &str,
+) -> error_stack::Result<Relocation, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -333,22 +335,36 @@ mod tests {
 
     #[test]
     fn rejects_unqualified_members_and_non_relocatable_kinds() {
-        parse_relocate("RELOCATE risk_scorer ONTO NODE node-2 FOLLOW PREFERENCES;")
-            .expect_err("an unqualified member must not parse");
-        parse_relocate("RELOCATE SCHEMA payload ONTO NODE node-2 FOLLOW PREFERENCES;")
-            .expect_err("a non-relocatable kind must not parse");
-        parse_relocate("RELOCATE ENDPOINT ingress ONTO NODE node-2 FOLLOW PREFERENCES;")
-            .expect_err("an endpoint is not a runtime node");
+        assert!(
+            parse_relocate("RELOCATE risk_scorer ONTO NODE node-2 FOLLOW PREFERENCES;").is_err(),
+            "an unqualified member must not parse"
+        );
+        assert!(
+            parse_relocate("RELOCATE SCHEMA payload ONTO NODE node-2 FOLLOW PREFERENCES;").is_err(),
+            "a non-relocatable kind must not parse"
+        );
+        assert!(
+            parse_relocate("RELOCATE ENDPOINT ingress ONTO NODE node-2 FOLLOW PREFERENCES;")
+                .is_err(),
+            "an endpoint is not a runtime node"
+        );
     }
 
     #[test]
     fn rejects_missing_strategy_destination_and_wrong_destination_keyword() {
-        parse_relocate("RELOCATE JUNCTION risk_scorer ONTO NODE node-2;")
-            .expect_err("the default strategy is mandatory");
-        parse_relocate("RELOCATE JUNCTION risk_scorer FOLLOW PREFERENCES;")
-            .expect_err("the destination is mandatory");
-        parse_relocate("RELOCATE JUNCTION risk_scorer TO NODE node-2 FOLLOW PREFERENCES;")
-            .expect_err("the destination clause is ONTO NODE");
+        assert!(
+            parse_relocate("RELOCATE JUNCTION risk_scorer ONTO NODE node-2;").is_err(),
+            "the default strategy is mandatory"
+        );
+        assert!(
+            parse_relocate("RELOCATE JUNCTION risk_scorer FOLLOW PREFERENCES;").is_err(),
+            "the destination is mandatory"
+        );
+        assert!(
+            parse_relocate("RELOCATE JUNCTION risk_scorer TO NODE node-2 FOLLOW PREFERENCES;")
+                .is_err(),
+            "the destination clause is ONTO NODE"
+        );
     }
 
     #[test]

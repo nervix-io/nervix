@@ -145,7 +145,7 @@ pub fn parse_create_stream_tokens(
 
 pub fn parse_create_stream(
     input: &str,
-) -> Result<CreateStatement<CreateRelay>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateRelay>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -166,7 +166,7 @@ pub fn parse_alter_relay_tokens(tokens: &[Token]) -> Result<AlterRelay, Vec<Pars
     }
 }
 
-pub fn parse_alter_relay(input: &str) -> Result<AlterRelay, ParseFromSourceError> {
+pub fn parse_alter_relay(input: &str) -> error_stack::Result<AlterRelay, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -231,7 +231,7 @@ mod tests {
             parse_create_stream("CREATE RELAY notifications SCHEMA event_schema BY tenant_branch;")
                 .expect_err("bare BY is not a relay branch mode");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty());
@@ -242,7 +242,7 @@ mod tests {
         let error = parse_create_stream("CREATE RELAY notifications SCHEMA event_schema;")
             .expect_err("relay must declare UNBRANCHED or BRANCHED BY");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty());
@@ -310,7 +310,7 @@ mod tests {
         let error = parse_alter_relay("ALTER RELAY notifications SET CAPACITY 0;")
             .expect_err("parse should fail");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty());
@@ -337,7 +337,7 @@ mod tests {
         )
         .expect_err("parse should fail");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty());
@@ -356,7 +356,7 @@ mod tests {
         let error = parse_create_stream("CREATE RELAY branch SCHEMA event_schema UNBRANCHED;")
             .expect_err("reserved branch namespace must not be accepted as relay name");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty(), "expected diagnostics");
@@ -370,7 +370,7 @@ mod tests {
         )
         .expect_err("reserved branch namespace must not be accepted as relay reference");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty(), "expected diagnostics");
@@ -383,7 +383,7 @@ mod tests {
         )
         .expect_err("parse should fail");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty());
@@ -435,7 +435,7 @@ mod tests {
         let input = "CREATE RELAY notifications SCHEMA event_schema UNBRANCHED TTL ";
         let error = parse_create_stream(input).expect_err("parse should fail");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty());

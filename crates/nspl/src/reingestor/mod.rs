@@ -94,7 +94,7 @@ pub fn parse_alter_reingestor_tokens(
 
 pub fn parse_create_reingestor(
     input: &str,
-) -> Result<CreateStatement<CreateReingestor>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateReingestor>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -104,7 +104,9 @@ pub fn parse_create_reingestor(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_reingestor(input: &str) -> Result<AlterReingestor, ParseFromSourceError> {
+pub fn parse_alter_reingestor(
+    input: &str,
+) -> error_stack::Result<AlterReingestor, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

@@ -32,7 +32,9 @@ pub fn parse_describe_ingestor_tokens(
     }
 }
 
-pub fn parse_describe_ingestor(input: &str) -> Result<DescribeIngestor, ParseFromSourceError> {
+pub fn parse_describe_ingestor(
+    input: &str,
+) -> error_stack::Result<DescribeIngestor, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

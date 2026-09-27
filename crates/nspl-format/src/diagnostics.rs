@@ -18,20 +18,14 @@ pub fn report(origin: &str, error: &ParseFromSourceError) {
     }
 
     let failure = match error {
-        ParseFromSourceError::Lex {
-            source,
-            diagnostics,
-        } => RenderedFailure {
+        ParseFromSourceError::Lex { text, diagnostics } => RenderedFailure {
             kind: "lex error",
-            source,
+            source: text,
             diagnostics,
         },
-        ParseFromSourceError::Parse {
-            source,
-            diagnostics,
-        } => RenderedFailure {
+        ParseFromSourceError::Parse { text, diagnostics } => RenderedFailure {
             kind: "parse error",
-            source,
+            source: text,
             diagnostics,
         },
     };

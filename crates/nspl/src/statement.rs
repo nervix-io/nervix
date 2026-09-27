@@ -153,7 +153,7 @@ pub fn parse_statement_tokens(tokens: &[Token]) -> Result<Statement, Vec<ParseEr
     }
 }
 
-pub fn parse_statement(input: &str) -> Result<Statement, ParseFromSourceError> {
+pub fn parse_statement(input: &str) -> error_stack::Result<Statement, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -1594,7 +1594,8 @@ mod tests {
                      LOG DECODE USING sch BY u_branch FROM ENDPOINT ep MODE NO_ACK SEQUENTIAL ON \
                      GENERAL ERROR LOG;";
 
-        parse_statement(input).expect_err("bare BY is not a branch selection mode");
+        let error = parse_statement(input).expect_err("bare BY is not a branch selection mode");
+        assert!(!error.current_context().diagnostics().is_empty());
     }
 
     #[test]
@@ -1812,7 +1813,7 @@ mod tests {
         let error = parse_statement("ALTER RELAY notifications SET CAPACITY 0;")
             .expect_err("parse should fail");
 
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(!diagnostics.is_empty());
@@ -2083,8 +2084,9 @@ mod tests {
 
     #[test]
     fn rejects_client_only_upload_resource_statement() {
-        parse_statement("UPLOAD RESOURCE fraud_model VERSION '/tmp/model';")
+        let error = parse_statement("UPLOAD RESOURCE fraud_model VERSION '/tmp/model';")
             .expect_err("UPLOAD RESOURCE is a client-side command");
+        assert!(!error.current_context().diagnostics().is_empty());
     }
 
     #[test]

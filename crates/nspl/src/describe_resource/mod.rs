@@ -51,7 +51,9 @@ pub fn parse_describe_resource_tokens(
     }
 }
 
-pub fn parse_describe_resource(input: &str) -> Result<DescribeResource, ParseFromSourceError> {
+pub fn parse_describe_resource(
+    input: &str,
+) -> error_stack::Result<DescribeResource, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -122,7 +124,7 @@ mod tests {
     fn rejects_non_numeric_version() {
         let err = parse_describe_resource("DESCRIBE RESOURCE fraud_model VERSION abc;")
             .expect_err("parse should fail");
-        match err {
+        match err.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. } => {
                 assert!(!diagnostics.is_empty());
             }

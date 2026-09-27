@@ -31,7 +31,9 @@ pub fn parse_show_transactions_tokens(
     }
 }
 
-pub fn parse_show_transactions(input: &str) -> Result<ShowTransactions, ParseFromSourceError> {
+pub fn parse_show_transactions(
+    input: &str,
+) -> error_stack::Result<ShowTransactions, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

@@ -152,7 +152,7 @@ pub fn show_placements_parser<'src>()
 
 pub fn parse_create_placement(
     input: &str,
-) -> Result<CreateStatement<CreatePlacement>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreatePlacement>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -175,7 +175,9 @@ pub fn parse_create_placement(
     }
 }
 
-pub fn parse_alter_placement(input: &str) -> Result<AlterPlacement, ParseFromSourceError> {
+pub fn parse_alter_placement(
+    input: &str,
+) -> error_stack::Result<AlterPlacement, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -262,7 +264,7 @@ mod tests {
         let error =
             parse_create_placement("CREATE PLACEMENT p FROM source TO sink NEUTRAL RANK 0;")
                 .expect_err("rank zero must fail");
-        let ParseFromSourceError::Parse { diagnostics, .. } = error else {
+        let ParseFromSourceError::Parse { diagnostics, .. } = error.current_context() else {
             panic!("expected parse error");
         };
         assert!(
@@ -274,12 +276,19 @@ mod tests {
 
     #[test]
     fn rejects_hard_separation_and_empty_sides() {
-        parse_create_placement("CREATE PLACEMENT p FROM source TO sink REQUIRE SEPARATION;")
-            .expect_err("hard separation is not a policy");
-        parse_create_placement("CREATE PLACEMENT p FROM TO sink NEUTRAL;")
-            .expect_err("FROM must not be empty");
-        parse_create_placement("CREATE PLACEMENT p FROM source TO NEUTRAL;")
-            .expect_err("TO must not be empty");
+        assert!(
+            parse_create_placement("CREATE PLACEMENT p FROM source TO sink REQUIRE SEPARATION;")
+                .is_err(),
+            "hard separation is not a policy"
+        );
+        assert!(
+            parse_create_placement("CREATE PLACEMENT p FROM TO sink NEUTRAL;").is_err(),
+            "FROM must not be empty"
+        );
+        assert!(
+            parse_create_placement("CREATE PLACEMENT p FROM source TO NEUTRAL;").is_err(),
+            "TO must not be empty"
+        );
     }
 
     #[test]

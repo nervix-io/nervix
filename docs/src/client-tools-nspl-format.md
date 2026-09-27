@@ -54,9 +54,9 @@ nervix-nspl-format --stdout pipeline.nspl | diff -u pipeline.nspl -
 | 0 | Every file was handled, or under `--check` every file was already formatted. |
 | 1 | `--check` only: at least one file is not formatted. |
 | 2 | The arguments were not usable. |
-| 3 | A file could not be parsed. The parse error is printed with the offending span. |
+| 3 | A file could not be lexed or parsed. The lex or parse error is printed with the offending span, at its line in the file. |
 | 4 | A file could not be read or written, or was not UTF-8. |
-| 5 | A file could not be rendered. This is a defect in the formatter; please report it. |
+| 5 | A file could not be rendered, or its formatted output did not reparse to the same statements. This is a defect in the formatter; please report it. |
 
 A file that fails never blocks the others: every failure is reported and every other file is still
 formatted. A file that fails is left exactly as it was.
