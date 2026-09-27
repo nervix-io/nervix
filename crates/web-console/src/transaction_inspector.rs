@@ -978,9 +978,6 @@ fn contributors(contributors: &nervix_web_console::graph::impact::Contributors) 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Once;
-
-    use any_spawner::Executor;
     use leptos::prelude::Owner;
     use meticulous::ResultExt as _;
     use nervix_models::{
@@ -1291,11 +1288,7 @@ mod tests {
 
     #[test]
     fn inspector_renders_the_typed_report_summary_and_controls() {
-        static EXECUTOR: Once = Once::new();
-        EXECUTOR.call_once(|| {
-            Executor::init_futures_executor()
-                .assured("the test process initializes the Leptos executor once");
-        });
+        super::super::initialize_test_executor();
         Owner::new().with(|| {
             let inspector = InspectorSignals::new();
             let inspected = configured_inspection();
@@ -1310,7 +1303,7 @@ mod tests {
                 .run_command(|_| {})
                 .build();
             let view = TransactionInspector(props);
-            Executor::poll_local();
+            any_spawner::Executor::poll_local();
             let markup = view.to_html();
             assert!(markup.contains("Transaction inspector"));
             assert!(markup.contains("COMPLETE"));

@@ -44,6 +44,12 @@ Current session behavior:
 
 Sessions are runtime-facing protocol interactions, not part of the persisted namespace model.
 
+A terminal reply may hold up to 64 MiB, including one string of that size. A reply above the 4 MiB
+frame bound is carried as ordered transfer parts that each fit one frame, then validated and
+reassembled before the client exposes it. This is how a rendered transaction report larger than one
+frame reaches the Rust client, CLI, and browser without truncation. A reply above the transfer bound
+is rejected whole; no client receives a successful partial result.
+
 ## Subscription Lifecycle
 
 A subscription is identified by its name together with the generation its session assigns when it
@@ -133,6 +139,27 @@ an empty candidate list.
 
 Suggestions are read-only session requests. They can complete while a command is still pending;
 they neither enter the command admission gate nor change the transaction queue.
+
+## Structured Choices
+
+`ChoiceLookupRequest` resolves values for structured client controls without constructing partial
+NSPL. It carries a semantic target, typed dependent selections, search text, a page size from 1
+through 100, and an optional page cursor. The first targets resolve domain pace and placement
+policy. Placement requires exactly one domain-pace dependency; an absent or differently typed
+dependency returns `MissingContext`.
+
+Each result separates semantics from presentation. `ChoiceValue` carries a domain-pace or
+placement-policy variant, or a typed domain, resource, or model reference. `ChoicePresentation`
+carries its label, optional detail, and optional group. A client selects by the typed value and
+never derives behavior from the label. `Ready` with no values is an ordinary empty match;
+`MissingContext`, `StaleContext`, and `LookupFailed` remain distinct outcomes.
+
+A page cursor binds the target, every dependent value, search text, application revision, and the
+ordered typed candidate set including its presentation metadata. Changing any part returns
+`StaleContext` instead of continuing through a different result. Choice lookups are read-only and
+can run concurrently with each other and with commands. The web console additionally correlates
+each lookup with its control, draft revision, and session generation, so a late reply cannot
+replace the choices for a newer edit or connection.
 
 ## Transaction Binding
 

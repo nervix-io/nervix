@@ -214,6 +214,13 @@ an inspection reads. Reports use keyed header, operation, and step records. Topo
 content-addressed, stored as bounded node and edge records, and shared by every report revision that
 names the same content instead of being copied into one growing transaction value.
 
+Those storage bounds do not narrow the public report. Raft log readers and snapshot transfer read
+large stored ranges in bounded chunks, while inspection reconstructs every referenced operation,
+step, node, and edge before returning one typed result. Text and JSON responses are not paginated or
+silently truncated, including when an expanded report is larger than one Raft replication batch. A
+client therefore budgets one response proportional to the accepted operation count and affected
+graph; an encoding or transport failure yields no successful partial inspection.
+
 Actual quiescence is an ordered engagement history, distinct from the frozen plan. Each attempt
 records its request and then whether engagement was confirmed, definitively failed, or remained
 uncertain; a confirmed cleanup records release. A request timeout is uncertain when the remote node

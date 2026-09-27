@@ -16,6 +16,7 @@ use nervix_connector::{
     RetainedIngestHeaders, SourceConnector, SourceError, SourcePoll, SourcePollMessage,
     SourceResult, client_config_value, optional_client_config_value, physical_time::actual_utc_now,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, Timestamp};
 use reqwest::{Client as HttpClient, Method, StatusCode, header::HeaderMap};
 use thiserror::Error;
@@ -24,6 +25,7 @@ const HTTP: &str = "http";
 
 pub struct HttpSourcePlan {
     pub config: Vec<ClientConfigEntry>,
+    pub dns: DnsResolver,
 }
 
 pub struct HttpSource {
@@ -66,7 +68,7 @@ impl SourceConnector for HttpSource {
             .change_context(SourceError::Open { connector: HTTP })?;
         let method = Self::method_from_config(&plan.config)
             .change_context(SourceError::Open { connector: HTTP })?;
-        let client = HttpClientConfig::new(&plan.config, "HTTP")
+        let client = HttpClientConfig::new(&plan.config, "HTTP", &plan.dns)
             .build()
             .change_context(SourceError::Open { connector: HTTP })?;
         Ok(Self {
