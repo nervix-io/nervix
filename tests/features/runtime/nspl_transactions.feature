@@ -1,3 +1,4 @@
+@transaction_quiesce_qualification
 Feature: NSPL transactions
   @transaction_frozen_plan
   Scenario Outline: Commit admission freezes a plan before later authoritative state changes

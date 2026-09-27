@@ -244,6 +244,10 @@ when an operation is selected. Inspecting another transaction leaves the attache
 commit basis intact. Retained reports keep their own graph geometry when the live execution graph
 changes.
 
+The inspector receives the same complete typed report as the Rust client and CLI. It does not
+silently omit nodes, edges, operations, or steps from a large retained report; search, focus, and
+the outline change what is visible in the viewport without narrowing the result that was read.
+
 ## Uploading Resources
 
 ![The resource dialog after uploading a version](images/console-resource-dialog.png)

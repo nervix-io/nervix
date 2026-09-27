@@ -88,6 +88,8 @@ const KEYSPACE_LOGS: &str = "raft_logs";
 const KEYSPACE_META: &str = "raft_meta";
 const KEYSPACE_STATE_MACHINE: &str = "raft_state_machine";
 const KEYSPACE_SNAPSHOT: &str = "raft_snapshot";
+/// Working memory reserved for ordinary metadata and log storage relative to its operation unit.
+const STORAGE_RESERVATION_MULTIPLIER: u64 = 4;
 const KEYSPACE_NAMES: [&str; 4] = [
     KEYSPACE_LOGS,
     KEYSPACE_META,
@@ -600,18 +602,26 @@ impl StoreInner {
     }
 
     async fn reserve(executor: &Executor, class: MemoryClass) -> io::Result<Reservation> {
-        let unit = match class {
-            MemoryClass::Management => executor.limits().management_event_bytes.as_u64(),
+        let bytes = match class {
+            MemoryClass::Management => executor
+                .limits()
+                .management_event_bytes
+                .as_u64()
+                .checked_mul(STORAGE_RESERVATION_MULTIPLIER)
+                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
             MemoryClass::Bulk => executor
                 .limits()
                 .snapshot_section_working_bytes()
                 .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
-            MemoryClass::Commands | MemoryClass::Relay => executor.limits().command_bytes.as_u64(),
-        };
-        let bytes = match class {
-            MemoryClass::Bulk => unit,
-            _ => unit
-                .checked_mul(4)
+            MemoryClass::Commands => executor
+                .limits()
+                .command_state_storage_working_bytes()
+                .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
+            MemoryClass::Relay => executor
+                .limits()
+                .command_bytes
+                .as_u64()
+                .checked_mul(STORAGE_RESERVATION_MULTIPLIER)
                 .ok_or_else(|| io::Error::other(StorageFailure::Capacity))?,
         };
         executor

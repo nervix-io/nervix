@@ -51,8 +51,9 @@ The number of scenarios that run at once is the number of CPUs times the concurr
 `--concurrency` sets an absolute number instead. The CI `tests` job sets the factor to `2`, which is
 32 concurrent scenarios on its 16-CPU runner. Three limits apply beneath that number: a scenario
 tagged `@exclusive` runs alone, at most one scenario of the coordinated WASM state-reset feature
-runs at a time, and at most two web console scenarios run at a time. Cucumber retries a failed
-scenario twice; `--retry 0` turns retries off for a focused run.
+runs at a time, and at most two scenarios from the web console REPL, execution graph, or transaction
+inspector features run at a time. Cucumber retries a failed scenario twice; `--retry 0` turns
+retries off for a focused run.
 
 ## Product Deadlines And Harness Deadlines
 

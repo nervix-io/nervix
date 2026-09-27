@@ -166,7 +166,9 @@ For a standalone `--command` inspection with `FORMAT JSON`, stdout contains exac
 document serialized from the typed report, without terminal decoration or unrelated events.
 Failures print one JSON object with `error.code` and `error.message` on stdout and exit nonzero;
 diagnostic details and unrelated events go to stderr. `FORMAT TEXT` uses the normal readable
-terminal output. After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
+terminal output. Inspection output is complete rather than paginated or truncated, so redirect a
+large text or JSON report to a file or downstream process when terminal output is impractical.
+After a stale-preview `COMMIT` refusal, run `DESCRIBE TRANSACTION` for the
 attached transaction before retrying the commit so the client fences it to the newly reviewed
 planning basis.
 

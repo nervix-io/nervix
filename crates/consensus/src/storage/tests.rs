@@ -1275,8 +1275,25 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
         .faults
         .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
     let mut builder = source.store.clone();
-    let build = tokio::spawn(async move { builder.build_snapshot().await });
-    tokio::time::timeout(Duration::from_secs(10), pause.entered()).await?;
+    let mut build = tokio::spawn(async move { builder.build_snapshot().await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            () = pause.entered() => Ok(()),
+            result = &mut build => match result {
+                Ok(Ok(_)) => Err(
+                    "snapshot build completed before its first section reached storage".to_string()
+                ),
+                Ok(Err(error)) => Err(format!(
+                    "snapshot build failed before its first section reached storage: {error}"
+                )),
+                Err(error) => Err(format!(
+                    "snapshot build task ended before its first section reached storage: {error}"
+                )),
+            },
+        }
+    })
+    .await
+    .map_err(|_| "snapshot build did not reach its first storage boundary within 10 seconds")??;
     assert_eq!(
         executor.snapshot().bulk_memory.reserved_bytes,
         section_working_bytes,
@@ -1304,7 +1321,22 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await
+    .map_err(|_| "the append did not queue behind the paused snapshot section within 10 seconds")?;
+    let next_pause = source
+        .store
+        .inner
+        .faults
+        .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
+    pause.release();
+    tokio::time::timeout(Duration::from_secs(10), next_pause.entered())
+        .await
+        .map_err(|_| "the snapshot did not reach its next section within 10 seconds")?;
+    append.await??;
+
+    // A normalized command state write reserves 16 MiB of the 24 MiB Commands class, so the apply
+    // cannot hold a second reservation beside the append. Queue it behind the next paused section
+    // after the append has released its reservation.
     let mut live_store = source.store.clone();
     let apply = tokio::spawn(async move {
         live_store
@@ -1312,21 +1344,23 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
             .await
     });
     tokio::time::timeout(Duration::from_secs(10), async {
-        while executor.snapshot().consensus_storage.pending < 2 {
+        while executor.snapshot().consensus_storage.pending < 1 {
             tokio::task::consume_budget().await;
             tokio::task::yield_now().await;
         }
     })
-    .await?;
-    let next_pause = source
+    .await
+    .map_err(|_| "the apply did not queue behind the paused snapshot section within 10 seconds")?;
+    let following_pause = source
         .store
         .inner
         .faults
         .pause_next("snapshot_section".to_owned(), StorageBoundary::AfterSync);
-    pause.release();
-    tokio::time::timeout(Duration::from_secs(10), next_pause.entered()).await?;
-    append.await??;
+    next_pause.release();
     apply.await??;
+    tokio::time::timeout(Duration::from_secs(10), following_pause.entered())
+        .await
+        .map_err(|_| "the snapshot did not reach its following section within 10 seconds")?;
     let concurrent_log_bytes = source
         .store
         .log_bytes_since_snapshot()
@@ -1341,7 +1375,7 @@ async fn a_generation_larger_than_bulk_memory_seals_one_budgeted_section_at_a_ti
         !build.is_finished(),
         "the generation must still be writing its later bounded sections"
     );
-    next_pause.release();
+    following_pause.release();
 
     let built = build.await??;
     assert_eq!(
