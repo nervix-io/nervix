@@ -6722,6 +6722,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "triomphe",
  "url",
 ]
 
@@ -6856,18 +6857,23 @@ dependencies = [
 name = "nervix-connector-rabbitmq"
 version = "0.1.0-dev"
 dependencies = [
+ "async-rs",
  "async-trait",
  "error-stack",
+ "flume",
  "futures-util",
  "humantime",
  "lapin",
  "meticulous",
  "nervix-connector",
+ "nervix-dns",
  "nervix-models",
+ "nervix-test-environment",
  "shuttle-tokio",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "url",
 ]
 
 [[package]]

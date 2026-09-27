@@ -363,6 +363,11 @@ async-nats = { version = "0.49.1", default-features = false, features = [
   "server_2_10",
   "server_2_11",
 ] }
+# Lapin's async runtime abstraction, named by the RabbitMQ connector for the transport it hands
+# Lapin. Its `hickory-dns` feature stays off; see `lapin` below.
+async-rs = { version = "0.8.12", default-features = false, features = [
+  "tokio",
+] }
 async-tar = { version = "0.6", default-features = false }
 async-trait = "0.1"
 aws-config = "1.8"
@@ -399,6 +404,7 @@ fjall = "3.0.4"
 flatbuffers = "25.12.19"
 flatc-rust = "0.2.0"
 flate2 = "1"
+flume = { version = "0.12", default-features = false }
 futures-channel = "0.3"
 futures-util = "0.3"
 gloo-net = "0.7"
@@ -441,7 +447,12 @@ jaq-std = "3"
 jiff = { version = "0.2.35", default-features = false, features = ["std"] }
 jiff-tzdb = "0.1.8"
 js-sys = "0.3"
-lapin = "4.4.0"
+# The RabbitMQ connector resolves its broker through the node resolver and hands Lapin the
+# established transport through `Connection::connector`. The `hickory-dns` feature stays off: it
+# resolves through a process-wide resolver read from the host's `/etc/resolv.conf`, which ignores
+# the node's DNS configuration and bounds and keeps name-server connections of the first Tokio
+# runtime that used it.
+lapin = "4.12.0"
 leptos = { version = "0.8.19", features = ["csr"] }
 libc = "0.2"
 md5 = "0.8"

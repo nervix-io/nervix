@@ -13,5 +13,7 @@ pub(crate) mod raw_session;
 pub(crate) mod redis_client;
 pub(crate) mod scenario_phase;
 pub(crate) mod server_process;
+pub(crate) mod server_process_cluster;
 pub(crate) mod status_request;
 pub(crate) mod suite_watchdog;
+pub(crate) mod tcp_forwarder;

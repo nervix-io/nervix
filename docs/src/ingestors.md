@@ -366,10 +366,6 @@ Transport-specific schemes and keys:
 - `KAFKA`: pass-through to librdkafka. Typically set `'security.protocol' = 'ssl'`, `'ssl.ca.location' = '{{ tls_resource }}/ca.pem'`, and if needed `'ssl.certificate.location'` plus `'ssl.key.location'`.
 - `HTTP`: use an `https://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
 - `PROMETHEUS`: use an `https://...` `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`, and optional `timeout_ms`.
-
-HTTP polling and Prometheus resolve endpoint names through the node's configured DNS resolver.
-The request timeout covers name resolution, connection establishment, TLS, and the response.
-The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
 - `WEBSOCKETS`: use a `wss://...` endpoint. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
 - `MQTT`: use `mqtts://...` in `addr`. Nervix requires `tls_ca_file` for server trust and also supports `tls_cert_file` plus `tls_key_file` for mTLS.
 - `NATS`: use `tls://...` in `addr`. Nervix honors `tls_ca_file`, `tls_cert_file`, `tls_key_file`.
@@ -379,6 +375,12 @@ The endpoint name remains the HTTP authority and HTTPS certificate name after re
 - `SQS`: use an `https://...` `endpoint`. Nervix honors `tls_ca_file`. This is primarily useful for SQS-compatible local/test endpoints.
 - `SYSLOG`: select `'protocol' = 'tls'`. An ingestor requires `tls_cert_file` and
   `tls_key_file`; optional `tls_ca_file` enables required client-certificate verification.
+
+HTTP polling and Prometheus resolve endpoint names through the node's configured DNS resolver.
+The request timeout covers name resolution, connection establishment, TLS, and the response.
+The endpoint name remains the HTTP authority and HTTPS certificate name after resolution.
+RabbitMQ resolves the host of its `addr` the same way and verifies an `amqps` broker certificate
+against that host; see [RabbitMQ](#rabbitmq).
 
 Example Kafka TLS client:
 
@@ -508,6 +510,15 @@ Suspension cancels the consumer and RabbitMQ requeues unacknowledged in-flight d
 consumers on the same queue continue. Queue length, message TTL, overflow, and auto-expiry policies
 remain in force. If auto-expiry deletes the queue, resume reports a source error until an operator
 re-provisions it; Nervix never creates it.
+
+Each instance resolves the host of the client's `addr` through the node's configured DNS resolver
+every time it connects, so a changed DNS answer takes effect on the next connection, and tries the
+addresses it receives in order. A literal IPv4 address, or an IPv6 address in brackets, is
+connected to as written. Resolution, the TCP connection and, for `amqps`, the TLS handshake have 30
+seconds together; the broker certificate must name the host `addr` names. A connection that fails,
+including a name that does not resolve, is a source error that `DESCRIBE INGESTOR` shows as the
+transient error, and the instance tries again on its `RETRY POLICY` cadence without acknowledging
+anything.
 
 ### Redis Pub/Sub
 

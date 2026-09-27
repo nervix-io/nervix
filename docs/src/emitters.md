@@ -375,6 +375,54 @@ run in the same job on Nervix's blocking worker pool that already runs `ON EMITT
 program never stalls the emitter task. Candidate work is bounded by `MAX MESSAGES` and the
 encodings above; `MAX SIZE` bounds what is written.
 
+### Broker and message emitters
+
+Kafka, Pulsar, RabbitMQ, Redis Pub/Sub, MQTT, NATS, ZeroMQ and SQS publish each batch payload as
+one message through the connector's own driver: one Kafka record value, one Pulsar message
+payload, one AMQP message body, one `PUBLISH` to a Redis channel, one MQTT `PUBLISH` packet, one
+NATS message on the subject, one single-frame ZeroMQ message or one SQS message body. The message
+carries once what its members share. The Kafka record key and the Pulsar partition key are the
+members' concrete branch key; the written headers become Kafka and NATS headers, Pulsar
+properties, AMQP headers or SQS message attributes; and an SQS FIFO message carries the members'
+message group. Without the clause every record stays its own message, carried the same way.
+
+Batching keeps every publishing mode's completion point. `NO_ACK` and `QOS 0` complete when the
+producer, channel, client or socket accepts the batch message; the confirming modes wait for one
+delivery report, broker receipt, publisher confirm, `PUBACK`, completed QoS 2 handshake or
+JetStream `PubAck` for it. `ACK TIMEOUT` bounds that one wait, and a batch message whose outcome
+stays unknown is retained for the retry described above.
+
+SQS `MODE BATCH` remains a request shape and is independent of the clause. One `SendMessageBatch`
+request carries up to ten batch messages as separate entries within the 256 KiB request limit, and
+never two messages of one FIFO message group. The service answers for each entry, and an entry's
+answer applies to every member of the batch message it carries. Entries are never merged into one
+message, and one entry never carries more than one batch message.
+
+`MAX SIZE` bounds the payload, while the destination bounds the whole message it receives. Where
+the connector learns the destination's limit, it checks every message against it before writing,
+counting what it writes around the payload:
+
+| Sink | Limit checked before a message is written | Counted around the payload |
+| --- | --- | --- |
+| Kafka | The producer's `message.max.bytes` client setting | The record key, headers and record overhead |
+| MQTT | The Maximum Packet Size the broker declared in its latest `CONNACK`, and the largest packet the protocol can express | The fixed header, topic, packet identifier and property length |
+| NATS | The `max_payload` the server announced | The message headers |
+| SQS | 256 KiB | Message attribute names, types and values, and the FIFO message group |
+
+A batch message that does not fit is never written. Every member follows `ON MESSAGE ERROR` with
+code `external`, operation `publish` and one shared reference, and the message names the size and
+the limit, such as `mqtt rejected record: MQTT PUBLISH packet of 1200090 bytes exceeds the broker's
+maximum packet size of 1048576 bytes`. The messages around it are still written. Declare a
+`MAX SIZE` that leaves room for the metadata to keep batches from reaching the limit.
+
+The remaining limits are not visible to the client. Pulsar's `maxMessageSize` and RabbitMQ's
+`max_message_size` are broker settings: a Pulsar broker refuses a larger message and RabbitMQ
+closes the channel it arrived on, and Nervix retries either as an infrastructure failure, so
+declare a `MAX SIZE` below them with room for the properties or headers. Redis rejects a value above its
+`proto-max-bulk-len` itself, and that rejection follows `ON MESSAGE ERROR` like the ones above.
+ZeroMQ fixes no limit; a receiving socket configured with a maximum message size drops a larger
+message after the sending socket has accepted it.
+
 ## Altering emitters
 
 `ALTER EMITTER` applies one or more comma-separated operations in written order:
@@ -614,6 +662,15 @@ TO RABBITMQ <client> QUEUE <queue>
 `ACK` enables publisher confirms and waits for the confirm of each message. A broker nack is an
 infrastructure failure and is retried with backpressure. `NO_ACK` acknowledges channel acceptance.
 
+The emitter resolves the host of the client's `addr` through the node's configured DNS resolver
+when it opens and whenever it reopens after a failed publish, so a changed DNS answer takes effect
+on the next connection, and tries the addresses it receives in order. A literal IPv4 address, or
+an IPv6 address in brackets, is connected to as written. Resolution, the TCP connection and, for
+`amqps`, the TLS handshake have 30 seconds together; the broker certificate must name the host
+`addr` names. A connection that fails, including a name that does not resolve, leaves the emitter
+unavailable with the failure as its transient error; it confirms nothing, so its input stays
+unacknowledged, and it reopens on its `RETRY POLICY` backoff.
+
 ### Redis Pub/Sub
 
 ```nspl,ignore
@@ -639,7 +696,10 @@ QoS 0 acknowledges client acceptance. QoS 1 waits for `PUBACK`; QoS 2 waits for 
 exactly-once handshake. QoS 1 and 2 use a persistent session and the emitter client's stable
 identity so in-flight messages survive reconnects. Reconnect pacing follows the declared retry
 policy. A definitive record rejection, such as an invalid topic or payload-format rejection,
-follows `ON MESSAGE ERROR`.
+follows `ON MESSAGE ERROR`. So does a record whose `PUBLISH` packet would exceed the Maximum Packet
+Size the broker declared when the client connected, or the largest packet MQTT can express: the
+emitter rejects it before handing it to the client, which would otherwise lose its connection on a
+packet the broker refuses to receive.
 
 ### NATS
 
@@ -685,10 +745,13 @@ TO SQS <client> QUEUE <queue> [FIFO GROUP (FROM BRANCH | <string_expression>)]
   MODE (SINGLE | BATCH) RETRY POLICY BACKOFF <duration> MAX <duration>
 ```
 
-`SINGLE` issues one request per record. `BATCH` groups records within SQS's fixed limit of ten
+`SINGLE` issues one request per message. `BATCH` groups messages within SQS's fixed limit of ten
 entries and 256 KiB per request; both modes issue requests sequentially and acknowledge service
 responses. Per-entry transient failures retry only those entries, while invalid entries and a
-record larger than 256 KiB follow `ON MESSAGE ERROR` individually.
+message larger than 256 KiB, counting its attributes and FIFO message group, follow
+`ON MESSAGE ERROR` individually. Nervix checks what SQS refuses before sending: a body or attribute
+value holding a character SQS forbids, more than ten attributes, an attribute name SQS does not
+allow, an empty attribute value, and an invalid FIFO message group.
 
 Set the SQS client's optional `timeout_ms` CONFIG key to bound both the complete service operation
 and its single SDK attempt. Nervix disables the AWS SDK's internal retries, so a timeout returns to
