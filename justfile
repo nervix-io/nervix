@@ -1006,6 +1006,10 @@ deps:
 deps-down:
     docker compose down --remove-orphans --volumes
 
+# Run black-box cluster scenarios against an explicitly supplied, already-built Nervix image.
+chaos *args:
+    bash scripts/chaos/chaos.sh {{ args }}
+
 server *args: build-deps generate-dev-tls
     NERVIX_NODE_ID="${NERVIX_NODE_ID:-node-1}" \
     NERVIX_INTERCONNECT_TLS_CA="${NERVIX_INTERCONNECT_TLS_CA:-tls/dev/ca.pem}" \
