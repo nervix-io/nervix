@@ -68,8 +68,8 @@ impl EmitterSink for MappedRowSink {
                 self.projection
                     .project(
                         batch_index,
-                        &batch.batch,
-                        batch.execution_now,
+                        batch.relay_batch(),
+                        batch.execution_now(),
                         &pending_rows,
                     )
                     .await?

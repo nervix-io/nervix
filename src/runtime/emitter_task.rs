@@ -348,6 +348,180 @@ fn emitter_message_error_operation(
     }
 }
 
+/// The mutable state changed by an emitter loop's publish attempts.
+///
+/// Keeping these values together makes every event apply the same success, retry and terminal
+/// failure transitions. The loop still decides when an attempt starts and whether it is a cadence,
+/// force flush or newly received batch.
+struct EmitterTaskState {
+    sink: EmitterSinkState,
+    buffer: EmitterBatchBuffer,
+    retry: EmitterRetrySchedule,
+    backoff: RuntimeReconnectBackoff,
+    reconnect_on_wake: bool,
+}
+
+#[derive(Clone, Copy)]
+enum EmitterPublishErrorReport {
+    Flush,
+    Publish,
+}
+
+#[derive(Clone, Copy)]
+struct EmitterPublishOutcomeContext<'a> {
+    sink_label: &'a str,
+    codec_route: bool,
+    error_report: EmitterPublishErrorReport,
+}
+
+impl EmitterPublishOutcomeContext<'_> {
+    fn report_error(self, context: &EmitterSinkContext, reason: &str) {
+        match self.error_report {
+            EmitterPublishErrorReport::Flush => context.report_flush_error(self.sink_label, reason),
+            EmitterPublishErrorReport::Publish => {
+                context.report_publish_error(self.sink_label, reason)
+            }
+        }
+    }
+}
+
+impl EmitterTaskState {
+    fn new(
+        sink: EmitterSinkState,
+        buffer: EmitterBatchBuffer,
+        mut backoff: RuntimeReconnectBackoff,
+        context: &EmitterSinkContext,
+    ) -> Self {
+        let reconnect_on_wake = sink.unavailable_reason().is_some();
+        let mut retry = EmitterRetrySchedule::default();
+        if let Some(reason) = sink.unavailable_reason() {
+            retry.defer(
+                context,
+                EmitterRetryDeferral {
+                    wait: backoff.take_next_delay(),
+                    acks: EmitterAcknowledgements::default(),
+                    waiting_for_stall_clear: false,
+                    reason: Some(reason),
+                },
+            );
+        } else {
+            context
+                .runtime
+                .clear_emitter_transient_error(&context.domain, &context.emitter);
+        }
+        Self {
+            sink,
+            buffer,
+            retry,
+            backoff,
+            reconnect_on_wake,
+        }
+    }
+
+    fn wake(&self, context: &EmitterSinkContext) -> RuntimeWake {
+        self.retry
+            .wake(self.sink.cadence_wake(&context.clock, &self.buffer))
+    }
+
+    fn receives_input(&self, buffered_messages: usize) -> bool {
+        !self.retry.is_active() || buffered_messages == 0
+    }
+
+    async fn handle_publish_result(
+        &mut self,
+        result: EmitterPublishResult,
+        pending_batch: &mut Option<EmitterPublishBatch>,
+        context: &EmitterSinkContext,
+        batch_context: &EmitterBatchContext<'_>,
+        outcome_context: EmitterPublishOutcomeContext<'_>,
+    ) {
+        match result {
+            Ok(report) => {
+                self.backoff.reset();
+                self.retry.clear();
+                context
+                    .runtime
+                    .clear_emitter_transient_error(&context.domain, &context.emitter);
+                if let Some(report) = report.as_ref() {
+                    batch_context.observe_sent(report);
+                }
+                pending_batch.take();
+            }
+            Err(failure) if emitter_publish_error_is_retryable(failure.error()) => {
+                let (error, batch_owner) = failure.into_parts();
+                let wait = emitter_retry_delay(&mut self.backoff, &error);
+                if let EmitterPublishBatchOwner::Caller = batch_owner {
+                    let batch = pending_batch.take().verified(
+                        "a caller-owned publish failure retains the batch passed to the attempt",
+                    );
+                    if let Err(retain_error) = self.buffer.push(context, batch.clone()) {
+                        self.retry.clear();
+                        let reason = emitter_error_message(&retain_error);
+                        let operation = emitter_message_error_operation(
+                            &retain_error,
+                            outcome_context.codec_route,
+                        );
+                        batch_context
+                            .handle_publish_error_batch(batch, reason, operation)
+                            .await;
+                        return;
+                    }
+                } else {
+                    pending_batch.take();
+                }
+                let reason = emitter_error_message(&error);
+                self.retry.defer(
+                    context,
+                    EmitterRetryDeferral {
+                        wait,
+                        acks: self.sink.pending_acks(&self.buffer),
+                        waiting_for_stall_clear: error.current_context()
+                            == &EmitterRuntimeError::PublishStalled,
+                        reason: Some(&reason),
+                    },
+                );
+                self.reconnect_on_wake = self.sink.reconnect_after(&error);
+                outcome_context.report_error(context, &reason);
+            }
+            Err(failure) => {
+                self.retry.clear();
+                let (error, failed_batches) =
+                    failure.drain_failed_batches(pending_batch, &mut self.buffer);
+                let reason = emitter_error_message(&error);
+                context.runtime.record_emitter_transient_error(
+                    &context.domain,
+                    &context.emitter,
+                    reason.clone(),
+                );
+                outcome_context.report_error(context, &reason);
+                let operation =
+                    emitter_message_error_operation(&error, outcome_context.codec_route);
+                batch_context
+                    .handle_publish_error_batches(failed_batches, reason, operation)
+                    .await;
+            }
+        }
+    }
+}
+
+/// The already prepared dependencies one emitter's event loop drives.
+struct EmitterTaskLoop<'a> {
+    context: &'a EmitterSinkContext,
+    batch_context: EmitterBatchContext<'a>,
+    state: EmitterTaskState,
+    interaction: RelayInteraction<EmitterTaskCommand>,
+    plan: &'a EmitterStartPlan,
+    input_schema: &'a CompiledSchema,
+    codec: Option<&'a Arc<CompiledCodec>>,
+    input_metrics: &'a HashMap<RelayName, NodeInputMetricsHandle>,
+    fault_injection: &'a ConfiguredFaultInjection,
+    buffered_messages: &'a AtomicUsize,
+    work_cancel_rx: &'a mut watch::Receiver<bool>,
+    shutdown_rx: &'a mut watch::Receiver<bool>,
+    stop_rx: &'a mut watch::Receiver<Option<Instant>>,
+    stop_signal: &'a watch::Sender<Option<Instant>>,
+}
+
 impl EmitterTask {
     pub(in crate::runtime) fn spawn(
         runtime: &Runtime,
@@ -607,7 +781,7 @@ impl EmitterTask {
                 };
                 interaction_inputs.push(input);
             }
-            let mut interaction = RelayInteraction::with_commands(
+            let interaction = RelayInteraction::with_commands(
                 interaction_inputs,
                 interaction_shutdown_rx,
                 Some(force_flush),
@@ -626,10 +800,10 @@ impl EmitterTask {
                 udfs,
                 clock: domain_clock.clone(),
             };
-            let mut publish_backoff = RuntimeReconnectBackoff::from_policy(plan.retry_policy);
-            let mut emitter_buffer =
+            let backoff = RuntimeReconnectBackoff::from_policy(plan.retry_policy);
+            let buffer =
                 EmitterBatchBuffer::new(&context, &task_flush_policy, buffered_messages.clone());
-            let mut sink = EmitterSinkState::open_until_cancelled(
+            let sink = EmitterSinkState::open_until_cancelled(
                 &plan,
                 &context,
                 &input_schema,
@@ -637,24 +811,9 @@ impl EmitterTask {
                 &mut work_cancel_rx,
             )
             .await;
-            let mut reconnect_on_wake = sink.unavailable_reason().is_some();
-            let mut retry_schedule = EmitterRetrySchedule::default();
-            if let Some(reason) = sink.unavailable_reason() {
-                let wait = publish_backoff.take_next_delay();
-                retry_schedule.defer(
-                    &context,
-                    EmitterRetryDeferral {
-                        wait,
-                        acks: EmitterAcknowledgements::default(),
-                        waiting_for_stall_clear: false,
-                        reason: Some(reason),
-                    },
-                );
-            } else {
-                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-            }
+            let state = EmitterTaskState::new(sink, buffer, backoff, &context);
             let task_emitter_node = ModelName::from(&task_emitter);
-            let mut batch_context = EmitterBatchContext {
+            let batch_context = EmitterBatchContext {
                 runtime: &runtime,
                 routing: &mut routing,
                 domain_clock: &domain_clock,
@@ -668,586 +827,23 @@ impl EmitterTask {
                 ordering_group: ordering_group.as_ref(),
                 materialized_state: &task_materialized_state,
             };
-            loop {
-                tokio::task::consume_budget().await;
-                let wake = retry_schedule.wake(sink.cadence_wake(&context.clock, &emitter_buffer));
-                let receive_input = !retry_schedule.is_active()
-                    || emitter_buffer_count.load(Ordering::Acquire) == 0;
-                let work = match interaction.next_with_input(wake, receive_input).await {
-                    Ok(work) => work,
-                    // The emitter holds work whose cadence it cannot resolve, because the domain
-                    // clock is not readable in this generation. There is no wall-clock fallback
-                    // for a logical cadence, so the work stays buffered and unpublished while the
-                    // acknowledgements it owns are kept alive on the physical beat.
-                    Err(RelayInteractionError::WakeTiming { reason, .. }) => {
-                        runtime.record_emitter_transient_error(&task_domain, &task_emitter, reason);
-                        let acks = sink.pending_acks(&emitter_buffer);
-                        RuntimeReconnectBackoff::wait_duration_with_ack_alive(
-                            RETRY_ACK_ALIVE_EACH,
-                            &mut shutdown_rx,
-                            &acks,
-                        )
-                        .await;
-                        continue;
-                    }
-                    Err(error) => {
-                        let reason = error.to_string();
-                        context.report_flush_error(plan.sink.label(), &reason);
-                        runtime.handle_internal_processor_error_for_acks(
-                            &task_domain,
-                            ModelKind::Emitter,
-                            &task_emitter,
-                            &task_error_policies,
-                            error.acks(),
-                            reason,
-                        );
-                        continue;
-                    }
-                };
-                let (input_event, mut work) = work.into_parts();
-                match input_event {
-                    RelayInteractionEvent::Command(EmitterTaskCommand::Reconfigure {
-                        config,
-                        response,
-                    }) => {
-                        // The new cadence replaces the old one for the batches already buffered,
-                        // so a reconfiguration that cannot read the domain clock leaves them
-                        // without a deadline and is recorded as the emitter's transient error.
-                        if let Err(error) =
-                            emitter_buffer.reconfigure(&context, &config.flush_policy)
-                        {
-                            let reason = emitter_error_message(&error);
-                            runtime.record_emitter_transient_error(
-                                &task_domain,
-                                &task_emitter,
-                                reason.clone(),
-                            );
-                            context.report_flush_error(plan.sink.label(), &reason);
-                        }
-                        response
-                            .send(())
-                            .means_peer_left("emitter reconfiguration requester");
-                    }
-                    RelayInteractionEvent::Command(EmitterTaskCommand::Stop {
-                        deadline,
-                        response,
-                    }) => {
-                        if response.is_closed() {
-                            clear_emitter_stop_signal(&task_stop_signal, deadline);
-                            continue;
-                        }
-                        if emitter_buffer_count.load(Ordering::Acquire) > 0
-                            && let Some(reason) =
-                                emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
-                        {
-                            runtime.record_emitter_transient_error(
-                                &task_domain,
-                                &task_emitter,
-                                reason.clone(),
-                            );
-                            context.report_flush_error(plan.sink.label(), &reason);
-                            clear_emitter_stop_signal(&task_stop_signal, deadline);
-                            response
-                                .send(Err(Report::new(EmitterRuntimeError::FinalFlush)
-                                    .attach_printable(format!(
-                                        "emitter final flush failed: {reason}"
-                                    ))))
-                                .means_peer_left("emitter stop requester");
-                            continue;
-                        }
-                        let mut control = EmitterPublishControl {
-                            fault_injection: &fault_injection,
-                            shutdown_rx: &mut shutdown_rx,
-                            stop_rx: &mut stop_rx,
-                            backoff: &mut publish_backoff,
-                        };
-                        let drained = tokio::time::timeout_at(deadline, async {
-                            let report = sink
-                                .flush_all(
-                                    plan.sink.label(),
-                                    &context,
-                                    &mut control,
-                                    &mut emitter_buffer,
-                                )
-                                .await?;
-                            sink.finish_transport(deadline).await?;
-                            Ok::<_, Report<EmitterRuntimeError>>(report)
-                        })
-                        .await;
-                        let result = match drained {
-                            Ok(Ok(report)) => {
-                                publish_backoff.reset();
-                                retry_schedule.clear();
-                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                                if let Some(report) = report.as_ref() {
-                                    batch_context.observe_sent(report);
-                                }
-                                Ok(())
-                            }
-                            Ok(Err(error)) => {
-                                let reason = emitter_error_message(&error);
-                                runtime.record_emitter_transient_error(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                );
-                                context.report_flush_error(plan.sink.label(), &reason);
-                                Err(
-                                    Report::new(EmitterRuntimeError::FinalFlush).attach_printable(
-                                        format!("emitter final flush failed: {reason}"),
-                                    ),
-                                )
-                            }
-                            Err(_) => {
-                                let reason = format!(
-                                    "emitter '{}' did not drain before its configured deadline",
-                                    task_emitter.as_str()
-                                );
-                                context.report_flush_error(plan.sink.label(), &reason);
-                                Err(Report::new(EmitterRuntimeError::StopDeadlineElapsed)
-                                    .attach_printable(reason))
-                            }
-                        };
-                        let should_stop = result.is_ok();
-                        if !should_stop {
-                            clear_emitter_stop_signal(&task_stop_signal, deadline);
-                        }
-                        if response.send(result).is_ok() && should_stop {
-                            break;
-                        }
-                        if should_stop {
-                            clear_emitter_stop_signal(&task_stop_signal, deadline);
-                        }
-                    }
-                    RelayInteractionEvent::ForceFlush(completion) => {
-                        if emitter_buffer_count.load(Ordering::Acquire) > 0
-                            && let Some(reason) =
-                                emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
-                        {
-                            retry_schedule.include_acks(sink.pending_acks(&emitter_buffer));
-                            if retry_schedule.is_active() {
-                                runtime.record_emitter_transient_error_with_backoff(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                    publish_backoff.next_delay(),
-                                );
-                            } else {
-                                retry_schedule.defer(
-                                    &context,
-                                    EmitterRetryDeferral {
-                                        wait: publish_backoff.take_next_delay(),
-                                        acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: fault_injection
-                                            .emitter_should_stall(&task_emitter),
-                                        reason: Some(&reason),
-                                    },
-                                );
-                            }
-                            context.report_flush_error(plan.sink.label(), &reason);
-                            completion.complete();
-                            continue;
-                        }
-                        let mut control = EmitterPublishControl {
-                            fault_injection: &fault_injection,
-                            shutdown_rx: &mut shutdown_rx,
-                            stop_rx: &mut stop_rx,
-                            backoff: &mut publish_backoff,
-                        };
-                        match sink
-                            .flush_all(
-                                plan.sink.label(),
-                                &context,
-                                &mut control,
-                                &mut emitter_buffer,
-                            )
-                            .await
-                        {
-                            Ok(Some(report)) => {
-                                publish_backoff.reset();
-                                retry_schedule.clear();
-                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                                batch_context.observe_sent(&report);
-                            }
-                            Ok(None) => {
-                                publish_backoff.reset();
-                                retry_schedule.clear();
-                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                            }
-                            Err(error) if emitter_publish_error_is_retryable(&error) => {
-                                let reason = emitter_error_message(&error);
-                                retry_schedule.defer(
-                                    &context,
-                                    EmitterRetryDeferral {
-                                        wait: emitter_retry_delay(&mut publish_backoff, &error),
-                                        acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: error.current_context()
-                                            == &EmitterRuntimeError::PublishStalled,
-                                        reason: Some(&reason),
-                                    },
-                                );
-                                reconnect_on_wake = sink.reconnect_after(&error);
-                                context.report_flush_error(plan.sink.label(), &reason);
-                            }
-                            Err(error) => {
-                                retry_schedule.clear();
-                                let reason = emitter_error_message(&error);
-                                runtime.record_emitter_transient_error(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                );
-                                context.report_flush_error(plan.sink.label(), &reason);
-                                let pending = emitter_buffer.drain_pending();
-                                let operation =
-                                    emitter_message_error_operation(&error, codec.is_some());
-                                batch_context
-                                    .handle_publish_error_batches(pending, reason, operation)
-                                    .await;
-                            }
-                        }
-                        completion.complete();
-                    }
-                    RelayInteractionEvent::Stopped(reason) => {
-                        debug!(
-                            domain = task_domain.as_str(),
-                            emitter = task_emitter.as_str(),
-                            ?reason,
-                            "emitter relay interaction stopped"
-                        );
-                        if emitter_buffer_count.load(Ordering::Acquire) > 0
-                            && let Some(reason) =
-                                emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
-                        {
-                            runtime.record_emitter_transient_error(
-                                &task_domain,
-                                &task_emitter,
-                                reason.clone(),
-                            );
-                            context.report_flush_error(plan.sink.label(), &reason);
-                            let pending = emitter_buffer.drain_pending();
-                            batch_context
-                                .handle_publish_error_batches(
-                                    pending,
-                                    reason,
-                                    MessageErrorOperation::Publish,
-                                )
-                                .await;
-                            break;
-                        }
-                        let mut control = EmitterPublishControl {
-                            fault_injection: &fault_injection,
-                            shutdown_rx: &mut shutdown_rx,
-                            stop_rx: &mut stop_rx,
-                            backoff: &mut publish_backoff,
-                        };
-                        match sink
-                            .flush_all(
-                                plan.sink.label(),
-                                &context,
-                                &mut control,
-                                &mut emitter_buffer,
-                            )
-                            .await
-                        {
-                            Ok(Some(report)) => batch_context.observe_sent(&report),
-                            Ok(None) => {}
-                            Err(error) => {
-                                let reason = emitter_error_message(&error);
-                                runtime.record_emitter_transient_error(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                );
-                                context.report_flush_error(plan.sink.label(), &reason);
-                                let pending = emitter_buffer.drain_pending();
-                                let operation =
-                                    emitter_message_error_operation(&error, codec.is_some());
-                                batch_context
-                                    .handle_publish_error_batches(pending, reason, operation)
-                                    .await;
-                            }
-                        }
-                        break;
-                    }
-                    RelayInteractionEvent::Wake => {
-                        let retry_was_active = retry_schedule.is_active();
-                        let retry_is_due = retry_schedule.retry_is_due();
-                        let stall_cleared = retry_schedule.release_if_stall_cleared(
-                            fault_injection.emitter_should_stall(&task_emitter),
-                        );
-                        if !retry_is_due && !stall_cleared {
-                            continue;
-                        }
-                        let retry_attempt = retry_was_active && (retry_is_due || stall_cleared);
-                        if reconnect_on_wake || sink.unavailable_reason().is_some() {
-                            sink = EmitterSinkState::open_until_cancelled(
-                                &plan,
-                                &context,
-                                &input_schema,
-                                codec.as_ref(),
-                                &mut work_cancel_rx,
-                            )
-                            .await;
-                            emitter_buffer.report_staged_messages(sink.staged_messages());
-                            if let Some(reason) = sink.unavailable_reason() {
-                                retry_schedule.defer(
-                                    &context,
-                                    EmitterRetryDeferral {
-                                        wait: publish_backoff.take_next_delay(),
-                                        acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: false,
-                                        reason: Some(reason),
-                                    },
-                                );
-                                reconnect_on_wake = true;
-                                continue;
-                            }
-                            reconnect_on_wake = false;
-                            runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                        }
-                        let mut control = EmitterPublishControl {
-                            fault_injection: &fault_injection,
-                            shutdown_rx: &mut shutdown_rx,
-                            stop_rx: &mut stop_rx,
-                            backoff: &mut publish_backoff,
-                        };
-                        match sink
-                            .flush_due(
-                                plan.sink.label(),
-                                &context,
-                                &mut control,
-                                &mut emitter_buffer,
-                                retry_attempt,
-                            )
-                            .await
-                        {
-                            Ok(Some(report)) => {
-                                publish_backoff.reset();
-                                retry_schedule.clear();
-                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                                batch_context.observe_sent(&report);
-                            }
-                            Ok(None) => {
-                                publish_backoff.reset();
-                                retry_schedule.clear();
-                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                            }
-                            Err(error) if emitter_publish_error_is_retryable(&error) => {
-                                let reason = emitter_error_message(&error);
-                                retry_schedule.defer(
-                                    &context,
-                                    EmitterRetryDeferral {
-                                        wait: emitter_retry_delay(&mut publish_backoff, &error),
-                                        acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: error.current_context()
-                                            == &EmitterRuntimeError::PublishStalled,
-                                        reason: Some(&reason),
-                                    },
-                                );
-                                reconnect_on_wake = sink.reconnect_after(&error);
-                                context.report_flush_error(plan.sink.label(), &reason);
-                            }
-                            Err(error) => {
-                                retry_schedule.clear();
-                                let reason = emitter_error_message(&error);
-                                runtime.record_emitter_transient_error(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                );
-                                context.report_flush_error(plan.sink.label(), &reason);
-                                let pending = emitter_buffer.drain_pending();
-                                let operation =
-                                    emitter_message_error_operation(&error, codec.is_some());
-                                batch_context
-                                    .handle_publish_error_batches(pending, reason, operation)
-                                    .await;
-                            }
-                        }
-                    }
-                    RelayInteractionEvent::Batch {
-                        relay: input_relay,
-                        batch,
-                    } => {
-                        let delivery_observation = batch.delivery_observation(actual_utc_now());
-                        let input_metrics = task_input_metrics
-                            .get(&input_relay)
-                            .verified("the task resolves metrics for every declared emitter input");
-                        input_metrics.observe_batch(
-                            batch.message_count(),
-                            batch.estimated_bytes(),
-                            delivery_observation.domain_timestamp,
-                        );
-                        runtime.mark_branch_aggregated_metrics_updated(
-                            &task_domain,
-                            ModelKind::Emitter,
-                            &task_emitter,
-                        );
-                        for seconds in delivery_observation.latency_seconds {
-                            input_metrics.observe_delivery_latency(
-                                seconds,
-                                delivery_observation.domain_timestamp,
-                            );
-                        }
-                        let wait_for_required_state = !interaction.is_terminal_drain();
-                        let publish_batch = match batch_context
-                            .process(
-                                &input_relay,
-                                batch,
-                                &mut work_cancel_rx,
-                                wait_for_required_state,
-                                work.as_mut(),
-                            )
-                            .await
-                        {
-                            Some(batch) => batch,
-                            None => continue,
-                        };
-
-                        if interaction.is_draining() {
-                            if let Err(error) =
-                                emitter_buffer.retain_without_cadence(publish_batch.clone())
-                            {
-                                let reason = emitter_error_message(&error);
-                                let operation =
-                                    emitter_message_error_operation(&error, codec.is_some());
-                                batch_context
-                                    .handle_publish_error_batch(publish_batch, reason, operation)
-                                    .await;
-                            } else if !interaction.is_terminal_drain() {
-                                retry_schedule.include_acks(publish_batch.merged_acks());
-                            }
-                            continue;
-                        }
-
-                        if retry_schedule.is_active()
-                            || emitter_unavailable_reason(&sink, &fault_injection, &task_emitter)
-                                .is_some()
-                        {
-                            let unavailable =
-                                emitter_unavailable_reason(&sink, &fault_injection, &task_emitter);
-                            if let Err(error) = emitter_buffer.push(&context, publish_batch.clone())
-                            {
-                                let reason = emitter_error_message(&error);
-                                let operation =
-                                    emitter_message_error_operation(&error, codec.is_some());
-                                batch_context
-                                    .handle_publish_error_batch(publish_batch, reason, operation)
-                                    .await;
-                                continue;
-                            }
-                            retry_schedule.include_acks(publish_batch.merged_acks());
-                            if !retry_schedule.is_active() {
-                                retry_schedule.defer(
-                                    &context,
-                                    EmitterRetryDeferral {
-                                        wait: publish_backoff.take_next_delay(),
-                                        acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: fault_injection
-                                            .emitter_should_stall(&task_emitter),
-                                        reason: unavailable.as_deref(),
-                                    },
-                                );
-                                if let Some(reason) = unavailable.as_deref() {
-                                    context.report_publish_error(plan.sink.label(), reason);
-                                }
-                            }
-                            reconnect_on_wake |= sink.unavailable_reason().is_some();
-                            continue;
-                        }
-
-                        let mut pending_batch = Some(publish_batch);
-                        let mut control = EmitterPublishControl {
-                            fault_injection: &fault_injection,
-                            shutdown_rx: &mut shutdown_rx,
-                            stop_rx: &mut stop_rx,
-                            backoff: &mut publish_backoff,
-                        };
-                        let publish_result = sink
-                            .publish_batch(
-                                &context,
-                                &mut control,
-                                &mut emitter_buffer,
-                                pending_batch
-                                    .as_ref()
-                                    .verified("this branch only runs while a batch is pending")
-                                    .clone(),
-                            )
-                            .await;
-                        match publish_result {
-                            Ok(Some(report)) => {
-                                publish_backoff.reset();
-                                retry_schedule.clear();
-                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                                batch_context.observe_sent(&report);
-                                pending_batch.take();
-                            }
-                            Ok(None) => {
-                                publish_backoff.reset();
-                                retry_schedule.clear();
-                                runtime.clear_emitter_transient_error(&task_domain, &task_emitter);
-                                pending_batch.take();
-                            }
-                            Err(failure) if emitter_publish_error_is_retryable(&failure.error) => {
-                                let EmitterPublishFailure { error, batch_owner } = failure;
-                                let wait = emitter_retry_delay(&mut publish_backoff, &error);
-                                if let EmitterPublishBatchOwner::Caller = batch_owner
-                                    && let Some(batch) = pending_batch.take()
-                                    && let Err(retain_error) =
-                                        emitter_buffer.push(&context, batch.clone())
-                                {
-                                    retry_schedule.clear();
-                                    let reason = emitter_error_message(&retain_error);
-                                    let operation = emitter_message_error_operation(
-                                        &retain_error,
-                                        codec.is_some(),
-                                    );
-                                    batch_context
-                                        .handle_publish_error_batch(batch, reason, operation)
-                                        .await;
-                                    continue;
-                                }
-                                if let EmitterPublishBatchOwner::Buffer
-                                | EmitterPublishBatchOwner::Sink = batch_owner
-                                {
-                                    pending_batch.take();
-                                }
-                                let reason = emitter_error_message(&error);
-                                retry_schedule.defer(
-                                    &context,
-                                    EmitterRetryDeferral {
-                                        wait,
-                                        acks: sink.pending_acks(&emitter_buffer),
-                                        waiting_for_stall_clear: error.current_context()
-                                            == &EmitterRuntimeError::PublishStalled,
-                                        reason: Some(&reason),
-                                    },
-                                );
-                                reconnect_on_wake = sink.reconnect_after(&error);
-                                context.report_publish_error(plan.sink.label(), &reason);
-                            }
-                            Err(failure) => {
-                                retry_schedule.clear();
-                                let (error, failed_batches) = failure
-                                    .drain_failed_batches(&mut pending_batch, &mut emitter_buffer);
-                                let reason = emitter_error_message(&error);
-                                runtime.record_emitter_transient_error(
-                                    &task_domain,
-                                    &task_emitter,
-                                    reason.clone(),
-                                );
-                                context.report_publish_error(plan.sink.label(), &reason);
-                                let operation =
-                                    emitter_message_error_operation(&error, codec.is_some());
-                                batch_context
-                                    .handle_publish_error_batches(failed_batches, reason, operation)
-                                    .await;
-                            }
-                        }
-                    }
-                }
-            }
+            let mut task_loop = EmitterTaskLoop {
+                context: &context,
+                batch_context,
+                state,
+                interaction,
+                plan: &plan,
+                input_schema: &input_schema,
+                codec: codec.as_ref(),
+                input_metrics: &task_input_metrics,
+                fault_injection: &fault_injection,
+                buffered_messages: &emitter_buffer_count,
+                work_cancel_rx: &mut work_cancel_rx,
+                shutdown_rx: &mut shutdown_rx,
+                stop_rx: &mut stop_rx,
+                stop_signal: &task_stop_signal,
+            };
+            task_loop.run().await;
             drop(work_cancel_forwarder);
         });
         Ok(ScheduledEmitterTask {
@@ -1255,6 +851,546 @@ impl EmitterTask {
             stop_signal,
             task,
         })
+    }
+}
+
+impl EmitterTaskLoop<'_> {
+    async fn run(&mut self) {
+        loop {
+            tokio::task::consume_budget().await;
+            let wake = self.state.wake(self.context);
+            let receive_input = self
+                .state
+                .receives_input(self.buffered_messages.load(Ordering::Acquire));
+            let work = match self.interaction.next_with_input(wake, receive_input).await {
+                Ok(work) => work,
+                // The emitter holds work whose cadence it cannot resolve, because the domain
+                // clock is not readable in this generation. There is no wall-clock fallback
+                // for a logical cadence, so the work stays buffered and unpublished while the
+                // acknowledgements it owns are kept alive on the physical beat.
+                Err(RelayInteractionError::WakeTiming { reason, .. }) => {
+                    self.context.runtime.record_emitter_transient_error(
+                        &self.context.domain,
+                        &self.context.emitter,
+                        reason,
+                    );
+                    let acks = self.state.sink.pending_acks(&self.state.buffer);
+                    RuntimeReconnectBackoff::wait_duration_with_ack_alive(
+                        RETRY_ACK_ALIVE_EACH,
+                        &mut *self.shutdown_rx,
+                        &acks,
+                    )
+                    .await;
+                    continue;
+                }
+                Err(error) => {
+                    let reason = error.to_string();
+                    self.context
+                        .report_flush_error(self.plan.sink.label(), &reason);
+                    self.context
+                        .runtime
+                        .handle_internal_processor_error_for_acks(
+                            &self.context.domain,
+                            ModelKind::Emitter,
+                            &self.context.emitter,
+                            &self.context.error_policies,
+                            error.acks(),
+                            reason,
+                        );
+                    continue;
+                }
+            };
+            let (input_event, mut work) = work.into_parts();
+            match input_event {
+                RelayInteractionEvent::Command(EmitterTaskCommand::Reconfigure {
+                    config,
+                    response,
+                }) => {
+                    // The new cadence replaces the old one for the batches already buffered,
+                    // so a reconfiguration that cannot read the domain clock leaves them
+                    // without a deadline and is recorded as the emitter's transient error.
+                    if let Err(error) = self
+                        .state
+                        .buffer
+                        .reconfigure(self.context, &config.flush_policy)
+                    {
+                        let reason = emitter_error_message(&error);
+                        self.context.runtime.record_emitter_transient_error(
+                            &self.context.domain,
+                            &self.context.emitter,
+                            reason.clone(),
+                        );
+                        self.context
+                            .report_flush_error(self.plan.sink.label(), &reason);
+                    }
+                    response
+                        .send(())
+                        .means_peer_left("emitter reconfiguration requester");
+                }
+                RelayInteractionEvent::Command(EmitterTaskCommand::Stop { deadline, response }) => {
+                    if response.is_closed() {
+                        clear_emitter_stop_signal(self.stop_signal, deadline);
+                        continue;
+                    }
+                    if self.buffered_messages.load(Ordering::Acquire) > 0
+                        && let Some(reason) = emitter_unavailable_reason(
+                            &self.state.sink,
+                            self.fault_injection,
+                            &self.context.emitter,
+                        )
+                    {
+                        self.context.runtime.record_emitter_transient_error(
+                            &self.context.domain,
+                            &self.context.emitter,
+                            reason.clone(),
+                        );
+                        self.context
+                            .report_flush_error(self.plan.sink.label(), &reason);
+                        clear_emitter_stop_signal(self.stop_signal, deadline);
+                        response
+                            .send(Err(Report::new(EmitterRuntimeError::FinalFlush)
+                                .attach_printable(format!(
+                                    "emitter final flush failed: {reason}"
+                                ))))
+                            .means_peer_left("emitter stop requester");
+                        continue;
+                    }
+                    let EmitterTaskState {
+                        sink,
+                        buffer,
+                        backoff,
+                        ..
+                    } = &mut self.state;
+                    let mut control = EmitterPublishControl {
+                        fault_injection: self.fault_injection,
+                        shutdown_rx: &mut *self.shutdown_rx,
+                        stop_rx: &mut *self.stop_rx,
+                        backoff,
+                    };
+                    let drained = tokio::time::timeout_at(deadline, async {
+                        let report = sink
+                            .flush_all(self.plan.sink.label(), self.context, &mut control, buffer)
+                            .await?;
+                        sink.finish_transport(deadline).await?;
+                        Ok::<_, Report<EmitterRuntimeError>>(report)
+                    })
+                    .await;
+                    let result = match drained {
+                        Ok(Ok(report)) => {
+                            self.state.backoff.reset();
+                            self.state.retry.clear();
+                            self.context.runtime.clear_emitter_transient_error(
+                                &self.context.domain,
+                                &self.context.emitter,
+                            );
+                            if let Some(report) = report.as_ref() {
+                                self.batch_context.observe_sent(report);
+                            }
+                            Ok(())
+                        }
+                        Ok(Err(error)) => {
+                            let reason = emitter_error_message(&error);
+                            self.context.runtime.record_emitter_transient_error(
+                                &self.context.domain,
+                                &self.context.emitter,
+                                reason.clone(),
+                            );
+                            self.context
+                                .report_flush_error(self.plan.sink.label(), &reason);
+                            Err(Report::new(EmitterRuntimeError::FinalFlush)
+                                .attach_printable(format!("emitter final flush failed: {reason}")))
+                        }
+                        Err(_) => {
+                            let reason = format!(
+                                "emitter '{}' did not drain before its configured deadline",
+                                self.context.emitter.as_str()
+                            );
+                            self.context
+                                .report_flush_error(self.plan.sink.label(), &reason);
+                            Err(Report::new(EmitterRuntimeError::StopDeadlineElapsed)
+                                .attach_printable(reason))
+                        }
+                    };
+                    let should_stop = result.is_ok();
+                    if !should_stop {
+                        clear_emitter_stop_signal(self.stop_signal, deadline);
+                    }
+                    if response.send(result).is_ok() && should_stop {
+                        break;
+                    }
+                    if should_stop {
+                        clear_emitter_stop_signal(self.stop_signal, deadline);
+                    }
+                }
+                RelayInteractionEvent::ForceFlush(completion) => {
+                    if self.buffered_messages.load(Ordering::Acquire) > 0
+                        && let Some(reason) = emitter_unavailable_reason(
+                            &self.state.sink,
+                            self.fault_injection,
+                            &self.context.emitter,
+                        )
+                    {
+                        self.state
+                            .retry
+                            .include_acks(self.state.sink.pending_acks(&self.state.buffer));
+                        if self.state.retry.is_active() {
+                            self.context
+                                .runtime
+                                .record_emitter_transient_error_with_backoff(
+                                    &self.context.domain,
+                                    &self.context.emitter,
+                                    reason.clone(),
+                                    self.state.backoff.next_delay(),
+                                );
+                        } else {
+                            self.state.retry.defer(
+                                self.context,
+                                EmitterRetryDeferral {
+                                    wait: self.state.backoff.take_next_delay(),
+                                    acks: self.state.sink.pending_acks(&self.state.buffer),
+                                    waiting_for_stall_clear: self
+                                        .fault_injection
+                                        .emitter_should_stall(&self.context.emitter),
+                                    reason: Some(&reason),
+                                },
+                            );
+                        }
+                        self.context
+                            .report_flush_error(self.plan.sink.label(), &reason);
+                        completion.complete();
+                        continue;
+                    }
+                    let publish_result = {
+                        let EmitterTaskState {
+                            sink,
+                            buffer,
+                            backoff,
+                            ..
+                        } = &mut self.state;
+                        let mut control = EmitterPublishControl {
+                            fault_injection: self.fault_injection,
+                            shutdown_rx: &mut *self.shutdown_rx,
+                            stop_rx: &mut *self.stop_rx,
+                            backoff,
+                        };
+                        sink.flush_all(self.plan.sink.label(), self.context, &mut control, buffer)
+                            .await
+                            .map_err(EmitterPublishFailure::buffer)
+                    };
+                    let mut pending_batch = None;
+                    self.state
+                        .handle_publish_result(
+                            publish_result,
+                            &mut pending_batch,
+                            self.context,
+                            &self.batch_context,
+                            EmitterPublishOutcomeContext {
+                                sink_label: self.plan.sink.label(),
+                                codec_route: self.codec.is_some(),
+                                error_report: EmitterPublishErrorReport::Flush,
+                            },
+                        )
+                        .await;
+                    completion.complete();
+                }
+                RelayInteractionEvent::Stopped(reason) => {
+                    debug!(
+                        domain = self.context.domain.as_str(),
+                        emitter = self.context.emitter.as_str(),
+                        ?reason,
+                        "emitter relay interaction stopped"
+                    );
+                    if self.buffered_messages.load(Ordering::Acquire) > 0
+                        && let Some(reason) = emitter_unavailable_reason(
+                            &self.state.sink,
+                            self.fault_injection,
+                            &self.context.emitter,
+                        )
+                    {
+                        self.context.runtime.record_emitter_transient_error(
+                            &self.context.domain,
+                            &self.context.emitter,
+                            reason.clone(),
+                        );
+                        self.context
+                            .report_flush_error(self.plan.sink.label(), &reason);
+                        let pending = self.state.buffer.drain_pending();
+                        self.batch_context
+                            .handle_publish_error_batches(
+                                pending,
+                                reason,
+                                MessageErrorOperation::Publish,
+                            )
+                            .await;
+                        break;
+                    }
+                    let flush_result = {
+                        let EmitterTaskState {
+                            sink,
+                            buffer,
+                            backoff,
+                            ..
+                        } = &mut self.state;
+                        let mut control = EmitterPublishControl {
+                            fault_injection: self.fault_injection,
+                            shutdown_rx: &mut *self.shutdown_rx,
+                            stop_rx: &mut *self.stop_rx,
+                            backoff,
+                        };
+                        sink.flush_all(self.plan.sink.label(), self.context, &mut control, buffer)
+                            .await
+                    };
+                    match flush_result {
+                        Ok(Some(report)) => self.batch_context.observe_sent(&report),
+                        Ok(None) => {}
+                        Err(error) => {
+                            let reason = emitter_error_message(&error);
+                            self.context.runtime.record_emitter_transient_error(
+                                &self.context.domain,
+                                &self.context.emitter,
+                                reason.clone(),
+                            );
+                            self.context
+                                .report_flush_error(self.plan.sink.label(), &reason);
+                            let pending = self.state.buffer.drain_pending();
+                            let operation =
+                                emitter_message_error_operation(&error, self.codec.is_some());
+                            self.batch_context
+                                .handle_publish_error_batches(pending, reason, operation)
+                                .await;
+                        }
+                    }
+                    break;
+                }
+                RelayInteractionEvent::Wake => {
+                    let retry_was_active = self.state.retry.is_active();
+                    let retry_is_due = self.state.retry.retry_is_due();
+                    let stall_cleared = self.state.retry.release_if_stall_cleared(
+                        self.fault_injection
+                            .emitter_should_stall(&self.context.emitter),
+                    );
+                    if !retry_is_due && !stall_cleared {
+                        continue;
+                    }
+                    let retry_attempt = retry_was_active && (retry_is_due || stall_cleared);
+                    if self.state.reconnect_on_wake
+                        || self.state.sink.unavailable_reason().is_some()
+                    {
+                        self.state.sink = EmitterSinkState::open_until_cancelled(
+                            self.plan,
+                            self.context,
+                            self.input_schema,
+                            self.codec,
+                            &mut *self.work_cancel_rx,
+                        )
+                        .await;
+                        self.state
+                            .buffer
+                            .report_staged_messages(self.state.sink.staged_messages());
+                        if let Some(reason) = self.state.sink.unavailable_reason() {
+                            self.state.retry.defer(
+                                self.context,
+                                EmitterRetryDeferral {
+                                    wait: self.state.backoff.take_next_delay(),
+                                    acks: self.state.sink.pending_acks(&self.state.buffer),
+                                    waiting_for_stall_clear: false,
+                                    reason: Some(reason),
+                                },
+                            );
+                            self.state.reconnect_on_wake = true;
+                            continue;
+                        }
+                        self.state.reconnect_on_wake = false;
+                        self.context.runtime.clear_emitter_transient_error(
+                            &self.context.domain,
+                            &self.context.emitter,
+                        );
+                    }
+                    let publish_result = {
+                        let EmitterTaskState {
+                            sink,
+                            buffer,
+                            backoff,
+                            ..
+                        } = &mut self.state;
+                        let mut control = EmitterPublishControl {
+                            fault_injection: self.fault_injection,
+                            shutdown_rx: &mut *self.shutdown_rx,
+                            stop_rx: &mut *self.stop_rx,
+                            backoff,
+                        };
+                        sink.flush_due(
+                            self.plan.sink.label(),
+                            self.context,
+                            &mut control,
+                            buffer,
+                            retry_attempt,
+                        )
+                        .await
+                        .map_err(EmitterPublishFailure::buffer)
+                    };
+                    let mut pending_batch = None;
+                    self.state
+                        .handle_publish_result(
+                            publish_result,
+                            &mut pending_batch,
+                            self.context,
+                            &self.batch_context,
+                            EmitterPublishOutcomeContext {
+                                sink_label: self.plan.sink.label(),
+                                codec_route: self.codec.is_some(),
+                                error_report: EmitterPublishErrorReport::Flush,
+                            },
+                        )
+                        .await;
+                }
+                RelayInteractionEvent::Batch {
+                    relay: input_relay,
+                    batch,
+                } => {
+                    let delivery_observation = batch.delivery_observation(actual_utc_now());
+                    let input_metrics = self
+                        .input_metrics
+                        .get(&input_relay)
+                        .verified("the task resolves metrics for every declared emitter input");
+                    input_metrics.observe_batch(
+                        batch.message_count(),
+                        batch.estimated_bytes(),
+                        delivery_observation.domain_timestamp,
+                    );
+                    self.context.runtime.mark_branch_aggregated_metrics_updated(
+                        &self.context.domain,
+                        ModelKind::Emitter,
+                        &self.context.emitter,
+                    );
+                    for seconds in delivery_observation.latency_seconds {
+                        input_metrics.observe_delivery_latency(
+                            seconds,
+                            delivery_observation.domain_timestamp,
+                        );
+                    }
+                    let wait_for_required_state = !self.interaction.is_terminal_drain();
+                    let publish_batch = match self
+                        .batch_context
+                        .process(
+                            &input_relay,
+                            batch,
+                            &mut *self.work_cancel_rx,
+                            wait_for_required_state,
+                            work.as_mut(),
+                        )
+                        .await
+                    {
+                        Some(batch) => batch,
+                        None => continue,
+                    };
+
+                    if self.interaction.is_draining() {
+                        if let Err(error) = self
+                            .state
+                            .buffer
+                            .retain_without_cadence(publish_batch.clone())
+                        {
+                            let reason = emitter_error_message(&error);
+                            let operation =
+                                emitter_message_error_operation(&error, self.codec.is_some());
+                            self.batch_context
+                                .handle_publish_error_batch(publish_batch, reason, operation)
+                                .await;
+                        } else if !self.interaction.is_terminal_drain() {
+                            self.state.retry.include_acks(publish_batch.merged_acks());
+                        }
+                        continue;
+                    }
+
+                    if self.state.retry.is_active()
+                        || emitter_unavailable_reason(
+                            &self.state.sink,
+                            self.fault_injection,
+                            &self.context.emitter,
+                        )
+                        .is_some()
+                    {
+                        let unavailable = emitter_unavailable_reason(
+                            &self.state.sink,
+                            self.fault_injection,
+                            &self.context.emitter,
+                        );
+                        if let Err(error) =
+                            self.state.buffer.push(self.context, publish_batch.clone())
+                        {
+                            let reason = emitter_error_message(&error);
+                            let operation =
+                                emitter_message_error_operation(&error, self.codec.is_some());
+                            self.batch_context
+                                .handle_publish_error_batch(publish_batch, reason, operation)
+                                .await;
+                            continue;
+                        }
+                        self.state.retry.include_acks(publish_batch.merged_acks());
+                        if !self.state.retry.is_active() {
+                            self.state.retry.defer(
+                                self.context,
+                                EmitterRetryDeferral {
+                                    wait: self.state.backoff.take_next_delay(),
+                                    acks: self.state.sink.pending_acks(&self.state.buffer),
+                                    waiting_for_stall_clear: self
+                                        .fault_injection
+                                        .emitter_should_stall(&self.context.emitter),
+                                    reason: unavailable.as_deref(),
+                                },
+                            );
+                            if let Some(reason) = unavailable.as_deref() {
+                                self.context
+                                    .report_publish_error(self.plan.sink.label(), reason);
+                            }
+                        }
+                        self.state.reconnect_on_wake |=
+                            self.state.sink.unavailable_reason().is_some();
+                        continue;
+                    }
+
+                    let mut pending_batch = Some(publish_batch);
+                    let publish_result = {
+                        let EmitterTaskState {
+                            sink,
+                            buffer,
+                            backoff,
+                            ..
+                        } = &mut self.state;
+                        let mut control = EmitterPublishControl {
+                            fault_injection: self.fault_injection,
+                            shutdown_rx: &mut *self.shutdown_rx,
+                            stop_rx: &mut *self.stop_rx,
+                            backoff,
+                        };
+                        sink.publish_batch(
+                            self.context,
+                            &mut control,
+                            buffer,
+                            pending_batch
+                                .as_ref()
+                                .verified("this branch only runs while a batch is pending")
+                                .clone(),
+                        )
+                        .await
+                    };
+                    self.state
+                        .handle_publish_result(
+                            publish_result,
+                            &mut pending_batch,
+                            self.context,
+                            &self.batch_context,
+                            EmitterPublishOutcomeContext {
+                                sink_label: self.plan.sink.label(),
+                                codec_route: self.codec.is_some(),
+                                error_report: EmitterPublishErrorReport::Publish,
+                            },
+                        )
+                        .await;
+                }
+            }
+        }
     }
 }
 
@@ -1286,8 +1422,9 @@ impl EmitterBatchContext<'_> {
         reason: String,
         operation: MessageErrorOperation,
     ) {
-        let delivered = batch.delivered.clone();
-        let messages = match batch.batch.try_into_messages() {
+        let execution_now = batch.execution_now();
+        let delivered = batch.delivered_rows().to_vec();
+        let messages = match batch.into_relay_batch().try_into_messages() {
             Ok(messages) => messages,
             Err(error) => {
                 let failure = *error;
@@ -1311,7 +1448,7 @@ impl EmitterBatchContext<'_> {
                     policy: &self.error_policies.message,
                     message,
                     error: structured_message_error(
-                        batch.execution_now,
+                        execution_now,
                         MessageErrorCode::External,
                         reason.clone(),
                         operation,
@@ -1321,7 +1458,7 @@ impl EmitterBatchContext<'_> {
                     partial_output: None,
                     materialized_state: HashMap::default(),
                     ingest_metadata: None,
-                    execution_now: batch.execution_now,
+                    execution_now,
                 })
                 .await;
         }
@@ -1584,7 +1721,60 @@ impl EmitterBatchContext<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::test_fixtures::sink_context;
+    use crate::runtime::test_fixtures::{input_batch, sink_context};
+
+    fn task_state(context: &EmitterSinkContext) -> EmitterTaskState {
+        let mut buffer = EmitterBatchBuffer::default();
+        buffer.set_flush_policy(RuntimeFlushPolicy::Immediate);
+        EmitterTaskState::new(
+            EmitterSinkState::Unavailable {
+                reason: "test sink is unavailable".to_string(),
+            },
+            buffer,
+            RuntimeReconnectBackoff::default(),
+            context,
+        )
+    }
+
+    fn output_metrics(context: &EmitterSinkContext) -> EmitterOutputMetrics {
+        EmitterOutputMetrics::WithoutRelay(
+            context
+                .runtime
+                .inner
+                .metrics
+                .resolve_global_node_message_metrics(
+                    &context.domain,
+                    ModelKind::Emitter,
+                    &ModelName::from(&context.emitter),
+                    None,
+                    "sent",
+                ),
+        )
+    }
+
+    fn batch_context<'a>(
+        context: &'a EmitterSinkContext,
+        routing: &'a mut DomainRoutingCache,
+        output_metrics: &'a EmitterOutputMetrics,
+        node: &'a ModelName,
+        source_filters: &'a HashMap<RelayName, CompiledProgramWithMaterializedInterest>,
+        materialized_state: &'a [nervix_models::MaterializedStateDependency],
+    ) -> EmitterBatchContext<'a> {
+        EmitterBatchContext {
+            runtime: &context.runtime,
+            routing,
+            domain_clock: &context.clock,
+            domain: &context.domain,
+            emitter: &context.emitter,
+            node,
+            output_metrics,
+            error_policies: &context.error_policies,
+            source_filters,
+            filter_map: None,
+            ordering_group: None,
+            materialized_state,
+        }
+    }
 
     #[test]
     fn emitter_error_classification_is_explicit_for_every_context() {
@@ -1631,6 +1821,167 @@ mod tests {
         assert_eq!(
             emitter_error_message(&bare),
             "failed to encode emitter batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_success_clears_retry_state_and_releases_the_caller_batch() {
+        let context = sink_context();
+        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
+        let mut routing = DomainRoutingCache::new(routing.shared());
+        let output_metrics = output_metrics(&context);
+        let node = ModelName::from(&context.emitter);
+        let source_filters = HashMap::default();
+        let materialized_state = Vec::new();
+        let batch_context = batch_context(
+            &context,
+            &mut routing,
+            &output_metrics,
+            &node,
+            &source_filters,
+            &materialized_state,
+        );
+        let mut state = task_state(&context);
+        let mut pending_batch = Some(EmitterPublishBatch::from_batch(
+            input_batch(),
+            Timestamp::from_unix_nanos(100),
+        ));
+
+        state
+            .handle_publish_result(
+                Ok(None),
+                &mut pending_batch,
+                &context,
+                &batch_context,
+                EmitterPublishOutcomeContext {
+                    sink_label: "test",
+                    codec_route: true,
+                    error_report: EmitterPublishErrorReport::Publish,
+                },
+            )
+            .await;
+
+        assert!(pending_batch.is_none());
+        assert!(!state.retry.is_active());
+        assert_eq!(
+            context
+                .runtime
+                .emitter_transient_error(&context.domain, &context.emitter),
+            None
+        );
+        let mut fresh_backoff = RuntimeReconnectBackoff::default();
+        assert_eq!(
+            state.backoff.take_next_delay(),
+            fresh_backoff.take_next_delay(),
+            "success must reset the declared retry sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn retryable_caller_failure_retains_the_batch_and_defers_one_retry() {
+        let context = sink_context();
+        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
+        let mut routing = DomainRoutingCache::new(routing.shared());
+        let output_metrics = output_metrics(&context);
+        let node = ModelName::from(&context.emitter);
+        let source_filters = HashMap::default();
+        let materialized_state = Vec::new();
+        let batch_context = batch_context(
+            &context,
+            &mut routing,
+            &output_metrics,
+            &node,
+            &source_filters,
+            &materialized_state,
+        );
+        let mut state = task_state(&context);
+        state.retry.clear();
+        let mut pending_batch = Some(EmitterPublishBatch::from_batch(
+            input_batch(),
+            Timestamp::from_unix_nanos(100),
+        ));
+        let failure = EmitterPublishFailure::caller(
+            Report::new(EmitterRuntimeError::PublishBatch)
+                .attach_printable("test sink rejected the attempt"),
+        );
+
+        state
+            .handle_publish_result(
+                Err(failure),
+                &mut pending_batch,
+                &context,
+                &batch_context,
+                EmitterPublishOutcomeContext {
+                    sink_label: "test",
+                    codec_route: true,
+                    error_report: EmitterPublishErrorReport::Publish,
+                },
+            )
+            .await;
+
+        assert!(pending_batch.is_none());
+        assert_eq!(state.buffer.pending().len(), 1);
+        assert!(state.retry.is_active());
+        assert!(state.reconnect_on_wake);
+        assert_eq!(
+            context
+                .runtime
+                .emitter_transient_error(&context.domain, &context.emitter),
+            Some("test sink rejected the attempt".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_buffer_failure_drains_and_routes_every_owned_batch() {
+        let context = sink_context();
+        let routing = DomainRouting::new(DomainRoutingSnapshot::default());
+        let mut routing = DomainRoutingCache::new(routing.shared());
+        let output_metrics = output_metrics(&context);
+        let node = ModelName::from(&context.emitter);
+        let source_filters = HashMap::default();
+        let materialized_state = Vec::new();
+        let batch_context = batch_context(
+            &context,
+            &mut routing,
+            &output_metrics,
+            &node,
+            &source_filters,
+            &materialized_state,
+        );
+        let mut state = task_state(&context);
+        state
+            .buffer
+            .push(
+                &context,
+                EmitterPublishBatch::from_batch(input_batch(), Timestamp::from_unix_nanos(100)),
+            )
+            .expect("test batch must buffer");
+        let failure = EmitterPublishFailure::buffer(
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable("test encoding failed"),
+        );
+        let mut pending_batch = None;
+
+        state
+            .handle_publish_result(
+                Err(failure),
+                &mut pending_batch,
+                &context,
+                &batch_context,
+                EmitterPublishOutcomeContext {
+                    sink_label: "test",
+                    codec_route: true,
+                    error_report: EmitterPublishErrorReport::Flush,
+                },
+            )
+            .await;
+
+        assert!(state.buffer.is_empty());
+        assert!(!state.retry.is_active());
+        assert_eq!(
+            context
+                .runtime
+                .emitter_transient_error(&context.domain, &context.emitter),
+            Some("test encoding failed".to_string())
         );
     }
 
