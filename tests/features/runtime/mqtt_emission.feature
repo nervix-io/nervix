@@ -131,6 +131,7 @@ Feature: MQTT emission
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
         INHERIT ALL
+        <batch>
         FLUSH IMMEDIATE
         ON MESSAGE ERROR SEND TO emitter_errors
           SET error_code = error.code,
@@ -150,11 +151,14 @@ Feature: MQTT emission
     When the stallable endpoint "mqtt" is resumed
     Then the observed broker receives a payload
       """
-      {"user_id":42}
+      <payload>
       """
     And within "5s" Kafka consumer group "mqtt_boundary_group_{{test_id}}" next offset for topic "mqtt_boundary_in_{{test_id}}" partition 0 is "at least 1"
 
+    # A batch payload is one PUBLISH packet, so its PUBACK is the completion point.
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | batch                              | payload          |
+      | 1            |                                    | {"user_id":42}   |
+      | 3            |                                    | {"user_id":42}   |
+      | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+      | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |

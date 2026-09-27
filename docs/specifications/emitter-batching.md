@@ -267,8 +267,12 @@ names the limit and the encoding that exceeded it. Packing then continues with t
 follow it. A record is never rejected on the strength of an estimate, and never rejected without
 the encoder having tried to encode it alone.
 
-A record that fits the emitter's `MAX SIZE` but not the destination's own limit is rejected by the
-destination exactly as it is today, through `ON MESSAGE ERROR`.
+A payload that fits the emitter's `MAX SIZE` but whose message does not fit the destination's own
+limit is rejected with every member it carries, through `ON MESSAGE ERROR` with one shared
+reference. Where the connector learns that limit, it measures the complete message, framing
+outside the bound included, and rejects it before writing anything, as the
+[native limits](#byte-boundary-and-native-limits) below list. Where it cannot, the destination's
+own answer decides the outcome exactly as it does for a single record.
 
 ### Working memory is not wire size
 
@@ -456,6 +460,17 @@ not an array — and Nervix never changes a destination schema to make an array 
 | MongoDB | The BSON documents of the members and the command's own fields | The wire-protocol message header | 16 MiB per document, and the `maxWriteBatchSize` and `maxMessageSizeBytes` the server reports — 100,000 operations and 48 MB today |
 | Iceberg | The Parquet data file as written to object storage | The manifest and snapshot metadata the commit writes | None fixed by Iceberg; without the clause Nervix rolls data files at 512 MiB |
 
+The broker and message connectors that can learn their destination's limit check every message
+against it before writing, counting the framing outside the bound: the Kafka producer's
+`message.max.bytes` with the record key, headers and record overhead; the Maximum Packet Size the
+MQTT broker declared in its latest `CONNACK`, and the largest packet MQTT can express, with the
+fixed header, topic, packet identifier and property length; the `max_payload` the NATS server
+announced, with the message headers; and the 256 KiB SQS message with its attributes and FIFO
+group. Pulsar's `maxMessageSize` and RabbitMQ's `max_message_size` are broker settings a client
+cannot read, so a larger message reaches the broker, which refuses it or closes the channel it
+arrived on, and the emitter retries it as an infrastructure failure. Redis answers a value above
+`proto-max-bulk-len` with a rejection, and ZeroMQ fixes no limit of its own.
+
 Iceberg is the one sink with two byte bounds, and they measure different things on purpose:
 `BATCH ... MAX SIZE` bounds one written data file, while `COMMIT EACH ... MAX SIZE` bounds the
 Arrow payload bytes staged before a commit becomes due. A declaration that sets the first above the
@@ -536,7 +551,7 @@ outcome; a connector receives a payload and answers for it.
 | The ordering group cannot be evaluated for one record | That record | `publish` | Unchanged from today |
 | A batch transformation yields no output, more than one output, an evaluation failure, or a value the format cannot write | Every member of that batch | `encode` | All members follow `ON MESSAGE ERROR` with one shared reference; the diagnostic names the codec and the cause and quotes no payload value |
 | A single member still exceeds `MAX SIZE` after a bounded encoding of it alone | That record | `encode` | The record follows `ON MESSAGE ERROR` with a validation error naming the measured limit |
-| The destination definitively rejects the batch | Every member of that batch | `publish` | All members follow `ON MESSAGE ERROR` with one shared reference |
+| The destination definitively rejects the batch, or the connector finds its message larger than a limit the destination declared | Every member of that batch | `publish` | All members follow `ON MESSAGE ERROR` with one shared reference |
 | The destination names a member it rejected | That member | `publish` | That member follows `ON MESSAGE ERROR`; the others are unaffected |
 | The destination fails for an infrastructure reason, or the outcome is ambiguous | No member | `publish` | The prepared payload is retained and retried on the declared backoff, with backpressure |
 
