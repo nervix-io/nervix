@@ -192,6 +192,7 @@ mod emitter_buffer;
 mod emitter_encoding;
 mod emitter_ordering_group;
 mod emitter_publishing;
+mod emitter_record_writes;
 mod emitter_retry;
 mod emitter_sinks;
 mod emitter_start_plan;
@@ -313,15 +314,18 @@ pub(crate) use domain_execution::{DomainRoutingCache, SharedDomainRouting};
 use domain_rebuild::branch_relays_from_branched_specs;
 use domain_wire_schemas::DomainWireSchemas;
 use emitter_buffer::{
-    DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublishBatch,
-    PublishReport,
+    DeliveredAcknowledgements, EmitterBatchBuffer, EmitterBufferedMessages, EmitterPublication,
+    EmitterPublishBatch, PublishReport, RowToPack,
 };
 use emitter_encoding::EncodedRecordSink;
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{
     EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterPublishResult,
     EmitterSink, EmitterSinkState, RejectedEmitterRecord, await_emitter_confirmation,
-    emitter_unavailable_reason, finish_record_sink_publish, finish_rejected_records,
+    emitter_unavailable_reason, finish_rejected_records, sink_publish_failure,
+};
+use emitter_record_writes::{
+    PreparedPayload, PreparedPayloads, PreparedWrite, RowAnswers, RowRecords,
 };
 use emitter_retry::{
     EmitterAcknowledgements, EmitterRetryDeferral, EmitterRetrySchedule, RETRY_ACK_ALIVE_EACH,

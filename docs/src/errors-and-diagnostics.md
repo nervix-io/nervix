@@ -157,6 +157,13 @@ of the internal report. The route may inspect the eligible original input, its c
 materialized-state snapshot, and an all-optional `partial_output` of construction completed before
 failure. An error handler whose own construction fails does not recursively invoke itself.
 
+A batch payload's rejection becomes one message error per member, each a copy of the sink's
+structured error: the members share its reference, so an operator can see that they failed
+together, while each keeps its own occurrence time and branch. A sink answer that breaks the write
+contract, by naming a record the write did not carry or answering twice for one, is not a message
+error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
+follow `ON MESSAGE ERROR` as a failed publish.
+
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON
 GLOBAL ERROR` handles guest failures outside an individual message route. Error delivery preserves

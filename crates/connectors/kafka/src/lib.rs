@@ -26,7 +26,7 @@ use futures_util::FutureExt;
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
-    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
+    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
     SinkStartError, SinkStartResult,
 };
 use nervix_models::{ClientConfigEntry, Timestamp, TopicName};
@@ -59,7 +59,7 @@ pub struct KafkaSink {
 }
 
 struct PendingKafkaConfirmation {
-    position: SinkRecordPosition,
+    record: SinkRecordId,
     occurred_at: Timestamp,
     deadline: Instant,
     confirmation: DeliveryFuture,
@@ -85,13 +85,17 @@ impl KafkaSink {
         })
     }
 
-    async fn publish_unconfirmed(&self, records: Vec<SinkRecord>, outcome: &mut PerRecordOutcome) {
+    async fn publish_unconfirmed(
+        &self,
+        records: Vec<SinkRecord>,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
+    ) {
         for record in records {
             tokio::task::consume_budget().await;
             match self.enqueue(&record) {
                 Ok(confirmation) => {
                     drop(confirmation);
-                    outcome.deliver(record.position);
+                    outcome.deliver(record.id);
                 }
                 Err(error) if Self::is_record_rejection(&error) => {
                     outcome.reject(record.rejected(format!("kafka rejected record: {error}")));
@@ -111,7 +115,7 @@ impl KafkaSink {
             max_in_flight,
             timeout,
         }: AckConfirmation,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         let mut pending: VecDeque<PendingKafkaConfirmation> = VecDeque::new();
         for record in records {
@@ -134,7 +138,7 @@ impl KafkaSink {
                 return;
             };
             pending.push_back(PendingKafkaConfirmation {
-                position: record.position,
+                record: record.id,
                 occurred_at: record.occurred_at,
                 deadline,
                 confirmation,
@@ -181,7 +185,7 @@ impl KafkaSink {
     async fn confirm_oldest(
         pending: &mut VecDeque<PendingKafkaConfirmation>,
         timeout: Duration,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) -> SinkPublishResult<()> {
         let Some(oldest) = pending.front_mut() else {
             return Err(Self::publish_error(
@@ -211,18 +215,18 @@ impl KafkaSink {
                 humantime::format_duration(timeout)
             )));
         };
-        let position = oldest.position;
+        let record = oldest.record;
         let occurred_at = oldest.occurred_at;
         match result {
             Ok(Ok(_delivery)) => {
                 pending.pop_front();
-                outcome.deliver(position);
+                outcome.deliver(record);
                 Ok(())
             }
             Ok(Err((source, _message))) if Self::is_record_rejection(&source) => {
                 pending.pop_front();
                 outcome.reject(RejectedSinkRecord::external(
-                    position,
+                    record,
                     occurred_at,
                     format!("kafka rejected record: {source}"),
                 ));
@@ -243,7 +247,7 @@ impl KafkaSink {
 
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingKafkaConfirmation>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         let mut index = 1;
         while index < pending.len() {
@@ -259,10 +263,10 @@ impl KafkaSink {
                  removes from",
             );
             match result {
-                Ok(Ok(_delivery)) => outcome.deliver(confirmation.position),
+                Ok(Ok(_delivery)) => outcome.deliver(confirmation.record),
                 Ok(Err((source, _message))) if Self::is_record_rejection(&source) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        confirmation.position,
+                        confirmation.record,
                         confirmation.occurred_at,
                         format!("kafka rejected record: {source}"),
                     ));
@@ -322,7 +326,7 @@ impl SinkLifecycle for KafkaSink {
 
 #[async_trait]
 impl RecordSink for KafkaSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         match self.mode {
             BrokerPublishingMode::NoAck => {

@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
     PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult,
-    SinkRecord, SinkStartError, SinkStartResult,
+    SinkRecord, SinkRecordId, SinkStartError, SinkStartResult,
 };
 use nervix_models::ClientConfigEntry;
 use rustls_pki_types::ServerName;
@@ -185,35 +185,28 @@ impl SinkLifecycle for SyslogSink {}
 
 #[async_trait]
 impl RecordSink for SyslogSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
-        let mut current_batch = None;
-        // A write failure retains the entire current batch for retry, including records whose
-        // frames were already accepted by the socket and may therefore be delivered twice.
-        let mut staged_deliveries = Vec::new();
+        // A socket that accepted a frame has not delivered it, so a write failure leaves every
+        // record of this write for retry, including records whose frames were already accepted
+        // and may therefore be delivered twice.
+        let mut staged_deliveries = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
-            if current_batch.is_some_and(|batch| batch != position.batch_index) {
-                for position in staged_deliveries.drain(..) {
-                    outcome.deliver(position);
-                }
-            }
-            current_batch = Some(position.batch_index);
             if let Err(reason) = self.validate_payload(&record.payload) {
                 outcome.reject(record.rejected(reason.to_string()));
                 continue;
             }
             match self.publish_payload(&record.payload).await {
-                Ok(()) => staged_deliveries.push(position),
+                Ok(()) => staged_deliveries.push(record.id),
                 Err(error) => {
                     outcome.fail(error);
                     return outcome;
                 }
             }
         }
-        for position in staged_deliveries {
-            outcome.deliver(position);
+        for record in staged_deliveries {
+            outcome.deliver(record);
         }
         outcome
     }

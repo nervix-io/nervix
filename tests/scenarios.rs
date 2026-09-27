@@ -8799,6 +8799,24 @@ async fn when_sink_client_leaves_fault_mode(world: &mut ScenarioWorld, emitter: 
         .clear_sink_client_fault_on_all_nodes(&emitter);
 }
 
+/// The sink still writes every record of the emitter's next write, but the emitter receives the
+/// answers for only the first `resolved` of them, as from a broker that stops answering after it
+/// accepted the rest, and retries the write as one whose outcome it never learned.
+#[when(
+    expr = "the sink of emitter {string} stalls after resolving {int} record(s) of its next \
+            publish"
+)]
+async fn when_emitter_sink_stalls_after_resolving(
+    world: &mut ScenarioWorld,
+    emitter: String,
+    resolved: usize,
+) {
+    let emitter = expand_placeholders(world, &emitter);
+    world
+        .cluster()
+        .stall_emitter_sink_after_resolving_on_all_nodes(&emitter, resolved);
+}
+
 #[when(expr = "ingestor {string} enters fault mode")]
 async fn when_ingestor_enters_fault_mode(world: &mut ScenarioWorld, ingestor: String) {
     let ingestor = expand_placeholders(world, &ingestor);
@@ -21691,6 +21709,90 @@ async fn then_mongodb_collection_eventually_contains_document(
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Every docstring line is one expected document, as the JSON the other MongoDB assertions project
+/// each document to. The collection must hold exactly those documents, duplicates included, and
+/// still hold exactly them a moment later: a write the emitter must not repeat never arrives, so
+/// the closing check only strengthens the assertion.
+#[then("the MongoDB collection eventually holds exactly these documents")]
+async fn then_mongodb_collection_eventually_holds_exactly_these_documents(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let mut expected = Vec::new();
+    for line in docstring(step).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // A map keyed in sorted order makes one canonical text for equal documents, whatever order
+        // the docstring wrote their fields in.
+        let document: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(&expand_placeholders(world, line)).unwrap_or_else(|error| {
+                panic!("expected MongoDB document {line:?} is not a JSON object: {error}")
+            });
+        expected
+            .push(serde_json::to_string(&document).expect("a JSON object serializes back to JSON"));
+    }
+    expected.sort();
+    let collection = world
+        .mongodb_collection
+        .as_ref()
+        .expect("a MongoDB collection must be prepared before assertion")
+        .clone();
+    let client = mongodb_client(world.dependencies.endpoints(), world.mongodb_tls)
+        .await
+        .expect("failed to connect to MongoDB");
+    let collection = client
+        .database("nervix")
+        .collection::<MongoDbDocument>(&collection);
+    let read_documents = || async {
+        let documents = collection
+            .find(mongodb_doc! {})
+            .await
+            .expect("failed to query MongoDB collection")
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("failed to read MongoDB documents");
+        let mut observed = Vec::with_capacity(documents.len());
+        for document in documents {
+            let mut projected = BTreeMap::new();
+            projected.insert(
+                "mongodb_action".to_string(),
+                serde_json::json!(document.get_str("mongodb_action").unwrap_or_default()),
+            );
+            projected.insert(
+                "mongodb_user_id".to_string(),
+                mongodb_document_user_id(&document),
+            );
+            observed.push(
+                serde_json::to_string(&projected).expect("a JSON object serializes back to JSON"),
+            );
+        }
+        observed.sort();
+        observed
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        tokio::task::consume_budget().await;
+        let observed = read_documents().await;
+        if observed == expected {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for exactly the expected MongoDB documents; expected {expected:?}, \
+             observed {observed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let observed = read_documents().await;
+    assert_eq!(
+        observed, expected,
+        "the MongoDB collection changed after it held exactly the expected documents"
+    );
 }
 
 #[then(expr = "the MongoDB collection eventually contains exactly {int} documents")]

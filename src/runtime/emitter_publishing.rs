@@ -3,8 +3,8 @@
 //! Layer: data plane.
 //! - **Owns.** Whether the emitter holds an open connector, flushing its buffer through that
 //!   connector on its cadence, a retry or a drain, committing what the connector staged, the
-//!   fault-injection checks and stop deadline that bound every attempt, and applying each write's
-//!   per-record outcome to the buffered batches.
+//!   fault-injection checks and stop deadline that bound every attempt, and delivering the message
+//!   errors of the rows a write rejected.
 //! - **Depends on.** The emitter's buffer and retry schedule, the composition root that opens its
 //!   connector, the connector contract's lifecycle hooks and outcomes, and the node's
 //!   message-error handling.
@@ -14,8 +14,8 @@
 use async_trait::async_trait;
 use error_stack::ResultExt as _;
 use nervix_connector::{
-    PerRecordOutcome, SinkCommitReport, SinkDeadline, SinkLifecycle, SinkPublishError,
-    SinkRecordPosition, physical_time::PhysicalDeadlineCapability,
+    PerRecordOutcome, RejectedSinkRecord, SinkCommitReport, SinkDeadline, SinkLifecycle,
+    SinkPublishError, SinkRecordPosition, physical_time::PhysicalDeadlineCapability,
 };
 
 use super::*;
@@ -87,6 +87,7 @@ impl SinkCommitReason {
     }
 }
 
+#[derive(Debug)]
 pub(super) struct RejectedEmitterRecord {
     pub(super) position: SinkRecordPosition,
     pub(super) reason: String,
@@ -192,11 +193,12 @@ pub(super) trait EmitterSink: Send {
 
     fn lifecycle_mut(&mut self) -> &mut dyn SinkLifecycle;
 
-    /// Prepares every batch the emitter released for this connector's contract and writes it.
+    /// Prepares every batch the emitter released for this connector's contract and writes it,
+    /// together with the batch payloads earlier attempts retained.
     async fn publish_batches(
         &mut self,
         context: &EmitterSinkContext,
-        batches: &mut [EmitterPublishBatch],
+        publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()>;
 }
 
@@ -588,7 +590,8 @@ impl EmitterSinkState {
             let _confirmation_wait = context
                 .runtime
                 .begin_emitter_confirmation_wait(&context.domain, &context.emitter);
-            let publish = Box::pin(self.publish_buffered_batches(context, buffer.pending_mut()));
+            let publish =
+                Box::pin(self.publish_buffered_batches(context, buffer.publication_mut()));
             let published = await_until_emitter_stop_deadline(
                 control.stop_rx,
                 await_emitter_confirmation(&pending_acks, publish),
@@ -604,10 +607,10 @@ impl EmitterSinkState {
     async fn publish_buffered_batches(
         &mut self,
         context: &EmitterSinkContext,
-        batches: &mut [EmitterPublishBatch],
+        publication: EmitterPublication<'_>,
     ) -> EmitterRuntimeResult<()> {
         match self {
-            Self::Open(sink) => sink.publish_batches(context, batches).await,
+            Self::Open(sink) => sink.publish_batches(context, publication).await,
             Self::Unavailable { .. } => Err(Report::new(EmitterRuntimeError::SinkNotInitialized)
                 .attach_printable(
                     "emitter has no initialized sink client for its configured sink",
@@ -714,39 +717,83 @@ async fn wait_for_emitter_work_cancel(work_cancel_rx: &mut watch::Receiver<bool>
     }
 }
 
-pub(super) async fn finish_record_sink_publish(
-    context: &EmitterSinkContext,
-    batches: &mut [EmitterPublishBatch],
-    outcome: PerRecordOutcome,
-    acknowledgements: DeliveredAcknowledgements,
-) -> EmitterRuntimeResult<()> {
-    let outcome = outcome.into_parts();
-    for SinkRecordPosition {
-        batch_index,
-        row_index,
-    } in outcome.delivered
-    {
-        let batch = batches.get_mut(batch_index).ok_or_else(|| {
-            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-                "sink confirmation references missing emitter batch {batch_index}"
-            ))
-        })?;
-        batch.mark_delivered(row_index, acknowledgements)?;
+impl EmitterSinkContext {
+    /// One write's outcome as it reaches the emitter.
+    ///
+    /// A test build can stall the sink after it resolved the first records of a write: the
+    /// answers for every later record are lost, as they are from a broker that stops answering
+    /// after it accepted them, and the write fails as one whose outcome the emitter never
+    /// learned. Any other build receives the outcome exactly as the sink reported it.
+    pub(super) fn received_outcome<Id: Copy + Ord>(
+        &self,
+        records: usize,
+        outcome: PerRecordOutcome<Id>,
+    ) -> PerRecordOutcome<Id> {
+        if records == 0 {
+            return outcome;
+        }
+        let Some(resolved) = self
+            .runtime
+            .inner
+            .fault_injection
+            .take_emitter_sink_stall(&self.emitter)
+        else {
+            return outcome;
+        };
+        stalled_after_resolving(outcome, resolved)
     }
-    let rejected = outcome
-        .rejected
-        .into_iter()
-        .map(|rejected| RejectedEmitterRecord {
-            position: rejected.position,
-            reason: String::new(),
-            structured_error: Some(rejected.error),
-        })
-        .collect();
-    finish_rejected_records(context, batches, rejected, MessageErrorOperation::Publish).await?;
-    match outcome.infrastructure_error {
-        Some(error) => Err(sink_publish_failure(error)),
-        None => Ok(()),
+}
+
+/// One answer a sink gave for one record of a write.
+enum SinkAnswer<Id> {
+    Delivered(Id),
+    Rejected(RejectedSinkRecord<Id>),
+}
+
+impl<Id: Copy> SinkAnswer<Id> {
+    fn id(&self) -> Id {
+        match self {
+            Self::Delivered(id) => *id,
+            Self::Rejected(rejected) => rejected.id,
+        }
     }
+}
+
+/// `outcome` as it arrives from a sink that stalled after it resolved `resolved` records: the
+/// answers for every record after the first `resolved`, in the order the host handed them over,
+/// never arrive, and the write fails as one whose outcome is unknown.
+fn stalled_after_resolving<Id: Copy + Ord>(
+    outcome: PerRecordOutcome<Id>,
+    resolved: usize,
+) -> PerRecordOutcome<Id> {
+    let parts = outcome.into_parts();
+    let mut answers = Vec::with_capacity(
+        parts
+            .delivered
+            .len()
+            .checked_add(parts.rejected.len())
+            .assured("both counts total answers this node already holds in memory"),
+    );
+    for id in parts.delivered {
+        answers.push(SinkAnswer::Delivered(id));
+    }
+    for rejected in parts.rejected {
+        answers.push(SinkAnswer::Rejected(rejected));
+    }
+    answers.sort_by_key(SinkAnswer::id);
+    let mut stalled = PerRecordOutcome::with_capacity(resolved);
+    for answer in answers.into_iter().take(resolved) {
+        match answer {
+            SinkAnswer::Delivered(id) => stalled.deliver(id),
+            SinkAnswer::Rejected(rejected) => stalled.reject(rejected),
+        }
+    }
+    stalled.fail(
+        Report::new(SinkPublishError::Publish { sink: "stalled" }).attach_printable(format!(
+            "fault injector stalled the sink after it resolved {resolved} records"
+        )),
+    );
+    stalled
 }
 
 /// A connector's publish failure as this emitter's own, keeping a misconfigured sink out of the
@@ -847,7 +894,7 @@ pub(super) async fn finish_rejected_records(
 
 #[cfg(test)]
 mod tests {
-    use nervix_connector::ParsedRetryPolicy;
+    use nervix_connector::{ParsedRetryPolicy, SinkRecordId};
 
     use super::*;
     use crate::runtime::test_fixtures::{input_batch, input_batch_with, input_value, sink_context};
@@ -932,11 +979,57 @@ mod tests {
         async fn publish_batches(
             &mut self,
             _context: &EmitterSinkContext,
-            _batches: &mut [EmitterPublishBatch],
+            _publication: EmitterPublication<'_>,
         ) -> EmitterRuntimeResult<()> {
             Err(Report::new(EmitterRuntimeError::EncodeBatch)
                 .attach_printable("the test sink encodes no record"))
         }
+    }
+
+    #[test]
+    fn a_stalled_sink_keeps_only_its_first_answers_in_the_order_they_were_handed_over() {
+        let mut outcome = PerRecordOutcome::with_capacity(3);
+        outcome.deliver(SinkRecordId::new(2));
+        outcome.reject(RejectedSinkRecord::external(
+            SinkRecordId::new(1),
+            Timestamp::from_unix_nanos(1),
+            "refused".to_string(),
+        ));
+        outcome.deliver(SinkRecordId::new(0));
+
+        let stalled = stalled_after_resolving(outcome, 2).into_parts();
+
+        assert_eq!(stalled.delivered, vec![SinkRecordId::new(0)]);
+        assert_eq!(
+            stalled
+                .rejected
+                .iter()
+                .map(|rejected| rejected.id)
+                .collect::<Vec<_>>(),
+            vec![SinkRecordId::new(1)]
+        );
+        let error = sink_publish_failure(
+            stalled
+                .infrastructure_error
+                .expect("a stalled sink leaves the write unresolved"),
+        );
+        assert!(emitter_publish_error_is_retryable(&error));
+        assert_eq!(
+            emitter_error_message(&error),
+            "fault injector stalled the sink after it resolved 2 records"
+        );
+    }
+
+    #[test]
+    fn an_empty_write_never_consumes_an_armed_stall() {
+        let context = sink_context();
+        let mut outcome = PerRecordOutcome::<SinkRecordId>::with_capacity(0);
+        outcome.deliver(SinkRecordId::new(0));
+
+        let received = context.received_outcome(0, outcome).into_parts();
+
+        assert_eq!(received.delivered, vec![SinkRecordId::new(0)]);
+        assert!(received.infrastructure_error.is_none());
     }
 
     #[tokio::test]

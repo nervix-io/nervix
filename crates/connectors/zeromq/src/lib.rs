@@ -19,7 +19,8 @@ use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
     PerRecordOutcome, RecordSink, SinkHost, SinkLifecycle, SinkPublishError, SinkRecord,
-    SinkStartError, SinkStartResult, client_config_value, optional_client_config_value,
+    SinkRecordId, SinkStartError, SinkStartResult, client_config_value,
+    optional_client_config_value,
 };
 use nervix_models::ClientConfigEntry;
 pub use source::{ZeroMqSource, ZeroMqSourceError, ZeroMqSourceMessage, ZeroMqSourcePlan};
@@ -84,12 +85,12 @@ impl SinkLifecycle for ZeroMqSink {}
 
 #[async_trait]
 impl RecordSink for ZeroMqSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
             match self.socket.send(record.payload.into()).await {
-                Ok(()) => outcome.deliver(record.position),
+                Ok(()) => outcome.deliver(record.id),
                 Err(error) => {
                     outcome.fail(Self::publish_error(error));
                     break;
