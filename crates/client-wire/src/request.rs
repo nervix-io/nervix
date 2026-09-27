@@ -148,6 +148,18 @@ pub struct CancelRequest {
     pub target: RequestId,
 }
 
+/// Attaches the session to a domain's clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachDomainClockRequest {
+    pub domain: DomainName,
+}
+
+/// Detaches the session from a domain's clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachDomainClockRequest {
+    pub domain: DomainName,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientRequest {
     Command(CommandRequest),
@@ -160,6 +172,8 @@ pub enum ClientRequest {
     Subscribe(SubscribeRequest),
     Unsubscribe(UnsubscribeRequest),
     Cancel(CancelRequest),
+    AttachDomainClock(AttachDomainClockRequest),
+    DetachDomainClock(DetachDomainClockRequest),
 }
 
 /// One request of a session.
@@ -327,6 +341,28 @@ impl ClientRequest {
                 );
                 EncodedUnion::new(wire::ClientRequest::CancelRequest, request)
             }
+            Self::AttachDomainClock(attach) => {
+                let domain =
+                    encoder.text("AttachDomainClockRequest.domain", attach.domain.as_str())?;
+                let request = wire::AttachDomainClockRequest::create(
+                    encoder.fbb(),
+                    &wire::AttachDomainClockRequestArgs {
+                        domain: Some(domain),
+                    },
+                );
+                EncodedUnion::new(wire::ClientRequest::AttachDomainClockRequest, request)
+            }
+            Self::DetachDomainClock(detach) => {
+                let domain =
+                    encoder.text("DetachDomainClockRequest.domain", detach.domain.as_str())?;
+                let request = wire::DetachDomainClockRequest::create(
+                    encoder.fbb(),
+                    &wire::DetachDomainClockRequestArgs {
+                        domain: Some(domain),
+                    },
+                );
+                EncodedUnion::new(wire::ClientRequest::DetachDomainClockRequest, request)
+            }
         };
         Ok(union)
     }
@@ -424,6 +460,18 @@ impl ClientRequest {
                         "CancelRequest.target_request_id",
                         cancel.target_request_id(),
                     )?,
+                })
+            }
+            wire::ClientRequest::AttachDomainClockRequest => {
+                let attach = request_member(message.request_as_attach_domain_clock_request());
+                Self::AttachDomainClock(AttachDomainClockRequest {
+                    domain: decoder.name("AttachDomainClockRequest.domain", attach.domain())?,
+                })
+            }
+            wire::ClientRequest::DetachDomainClockRequest => {
+                let detach = request_member(message.request_as_detach_domain_clock_request());
+                Self::DetachDomainClock(DetachDomainClockRequest {
+                    domain: decoder.name("DetachDomainClockRequest.domain", detach.domain())?,
                 })
             }
             undeclared => {

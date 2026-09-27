@@ -35,7 +35,7 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | Sink transports, publishing modes, confirmation windows/timeouts, retry pacing, headers, direct values, flush/commit, and ACK behavior | `Emitters` |
 | Runtime-node colocation, spreading preferences, path-gated rules, and domain placement defaults | `Placement Policies` and `Control Plane` |
 | Hash maps and lookup expressions | `Lookups` |
-| Session subscriptions | `Sessions` |
+| Session subscriptions and domain clock attachment | `Sessions` |
 | Metrics and runtime inspection | `Metrics And Observability` |
 | Full graph examples | `Examples` |
 | WASM guest ABI and output timing | `WASM Processor Guests` |
@@ -86,7 +86,8 @@ Use separate execution phases so transaction and active-domain rules stay clear.
    queued prefix without applying its effect; a rejection can be corrected before commit. Queued
    model mutations report their own preflighted quiesce levels, and `COMMIT` reports only the
    maximum level actually executed. `CREATE DOMAIN`, `CREATE USER`, other read-only statements,
-   subscriptions, uploads, and node administration remain outside the transaction.
+   subscriptions, domain clock attachment, uploads, and node administration remain outside the
+   transaction.
    `DESCRIBE TRANSACTION;` and `SHOW TRANSACTIONS;` run on their own beside an open transaction;
    they read impact or status without becoming content or shifting operation numbers.
 5. **Lifecycle:** use `START`, `START AT ...`, or `STOP` against the active domain as intended. A
@@ -133,6 +134,7 @@ inputs. Keep placeholders obvious and list provisioning that must happen outside
 | Produce timed records from one materialized relay | `GENERATOR` |
 | Publish records outside Nervix | `EMITTER` |
 | Read a session-local filtered view | `CREATE SUBSCRIPTION` |
+| Follow the active domain's clock from a client session | `ATTACH DOMAIN CLOCK` |
 
 Use materialized relay dependencies when a node needs the latest record from another compatible
 relay. Do not use them to scan across branches.
@@ -312,6 +314,10 @@ Choose checks relevant to the configured graph:
 - `LOOKUP <hash_map> KEY '<key>';` checks a loaded lookup.
 - `CREATE SUBSCRIPTION ...` checks live relay output without modifying the graph. A subscription
   ends when its relay is redefined or removed; create it again to read the current definition.
+- `ATTACH DOMAIN CLOCK;` shows the active domain's `START` generation and clock state, including a
+  paced domain's committed origin, UTC anchor, and rate, then reports each change until
+  `DETACH DOMAIN CLOCK;`. Use it when paced ingestion rejects `TIMESTAMP AT` values: the mapping
+  determines which logical tick centers the admission window has reached.
 - `SHOW CLUSTER STATUS;` checks cluster topology before diagnosing a graph as unavailable.
 - `SHOW TRANSACTIONS;` checks open/committing progress and retained commit, revert, failure, or
   expiry outcomes.

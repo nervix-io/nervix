@@ -23,7 +23,9 @@ use thiserror::Error;
 use crate::{ClusterNodeIdentity, Timestamp};
 
 mod admission;
+mod observation;
 pub use admission::DomainAdmissionWindow;
+pub use observation::{DomainClockObservation, DomainClockObservedState, PacedDomainClock};
 
 #[derive(Debug, Error)]
 pub enum DomainClockError {
@@ -234,6 +236,11 @@ where
 pub struct DomainClockPeriod(NonZeroU64);
 
 impl DomainClockPeriod {
+    /// Every positive nanosecond count is a period, so this conversion cannot fail.
+    pub const fn from_nanos(nanos: NonZeroU64) -> Self {
+        Self(nanos)
+    }
+
     pub const fn as_nanos(self) -> u64 {
         self.0.get()
     }
@@ -295,6 +302,11 @@ pub struct DomainClockSkew(u64);
 
 impl DomainClockSkew {
     pub const ZERO: Self = Self(0);
+
+    /// Every nanosecond count is a skew, so this conversion cannot fail.
+    pub const fn from_nanos(nanos: u64) -> Self {
+        Self(nanos)
+    }
 
     pub const fn as_nanos(self) -> u64 {
         self.0

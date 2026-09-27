@@ -11,16 +11,24 @@
 use std::{fmt::Write as _, fs, path::PathBuf};
 
 use bytes::Bytes;
-use meticulous::ResultExt as _;
-use nervix_models::{ModelKind, ModelName, NodeRef, ParseAsType, PlacementPolicy, SchemaField};
+use meticulous::{OptionExt as _, ResultExt as _};
+use nervix_models::{
+    DomainClockObservation, DomainClockObservedState, ModelKind, ModelName, NodeRef, ParseAsType,
+    PlacementPolicy, SchemaField,
+};
 
 use super::{
     fixtures::{limits, name, request},
-    samples::{client_messages, command_outcome, leader, row_schema, rows_frame, subscription},
+    samples::{
+        client_messages, command_outcome, domain_clock_observations, leader, row_schema,
+        rows_frame, subscription,
+    },
 };
 use crate::{
     CellView, CellsView, Choice, ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue,
-    ClientFrame, ClientMessage, ClientRequest, CommandDisposition, DomainPaceChoice,
+    ClientFrame, ClientMessage, ClientRequest, CommandDisposition, DomainClockAttachDisposition,
+    DomainClockAttachOutcome, DomainClockAttachmentEndReason, DomainClockAttachmentEnded,
+    DomainClockDetachDisposition, DomainClockDetachOutcome, DomainClockObserved, DomainPaceChoice,
     LeaderRedirect, Reply, ReplyBody, ReplyDelivery, RequestRejected, RequestRejection,
     ServerEvent, ServerFrame, ServerMessage, SubscribeDisposition, SubscribeOutcome,
     SubscriptionEndReason, SubscriptionEnded, SubscriptionOpened, SubscriptionType, SuggestOutcome,
@@ -75,12 +83,51 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
     }
     .encode(&limits())
     .assured("the corpus event fits the default limits");
+    let paced_clock = domain_clock_observations()
+        .into_iter()
+        .find(|clock| clock.generation == u64::MAX)
+        .assured("the samples hold a paced clock at the last generation");
+    let clock_attach = |id: u64, disposition: DomainClockAttachDisposition, message: &str| {
+        reply(
+            id,
+            ReplyBody::DomainClockAttach(DomainClockAttachOutcome {
+                disposition,
+                message: message.to_string(),
+            }),
+        )
+    };
+    let clock_detach = |id: u64, disposition: DomainClockDetachDisposition, message: &str| {
+        reply(
+            id,
+            ReplyBody::DomainClockDetach(DomainClockDetachOutcome {
+                disposition,
+                message: message.to_string(),
+            }),
+        )
+    };
+    let clock_observed = |generation: u64, state: DomainClockObservedState| {
+        DomainClockObserved {
+            domain: name("tenant"),
+            clock: DomainClockObservation { generation, state },
+        }
+        .encode(&limits())
+        .assured("a corpus clock frame fits the default limits")
+        .into_bytes()
+    };
+    let clock_ended = DomainClockAttachmentEnded {
+        domain: name("tenant"),
+        reason: DomainClockAttachmentEndReason::DomainRemoved,
+    }
+    .encode(&limits())
+    .assured("a corpus clock frame fits the default limits");
     vec![
+        ("client_attach_domain_clock.nxcm", client(15)),
         ("client_cancel.nxcm", client(13)),
         ("client_choice.nxcm", client(14)),
         ("client_command.nxcm", client(0)),
         ("client_command_bare.nxcm", client(2)),
         ("client_commit.nxcm", client(1)),
+        ("client_detach_domain_clock.nxcm", client(16)),
         ("client_subscribe.nxcm", client(11)),
         ("client_suggest.nxcm", client(3)),
         (
@@ -164,6 +211,70 @@ fn corpus_frames() -> Vec<(&'static str, Bytes)> {
                 4,
                 CommandDisposition::OutcomeUnknown(UnknownOutcomeCause::StillApplying),
             ),
+        ),
+        (
+            "server_domain_clock_already_attached.nxsm",
+            clock_attach(
+                11,
+                DomainClockAttachDisposition::AlreadyAttached(name("tenant")),
+                "this session already follows the clock of domain 'tenant'",
+            ),
+        ),
+        (
+            "server_domain_clock_attach_failed.nxsm",
+            clock_attach(
+                12,
+                DomainClockAttachDisposition::Failed,
+                "session-scoped and client-local statements cannot be queued in a transaction",
+            ),
+        ),
+        (
+            "server_domain_clock_attached.nxsm",
+            clock_attach(
+                10,
+                DomainClockAttachDisposition::Attached {
+                    domain: name("tenant"),
+                    clock: paced_clock,
+                },
+                "attached to the clock of domain 'tenant'",
+            ),
+        ),
+        (
+            "server_domain_clock_detached.nxsm",
+            clock_detach(
+                14,
+                DomainClockDetachDisposition::Detached(name("tenant")),
+                "detached from the clock of domain 'tenant'",
+            ),
+        ),
+        (
+            "server_domain_clock_domain_not_found.nxsm",
+            clock_attach(
+                13,
+                DomainClockAttachDisposition::DomainNotFound(name("missing")),
+                "domain 'missing' does not exist",
+            ),
+        ),
+        ("server_domain_clock_ended.nxsm", clock_ended.into_bytes()),
+        (
+            "server_domain_clock_not_attached.nxsm",
+            clock_detach(
+                15,
+                DomainClockDetachDisposition::NotAttached(name("tenant")),
+                "this session does not follow the clock of domain 'tenant'",
+            ),
+        ),
+        (
+            "server_domain_clock_stopped.nxsm",
+            clock_observed(0, DomainClockObservedState::Stopped),
+        ),
+        (
+            "server_domain_clock_uninstalled.nxsm",
+            clock_observed(7, DomainClockObservedState::Uninstalled),
+        ),
+        (
+            "server_domain_clock_unpaced.nxsm",
+            clock_observed(1, DomainClockObservedState::Unpaced),
         ),
         (
             "server_rejected.nxsm",
@@ -322,6 +433,26 @@ fn choice_value(value: &ChoiceValue) -> String {
     }
 }
 
+fn clock_line(clock: &DomainClockObservation) -> String {
+    let generation = clock.generation;
+    match &clock.state {
+        DomainClockObservedState::Stopped => format!("CLOCK generation={generation} state=stopped"),
+        DomainClockObservedState::Uninstalled => {
+            format!("CLOCK generation={generation} state=uninstalled")
+        }
+        DomainClockObservedState::Unpaced => format!("CLOCK generation={generation} state=unpaced"),
+        DomainClockObservedState::Paced(paced) => format!(
+            "CLOCK generation={generation} state=paced period={} skew={} origin={} anchor={} \
+             rate=f64:{:016x}",
+            paced.period.as_nanos(),
+            paced.skew.as_nanos(),
+            paced.mapping.logical_start().unix_nanos(),
+            paced.mapping.wall_started_at().unix_nanos(),
+            paced.mapping.time_rate().get().to_bits()
+        ),
+    }
+}
+
 fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
     match message {
         ServerMessage::Reply(reply) => {
@@ -442,6 +573,52 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                         }
                     }
                 }
+                ReplyBody::DomainClockAttach(outcome) => {
+                    let message = text(&outcome.message);
+                    match &outcome.disposition {
+                        DomainClockAttachDisposition::Attached { domain, clock } => {
+                            lines.push(format!(
+                                "REPLY {id} DOMAIN_CLOCK_ATTACH attached domain={} \
+                                 message={message}",
+                                domain.as_str()
+                            ));
+                            lines.push(clock_line(clock));
+                        }
+                        DomainClockAttachDisposition::AlreadyAttached(domain) => {
+                            lines.push(format!(
+                                "REPLY {id} DOMAIN_CLOCK_ATTACH already_attached domain={} \
+                                 message={message}",
+                                domain.as_str()
+                            ));
+                        }
+                        DomainClockAttachDisposition::DomainNotFound(domain) => {
+                            lines.push(format!(
+                                "REPLY {id} DOMAIN_CLOCK_ATTACH domain_not_found domain={} \
+                                 message={message}",
+                                domain.as_str()
+                            ));
+                        }
+                        DomainClockAttachDisposition::Failed => lines.push(format!(
+                            "REPLY {id} DOMAIN_CLOCK_ATTACH failed message={message}"
+                        )),
+                    }
+                }
+                ReplyBody::DomainClockDetach(outcome) => {
+                    let message = text(&outcome.message);
+                    let (disposition, domain) = match &outcome.disposition {
+                        DomainClockDetachDisposition::Detached(domain) => ("detached", domain),
+                        DomainClockDetachDisposition::NotAttached(domain) => {
+                            ("not_attached", domain)
+                        }
+                        DomainClockDetachDisposition::Failed => {
+                            panic!("the corpus holds no failed detach")
+                        }
+                    };
+                    lines.push(format!(
+                        "REPLY {id} DOMAIN_CLOCK_DETACH {disposition} domain={} message={message}",
+                        domain.as_str()
+                    ));
+                }
                 other => panic!("the corpus holds no {other:?} reply"),
             }
         }
@@ -472,6 +649,20 @@ fn render_server(message: &ServerMessage, lines: &mut Vec<String>) {
                 ended.subscription.generation,
                 ended.reason,
                 text(&ended.message)
+            ));
+        }
+        ServerMessage::Event(ServerEvent::DomainClockObserved(observed)) => {
+            lines.push(format!(
+                "EVENT DOMAIN_CLOCK domain={}",
+                observed.domain.as_str()
+            ));
+            lines.push(clock_line(&observed.clock));
+        }
+        ServerMessage::Event(ServerEvent::DomainClockAttachmentEnded(ended)) => {
+            lines.push(format!(
+                "EVENT DOMAIN_CLOCK_ENDED domain={} reason={:?}",
+                ended.domain.as_str(),
+                ended.reason
             ));
         }
         other => panic!("the corpus holds no {other:?} message"),
@@ -545,6 +736,14 @@ fn render_client(message: &ClientMessage, lines: &mut Vec<String>) {
                 cancel.target.get()
             ));
         }
+        ClientRequest::AttachDomainClock(attach) => lines.push(format!(
+            "REQUEST {id} ATTACH_DOMAIN_CLOCK domain={}",
+            attach.domain.as_str()
+        )),
+        ClientRequest::DetachDomainClock(detach) => lines.push(format!(
+            "REQUEST {id} DETACH_DOMAIN_CLOCK domain={}",
+            detach.domain.as_str()
+        )),
         other => panic!("the corpus holds no {other:?} request"),
     }
 }

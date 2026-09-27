@@ -29,10 +29,10 @@ use error_stack::{Report as StackReport, ResultExt as _};
 use nervix_client_core::{
     AutocompleteOutcome, AutocompleteSuggestion, Client, ClientError as CoreClientError,
     CommandDisposition, CommandExecutionReference, CommandOutcome, ConnectOptions, Diagnostic,
-    DomainName, LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan, StatementDisposition,
-    StatementOutcome, SubscriptionDeliveryBehavior, SubscriptionEvent, SubscriptionRequest,
-    SuggestionKind as ClientSuggestionKind, TlsRequirement, TransactionLifecycle,
-    TransactionStatus,
+    DomainClockEvent, DomainName, LeaderRedirect, NoticeLevel, ServerEvent, SourceSpan,
+    StatementDisposition, StatementOutcome, SubscriptionDeliveryBehavior, SubscriptionEvent,
+    SubscriptionRequest, SuggestionKind as ClientSuggestionKind, TlsRequirement,
+    TransactionLifecycle, TransactionStatus,
 };
 use nervix_models::{ClusterNodeName, InspectionFormat, Statement};
 use nervix_nspl::client_statement::{
@@ -1136,6 +1136,15 @@ fn spawn_event_collectors(client: Client, sender: EventLineSender) {
         }
     });
 
+    let clock_client = client.clone();
+    let clock_sender = sender.clone();
+    tokio::spawn(async move {
+        while let Ok(event) = clock_client.next_domain_clock_event().await {
+            tokio::task::consume_budget().await;
+            clock_sender.push(format_domain_clock_event(&event));
+        }
+    });
+
     tokio::spawn(async move {
         while let Ok(event) = client.next_server_event().await {
             tokio::task::consume_budget().await;
@@ -1209,6 +1218,25 @@ fn format_subscription_event(event: &SubscriptionEvent) -> Vec<String> {
             "[events] subscription [{subscription}] notice: the client event buffer filled; \
              delivery ended with a gap"
         )],
+    }
+}
+
+/// The terminal line of one event about a domain clock the session follows.
+fn format_domain_clock_event(event: &DomainClockEvent) -> String {
+    match event {
+        DomainClockEvent::Observed(observed) => format!(
+            "[events] domain clock [{}]: {}",
+            observed.domain, observed.clock
+        ),
+        DomainClockEvent::Ended(ended) => format!(
+            "[events] domain clock [{}] notice: the attachment ended because {}",
+            ended.domain, ended.reason
+        ),
+        DomainClockEvent::Interrupted(interrupted) => format!(
+            "[events] domain clock [{}] notice: the session was interrupted; the clock is \
+             attached again on the next session",
+            interrupted.domain
+        ),
     }
 }
 
@@ -2208,6 +2236,38 @@ mod tests {
                 "[events] subscription [live] notice: 3 rows were dropped because the session \
                  could not take them in time"
             ]
+        );
+    }
+
+    #[test]
+    fn domain_clock_events_print_one_line_each() {
+        let domain = DomainName::parse("sim").assured("a valid domain name");
+        let observed = DomainClockEvent::Observed(nervix_client_core::DomainClockObserved {
+            domain: domain.clone(),
+            clock: nervix_client_core::DomainClockObservation {
+                generation: 4,
+                state: nervix_client_core::DomainClockObservedState::Unpaced,
+            },
+        });
+        assert_eq!(
+            format_domain_clock_event(&observed),
+            "[events] domain clock [sim]: generation 4, unpaced"
+        );
+        let ended = DomainClockEvent::Ended(nervix_client_core::DomainClockAttachmentEnded {
+            domain: domain.clone(),
+            reason: nervix_client_core::DomainClockAttachmentEndReason::DomainRemoved,
+        });
+        assert_eq!(
+            format_domain_clock_event(&ended),
+            "[events] domain clock [sim] notice: the attachment ended because the domain no \
+             longer exists on the serving node"
+        );
+        let interrupted =
+            DomainClockEvent::Interrupted(nervix_client_core::DomainClockInterruption { domain });
+        assert_eq!(
+            format_domain_clock_event(&interrupted),
+            "[events] domain clock [sim] notice: the session was interrupted; the clock is \
+             attached again on the next session"
         );
     }
 
