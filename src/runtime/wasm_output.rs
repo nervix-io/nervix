@@ -3,13 +3,11 @@ use error_stack::{Report, ResultExt as _};
 use super::*;
 
 pub(super) struct WasmOutputContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
     pub(super) output_routes: &'a mut RelayProcessorOutputsNode,
-    pub(super) input_relays: &'a [RelayName],
     pub(super) input_schema: &'a Arc<CompiledSchema>,
     pub(super) output_schemas: &'a [(RelayName, Arc<CompiledSchema>)],
     pub(super) key: &'a Option<BranchKey>,
@@ -665,13 +663,11 @@ pub(super) async fn dispatch_wasm_output_envelopes(
     holds: &mut WasmCheckpointHolds,
 ) -> error_stack::Result<(), WasmInstanceError> {
     let WasmOutputContext {
-        graph,
         branch,
         node_kind,
         processor,
         error_policies,
         output_routes,
-        input_relays,
         input_schema,
         output_schemas,
         key,
@@ -746,12 +742,10 @@ pub(super) async fn dispatch_wasm_output_envelopes(
         }
         if let Some(acks) = dispatch_wasm_output_route(
             WasmRouteDispatchContext {
-                graph,
                 branch,
                 node_kind,
                 processor,
                 error_policies,
-                input_relays,
                 dispatch_error,
                 execution_now,
             },
@@ -778,12 +772,10 @@ pub(super) async fn dispatch_wasm_output_envelopes(
 }
 
 pub(super) struct WasmRouteDispatchContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
     pub(super) error_policies: &'a ErrorPolicies,
-    pub(super) input_relays: &'a [RelayName],
     pub(super) dispatch_error: &'static str,
     pub(super) execution_now: Timestamp,
 }
@@ -793,95 +785,6 @@ pub(super) async fn dispatch_wasm_output_route(
     mut decoded: WasmDecodedOutputBatch,
     output: &mut RelayProcessorOutputNode,
 ) -> Option<Vec<AckSet>> {
-    if output.compiled_program.is_none() {
-        let Some(primary_input_relay) = context.input_relays.first() else {
-            context
-                .branch
-                .runtime
-                .handle_internal_processor_error_for_acks(
-                    &context.branch.domain,
-                    context.node_kind,
-                    context.processor,
-                    context.error_policies,
-                    decoded.batch.acks.iter(),
-                    format!(
-                        "wasm processor '{}' has no input relays",
-                        context.processor.as_str()
-                    ),
-                );
-            return None;
-        };
-        let routing = match context.branch.domain_routing() {
-            Ok(routing) => routing,
-            Err(error) => {
-                context
-                    .branch
-                    .runtime
-                    .handle_internal_processor_error_for_acks(
-                        &context.branch.domain,
-                        context.node_kind,
-                        context.processor,
-                        context.error_policies,
-                        decoded.batch.acks.iter(),
-                        error.to_string(),
-                    );
-                return None;
-            }
-        };
-        let current_branching = routing
-            .relay_branchings
-            .get(primary_input_relay)
-            .cloned()
-            .assured("the validated WASM source relay has branch routing");
-        let output_schema =
-            match relay_schema_for_routing(routing, &context.branch.domain, &output.relay) {
-                Ok(schema) => schema,
-                Err(error) => {
-                    context
-                        .branch
-                        .runtime
-                        .handle_internal_processor_error_for_acks(
-                            &context.branch.domain,
-                            context.node_kind,
-                            context.processor,
-                            context.error_policies,
-                            decoded.batch.acks.iter(),
-                            error.to_string(),
-                        );
-                    return None;
-                }
-            };
-        match compile_wasm_output_filter_map_program(
-            &context.branch.domain,
-            context.processor,
-            &output.construction,
-            output_schema.arrow_schema(),
-            output_schema.vm_sensitivity(),
-            RuntimeVmCompileContext {
-                available_materialized_streams: &routing.materialized_stream_specs,
-                available_lookups: &routing.lookups,
-                current_branching: &current_branching,
-                udfs: Some(&routing.udfs),
-            },
-        ) {
-            Ok(program) => output.compiled_program = program,
-            Err(error) => {
-                context
-                    .branch
-                    .runtime
-                    .handle_internal_processor_error_for_acks(
-                        &context.branch.domain,
-                        context.node_kind,
-                        context.processor,
-                        context.error_policies,
-                        decoded.batch.acks.iter(),
-                        error.to_string(),
-                    );
-                return None;
-            }
-        }
-    }
-
     let Some(program) = output.compiled_program.as_ref() else {
         if let Err(error) = decoded.materialize_uninitialized_for_relay() {
             context
@@ -906,7 +809,6 @@ pub(super) async fn dispatch_wasm_output_route(
         if context
             .branch
             .dispatch_output(
-                context.graph,
                 output,
                 ModelKind::WasmProcessor,
                 context.processor,
@@ -1277,7 +1179,6 @@ pub(super) async fn dispatch_wasm_output_route(
     if context
         .branch
         .dispatch_output(
-            context.graph,
             output,
             ModelKind::WasmProcessor,
             context.processor,

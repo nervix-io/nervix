@@ -163,7 +163,6 @@ pub(super) async fn flush_ready_window_processor(
     now: Timestamp,
 ) -> bool {
     let WindowFlushContext {
-        graph,
         node_kind,
         processor,
         error_policies,
@@ -314,14 +313,11 @@ pub(super) async fn flush_ready_window_processor(
                 };
             if let Some(acks) = dispatch_processor_output(
                 ProcessorOutputDispatchContext {
-                    graph,
                     branch,
                     node_kind,
                     source_kind: ModelKind::WindowProcessor,
                     processor,
                     error_policies,
-                    input_relays: std::slice::from_ref(&output_relay),
-                    filter_source: ProcessorOutputFilterSource::OutputRelay,
                     materialized_state: ProcessorMaterializedState::ResolvedAtDispatch(
                         materialized_state,
                     ),

@@ -44,6 +44,7 @@ pub(crate) struct DomainRoutingSnapshot {
     pub(super) materialized_stream_owner_nodes: HashMap<RelayName, Option<ClusterNodeName>>,
     pub(super) codecs: HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) signaling_protocols: HashMap<SignalingProtocolName, Arc<CompiledSignalingProtocol>>,
+    pub(super) processor_plans: HashMap<NodeRef, StdArc<PublishedProcessorPlan>>,
 }
 
 pub(crate) type SharedDomainRouting = StdArc<ArcSwap<DomainRoutingSnapshot>>;
@@ -109,7 +110,6 @@ pub(super) struct DomainExecution {
     pub(super) start_version: u64,
     pub(super) domain_clock: DomainClock,
     pub(super) shutdown: watch::Sender<bool>,
-    pub(super) graph: SharedActiveGraph,
     pub(super) routing: DomainRouting,
     pub(super) branched_ingestors: HashMap<ModelName, Vec<BranchedIngestorSpec>>,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
@@ -348,10 +348,14 @@ impl Runtime {
                     reason: error.to_string(),
                 })?;
         let scheduled_nodes = graph.unplaced_schedule_nodes();
+        let scheduled_node_map = scheduled_nodes
+            .iter()
+            .cloned()
+            .map(|node| (node.identity(), node))
+            .collect::<ScheduledNodes>();
         self.install_state_identities_from_graph(domain, &scheduled_nodes);
 
         let domain_graph = self.domain_graph_handle(domain).await;
-        domain_graph.store(Some(StdArc::new(graph.clone())));
         let (shutdown_tx, _) = watch::channel(false);
         let mut relay_builders = HashMap::new();
         let mut relay_branchings = HashMap::new();
@@ -375,7 +379,7 @@ impl Runtime {
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
         let mut reingestor_tasks = HashMap::new();
-        let branched_specs = branched_node_specs_from_active_graph(&graph);
+        let branched_specs = branched_node_specs_from_scheduled_nodes(&scheduled_node_map);
         let branch_relays = branch_relays_from_branched_specs(&branched_specs);
         let model_index = graph
             .nodes()
@@ -756,11 +760,9 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: reason.to_string(),
             })?;
-            let Some(runtime) = self.start_branched_entrypoint_runtime(
-                domain,
-                &spec.identifier,
-                Some((domain_graph.clone(), template)),
-            ) else {
+            let Some(runtime) =
+                self.start_branched_entrypoint_runtime(domain, &spec.identifier, Some(template))
+            else {
                 continue;
             };
             branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
@@ -770,38 +772,49 @@ impl Runtime {
                 .push(runtime);
         }
 
+        let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
+        let processor_specs = processor_input_specs
+            .iter()
+            .map(|(spec, _)| spec.clone())
+            .collect::<Vec<_>>();
+        let previous_processor_plans = HashMap::default();
+        let processor_plans = bind_published_processor_plans(
+            &processor_specs,
+            ProcessorPlanBindingContext {
+                runtime: self,
+                domain,
+                model_index: &model_index,
+                relay_schemas: &relay_schemas,
+                relay_registries: &relay_registries,
+                relay_services: &relay_services,
+                relay_branchings: &relay_branchings,
+                materialized_stream_specs: &materialized_stream_specs,
+                lookups: &lookup_runtimes,
+                udfs: Some(&udf_executor),
+                previous: &previous_processor_plans,
+            },
+        )
+        .await
+        .map_err(|reason| RuntimeError::BuildDomainExecution {
+            domain: domain.as_str().to_string(),
+            reason: format!("failed to bind published processor plans: {reason:#}"),
+        })?;
+
         for (node_spec, inputs) in processor_input_specs {
-            let mut template = materialize_processor_instance_template(
-                &node_spec,
-                &model_index,
-                &relay_schemas,
-                &relay_registries,
-                &relay_services,
-                Some(&udf_executor),
-            )
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-            template
-                .prepare_wasm_processors(self, domain)
-                .await
-                .map_err(|reason| RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("{reason:#}"),
-                })?;
             let entity = NodeRef {
                 kind: node_spec.spec.kind,
                 identifier: node_spec.spec.processor.clone(),
             };
+            let template = processor_plans
+                .get(&entity)
+                .verified("the published plan binder returns every planned processor")
+                .template
+                .as_ref()
+                .clone();
             node_tasks.insert(
                 entity,
                 spawn_processor_node_runtime(
-                    ProcessorRuntimeContext::new(
-                        self.clone(),
-                        domain.clone(),
-                        domain_graph.clone(),
-                    ),
+                    ProcessorRuntimeContext::new(self.clone(), domain.clone()),
                     &shutdown_tx,
                     template,
                     inputs,
@@ -810,7 +823,6 @@ impl Runtime {
             );
         }
 
-        let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
         let execution_build_deps = ExecutionBuildDeps {
             domain,
             relay_schemas: &relay_schemas,
@@ -919,7 +931,6 @@ impl Runtime {
                 start_version,
                 domain_clock,
                 shutdown: shutdown_tx,
-                graph: domain_graph.clone(),
                 routing: self.stage_domain_routing(
                     domain,
                     DomainRoutingSnapshot {
@@ -934,6 +945,7 @@ impl Runtime {
                         materialized_stream_owner_nodes,
                         codecs,
                         signaling_protocols,
+                        processor_plans,
                     },
                 ),
                 branched_ingestors: Self::branched_specs_by_identifier(&branched_specs.entrypoints),
@@ -950,10 +962,15 @@ impl Runtime {
                 tasks,
             },
         );
+        domain_graph.store(Some(StdArc::new(graph)));
 
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "shuttle"))]
+#[path = "domain_routing_shuttle_tests.rs"]
+mod shuttle_tests;
 
 #[cfg(test)]
 mod tests {
