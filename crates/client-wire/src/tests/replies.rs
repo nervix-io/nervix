@@ -3,10 +3,10 @@
 use flatbuffers::FlatBufferBuilder;
 use meticulous::ResultExt as _;
 use nervix_models::{
-    DomainClockPeriod, DomainClockSkew, DomainPace, DomainStatus, TransactionInspection,
-    TransactionInspectionRejection, TransactionLifecycle, TransactionPosition, TransactionStatus,
-    TransactionStatusError, WasmCheckpointCounts, WasmCheckpointInspection, WasmCheckpointStage,
-    WasmStateGeneration, WasmStateInspection,
+    DomainClockPeriod, DomainClockSkew, DomainPace, DomainStatus, ModelKind, ModelName, NodeRef,
+    PlacementPolicy, TransactionInspection, TransactionInspectionRejection, TransactionLifecycle,
+    TransactionPosition, TransactionStatus, TransactionStatusError, WasmCheckpointCounts,
+    WasmCheckpointInspection, WasmCheckpointStage, WasmStateGeneration, WasmStateInspection,
 };
 
 use super::{
@@ -20,8 +20,9 @@ use super::{
     },
 };
 use crate::{
-    AttachDisposition, AttachOutcome, CancelOutcome, CancelState, CancellationStage, DomainInfo,
-    DomainList, DomainSelection, InspectionOutcome, LeaderRedirect, Reply, ReplyBody,
+    AttachDisposition, AttachOutcome, CancelOutcome, CancelState, CancellationStage, Choice,
+    ChoiceOutcome, ChoicePresentation, ChoiceStatus, ChoiceValue, DomainInfo, DomainList,
+    DomainPaceChoice, DomainSelection, InspectionOutcome, LeaderRedirect, Reply, ReplyBody,
     RequestCancelled, RequestRejected, RequestRejection, ServerMessage, SourceSpan,
     SubscribeDisposition, SubscribeOutcome, SubscriptionOpened, SubscriptionType, SuggestOutcome,
     Suggestion, SuggestionKind, UnsubscribeDisposition, UnsubscribeOutcome, WireDecodeError,
@@ -321,6 +322,68 @@ fn suggestions_round_trip() {
             status: *status,
             continuation: None,
             suggestions: Vec::new(),
+        }));
+    }
+}
+
+#[test]
+fn typed_choices_and_lookup_states_round_trip() {
+    let choices = vec![
+        Choice {
+            value: ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+            presentation: ChoicePresentation {
+                label: "PACED".to_string(),
+                detail: Some("advances from wall time".to_string()),
+                group: Some("Clock".to_string()),
+            },
+        },
+        Choice {
+            value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
+            presentation: ChoicePresentation {
+                label: "PREFER COLOCATION".to_string(),
+                detail: None,
+                group: None,
+            },
+        },
+        Choice {
+            value: ChoiceValue::Domain(name("tenant")),
+            presentation: ChoicePresentation {
+                label: "tenant".to_string(),
+                detail: None,
+                group: Some("Domains".to_string()),
+            },
+        },
+        Choice {
+            value: ChoiceValue::Resource(name("bundle")),
+            presentation: ChoicePresentation {
+                label: "bundle".to_string(),
+                detail: Some("Resource".to_string()),
+                group: None,
+            },
+        },
+        Choice {
+            value: ChoiceValue::Model(NodeRef::new(ModelKind::Relay, name::<ModelName>("orders"))),
+            presentation: ChoicePresentation {
+                label: "orders".to_string(),
+                detail: Some("Relay".to_string()),
+                group: Some("Models".to_string()),
+            },
+        },
+    ];
+    assert_round_trips(ReplyBody::Choice(ChoiceOutcome {
+        status: ChoiceStatus::Ready,
+        choices,
+        page_cursor: Some("next-page".to_string()),
+    }));
+    for status in [
+        ChoiceStatus::MissingContext,
+        ChoiceStatus::StaleContext,
+        ChoiceStatus::LookupFailed,
+    ] {
+        assert_round_trips(ReplyBody::Choice(ChoiceOutcome {
+            status,
+            choices: Vec::new(),
+            page_cursor: None,
         }));
     }
 }

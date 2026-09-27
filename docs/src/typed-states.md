@@ -154,6 +154,14 @@ apply the edit after checking the cursor boundary, and the web console converts 
 selection offsets at its edge. A continuation is bound to the input, domain, revision, and
 candidate set, so a changed context cannot silently reuse a page.
 
+Structured-control lookups use a separate typed choice boundary. A request names its semantic
+target and carries each dependency as a `ChoiceValue`; a placement choice therefore depends on a
+domain-pace variant rather than on the text `PACED`. Results keep the same typed union for enum
+variants and domain, resource, or model references, with label, detail, and group held separately
+as presentation. The FlatBuffers discriminant selects behavior. A missing typed dependency is
+`MissingContext`, and a page cursor binds the dependencies, revision, candidate values, and
+presentation so changed form state is `StaleContext` rather than a silently retargeted page.
+
 ## Validation And Failure Boundaries
 
 The registry rejects unresolved or contradictory contracts before a graph becomes active. It

@@ -604,6 +604,51 @@ const text = (value: Uint8Array | string | null): string => {
 const bytesOf = (read: (encoding: flatbuffers.Encoding) => string | Uint8Array | null): Uint8Array =>
   member(read(flatbuffers.Encoding.UTF8_BYTES)) as Uint8Array;
 
+const optionalText = (
+  read: (encoding: flatbuffers.Encoding) => string | Uint8Array | null,
+): string => {
+  const value = read(flatbuffers.Encoding.UTF8_BYTES);
+  return value === null ? 'none' : text(value);
+};
+
+function choiceValue(source: wire.Choice | wire.ChoiceSelection): string {
+  switch (source.valueType()) {
+    case wire.ChoiceValue.DomainPaceVariant: {
+      const value = member(
+        source.value(new wire.DomainPaceVariant()) as wire.DomainPaceVariant | null,
+      );
+      return `pace:${wire.DomainPaceChoice[member(value.value())]}`;
+    }
+    case wire.ChoiceValue.PlacementPolicyVariant: {
+      const value = member(
+        source.value(new wire.PlacementPolicyVariant()) as wire.PlacementPolicyVariant | null,
+      );
+      return `placement:${wire.PlacementPolicyChoice[member(value.value())]}`;
+    }
+    case wire.ChoiceValue.DomainChoiceReference: {
+      const value = member(
+        source.value(new wire.DomainChoiceReference()) as wire.DomainChoiceReference | null,
+      );
+      return `domain:${value.domain()}`;
+    }
+    case wire.ChoiceValue.ResourceChoiceReference: {
+      const value = member(
+        source.value(new wire.ResourceChoiceReference()) as wire.ResourceChoiceReference | null,
+      );
+      return `resource:${value.resource()}`;
+    }
+    case wire.ChoiceValue.ModelChoiceReference: {
+      const value = member(
+        source.value(new wire.ModelChoiceReference()) as wire.ModelChoiceReference | null,
+      );
+      const node = member(value.node());
+      return `model:${wire.ModelKind[member(node.kind())].toLowerCase()}/${node.name()}`;
+    }
+    default:
+      throw new Error(`undeclared choice value ${source.valueType()}`);
+  }
+}
+
 function frameBuffer(frame: Uint8Array, identifier: string): flatbuffers.ByteBuffer {
   const buffer = new flatbuffers.ByteBuffer(frame);
   if (frame.length < 8 || !buffer.__has_identifier(identifier)) {
@@ -714,6 +759,20 @@ function serverLines(frame: Uint8Array, schema: OpenedSchema): string[] {
           }
           return lines;
         }
+        case wire.ReplyBody.ChoiceOutcome: {
+          const outcome = member(reply.body(new wire.ChoiceOutcome()) as wire.ChoiceOutcome | null);
+          const lines = [
+            `REPLY ${id} CHOICE status=${wire.ChoiceStatus[member(outcome.status())]} cursor=${outcome.pageCursor() ?? 'none'}`,
+          ];
+          for (let index = 0; index < outcome.choicesLength(); index += 1) {
+            const choice = member(outcome.choices(index));
+            const presentation = member(choice.presentation());
+            lines.push(
+              `CHOICE value=${choiceValue(choice)} label=${text(bytesOf((encoding) => presentation.label(encoding)))} detail=${optionalText((encoding) => presentation.detail(encoding))} group=${optionalText((encoding) => presentation.group(encoding))}`,
+            );
+          }
+          return lines;
+        }
         default:
           throw new Error(`the corpus holds no ${wire.ReplyBody[reply.bodyType()]} reply`);
       }
@@ -776,6 +835,18 @@ function clientLines(frame: Uint8Array): string[] {
       const suggest = member(message.request(new wire.SuggestRequest()) as wire.SuggestRequest | null);
       return [
         `REQUEST ${id} SUGGEST input=${text(bytesOf((encoding) => suggest.input(encoding)))} cursor=${suggest.cursor()} domain=${suggest.domain() ?? 'none'} page_size=${suggest.pageSize()} continuation=${suggest.continuation() ?? 'none'}`,
+      ];
+    }
+    case wire.ClientRequest.ChoiceLookupRequest: {
+      const lookup = member(
+        message.request(new wire.ChoiceLookupRequest()) as wire.ChoiceLookupRequest | null,
+      );
+      const dependencies: string[] = [];
+      for (let index = 0; index < lookup.dependenciesLength(); index += 1) {
+        dependencies.push(choiceValue(member(lookup.dependencies(index))));
+      }
+      return [
+        `REQUEST ${id} CHOICE target=${wire.ChoiceTarget[member(lookup.target())]} dependencies=[${dependencies.join(',')}] search=${text(bytesOf((encoding) => lookup.search(encoding)))} page_size=${lookup.pageSize()} cursor=${lookup.pageCursor() ?? 'none'}`,
       ];
     }
     case wire.ClientRequest.CancelRequest: {

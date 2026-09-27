@@ -14,12 +14,19 @@ Capabilities:
 - `Client::upload_resource_from_directory(...)`
 - `Client::next_server_event()`, `Client::next_domain_list()` and `Client::leadership()`
 - `Client::suggest(...)` behind the `autocomplete` feature
+- `Client::lookup_choices(...)`
 
 Suggestion pages report `Ready`, `MissingContext`, `StaleContext`, or `LookupFailed`. Every
 candidate carries a UTF-8 byte text edit against the full input and a continuation requests the
 next bounded page. The shared C binding exposes the same result through `nx_session_suggest`,
 `nx_suggestions_at`, and `nx_suggestions_continuation`; its header is
 `crates/client-ffi/include/nervix_client.h`.
+
+Structured choice pages carry typed enum variants or domain, resource, and model references beside
+separate presentation metadata. The request includes typed dependencies, search, and a
+revision-fenced page cursor. `Client::lookup_choices(...)` retries this read-only request across a
+session reconnect and returns its `Ready`, `MissingContext`, `StaleContext`, or `LookupFailed`
+status without interpreting labels.
 
 Every outcome carries a typed `CommandDisposition`: `Completed`, `Failed`, `NotLeader` with the
 leader's endpoints when discovery knows them, `TransactionDetached`, `TransactionTakenOver`,

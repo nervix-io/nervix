@@ -134,6 +134,27 @@ an empty candidate list.
 Suggestions are read-only session requests. They can complete while a command is still pending;
 they neither enter the command admission gate nor change the transaction queue.
 
+## Structured Choices
+
+`ChoiceLookupRequest` resolves values for structured client controls without constructing partial
+NSPL. It carries a semantic target, typed dependent selections, search text, a page size from 1
+through 100, and an optional page cursor. The first targets resolve domain pace and placement
+policy. Placement requires exactly one domain-pace dependency; an absent or differently typed
+dependency returns `MissingContext`.
+
+Each result separates semantics from presentation. `ChoiceValue` carries a domain-pace or
+placement-policy variant, or a typed domain, resource, or model reference. `ChoicePresentation`
+carries its label, optional detail, and optional group. A client selects by the typed value and
+never derives behavior from the label. `Ready` with no values is an ordinary empty match;
+`MissingContext`, `StaleContext`, and `LookupFailed` remain distinct outcomes.
+
+A page cursor binds the target, every dependent value, search text, application revision, and the
+ordered typed candidate set including its presentation metadata. Changing any part returns
+`StaleContext` instead of continuing through a different result. Choice lookups are read-only and
+can run concurrently with each other and with commands. The web console additionally correlates
+each lookup with its control, draft revision, and session generation, so a late reply cannot
+replace the choices for a newer edit or connection.
+
 ## Transaction Binding
 
 An NSPL transaction is replicated control-plane state, but its binding to a live session is
