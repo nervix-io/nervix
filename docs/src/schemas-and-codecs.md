@@ -87,6 +87,14 @@ CREATE IF NOT EXISTS WIRE AVRO SCHEMA notification_wire MODE STRICT (
 ```
 
 JSON, CBOR, and AVRO wire schemas must declare at least one field.
+JSON and CBOR also accept exact numeric and datetime wire types (`U8` through `I64`, `F32`,
+`F64`, and `DATETIME`) alongside the generic JSON types. The exact variants retain their type in
+the canonical definition and in completion suggestions.
+
+The web console's **Create** menu provides structured editors for internal schemas and each of
+these three declared wire formats. Internal collection controls build nested `ARRAY` and `VEC`
+types from an exact scalar type. Field order, `OPTIONAL`, `SENSITIVE`, wire mode, and exact format
+are preserved in the completed Model and its canonical command. See [Web Console](client-tools-web-console.md).
 
 SYSLOG is different: it is a predefined singleton wire schema whose shape comes from the syslog
 protocol. It has no user-defined name, `CREATE WIRE` declaration, mode, field list, `ALTER`, or

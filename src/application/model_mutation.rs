@@ -2051,6 +2051,20 @@ impl SessionServiceImpl {
                         .to_string(),
                 );
             }
+            ClientStatement::AttachDomainClock => {
+                return command_error(
+                    "ATTACH DOMAIN CLOCK is a session-local command; send an attach domain clock \
+                     request"
+                        .to_string(),
+                );
+            }
+            ClientStatement::DetachDomainClock => {
+                return command_error(
+                    "DETACH DOMAIN CLOCK is a session-local command; send a detach domain clock \
+                     request"
+                        .to_string(),
+                );
+            }
             ClientStatement::UploadResource(upload) => {
                 return self.upload_resource_command(upload).await;
             }

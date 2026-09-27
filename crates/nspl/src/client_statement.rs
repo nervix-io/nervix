@@ -13,7 +13,8 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, completion_context,
         completion_tokens, domain_ref, if_not_exists_clause, into_parse_error, junction_name, kw,
-        lex_input, relay_ref, schema_name, suggestions_from_errors, tok, wire_schema_name,
+        kw_phrase3, lex_input, relay_ref, schema_name, suggestions_from_errors, tok,
+        wire_schema_name,
     },
 };
 
@@ -21,6 +22,10 @@ use crate::{
 pub enum ClientStatement {
     UseDomain(DomainName),
     ListDomains,
+    /// Attaches the session to the clock of its active domain.
+    AttachDomainClock,
+    /// Detaches the session from the clock of its active domain.
+    DetachDomainClock,
     BeginTransaction,
     CommitTransaction,
     RevertTransaction,
@@ -39,6 +44,8 @@ impl ClientStatement {
         match self {
             Self::UseDomain(domain) => Ok(format!("USE {};", domain.as_str())),
             Self::ListDomains => Ok("LIST DOMAINS;".to_string()),
+            Self::AttachDomainClock => Ok("ATTACH DOMAIN CLOCK;".to_string()),
+            Self::DetachDomainClock => Ok("DETACH DOMAIN CLOCK;".to_string()),
             Self::BeginTransaction => Ok("BEGIN;".to_string()),
             Self::CommitTransaction => Ok("COMMIT;".to_string()),
             Self::RevertTransaction => Ok("REVERT;".to_string()),
@@ -63,7 +70,11 @@ impl ClientStatement {
 
     pub fn requires_local_handling(&self) -> bool {
         match self {
-            Self::UseDomain(_) | Self::ListDomains | Self::UploadResource(_) => true,
+            Self::UseDomain(_)
+            | Self::ListDomains
+            | Self::AttachDomainClock
+            | Self::DetachDomainClock
+            | Self::UploadResource(_) => true,
             Self::BeginTransaction
             | Self::CommitTransaction
             | Self::RevertTransaction
@@ -124,6 +135,20 @@ pub fn list_domains_parser<'src>()
         .to(())
 }
 
+/// `ATTACH DOMAIN CLOCK`, one composed phrase that completion offers as one item.
+pub fn attach_domain_clock_parser<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Keyword::Attach, Keyword::Domain, Keyword::Clock)
+        .then_ignore(tok(Token::Semicolon).or_not())
+}
+
+/// `DETACH DOMAIN CLOCK`, one composed phrase that completion offers as one item.
+pub fn detach_domain_clock_parser<'src>()
+-> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
+    kw_phrase3(Keyword::Detach, Keyword::Domain, Keyword::Clock)
+        .then_ignore(tok(Token::Semicolon).or_not())
+}
+
 pub fn begin_transaction_parser<'src>()
 -> impl Parser<'src, &'src [Token], (), extra::Err<ParseError<'src>>> + Clone {
     kw(Keyword::Begin)
@@ -150,6 +175,8 @@ pub fn client_command_parser<'src>()
     choice((
         use_domain_parser().map(ClientStatement::UseDomain),
         list_domains_parser().to(ClientStatement::ListDomains),
+        attach_domain_clock_parser().to(ClientStatement::AttachDomainClock),
+        detach_domain_clock_parser().to(ClientStatement::DetachDomainClock),
         begin_transaction_parser().to(ClientStatement::BeginTransaction),
         commit_transaction_parser().to(ClientStatement::CommitTransaction),
         revert_transaction_parser().to(ClientStatement::RevertTransaction),
@@ -776,6 +803,90 @@ mod tests {
     }
 
     #[test]
+    fn parses_domain_clock_attachment_statements_in_any_case() {
+        for (source, expected) in [
+            ("ATTACH DOMAIN CLOCK;", ClientStatement::AttachDomainClock),
+            ("attach domain clock", ClientStatement::AttachDomainClock),
+            (
+                " Detach Domain Clock ; ",
+                ClientStatement::DetachDomainClock,
+            ),
+            ("DETACH DOMAIN CLOCK", ClientStatement::DetachDomainClock),
+        ] {
+            let parsed = parse_client_statement(source)
+                .unwrap_or_else(|error| panic!("{source:?} must parse: {error:?}"));
+            assert_eq!(parsed, expected, "{source:?}");
+            assert!(parsed.requires_local_handling(), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_incomplete_or_qualified_domain_clock_statements() {
+        for source in [
+            "ATTACH;",
+            "ATTACH DOMAIN;",
+            "ATTACH CLOCK;",
+            "DETACH DOMAIN;",
+            "ATTACH DOMAIN CLOCK sim;",
+            "ATTACH DOMAIN sim CLOCK;",
+            "DETACH DOMAIN CLOCK NOW;",
+            "ATTACH DOMAIN CLOCK; DETACH",
+        ] {
+            assert!(
+                parse_client_statements(source).is_err(),
+                "{source:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_offers_each_domain_clock_statement_as_one_phrase() {
+        for (source, phrase) in [
+            ("AT", "ATTACH DOMAIN CLOCK"),
+            ("", "ATTACH DOMAIN CLOCK"),
+            ("DET", "DETACH DOMAIN CLOCK"),
+            ("", "DETACH DOMAIN CLOCK"),
+        ] {
+            let suggestions = suggest_client_statement(source, source.len());
+            assert!(
+                suggestions.contains(&phrase.to_string()),
+                "{source:?} must offer {phrase:?}: {suggestions:?}"
+            );
+        }
+        assert_eq!(
+            suggest_client_statement("ATTACH ", "ATTACH ".len()),
+            ["DOMAIN"]
+        );
+        assert_eq!(
+            suggest_client_statement("DETACH DOMAIN ", "DETACH DOMAIN ".len()),
+            ["CLOCK"]
+        );
+        assert_eq!(
+            suggest_client_statement("ATTACH DOMAIN CL", "ATTACH DOMAIN CL".len()),
+            ["CLOCK"]
+        );
+    }
+
+    #[test]
+    fn domain_clock_phrases_stay_out_of_other_statement_contexts() {
+        for source in ["SHOW ", "CREATE ", "DROP ", "DESCRIBE ", "START ", "LIST "] {
+            let suggestions = suggest_client_statement(source, source.len());
+            for phrase in [
+                "ATTACH DOMAIN CLOCK",
+                "DETACH DOMAIN CLOCK",
+                "ATTACH",
+                "DETACH",
+                "CLOCK",
+            ] {
+                assert!(
+                    !suggestions.contains(&phrase.to_string()),
+                    "{source:?} leaks {phrase:?}: {suggestions:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn parses_transaction_controls() {
         assert!(matches!(
             parse_client_statement("BEGIN;").expect("parse should succeed"),
@@ -975,6 +1086,8 @@ mod tests {
         const STATEMENTS: &[&str] = &[
             "USE demo;",
             "LIST DOMAINS;",
+            "ATTACH DOMAIN CLOCK;",
+            "DETACH DOMAIN CLOCK;",
             "BEGIN;",
             "COMMIT;",
             "REVERT;",

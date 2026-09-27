@@ -9,6 +9,8 @@ Usage:
   just chaos list
   just chaos run baseline --image IMAGE [--nodes 1|3] [--records N]
   just chaos run rolling-restart --image IMAGE [--nodes 1|3] [--records N]
+  just chaos run leader-crash --image IMAGE [--nodes 1|3] [--records N]
+  just chaos run follower-crash|ingestor-owner-crash|emitter-owner-crash --image IMAGE [--records N]
   just chaos cleanup --run-id RUN_ID
   just chaos self-test
 
@@ -23,6 +25,11 @@ baseline  Kafka-to-Kafka delivery baseline using the supplied Nervix image
           topologies: one-node (--nodes 1), three-node (--nodes 3, default)
 rolling-restart  Graceful Pumba stops and Docker restarts under Kafka traffic
                  topologies: one-node (--nodes 1), three-node (--nodes 3, default)
+leader-crash  Observed leader SIGKILL, failover, and explicit Docker restart
+              topologies: one-node (--nodes 1), three-node (--nodes 3, default)
+follower-crash  Observed follower SIGKILL and recovery (three-node)
+ingestor-owner-crash  Observed ingestor owner SIGKILL and placement recovery (three-node)
+emitter-owner-crash  Observed emitter owner SIGKILL and placement recovery (three-node)
 EOF
 }
 
@@ -52,6 +59,9 @@ case "${command_name}" in
                 ;;
             rolling-restart)
                 exec "${script_dir}/run-rolling-restart.sh" "$@"
+                ;;
+            leader-crash | follower-crash | ingestor-owner-crash | emitter-owner-crash)
+                exec "${script_dir}/run-crash.sh" --scenario "${scenario}" "$@"
                 ;;
             *)
                 printf 'unknown chaos scenario: %s\n' "${scenario}" >&2

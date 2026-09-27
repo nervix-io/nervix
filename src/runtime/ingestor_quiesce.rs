@@ -874,8 +874,12 @@ impl Runtime {
         let key =
             DomainNodeRef::node_in(domain.clone(), ModelKind::Ingestor, ingestor.name.clone());
         if let Some(control) = self.inner.ingestor_quiescence.get(&key) {
-            let active_supported_by_source = ingestor.quiesce.supports(&control.mode());
-            control.update_declared_mode(ingestor.quiesce.mode(), active_supported_by_source);
+            let active_supported_by_source =
+                ingestor.declared_source.supports_quiesce(&control.mode());
+            control.update_declared_mode(
+                ingestor.declared_source.quiesce_mode(),
+                active_supported_by_source,
+            );
             return control.clone();
         }
         let dispatcher = self.inner.remote_dispatcher.load();
@@ -885,7 +889,7 @@ impl Runtime {
             dispatcher.as_deref().map(RemoteDispatcher::local_node_id),
         );
         let control = Arc::new(IngestorQuiesceControl::new(
-            ingestor.quiesce.mode().clone(),
+            ingestor.declared_source.quiesce_mode().clone(),
             self.inner.metrics.clone(),
             metric_labels,
         ));

@@ -4,8 +4,9 @@
 //! - **Owns.** Assertions that a reply larger than a frame arrives whole as transfer parts, that a
 //!   reply larger than the transfer limit is refused whole, that a cancellation of a request that
 //!   is not in flight says so, that registration refuses a duplicate or excess request rather
-//!   than queueing it, and that a subscription statement the parser rejects is refused with the
-//!   stage and the diagnostic located in that statement.
+//!   than queueing it, that a subscription statement the parser rejects is refused with the
+//!   stage and the diagnostic located in that statement, and that a domain clock attachment
+//!   delivers its changes between its replies and ends when its domain leaves the node.
 //! - **Depends on.** The session engine and the session test fixtures.
 //! - **Must not know.** Production ownership beyond the parent module under test.
 
@@ -17,12 +18,18 @@ use std::{
 use arch_into::ArchInto as _;
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_client_wire::{
-    CancelRequest, ClientFrame, ClientMessage, ClientRequest, CommandRequest,
-    LeaderRedirect as WireLeaderRedirect, ReplyBody, RequestId, RequestRejection, ServerFrame,
-    ServerMessage, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeRequest,
-    SubscriptionType, TransferAssembly, VerifiedFrame,
+    AttachDomainClockRequest, CancelRequest, ClientFrame, ClientMessage, ClientRequest,
+    CommandDisposition as WireCommandDisposition, CommandRequest, DetachDomainClockRequest,
+    DomainClockAttachDisposition, DomainClockAttachmentEndReason, DomainClockDetachDisposition,
+    LeaderRedirect as WireLeaderRedirect, ReplyBody, RequestId, RequestRejection, ServerEvent,
+    ServerFrame, ServerMessage, SessionLimitSettings, SessionLimits, SubscribeDisposition,
+    SubscribeRequest, SubscriptionType, TransferAssembly, VerifiedFrame,
 };
-use nervix_models::{DomainName, TransactionPosition, UserName};
+use nervix_models::{
+    DomainClockObservation, DomainClockObservedState, DomainClockState, DomainConfig, DomainName,
+    DomainPace, DomainStartPoint, DomainState, DomainStatus, DomainTimeRate, PacedDomainClock,
+    PlacementPolicy, Timestamp, TransactionPosition, UserName,
+};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -390,6 +397,302 @@ async fn a_subscription_statement_the_parser_rejects_is_refused_at_its_rejected_
     let start: usize = span.start().arch_into();
     let end: usize = span.end().arch_into();
     assert_eq!(statement.get(start..end), Some("42"));
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+/// A message of a session about a domain clock: the reply to a request, or a clock frame.
+#[derive(Debug)]
+enum ClockMessage {
+    Reply(RequestId, ReplyBody),
+    Frame(ServerEvent),
+}
+
+impl SessionUnderTest {
+    fn attach_clock(&self, id: u64, domain: &str) {
+        self.send(&ClientMessage {
+            request_id: request_id(id),
+            request: ClientRequest::AttachDomainClock(AttachDomainClockRequest {
+                domain: named::<DomainName>(domain),
+            }),
+        });
+    }
+
+    fn detach_clock(&self, id: u64, domain: &str) {
+        self.send(&ClientMessage {
+            request_id: request_id(id),
+            request: ClientRequest::DetachDomainClock(DetachDomainClockRequest {
+                domain: named::<DomainName>(domain),
+            }),
+        });
+    }
+
+    /// The next reply or clock frame the session sends, skipping every other event.
+    async fn next_clock_message(&mut self) -> ClockMessage {
+        loop {
+            tokio::task::consume_budget().await;
+            let frame = tokio::time::timeout(REPLY_TIMEOUT, self.outbound.next())
+                .await
+                .assured("the session sends within the deadline")
+                .assured("the session sends until the test closes it");
+            let frame = VerifiedFrame::<ServerFrame>::verify(frame.into_bytes(), &self.limits)
+                .assured("the session sends verified frames");
+            match ServerMessage::decode(&frame).assured("a server frame decodes") {
+                ServerMessage::Reply(reply) => {
+                    return ClockMessage::Reply(reply.request_id, reply.body);
+                }
+                ServerMessage::Event(
+                    event @ (ServerEvent::DomainClockObserved(_)
+                    | ServerEvent::DomainClockAttachmentEnded(_)),
+                ) => return ClockMessage::Frame(event),
+                ServerMessage::Event(_) | ServerMessage::TransferPart(_) => {}
+            }
+        }
+    }
+
+    /// The reply to `id`, which must be the next reply or clock frame the session sends.
+    async fn next_clock_reply(&mut self, id: u64) -> ReplyBody {
+        match self.next_clock_message().await {
+            ClockMessage::Reply(request, body) if request == request_id(id) => body,
+            other => panic!("request {id} is answered before any other clock message: {other:?}"),
+        }
+    }
+
+    /// The clock frame the session sends next, before any reply.
+    async fn next_clock_frame(&mut self) -> ServerEvent {
+        match self.next_clock_message().await {
+            ClockMessage::Frame(event) => event,
+            other => panic!("a clock frame comes next: {other:?}"),
+        }
+    }
+}
+
+fn clocked_domain(start_version: u64, status: DomainStatus) -> DomainState {
+    let clock = match status {
+        DomainStatus::Stopped => None,
+        DomainStatus::Running | DomainStatus::Paused => Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(5),
+            Timestamp::from_unix_nanos(1_000),
+            DomainTimeRate::ONE,
+        )),
+    };
+    DomainState {
+        id: named("clocked"),
+        config: DomainConfig {
+            pace: DomainPace::Paced {
+                period: "1s".parse().assured("one second is a valid period"),
+                skew: "10ms".parse().assured("ten milliseconds is a valid skew"),
+            },
+            placement: PlacementPolicy::Neutral,
+        },
+        status,
+        start_version,
+        last_start: DomainStartPoint::Resume,
+        clock,
+    }
+}
+
+fn clocked_observation(state: &DomainState) -> DomainClockObservation {
+    let observed = match (&state.status, &state.clock, state.config.pace) {
+        (DomainStatus::Stopped, _, _) => DomainClockObservedState::Stopped,
+        (_, Some(mapping), DomainPace::Paced { period, skew }) => {
+            DomainClockObservedState::Paced(PacedDomainClock {
+                period,
+                skew,
+                mapping: mapping.clone(),
+            })
+        }
+        (_, _, _) => DomainClockObservedState::Uninstalled,
+    };
+    DomainClockObservation {
+        generation: state.start_version,
+        state: observed,
+    }
+}
+
+fn install(service: &SessionServiceImpl, states: &[DomainState]) {
+    let domains = states
+        .iter()
+        .map(|state| (state.id.clone(), state.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    service.inner.runtime.sync_domains(&domains);
+}
+
+#[tokio::test]
+async fn a_session_follows_a_domain_clock_until_it_detaches_or_the_domain_leaves_the_node() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(false).await;
+    let running = clocked_domain(1, DomainStatus::Running);
+    install(&service, std::slice::from_ref(&running));
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+
+    session.attach_clock(1, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(1).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached {
+            domain: named("clocked"),
+            clock: clocked_observation(&running),
+        }
+    );
+    session.attach_clock(2, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(2).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::AlreadyAttached(named("clocked"))
+    );
+    session.attach_clock(3, "elsewhere");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(3).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::DomainNotFound(named("elsewhere"))
+    );
+
+    let stopped = clocked_domain(1, DomainStatus::Stopped);
+    install(&service, std::slice::from_ref(&stopped));
+    let ServerEvent::DomainClockObserved(observed) = session.next_clock_frame().await else {
+        panic!("stopping the domain delivers its stopped clock");
+    };
+    assert_eq!(observed.domain, named::<DomainName>("clocked"));
+    assert_eq!(observed.clock, clocked_observation(&stopped));
+
+    session.detach_clock(4, "clocked");
+    let ReplyBody::DomainClockDetach(outcome) = session.next_clock_reply(4).await else {
+        panic!("a detach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockDetachDisposition::Detached(named("clocked"))
+    );
+    let restarted = clocked_domain(2, DomainStatus::Running);
+    install(&service, std::slice::from_ref(&restarted));
+    session.attach_clock(5, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(5).await else {
+        panic!("nothing about a detached clock precedes the next reply");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached {
+            domain: named("clocked"),
+            clock: clocked_observation(&restarted),
+        }
+    );
+
+    install(&service, &[]);
+    let ServerEvent::DomainClockAttachmentEnded(ended) = session.next_clock_frame().await else {
+        panic!("removing the domain ends the attachment");
+    };
+    assert_eq!(ended.domain, named::<DomainName>("clocked"));
+    assert_eq!(ended.reason, DomainClockAttachmentEndReason::DomainRemoved);
+    session.detach_clock(6, "clocked");
+    let ReplyBody::DomainClockDetach(outcome) = session.next_clock_reply(6).await else {
+        panic!("a detach request is answered with its outcome");
+    };
+    assert_eq!(
+        outcome.disposition,
+        DomainClockDetachDisposition::NotAttached(named("clocked"))
+    );
+
+    install(&service, std::slice::from_ref(&restarted));
+    session.attach_clock(7, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(7).await else {
+        panic!("an attach request is answered with its outcome");
+    };
+    assert!(matches!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached { .. }
+    ));
+    install(&service, &[]);
+    assert!(matches!(
+        session.next_clock_frame().await,
+        ServerEvent::DomainClockAttachmentEnded(_)
+    ));
+    install(&service, std::slice::from_ref(&restarted));
+    session.attach_clock(8, "clocked");
+    let ReplyBody::DomainClockAttach(outcome) = session.next_clock_reply(8).await else {
+        panic!("a clock the server ended can be attached again");
+    };
+    assert!(matches!(
+        outcome.disposition,
+        DomainClockAttachDisposition::Attached { .. }
+    ));
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[tokio::test]
+async fn a_session_holding_a_transaction_refuses_domain_clock_requests() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    install(&service, &[clocked_domain(1, DomainStatus::Running)]);
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+    session.command(1, "BEGIN;", None);
+    let (begun, _) = session.reply(request_id(1)).await;
+    assert!(matches!(begun, ReplyBody::Command(_)));
+
+    session.attach_clock(2, "clocked");
+    let (body, _) = session.reply(request_id(2)).await;
+    let ReplyBody::DomainClockAttach(outcome) = body else {
+        panic!("an attach request is answered with its outcome, found {body:?}");
+    };
+    assert_eq!(outcome.disposition, DomainClockAttachDisposition::Failed);
+    assert_eq!(outcome.message, super::SESSION_LOCAL_IN_TRANSACTION);
+    session.detach_clock(3, "clocked");
+    let (body, _) = session.reply(request_id(3)).await;
+    let ReplyBody::DomainClockDetach(outcome) = body else {
+        panic!("a detach request is answered with its outcome, found {body:?}");
+    };
+    assert_eq!(outcome.disposition, DomainClockDetachDisposition::Failed);
+    assert_eq!(outcome.message, super::SESSION_LOCAL_IN_TRANSACTION);
+
+    session.close().await;
+    std::fs::remove_dir_all(&path).assured("the test database directory is removable");
+}
+
+#[tokio::test]
+async fn a_domain_clock_statement_sent_as_a_command_is_refused_in_favour_of_its_request() {
+    let TestService {
+        service,
+        registry: _registry,
+        path,
+    } = build_test_service(true).await;
+    let mut session = SessionUnderTest::start(&service, SessionLimits::DEFAULT);
+
+    session.command(1, "ATTACH DOMAIN CLOCK;", None);
+    let (body, _) = session.reply(request_id(1)).await;
+    let ReplyBody::Command(outcome) = body else {
+        panic!("a command is answered with its outcome, found {body:?}");
+    };
+    assert_eq!(outcome.disposition, WireCommandDisposition::Failed);
+    assert_eq!(
+        outcome.message,
+        "ATTACH DOMAIN CLOCK is a session-local command; send an attach domain clock request"
+    );
+
+    session.command(2, "DETACH DOMAIN CLOCK;", None);
+    let (body, _) = session.reply(request_id(2)).await;
+    let ReplyBody::Command(outcome) = body else {
+        panic!("a command is answered with its outcome, found {body:?}");
+    };
+    assert_eq!(outcome.disposition, WireCommandDisposition::Failed);
+    assert_eq!(
+        outcome.message,
+        "DETACH DOMAIN CLOCK is a session-local command; send a detach domain clock request"
+    );
 
     session.close().await;
     std::fs::remove_dir_all(&path).assured("the test database directory is removable");

@@ -11,9 +11,10 @@ use std::num::NonZeroU64;
 use meticulous::ResultExt as _;
 use nervix_client_wire::{
     self as wire, AttachDisposition, AttachOutcome, CommandDisposition, Diagnostic,
-    InspectionOutcome, LeaderRedirect, OutcomeOrigin, SourceSpan, StatementOutcome,
-    SubscribeDisposition, SubscribeOutcome, SubscriptionOpened, UnsubscribeDisposition,
-    UnsubscribeOutcome, UploadDisposition, UploadFailure, UploadReply,
+    DomainClockAttachDisposition, DomainClockAttachOutcome, DomainClockDetachDisposition,
+    DomainClockDetachOutcome, InspectionOutcome, LeaderRedirect, OutcomeOrigin, SourceSpan,
+    StatementOutcome, SubscribeDisposition, SubscribeOutcome, SubscriptionOpened,
+    UnsubscribeDisposition, UnsubscribeOutcome, UploadDisposition, UploadFailure, UploadReply,
 };
 use nervix_models::{
     CommandExecutionReference, ResourceDescription, ResourceUploadIdentity, TransactionInspection,
@@ -25,8 +26,8 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     /// Stable identity of the logical server command across redirects and reconnects. `None` for
-    /// a statement the client serves itself — `USE`, `LIST DOMAINS` and `UPLOAD RESOURCE` — and
-    /// for a subscription request.
+    /// a statement the client serves itself — `USE`, `LIST DOMAINS`, `ATTACH DOMAIN CLOCK`,
+    /// `DETACH DOMAIN CLOCK` and `UPLOAD RESOURCE` — and for a subscription request.
     pub execution_reference: Option<CommandExecutionReference>,
     /// Whether the outcome was produced now or recovered from an earlier attempt of the same
     /// command. `None` when no command request produced it.
@@ -266,6 +267,36 @@ impl From<UnsubscribeOutcome> for CommandOutcome {
         let mut unsubscribed = Self::local(disposition, outcome.message);
         unsubscribed.diagnostics = outcome.diagnostics;
         unsubscribed
+    }
+}
+
+impl From<DomainClockAttachOutcome> for CommandOutcome {
+    /// Only an attachment completes: a refusal, including one saying the session already follows
+    /// the clock, fails with the server's reason.
+    fn from(outcome: DomainClockAttachOutcome) -> Self {
+        let disposition = match outcome.disposition {
+            DomainClockAttachDisposition::Attached { .. } => CommandDisposition::Completed {
+                already_existed: false,
+            },
+            DomainClockAttachDisposition::AlreadyAttached(_)
+            | DomainClockAttachDisposition::DomainNotFound(_)
+            | DomainClockAttachDisposition::Failed => CommandDisposition::Failed,
+        };
+        Self::local(disposition, outcome.message)
+    }
+}
+
+impl From<DomainClockDetachOutcome> for CommandOutcome {
+    fn from(outcome: DomainClockDetachOutcome) -> Self {
+        let disposition = match outcome.disposition {
+            DomainClockDetachDisposition::Detached(_) => CommandDisposition::Completed {
+                already_existed: false,
+            },
+            DomainClockDetachDisposition::NotAttached(_) | DomainClockDetachDisposition::Failed => {
+                CommandDisposition::Failed
+            }
+        };
+        Self::local(disposition, outcome.message)
     }
 }
 

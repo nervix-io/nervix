@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use error_stack::Report;
 use meticulous::{OptionExt as _, ResultExt as _};
 use rkyv::{
@@ -127,6 +127,12 @@ impl Timestamp {
         Some(Duration::from_nanos(u64::try_from(nanos).assured(
             "the difference between two i64 values is at most u64::MAX",
         )))
+    }
+
+    /// The RFC 3339 text of the instant in UTC, with as many fractional digits as it needs and a
+    /// `Z` offset, which [`Timestamp::from_str`] parses back to the same instant.
+    pub fn to_rfc3339(self) -> String {
+        self.0.to_rfc3339_opts(SecondsFormat::AutoSi, true)
     }
 }
 
@@ -314,6 +320,24 @@ mod tests {
                     .expect("endpoint is valid RFC 3339 and signed Unix nanoseconds")
                     .unix_nanos(),
                 unix_nanos
+            );
+        }
+    }
+
+    #[test]
+    fn rfc3339_text_uses_utc_and_only_the_fractional_digits_it_needs() {
+        for (unix_nanos, text) in [
+            (0, "1970-01-01T00:00:00Z"),
+            (1_500_000_000, "1970-01-01T00:00:01.500Z"),
+            (-1, "1969-12-31T23:59:59.999999999Z"),
+            (i64::MAX, "2262-04-11T23:47:16.854775807Z"),
+        ] {
+            let timestamp = Timestamp::from_unix_nanos(unix_nanos);
+            assert_eq!(timestamp.to_rfc3339(), text);
+            assert_eq!(
+                text.parse::<Timestamp>()
+                    .expect("the rendered text is RFC 3339"),
+                timestamp
             );
         }
     }

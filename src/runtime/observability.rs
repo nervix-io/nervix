@@ -569,24 +569,17 @@ impl Runtime {
                 kafka_domain_offsets: None,
             });
         };
-        let scheduled_ingestor = execution
-            .schedule
-            .nodes
-            .get(&NodeRef::new(
+        let kafka_domain_offsets = if let Some(plan) = execution.entrypoints.ingestor(ingestor)
+            && let SourceStartPlan::Kafka(KafkaIngestorStartPlan {
+                topic,
+                offsets: KafkaOffsetPlan::Domain(_),
+                instances,
+                ..
+            }) = &plan.source
+            && let Some(node) = execution.schedule.nodes.get(&NodeRef::new(
                 ModelKind::Ingestor,
                 ModelName::from(ingestor),
             ))
-            .and_then(|node| match node.config.as_ref() {
-                Model::Ingestor(ingestor) => Some((node, ingestor.clone())),
-                _ => None,
-            });
-        let kafka_domain_offsets = if let Some((node, ingestor)) = scheduled_ingestor
-            && let IngestSource::Kafka {
-                topic,
-                offset_mode: KafkaOffsetMode::Domain,
-                instances,
-                ..
-            } = &ingestor.source
             && let Some(schedule) = node.kafka_partition_schedule.as_ref()
         {
             Some(kafka_domain_offset_describe_from_schedule(

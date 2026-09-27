@@ -65,6 +65,21 @@ impl DomainAdmissionWindow {
         })
     }
 
+    /// The oldest retained tick center.
+    pub const fn earliest_center(&self) -> Timestamp {
+        self.first
+    }
+
+    /// The newest reached tick center: the logical frontier the window was reconstructed at.
+    pub const fn latest_center(&self) -> Timestamp {
+        self.last
+    }
+
+    /// The inclusive distance from a retained center within which an event is admitted.
+    pub const fn skew(&self) -> DomainClockSkew {
+        self.skew
+    }
+
     pub fn contains(&self, event: Timestamp) -> bool {
         if event < self.first {
             return self
@@ -111,6 +126,9 @@ mod tests {
                 .assured("fixture skew fits the supported range"),
         )
         .assured("now has reached the origin");
+        assert_eq!(window.earliest_center(), Timestamp::from_unix_nanos(1000));
+        assert_eq!(window.latest_center(), Timestamp::from_unix_nanos(1000));
+        assert_eq!(window.skew().as_nanos(), 10);
         for nanos in [990, 1000, 1010] {
             assert!(
                 window.contains(Timestamp::from_unix_nanos(nanos)),
@@ -160,6 +178,15 @@ mod tests {
                 .checked_sub(retained_preceding_position_count)
                 .assured("a nonnegative frontier minus a u32-sized count fits i64")
                 .max(0);
+            assert_eq!(
+                window.earliest_center(),
+                Timestamp::from_unix_nanos(
+                    first
+                        .checked_mul(100)
+                        .assured("fixture first position is bounded")
+                )
+            );
+            assert_eq!(window.latest_center(), Timestamp::from_unix_nanos(reached));
             for position in 0..=frontier
                 .checked_add(1)
                 .assured("fixture frontier is at most 10000")

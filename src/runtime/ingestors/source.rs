@@ -46,7 +46,7 @@ pub(super) const SOURCE_RECONNECT_POLICY: ParsedRetryPolicy = ParsedRetryPolicy 
 
 impl IngestorSpec {
     /// The identity this ingestor's running source is registered under.
-    pub(super) fn runtime_key(&self) -> DomainNodeRef {
+    pub(in crate::runtime) fn runtime_key(&self) -> DomainNodeRef {
         DomainNodeRef::node_in(self.domain.clone(), ModelKind::Ingestor, self.name.clone())
     }
 
@@ -59,6 +59,12 @@ impl IngestorSpec {
         }
     }
 
+    /// The metadata namespace this ingestor's messages expose to its programs, which its source's
+    /// transport class decides.
+    pub(in crate::runtime) fn metadata_kind(&self) -> IngestMetadataKind {
+        IngestMetadataKind::from(self.declared_source.transport())
+    }
+
     /// The capabilities this ingestor's source runs with, derived from the source vocabulary.
     pub(super) fn source_capabilities(
         &self,
@@ -66,9 +72,10 @@ impl IngestorSpec {
         acknowledgement: SourceAcknowledgementSupport,
     ) -> SourceCapabilities {
         SourceCapabilities::new(
-            self.allow_header_reads,
-            self.metadata_kind.source_scope(),
-            self.quiesce.supports(self.quiesce.mode()),
+            self.reads_headers(),
+            self.metadata_kind().source_scope(),
+            self.declared_source
+                .supports_quiesce(self.declared_source.quiesce_mode()),
             instances,
             acknowledgement,
         )
@@ -317,8 +324,11 @@ impl Runtime {
             metrics,
         } = dependencies;
         let domain = &ingestor.domain;
-        let branched_runtime =
-            self.start_branched_ingestor_runtime(domain, &ingestor.name, branched_templates);
+        let branched_runtime = self.start_branched_entrypoint_runtimes(
+            domain,
+            &ModelName::from(&ingestor.name),
+            branched_templates,
+        );
         let instance_count: u64 = instances.len().arch_into();
         let expected_instances = NonZeroU64::new(instance_count).assured(
             "every source composition opens the non-zero instance count its source declares",
@@ -344,7 +354,7 @@ impl Runtime {
                 quiesce: quiesce.clone(),
                 shutdown: shutdown_tx.subscribe(),
                 instance_index,
-                metadata_kind: ingestor.metadata_kind,
+                metadata_kind: ingestor.metadata_kind(),
                 buffered_intake,
                 flush_each_intake,
             });
@@ -406,7 +416,7 @@ pub(super) struct RuntimeSourceHostSpec {
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
     pub(super) timestamp_source: Option<IngestTimestampSource>,
-    pub(super) output_routes: RelayProcessorOutputsNode,
+    pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) codec: Arc<CompiledCodec>,
     pub(super) metrics: MessageMetricsHandle,
@@ -424,7 +434,7 @@ pub(super) struct RuntimeSourceHost {
     domain: DomainName,
     ingestor: IngestorName,
     timestamp_source: Option<IngestTimestampSource>,
-    output_routes: RelayProcessorOutputsNode,
+    output_routes: Arc<BoundIngestorRoutes>,
     filter_where: Option<CompiledProgramWithMaterializedInterest>,
     codec: Arc<CompiledCodec>,
     metrics: MessageMetricsHandle,

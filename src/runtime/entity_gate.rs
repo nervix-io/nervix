@@ -2140,6 +2140,7 @@ mod tests {
         );
         let remote_consumers = Runtime::remote_runtime_consumers_for_schedule(
             &schedule,
+            &EntrypointPlans::default(),
             &ClusterNodeName::parse("node-1").expect("valid name"),
         );
         assert_eq!(remote_consumers.len(), 2);

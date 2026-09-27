@@ -51,7 +51,7 @@ pub(super) struct EndpointIngestBinding {
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
     pub(super) timestamp_source: Option<IngestTimestampSource>,
-    pub(super) output_routes: RelayProcessorOutputsNode,
+    pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) codec: Arc<CompiledCodec>,
     pub(super) metrics: MessageMetricsHandle,
