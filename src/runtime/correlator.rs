@@ -1004,7 +1004,6 @@ pub(super) async fn evaluate_correlator_output_batch(
 }
 
 pub(super) struct CorrelatorOutputContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
@@ -1019,7 +1018,6 @@ pub(super) async fn enqueue_correlator_output(
     execution_now: Timestamp,
 ) {
     let CorrelatorOutputContext {
-        graph,
         branch,
         node_kind,
         processor,
@@ -1155,7 +1153,6 @@ pub(super) async fn enqueue_correlator_output(
     };
     if branch
         .dispatch_output(
-            graph,
             output,
             ModelKind::Correlator,
             &ModelName::from(&RelayName::from(processor)),
@@ -1184,7 +1181,6 @@ pub(super) async fn enqueue_correlator_output(
 }
 
 pub(super) struct CorrelatorTimeoutContext<'a> {
-    pub(super) graph: &'a SharedActiveGraph,
     pub(super) branch: &'a mut BranchRuntime,
     pub(super) node_kind: ModelKind,
     pub(super) processor: &'a ModelName,
@@ -1198,7 +1194,6 @@ pub(super) async fn handle_correlator_timeout_action(
     message: RelayMessage,
 ) {
     let CorrelatorTimeoutContext {
-        graph,
         branch,
         node_kind,
         processor,
@@ -1264,7 +1259,6 @@ pub(super) async fn handle_correlator_timeout_action(
             };
             if branch
                 .dispatch_output(
-                    graph,
                     &output,
                     ModelKind::Correlator,
                     &ModelName::from(&RelayName::from(processor)),

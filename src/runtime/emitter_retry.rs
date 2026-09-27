@@ -297,7 +297,7 @@ mod tests {
     fn an_active_retry_replaces_the_ordinary_cadence_wake() {
         let context = sink_context();
         let mut buffer = EmitterBatchBuffer::default();
-        buffer.flush_policy = Some(RuntimeFlushPolicy::Each {
+        buffer.set_flush_policy(RuntimeFlushPolicy::Each {
             interval: Duration::from_secs(60),
             max_batch_size: u64::MAX,
         });

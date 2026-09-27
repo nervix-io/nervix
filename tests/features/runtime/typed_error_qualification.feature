@@ -48,6 +48,54 @@ Feature: Typed error qualification through public streams
       | 1            |
       | 3            |
 
+  Scenario Outline: A rejected alteration names the model and the refused operation and changes nothing
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      CREATE SCHEMA order_event (id STRING);
+      CREATE RELAY orders SCHEMA order_event UNBRANCHED;
+      CREATE RELAY accepted_orders SCHEMA order_event UNBRANCHED;
+      CREATE JUNCTION route_orders
+        FROM orders
+        UNBRANCHED
+        TO accepted_orders
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+    When these NSPL commands fail with "model 'route_orders' in domain '{{domain}}' is invalid: input relay `accepted_orders` is not configured"
+      """
+      ALTER JUNCTION route_orders DROP FROM accepted_orders;
+      """
+    And these NSPL commands fail with "model 'route_orders' in domain '{{domain}}' is invalid: a processor must retain at least one input"
+      """
+      ALTER JUNCTION route_orders SET DETACHED, DROP FROM orders;
+      """
+    And these NSPL commands fail with "model 'order_event' in domain '{{domain}}' is invalid: field `missing` does not exist"
+      """
+      ALTER SCHEMA order_event DROP FIELD missing;
+      """
+    And these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE JUNCTION route_orders;
+      """
+    Then the last command output contains
+      """
+      CREATE ATTACHED JUNCTION route_orders
+        FROM orders
+        UNBRANCHED
+        TO accepted_orders
+          INHERIT ALL
+          FLUSH IMMEDIATE
+          ON MESSAGE ERROR LOG;
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
   Scenario Outline: Direct VALUES cannot expose a sensitive field without explicit leakage
     Given a <cluster_size> node nervix cluster is started
     And the leader node is configured with these NSPL commands

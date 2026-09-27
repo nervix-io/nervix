@@ -1,0 +1,56 @@
+BEGIN;
+
+CREATE SCHEMA chaos_record (
+  event_id STRING,
+  branch_name STRING,
+  sequence I64,
+  content STRING
+);
+
+CREATE WIRE JSON SCHEMA chaos_wire MODE STRICT (
+  event_id STRING,
+  branch_name STRING,
+  sequence INTEGER,
+  content STRING
+);
+
+CREATE CODEC chaos_json
+  FROM WIRE JSON SCHEMA chaos_wire
+  TO SCHEMA chaos_record;
+
+CREATE SCHEMA chaos_branch_key (
+  branch_name STRING
+);
+
+CREATE BRANCH chaos_branch SCHEMA chaos_branch_key TTL 5m MAX INSTANCES 16 EVICT LRU;
+
+CREATE RELAY chaos_records SCHEMA chaos_record BRANCHED BY chaos_branch CAPACITY 1;
+
+CREATE CLIENT chaos_kafka
+  TYPE KAFKA
+  CONFIG {
+    'bootstrap.servers' = 'broker:9092',
+    'auto.offset.reset' = 'earliest'
+  };
+
+CREATE INGESTOR chaos_ingestor
+  FROM KAFKA chaos_kafka TOPIC chaos_input OFFSET BY CONSUMER GROUP chaos_baseline MODE ACK SEQUENTIAL ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s ON QUIESCE SUSPEND
+  DECODE USING chaos_json
+  TO chaos_records
+    INHERIT ALL
+    BRANCHED BY chaos_branch SET branch_name = message.branch_name
+    FLUSH IMMEDIATE
+    ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+CREATE ATTACHED EMITTER chaos_emitter
+  FROM chaos_records
+  TO KAFKA chaos_kafka TOPIC chaos_output
+    MODE ACK PARALLEL MAX 16 ACK TIMEOUT 30s RETRY POLICY BACKOFF 200ms MAX 5s
+    ENCODE USING chaos_json
+  INHERIT ALL
+  FLUSH IMMEDIATE
+  ON MESSAGE ERROR LOG
+  ON GENERAL ERROR LOG;
+
+COMMIT;

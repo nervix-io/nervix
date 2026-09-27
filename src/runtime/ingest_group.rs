@@ -240,7 +240,7 @@ pub(super) struct IngestorDependencies {
     pub(super) output_routes: RelayProcessorOutputsNode,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) codec: Arc<CompiledCodec>,
-    pub(super) branched_templates: HashMap<RelayName, (SharedActiveGraph, IngestorRouteTemplate)>,
+    pub(super) branched_templates: HashMap<RelayName, IngestorRouteTemplate>,
     pub(super) metrics: MessageMetricsHandle,
 }
 

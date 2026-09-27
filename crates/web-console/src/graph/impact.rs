@@ -123,7 +123,7 @@ pub struct ImpactEdgeId {
 }
 
 /// Which side of the change an item or a relation belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TopologyPresence {
     /// Only before: the change drops it or disconnects it from the affected graph.
     Before,

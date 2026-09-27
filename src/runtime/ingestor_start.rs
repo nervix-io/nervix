@@ -408,8 +408,7 @@ impl Runtime {
                     domain: domain.as_str().to_string(),
                     reason: reason.to_string(),
                 })?;
-                branched_templates
-                    .insert(spec.root_relay.clone(), (execution.graph.clone(), template));
+                branched_templates.insert(spec.root_relay.clone(), template);
             }
         }
         drop(execution);

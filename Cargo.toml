@@ -620,6 +620,7 @@ tokio-tungstenite = "0.24"
 tokio-util = { version = "0.7", features = ["rt"] }
 toml = "0.8"
 # Keep tonic/build on 0.13 for the workspace's Prost 0.13 API while selecting AWS-LC TLS.
+any_spawner = "0.3.0"
 tonic = { version = "0.13", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.32"

@@ -35,7 +35,7 @@ impl ClientStatement {
     ///
     /// Server statements delegate to [`Statement::to_canonical_nspl`]; the session-local forms are
     /// rendered here because they belong to the client protocol rather than to a stored model.
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         match self {
             Self::UseDomain(domain) => Ok(format!("USE {};", domain.as_str())),
             Self::ListDomains => Ok("LIST DOMAINS;".to_string()),
@@ -80,6 +80,12 @@ impl ClientStatement {
     /// change the transaction it reads.
     pub fn inspects_transaction(&self) -> bool {
         matches!(self, Self::Server(Statement::DescribeTransaction(_)))
+    }
+
+    /// Transaction catalog reads run beside an attached transaction without taking a queue
+    /// position or changing its binding.
+    pub fn reads_transaction_state(&self) -> bool {
+        self.inspects_transaction() || matches!(self, Self::Server(Statement::ShowTransactions(_)))
     }
 }
 
