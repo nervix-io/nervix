@@ -11,6 +11,7 @@ use std::{
     num::{NonZeroU32, NonZeroU64},
 };
 
+use error_stack::Report;
 use nervix_models::{
     AvroType, BranchEviction, BranchName, CborType, CreateBranch, CreateSchema, CreateWireSchema,
     FieldName, JsonType, Model, ParseAsType, SchemaField, SchemaName, WireSchemaField,
@@ -64,9 +65,9 @@ pub(super) enum CollectionLayer {
 }
 
 impl SchemaTypeDraft {
-    fn build(&self, field: usize) -> Result<ParseAsType, SchemaDraftError> {
+    fn build(&self, field: usize) -> error_stack::Result<ParseAsType, SchemaDraftError> {
         let Some(mut ty) = self.scalar.clone() else {
-            return Err(SchemaDraftError::FieldTypeRequired { field });
+            return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
         };
         for (position, layer) in self.layers.iter().enumerate() {
             ty = match layer {
@@ -75,16 +76,16 @@ impl SchemaTypeDraft {
                 },
                 CollectionLayer::Array { length } => {
                     let parsed = length.trim().parse::<NonZeroU32>().map_err(|_| {
-                        SchemaDraftError::ArrayLength {
+                        Report::new(SchemaDraftError::ArrayLength {
                             field,
                             layer: position + 1,
-                        }
+                        })
                     })?;
                     if parsed.get() > i32::MAX.unsigned_abs() {
-                        return Err(SchemaDraftError::ArrayLength {
+                        return Err(Report::new(SchemaDraftError::ArrayLength {
                             field,
                             layer: position + 1,
-                        });
+                        }));
                     }
                     ParseAsType::Array {
                         element: Box::new(ty),
@@ -98,19 +99,20 @@ impl SchemaTypeDraft {
 }
 
 impl SchemaDraft {
-    pub(super) fn build(&self) -> Result<CreateSchema, SchemaDraftError> {
-        let name = SchemaName::parse(self.name.trim()).map_err(|_| SchemaDraftError::SchemaName)?;
+    pub(super) fn build(&self) -> error_stack::Result<CreateSchema, SchemaDraftError> {
+        let name = SchemaName::parse(self.name.trim())
+            .map_err(|_| Report::new(SchemaDraftError::SchemaName))?;
         if self.fields.is_empty() {
-            return Err(SchemaDraftError::FieldsRequired);
+            return Err(Report::new(SchemaDraftError::FieldsRequired));
         }
         let mut names = BTreeSet::new();
         let mut fields = Vec::with_capacity(self.fields.len());
         for (index, draft) in self.fields.iter().enumerate() {
             let field = index + 1;
             let name = FieldName::parse(draft.name.trim())
-                .map_err(|_| SchemaDraftError::FieldName { field })?;
+                .map_err(|_| Report::new(SchemaDraftError::FieldName { field }))?;
             if !names.insert(name.clone()) {
-                return Err(SchemaDraftError::DuplicateField { name });
+                return Err(Report::new(SchemaDraftError::DuplicateField { name }));
             }
             fields.push(SchemaField {
                 name,
@@ -172,14 +174,14 @@ impl StructuredDrafts {
 }
 
 impl WireSchemaDraft {
-    pub(super) fn build(&self, format: WireFormat) -> Result<Model, SchemaDraftError> {
+    pub(super) fn build(&self, format: WireFormat) -> error_stack::Result<Model, SchemaDraftError> {
         let name = WireSchemaName::parse(self.name.trim())
-            .map_err(|_| SchemaDraftError::WireSchemaName)?;
+            .map_err(|_| Report::new(SchemaDraftError::WireSchemaName))?;
         let Some(strictness) = self.mode else {
-            return Err(SchemaDraftError::WireModeRequired);
+            return Err(Report::new(SchemaDraftError::WireModeRequired));
         };
         if self.fields.is_empty() {
-            return Err(SchemaDraftError::FieldsRequired);
+            return Err(Report::new(SchemaDraftError::FieldsRequired));
         }
         let mut names = BTreeSet::new();
         match format {
@@ -188,12 +190,14 @@ impl WireSchemaDraft {
                 for (index, draft) in self.fields.iter().enumerate() {
                     let field = index + 1;
                     let field_name = FieldName::parse(draft.name.trim())
-                        .map_err(|_| SchemaDraftError::FieldName { field })?;
+                        .map_err(|_| Report::new(SchemaDraftError::FieldName { field }))?;
                     if !names.insert(field_name.clone()) {
-                        return Err(SchemaDraftError::DuplicateField { name: field_name });
+                        return Err(Report::new(SchemaDraftError::DuplicateField {
+                            name: field_name,
+                        }));
                     }
                     let Some(WireFieldType::Json(ty)) = draft.ty else {
-                        return Err(SchemaDraftError::FieldTypeRequired { field });
+                        return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
                     };
                     fields.push(WireSchemaField {
                         name: field_name,
@@ -217,12 +221,14 @@ impl WireSchemaDraft {
                 for (index, draft) in self.fields.iter().enumerate() {
                     let field = index + 1;
                     let field_name = FieldName::parse(draft.name.trim())
-                        .map_err(|_| SchemaDraftError::FieldName { field })?;
+                        .map_err(|_| Report::new(SchemaDraftError::FieldName { field }))?;
                     if !names.insert(field_name.clone()) {
-                        return Err(SchemaDraftError::DuplicateField { name: field_name });
+                        return Err(Report::new(SchemaDraftError::DuplicateField {
+                            name: field_name,
+                        }));
                     }
                     let Some(WireFieldType::Avro(ty)) = draft.ty else {
-                        return Err(SchemaDraftError::FieldTypeRequired { field });
+                        return Err(Report::new(SchemaDraftError::FieldTypeRequired { field }));
                     };
                     fields.push(WireSchemaField {
                         name: field_name,
@@ -253,24 +259,25 @@ pub(super) struct BranchDraft {
 }
 
 impl BranchDraft {
-    pub(super) fn build(&self) -> Result<CreateBranch, SchemaDraftError> {
-        let name = BranchName::parse(self.name.trim()).map_err(|_| SchemaDraftError::BranchName)?;
+    pub(super) fn build(&self) -> error_stack::Result<CreateBranch, SchemaDraftError> {
+        let name = BranchName::parse(self.name.trim())
+            .map_err(|_| Report::new(SchemaDraftError::BranchName))?;
         let Some(schema) = &self.schema else {
-            return Err(SchemaDraftError::SchemaReferenceRequired);
+            return Err(Report::new(SchemaDraftError::SchemaReferenceRequired));
         };
         if !self.schema_valid {
-            return Err(SchemaDraftError::SchemaReferenceChanged);
+            return Err(Report::new(SchemaDraftError::SchemaReferenceChanged));
         }
         let ttl = self.ttl.trim();
         if ttl.is_empty() {
-            return Err(SchemaDraftError::TtlRequired);
+            return Err(Report::new(SchemaDraftError::TtlRequired));
         }
         let eviction = if self.limit_instances {
             let max_instances = self
                 .max_instances
                 .trim()
                 .parse::<NonZeroU64>()
-                .map_err(|_| SchemaDraftError::MaxInstances)?;
+                .map_err(|_| Report::new(SchemaDraftError::MaxInstances))?;
             Some(BranchEviction::Lru { max_instances })
         } else {
             None
@@ -327,6 +334,14 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use super::*;
+
+    fn draft_error<T>(result: error_stack::Result<T, SchemaDraftError>) -> SchemaDraftError {
+        result
+            .err()
+            .verified("the draft in this assertion has a required value missing or invalid")
+            .current_context()
+            .clone()
+    }
 
     fn assert_canonical_round_trip(model: Model, if_not_exists: bool) {
         let model: Model<RequestedResourceVersion> = model.into();
@@ -457,8 +472,8 @@ mod tests {
             ..BranchDraft::default()
         };
         assert_eq!(
-            branch.build(),
-            Err(SchemaDraftError::SchemaReferenceChanged)
+            draft_error(branch.build()),
+            SchemaDraftError::SchemaReferenceChanged
         );
         branch.schema_valid = true;
         let model = branch
@@ -475,7 +490,7 @@ mod tests {
         );
         assert_canonical_round_trip(Model::Branch(model), false);
         branch.max_instances = "0".to_string();
-        assert_eq!(branch.build(), Err(SchemaDraftError::MaxInstances));
+        assert_eq!(draft_error(branch.build()), SchemaDraftError::MaxInstances);
     }
 
     #[test]
@@ -494,16 +509,16 @@ mod tests {
         };
         schema.fields.push(schema.fields[0].clone());
         assert_eq!(
-            schema.build(),
-            Err(SchemaDraftError::DuplicateField {
+            draft_error(schema.build()),
+            SchemaDraftError::DuplicateField {
                 name: FieldName::parse("same").assured("the test field name is valid"),
-            })
+            }
         );
         schema.fields.pop();
         schema.fields[0].ty.scalar = None;
         assert_eq!(
-            schema.build(),
-            Err(SchemaDraftError::FieldTypeRequired { field: 1 })
+            draft_error(schema.build()),
+            SchemaDraftError::FieldTypeRequired { field: 1 }
         );
 
         let wire = WireSchemaDraft {
@@ -516,8 +531,8 @@ mod tests {
             ..WireSchemaDraft::default()
         };
         assert_eq!(
-            wire.build(WireFormat::Json),
-            Err(SchemaDraftError::WireModeRequired)
+            draft_error(wire.build(WireFormat::Json)),
+            SchemaDraftError::WireModeRequired
         );
     }
 
@@ -530,22 +545,25 @@ mod tests {
             }],
         };
         assert_eq!(
-            collection.build(1),
-            Err(SchemaDraftError::ArrayLength { field: 1, layer: 1 })
+            draft_error(collection.build(1)),
+            SchemaDraftError::ArrayLength { field: 1, layer: 1 }
         );
         collection.layers[0] = CollectionLayer::Array {
             length: "2147483648".to_string(),
         };
         assert_eq!(
-            collection.build(1),
-            Err(SchemaDraftError::ArrayLength { field: 1, layer: 1 })
+            draft_error(collection.build(1)),
+            SchemaDraftError::ArrayLength { field: 1, layer: 1 }
         );
 
         let schema = SchemaDraft {
             name: "record".to_string(),
             ..SchemaDraft::default()
         };
-        assert_eq!(schema.build(), Err(SchemaDraftError::FieldsRequired));
+        assert_eq!(
+            draft_error(schema.build()),
+            SchemaDraftError::FieldsRequired
+        );
 
         let mut wire = WireSchemaDraft {
             name: "wire".to_string(),
@@ -553,8 +571,8 @@ mod tests {
             ..WireSchemaDraft::default()
         };
         assert_eq!(
-            wire.build(WireFormat::Json),
-            Err(SchemaDraftError::FieldsRequired)
+            draft_error(wire.build(WireFormat::Json)),
+            SchemaDraftError::FieldsRequired
         );
         wire.fields.push(WireFieldDraft {
             name: "payload".to_string(),
@@ -562,15 +580,15 @@ mod tests {
             optional: false,
         });
         assert_eq!(
-            wire.build(WireFormat::Avro),
-            Err(SchemaDraftError::FieldTypeRequired { field: 1 })
+            draft_error(wire.build(WireFormat::Avro)),
+            SchemaDraftError::FieldTypeRequired { field: 1 }
         );
         wire.fields.push(wire.fields[0].clone());
         assert_eq!(
-            wire.build(WireFormat::Json),
-            Err(SchemaDraftError::DuplicateField {
+            draft_error(wire.build(WireFormat::Json)),
+            SchemaDraftError::DuplicateField {
                 name: FieldName::parse("payload").assured("valid field name"),
-            })
+            }
         );
 
         let mut branch = BranchDraft {
@@ -578,11 +596,11 @@ mod tests {
             ..BranchDraft::default()
         };
         assert_eq!(
-            branch.build(),
-            Err(SchemaDraftError::SchemaReferenceRequired)
+            draft_error(branch.build()),
+            SchemaDraftError::SchemaReferenceRequired
         );
         branch.schema = Some(SchemaName::parse("tenant_key").assured("valid schema name"));
         branch.schema_valid = true;
-        assert_eq!(branch.build(), Err(SchemaDraftError::TtlRequired));
+        assert_eq!(draft_error(branch.build()), SchemaDraftError::TtlRequired);
     }
 }

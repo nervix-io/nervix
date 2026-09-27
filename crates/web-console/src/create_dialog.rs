@@ -609,21 +609,17 @@ fn build_submission(
                 .ok_or_else(|| Report::new(CreateDraftError::ScopedDomainRequired))?;
             let (model, if_not_exists) = match kind {
                 CreateKind::Schema => (
-                    Model::Schema(
-                        structured_drafts
-                            .schema
-                            .build()
-                            .map_err(|error| Report::new(CreateDraftError::Structured(error)))?,
-                    ),
+                    Model::Schema(structured_drafts.schema.build().map_err(|error| {
+                        let context = CreateDraftError::Structured(error.current_context().clone());
+                        error.change_context(context)
+                    })?),
                     structured_drafts.schema.if_not_exists,
                 ),
                 CreateKind::Branch => (
-                    Model::Branch(
-                        structured_drafts
-                            .branch
-                            .build()
-                            .map_err(|error| Report::new(CreateDraftError::Structured(error)))?,
-                    ),
+                    Model::Branch(structured_drafts.branch.build().map_err(|error| {
+                        let context = CreateDraftError::Structured(error.current_context().clone());
+                        error.change_context(context)
+                    })?),
                     structured_drafts.branch.if_not_exists,
                 ),
                 _ => {
@@ -632,9 +628,11 @@ fn build_submission(
                     );
                     let draft = structured_drafts.wire(format);
                     (
-                        draft
-                            .build(format)
-                            .map_err(|error| Report::new(CreateDraftError::Structured(error)))?,
+                        draft.build(format).map_err(|error| {
+                            let context =
+                                CreateDraftError::Structured(error.current_context().clone());
+                            error.change_context(context)
+                        })?,
                         draft.if_not_exists,
                     )
                 }
