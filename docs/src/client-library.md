@@ -11,6 +11,8 @@ Capabilities:
   `Client::inspect_transaction(...)`
 - `Client::list_domains()`, `Client::domain()` and `Client::set_domain(...)`
 - `Client::subscribe(...)`, `Client::unsubscribe(...)` and `Client::next_subscription()`
+- `Client::attach_domain_clock(...)`, `Client::detach_domain_clock(...)`,
+  `Client::domain_clock(...)` and `Client::next_domain_clock_event()`
 - `Client::upload_resource_from_directory(...)`
 - `Client::next_server_event()`, `Client::next_domain_list()` and `Client::leadership()`
 - `Client::suggest(...)` behind the `autocomplete` feature
@@ -82,6 +84,62 @@ rows it skipped, and the end of the subscription with its reason: `RelayChanged`
 redefined, so the announced schema no longer describes its rows, or `RelayRemoved` when the relay
 or its domain no longer exists. The end is the last event of that subscription; subscribe again to
 keep reading a redefined relay. See [Sessions](sessions.md#subscription-lifecycle).
+
+## Following A Domain Clock
+
+`execute` routes `ATTACH DOMAIN CLOCK;` and `DETACH DOMAIN CLOCK;` the way it routes `USE`: it sends
+them as typed attach and detach requests for the selected domain and never as commands. Without a
+selected domain they fail with `ClientError::NoActiveDomain`, and while a transaction is active they
+are refused like every other client-local statement. `Client::attach_domain_clock(domain)` and
+`Client::detach_domain_clock(domain)` send the same requests for a domain named explicitly and
+return the typed `DomainClockAttachOutcome` and `DomainClockDetachOutcome`, whose dispositions tell
+an attachment from each refusal.
+
+Once attached, `Client::domain_clock(&domain)` returns an `AttachedDomainClock` holding the newest
+clock the session received. It answers with the same vocabulary arithmetic the cluster runs,
+`DomainClockState::logical_time_at` and `DomainAdmissionWindow::reached`, for a UTC instant the
+caller supplies:
+
+```rust
+use nervix_client_core::{DomainClockEvent, DomainName, Timestamp};
+
+let domain = DomainName::parse("simulation")?;
+client.set_domain(Some(domain.clone())).await;
+client.execute("ATTACH DOMAIN CLOCK;").await?;
+
+let clock = client.domain_clock(&domain).expect("the session follows this clock");
+let now = Timestamp::now();
+let logical_now = clock.logical_time_at(now)?;
+if let Some(window) = clock.admission_window(now)? {
+    // The newest center the ingestor has reached, admitted within SKEW on either side.
+    let occurred_at = window.latest_center();
+    println!("{logical_now}: send events stamped {occurred_at}");
+}
+
+match client.next_domain_clock_event().await? {
+    DomainClockEvent::Observed(observed) => println!("{}", observed.clock),
+    DomainClockEvent::Ended(ended) => println!("ended because {}", ended.reason),
+    DomainClockEvent::Interrupted(gap) => println!("{} is attached again", gap.domain),
+}
+```
+
+`logical_time_at` reads an unpaced clock as UTC itself and rounds a paced projection down;
+`wall_duration_until(now, target)` returns the physical wait until a logical instant, rounded up so
+waiting it never arrives early, and zero once the instant is reached; `admission_window` returns
+`None` for an unpaced clock, whose ingestors admit every timestamp. A stopped or uninstalled clock
+answers every question with a typed `DomainClockReadError`. The answers hold for the caller's UTC: a
+host whose UTC is offset from the cluster's receives answers shifted by that offset multiplied by
+the rate.
+
+`Client::next_domain_clock_event()` reports what the session receives after each attach reply:
+`Observed` with a changed clock, `Ended` when the server ended the attachment because the domain no
+longer exists on the serving node, and `Interrupted` when the session holding an attachment ended.
+Events are coalesced per domain, so a caller that reads late receives the newest clock of each
+domain rather than every change in between. After a reconnect, the client attaches every followed
+clock again on the new session before any other request, and the clock that attachment reports
+follows the interruption as an `Observed` event; changes in between are not reported. Waiting for
+the next event reopens a closed session when a followed clock waits for it. A detach, or an end,
+stops following the domain, and `domain_clock` returns `None` for it afterwards.
 
 ## Transaction Handles And Attach
 

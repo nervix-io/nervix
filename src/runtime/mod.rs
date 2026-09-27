@@ -590,7 +590,7 @@ mod window_state;
 
 #[doc(hidden)]
 pub use branch_key::BranchKey;
-pub(crate) use domain_clock::DomainExecutionSnapshot;
+pub(crate) use domain_clock::{DomainClockObserver, DomainExecutionSnapshot};
 pub(crate) use domain_execution::LookupRuntime;
 /// Opaque runtime-state handle types exposed only so compile-fail tests can prove that forbidden
 /// operations are absent from each capability.
