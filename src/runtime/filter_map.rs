@@ -2295,10 +2295,13 @@ mod tests {
         let program = compile_emitter_filter_map_program(
             &domain("default"),
             &emitter,
-            input_schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
-            output_schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
+            EmitterRoute::Declared,
+            RuntimeVmSchemaPair {
+                input: input_schema.arrow_schema(),
+                input_sensitivity: VmSchemaSensitivity::default(),
+                output: output_schema.arrow_schema(),
+                output_sensitivity: VmSchemaSensitivity::default(),
+            },
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),
@@ -2315,10 +2318,13 @@ mod tests {
         let error = compile_emitter_filter_map_program(
             &domain("default"),
             &unsupported_emitter,
-            input_schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
-            output_schema.arrow_schema(),
-            VmSchemaSensitivity::default(),
+            EmitterRoute::Declared,
+            RuntimeVmSchemaPair {
+                input: input_schema.arrow_schema(),
+                input_sensitivity: VmSchemaSensitivity::default(),
+                output: output_schema.arrow_schema(),
+                output_sensitivity: VmSchemaSensitivity::default(),
+            },
             RuntimeVmCompileContext {
                 available_materialized_streams: &HashMap::default(),
                 available_lookups: &HashMap::default(),

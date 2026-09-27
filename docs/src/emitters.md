@@ -190,8 +190,46 @@ emitters publish one request per eligible source record, so they do not accept t
 `BATCH` clause. `SHOW CREATE EMITTER` preserves both request expressions and the explicit body
 selection.
 
-HTTP emitter configuration can currently be created, altered and inspected. Outbound request
-delivery is not yet available.
+#### HTTP requests
+
+An HTTP emitter sends one request for each eligible record. For each batch it admits, it resolves
+its materialized dependencies once and uses one execution snapshot, and every expression below
+reads that snapshot. Each record then passes, in order: its source `WHERE`; construction and
+finalization of its codec record; route `WHERE`; `METHOD`; `PATH`; and each `write_header`
+invocation as it is written. A record that route `WHERE` filters evaluates no request field and
+sends nothing, even when one of its request fields would fail.
+
+The first request field that fails rejects its record through `ON MESSAGE ERROR` before any part of
+its request is sent. A failed expression keeps its `evaluation` code; a value that is not a valid
+request field has the code `validation`. A method or path failure has the operation `publish` and
+names the request field, `method` or `path`, beside the fields its expression reads. A header write
+failure has the operation `invoke` and the zero-based position of its invocation. A record whose
+body the codec cannot encode when a flush releases it is rejected the same way with the operation
+`encode`. The message never quotes a method, target or header value. The error handler of every
+such rejection, and of any later rejection of an admitted request, reads the original input and the
+materialized state its batch was admitted with; with a codec it also reads the attempted record as
+`partial_output`.
+
+The method keeps its spelling. The request goes to exactly the normalized target: encoded
+separators such as `%2F`, repeated query parameters, a literal `+`, and the empty query of a
+trailing `?` stay as they are. Header names compare without ASCII case and a later write replaces an
+earlier value; an empty string is sent as an empty value. An invalid or reserved write rejects its
+record even when a later write would replace it, and the 128-header and 32 KiB bounds apply after
+every replacement. The body is exactly the bytes the codec produced, with no wrapper, array,
+newline, form encoding or compression added; Nervix adds no `Content-Type`, and a declared
+`Content-Encoding` does not transform the bytes. `WITHOUT BODY` sends zero content bytes.
+
+A prepared request, with its method, target, headers and body, is kept until the endpoint answers
+for it, so every retry resends it byte for byte: neither the request expressions nor the codec run
+again, including volatile calls such as `uuid_v4()`. Retained bodies occupy node memory, which
+memory pressure accounts for, until their requests complete.
+
+The emitter sends the requests of the records a flush releases one at a time and in order, and
+waits for each response's headers before it sends the next. The client's `timeout_ms` bounds each
+attempt. Complete `2xx` response headers deliver the record, and the response body is never read.
+No redirect is followed. Any other response, and any request that fails before its response
+headers arrive, fails the attempt: the emitter retries that request and every later one on its
+declared retry policy, and keeps their upstream acknowledgements alive until they complete.
 
 `ALTER EMITTER ... SET TO HTTP` restates the complete method, path, mode and body selection.
 `SET CLIENT` changes the referenced client, `SET MODE` changes the retry policy, and `SET ENCODE

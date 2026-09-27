@@ -94,6 +94,17 @@ pub(super) struct RejectedEmitterRecord {
     pub(super) structured_error: Option<StructuredMessageError>,
 }
 
+/// What the message error of a record rejected after its batch was admitted reads besides the
+/// error itself.
+pub(super) struct RejectedRecordInput {
+    /// The record the error handler reads as `input`.
+    pub(super) record: RuntimeRow,
+    /// The attempted output the error handler reads as `partial_output`, when there is one.
+    pub(super) partial_output: Option<RuntimeRecordBatch>,
+    /// The materialized state the error handler reads.
+    pub(super) materialized_state: HashMap<String, RuntimeValue>,
+}
+
 pub(super) type EmitterPublishResult = Result<Option<PublishReport>, EmitterPublishFailure>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -842,12 +853,11 @@ pub(super) async fn finish_rejected_records(
                 std::iter::empty(),
             )
         };
-        let record = batch
-            .relay_batch()
-            .runtime_row(row_index)
-            .map_err(|reason| {
-                Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(reason)
-            })?;
+        let RejectedRecordInput {
+            record,
+            partial_output,
+            materialized_state,
+        } = batch.rejected_record_input(row_index)?;
         let key = batch
             .relay_batch()
             .keys
@@ -881,8 +891,8 @@ pub(super) async fn finish_rejected_records(
                         policy: &context.error_policies.message,
                         message: RelayMessage { key, record, acks },
                         error,
-                        partial_output: None,
-                        materialized_state: HashMap::default(),
+                        partial_output,
+                        materialized_state,
                         ingest_metadata: None,
                         execution_now,
                     }),
