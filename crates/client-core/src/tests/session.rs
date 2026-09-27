@@ -19,7 +19,7 @@ use std::{
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_models::{
     ClusterNodeName, CommandExecutionReference, DomainPace, DomainStatus, FieldName, ParseAsType,
-    RelayName, SchemaField, SubscriptionName, TransactionInspection,
+    PlacementPolicy, RelayName, SchemaField, SubscriptionName, TransactionInspection,
     TransactionInspectionRejection, TransactionInspectionTarget,
 };
 use tokio::{
@@ -44,13 +44,15 @@ use crate::{
     Client, ClientError, CommandDisposition, ConnectOptions, DomainName, Leadership, OutcomeOrigin,
     ResourceUploadIdentity, ResourceUploadOutcome, SubscriptionEvent, SubscriptionRequest,
     wire::{
-        ClientFrame, ClientMessage, ClientRequest, DomainInfo, DomainList, DomainsObserved,
-        EncodedFrame, InspectionOutcome, LeaderEndpoints, LeaderRedirect, LeadershipObserved,
-        NoticeLevel, Reply, ReplyBody, ReplyDelivery, RequestId, RowSchema, ServerFrame,
-        ServerNotice, SessionLimitSettings, SessionLimits, SubscribeDisposition, SubscribeOutcome,
-        SubscriptionEndReason, SubscriptionEnded, SubscriptionHandle, SubscriptionOpened,
-        SubscriptionRowsEncoder, SubscriptionType, UploadDisposition, UploadFailure, UploadFrame,
-        UploadMessage, UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
+        Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection,
+        ChoiceStatus, ChoiceTarget, ChoiceValue, ClientFrame, ClientMessage, ClientRequest,
+        DomainInfo, DomainList, DomainPaceChoice, DomainsObserved, EncodedFrame, InspectionOutcome,
+        LeaderEndpoints, LeaderRedirect, LeadershipObserved, NoticeLevel, Reply, ReplyBody,
+        ReplyDelivery, RequestId, RowSchema, ServerFrame, ServerNotice, SessionLimitSettings,
+        SessionLimits, SubscribeDisposition, SubscribeOutcome, SubscriptionEndReason,
+        SubscriptionEnded, SubscriptionHandle, SubscriptionOpened, SubscriptionRowsEncoder,
+        SubscriptionType, UploadDisposition, UploadFailure, UploadFrame, UploadMessage,
+        UploadReply, UploadReplyFrame, UploadStart, VerifiedFrame,
         grpc::{
             EXCHANGE_PATH, SERVICE_NAME, ServerExchangeCodec, ServerUploadCodec,
             UPLOAD_RESOURCE_PATH,
@@ -917,6 +919,66 @@ async fn a_domain_list_recovers_after_its_session_closes() {
             .assured("the recovered listing succeeds"),
         tenant_domains()
     );
+}
+
+#[tokio::test]
+async fn a_typed_choice_lookup_preserves_dependencies_and_returns_typed_values() {
+    let mut server = TestServer::start().await;
+    let client = server.connect().await;
+    let mut exchange = server.next_exchange().await;
+    let lookup = ChoiceLookupRequest::new(
+        ChoiceTarget::PlacementPolicy,
+        vec![ChoiceSelection {
+            value: ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+        }],
+        "colo".to_string(),
+    )
+    .with_page(2, None)
+    .assured("two choices fit the bounded page size");
+    let choice_client = client.clone();
+    let choices = tokio::spawn(async move { choice_client.lookup_choices(lookup).await });
+
+    let request = exchange.next_request().await;
+    let ClientRequest::Choice(lookup) = request.request else {
+        panic!("the client sends a typed choice lookup");
+    };
+    assert_eq!(lookup.target(), ChoiceTarget::PlacementPolicy);
+    assert_eq!(
+        lookup.dependencies(),
+        [ChoiceSelection {
+            value: ChoiceValue::DomainPace(DomainPaceChoice::Paced),
+        }]
+    );
+    assert_eq!(lookup.search(), "colo");
+    exchange
+        .reply(
+            request.request_id,
+            ReplyBody::Choice(ChoiceOutcome {
+                status: ChoiceStatus::Ready,
+                choices: vec![Choice {
+                    value: ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation),
+                    presentation: ChoicePresentation {
+                        label: "PREFER COLOCATION".to_string(),
+                        detail: Some("Prefer placing domain work together".to_string()),
+                        group: Some("Placement".to_string()),
+                    },
+                }],
+                page_cursor: Some("next".to_string()),
+            }),
+            &limits(),
+        )
+        .await;
+
+    let outcome = within_deadline(choices)
+        .await
+        .assured("the choice task finishes")
+        .assured("the choice lookup succeeds");
+    assert_eq!(outcome.status, ChoiceStatus::Ready);
+    assert_eq!(
+        outcome.choices[0].value,
+        ChoiceValue::PlacementPolicy(PlacementPolicy::PreferColocation)
+    );
+    assert_eq!(outcome.page_cursor.as_deref(), Some("next"));
 }
 
 #[cfg(feature = "autocomplete")]

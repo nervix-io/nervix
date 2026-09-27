@@ -5,6 +5,10 @@ use std::{collections::BTreeSet, fmt::Debug};
 use error_stack::Report;
 
 use crate::{
+    choice::{
+        ALL_CHOICE_PLACEMENT_POLICIES, ALL_CHOICE_STATUSES, ALL_CHOICE_TARGETS,
+        ALL_DOMAIN_PACE_CHOICES,
+    },
     codec::UndeclaredEnumValue,
     command::{ALL_EXECUTION_REFERENCE_CONFLICTS, ALL_UNKNOWN_OUTCOME_CAUSES},
     common::{ALL_MODEL_KINDS, ALL_OUTCOME_ORIGINS},
@@ -77,6 +81,13 @@ where
 
 #[test]
 fn every_enum_maps_exactly_to_its_schema_enum() {
+    assert_exact_mapping(ALL_CHOICE_TARGETS, wire::ChoiceTarget::ENUM_VALUES);
+    assert_exact_mapping(ALL_DOMAIN_PACE_CHOICES, wire::DomainPaceChoice::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_CHOICE_PLACEMENT_POLICIES,
+        wire::PlacementPolicyChoice::ENUM_VALUES,
+    );
+    assert_exact_mapping(ALL_CHOICE_STATUSES, wire::ChoiceStatus::ENUM_VALUES);
     assert_exact_mapping(ALL_OUTCOME_ORIGINS, wire::OutcomeOrigin::ENUM_VALUES);
     assert_exact_mapping(ALL_MODEL_KINDS, wire::ModelKind::ENUM_VALUES);
     assert_exact_mapping(
@@ -132,6 +143,22 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
 
 #[test]
 fn every_undeclared_enum_byte_is_refused() {
+    assert_undeclared_refused::<crate::ChoiceTarget, _>(
+        wire::ChoiceTarget::ENUM_MAX,
+        wire::ChoiceTarget,
+    );
+    assert_undeclared_refused::<crate::DomainPaceChoice, _>(
+        wire::DomainPaceChoice::ENUM_MAX,
+        wire::DomainPaceChoice,
+    );
+    assert_undeclared_refused::<nervix_models::PlacementPolicy, _>(
+        wire::PlacementPolicyChoice::ENUM_MAX,
+        wire::PlacementPolicyChoice,
+    );
+    assert_undeclared_refused::<crate::ChoiceStatus, _>(
+        wire::ChoiceStatus::ENUM_MAX,
+        wire::ChoiceStatus,
+    );
     assert_undeclared_refused::<crate::OutcomeOrigin, _>(
         wire::OutcomeOrigin::ENUM_MAX,
         wire::OutcomeOrigin,

@@ -21,6 +21,7 @@ include!(concat!(env!("OUT_DIR"), "/flatbuffers/session_module.rs"));
 
 use generated::nervix::session as wire;
 
+mod choice;
 mod codec;
 mod command;
 mod common;
@@ -43,6 +44,10 @@ mod transfer;
 mod upload;
 pub mod websocket;
 
+pub use choice::{
+    Choice, ChoiceLookupRequest, ChoiceOutcome, ChoicePresentation, ChoiceSelection, ChoiceStatus,
+    ChoiceTarget, ChoiceValue, DomainPaceChoice,
+};
 pub use codec::{WireDecodeError, WireEncodeError};
 pub use command::{
     AttachDisposition, AttachOutcome, CommandDisposition, CommandOutcome,

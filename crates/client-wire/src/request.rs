@@ -9,6 +9,7 @@ use nervix_models::{
 };
 
 use crate::{
+    choice::ChoiceLookupRequest,
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError, wire_size},
     common::{RequestId, WireValueError},
     frame::{ClientFrame, EncodedFrame, VerifiedFrame},
@@ -151,6 +152,7 @@ pub struct CancelRequest {
 pub enum ClientRequest {
     Command(CommandRequest),
     Suggest(SuggestRequest),
+    Choice(ChoiceLookupRequest),
     ListDomains,
     SelectDomain(SelectDomainRequest),
     AttachTransaction(AttachTransactionRequest),
@@ -246,6 +248,10 @@ impl ClientRequest {
                 );
                 EncodedUnion::new(wire::ClientRequest::SuggestRequest, request)
             }
+            Self::Choice(choice) => EncodedUnion::new(
+                wire::ClientRequest::ChoiceLookupRequest,
+                choice.encode(encoder)?,
+            ),
             Self::ListDomains => EncodedUnion::new(
                 wire::ClientRequest::ListDomainsRequest,
                 wire::ListDomainsRequest::create(encoder.fbb(), &wire::ListDomainsRequestArgs {}),
@@ -356,6 +362,10 @@ impl ClientRequest {
                         })
                     })?;
                 Self::Suggest(request)
+            }
+            wire::ClientRequest::ChoiceLookupRequest => {
+                let choice = request_member(message.request_as_choice_lookup_request());
+                Self::Choice(ChoiceLookupRequest::decode(decoder, choice)?)
             }
             wire::ClientRequest::ListDomainsRequest => Self::ListDomains,
             wire::ClientRequest::SelectDomainRequest => {

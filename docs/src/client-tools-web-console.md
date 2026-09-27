@@ -46,13 +46,42 @@ The console is one screen with three regions:
 - the **execution graph** in the upper right
 - the **REPL** below it, which also hosts any relay subscriptions you open
 
-The top bar carries the websocket connection state, the domain lifecycle button, and the theme
-picker.
+The top bar carries the websocket connection state, the global **Create** menu, the domain
+lifecycle button, and the theme picker.
 
 Sidebar entries are counted per kind and each group collapses. Selecting an endpoint runs its
 `DESCRIBE` in the REPL; selecting a resource does the same and opens its version dialog.
 The **Cluster** footer stays independent of the selected domain: it reports the number of running
 domains, non-relay graph nodes, and relays across the current cluster graph.
+
+## Creating Domains, Users, And Resources
+
+The top bar's **Create** menu opens keyboard-accessible forms for domains, users, and resource
+catalogs. The resource group in the sidebar also provides a contextual create action. A form keeps
+its unfinished draft when it closes, restores focus to the action that opened it, reports
+validation and server failures inline, and shows the canonical NSPL statement before submission.
+The domain form supports paced and unpaced clocks, period and skew for a paced clock, placement
+policy, and `IF NOT EXISTS`. User and resource forms support their corresponding names and the
+same creation modifier.
+
+Pace and placement are typed choices supplied by the session server. They are searchable and
+paged independently, and the placement lookup carries the selected pace as a typed dependency.
+Loading, no-match, stale-context, and lookup-failure states remain distinct. An edit, dialog close,
+or replacement session makes an older reply ineligible to change the form.
+
+A resource draft captures the selected domain the first time it opens. If the console later
+selects another domain, reopening the retained draft keeps its captured scope and offers **Use
+current domain** as an explicit change. Domain and user creation are cluster scoped. Passwords are
+sent in the canonical command but appear as eight asterisks in both the preview and REPL; the
+cleartext value is never added to terminal history.
+
+Submitting uses the same durable command path as the REPL. The form therefore keeps the command's
+execution reference through redirects and reconnects, uses the attached transaction's expected
+position, and reports **Editing**, **Submitting**, **Queued until reconnect**, **Queued in
+transaction**, **Completed**, or **Failed** from the correlated outcome. A queued transaction
+operation is not presented as externally complete. A successful standalone resource create opens
+the existing resource version dialog, where upload identity and completion continue to be owned by
+the upload workflow.
 
 ## The Execution Graph
 

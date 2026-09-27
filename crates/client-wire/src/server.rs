@@ -8,6 +8,7 @@ use error_stack::Report;
 use meticulous::OptionExt as _;
 
 use crate::{
+    choice::ChoiceOutcome,
     codec::{Decoder, EncodedUnion, Encoder, WireDecodeError, WireEncodeError},
     command::{AttachOutcome, CommandOutcome},
     common::RequestId,
@@ -34,6 +35,7 @@ pub enum ReplyBody {
     Command(Box<CommandOutcome>),
     Attach(AttachOutcome),
     Suggest(SuggestOutcome),
+    Choice(ChoiceOutcome),
     DomainList(DomainList),
     DomainSelection(DomainSelection),
     Inspection(InspectionOutcome),
@@ -69,6 +71,7 @@ impl Reply {
             ReplyBody::Command(outcome) => outcome.encode_body(&mut encoder)?,
             ReplyBody::Attach(outcome) => outcome.encode_body(&mut encoder)?,
             ReplyBody::Suggest(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::Choice(outcome) => outcome.encode_body(&mut encoder)?,
             ReplyBody::DomainList(list) => list.encode_body(&mut encoder)?,
             ReplyBody::DomainSelection(selection) => selection.encode_body(&mut encoder)?,
             ReplyBody::Inspection(outcome) => outcome.encode_body(&mut encoder)?,
@@ -114,6 +117,10 @@ impl Reply {
             wire::ReplyBody::SuggestOutcome => ReplyBody::Suggest(SuggestOutcome::decode(
                 decoder,
                 reply_member(reply.body_as_suggest_outcome()),
+            )?),
+            wire::ReplyBody::ChoiceOutcome => ReplyBody::Choice(ChoiceOutcome::decode(
+                decoder,
+                reply_member(reply.body_as_choice_outcome()),
             )?),
             wire::ReplyBody::DomainList => ReplyBody::DomainList(DomainList::decode(
                 decoder,

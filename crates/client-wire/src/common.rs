@@ -59,6 +59,8 @@ pub enum WireValueError {
     CursorOffCharBoundary { cursor: usize, length: usize },
     #[error("completion page size {size} must be between 1 and 100")]
     InvalidCompletionPageSize { size: u16 },
+    #[error("choice page size {size} must be between 1 and 100")]
+    InvalidChoicePageSize { size: u16 },
     #[error("{applied} applied operations exceed {accepted} accepted operations")]
     AppliedOperationsExceedAccepted { applied: usize, accepted: usize },
 }

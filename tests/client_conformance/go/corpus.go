@@ -27,6 +27,51 @@ func orNone(value []byte) string {
 	return string(value)
 }
 
+func optionalText(value []byte) string {
+	if value == nil {
+		return "none"
+	}
+	return text(value)
+}
+
+func choiceValue(kind session.ChoiceValue, table tableOf) (string, error) {
+	switch kind {
+	case session.ChoiceValueDomainPaceVariant:
+		value := new(session.DomainPaceVariant)
+		value.Init(table.Bytes, table.Pos)
+		pace := value.Value()
+		if pace == nil {
+			return "", errors.New("a domain pace choice has no value")
+		}
+		return "pace:" + session.EnumNamesDomainPaceChoice[*pace], nil
+	case session.ChoiceValuePlacementPolicyVariant:
+		value := new(session.PlacementPolicyVariant)
+		value.Init(table.Bytes, table.Pos)
+		policy := value.Value()
+		if policy == nil {
+			return "", errors.New("a placement choice has no value")
+		}
+		return "placement:" + session.EnumNamesPlacementPolicyChoice[*policy], nil
+	case session.ChoiceValueDomainChoiceReference:
+		value := new(session.DomainChoiceReference)
+		value.Init(table.Bytes, table.Pos)
+		return "domain:" + string(value.Domain()), nil
+	case session.ChoiceValueResourceChoiceReference:
+		value := new(session.ResourceChoiceReference)
+		value.Init(table.Bytes, table.Pos)
+		return "resource:" + string(value.Resource()), nil
+	case session.ChoiceValueModelChoiceReference:
+		value := new(session.ModelChoiceReference)
+		value.Init(table.Bytes, table.Pos)
+		node := value.Node(nil)
+		if node == nil || node.Kind() == nil {
+			return "", errors.New("a model choice has no typed node reference")
+		}
+		return fmt.Sprintf("model:%s/%s", strings.ToLower(session.EnumNamesModelKind[*node.Kind()]), node.Name()), nil
+	}
+	return "", fmt.Errorf("undeclared choice value %d", kind)
+}
+
 func frameRoot(frame []byte, identifier string) error {
 	if len(frame) < 8 || string(frame[4:8]) != identifier {
 		return fmt.Errorf("the frame lacks the %s identifier", identifier)
@@ -212,6 +257,39 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 					edit.Start(), edit.End(), text(edit.Replacement())))
 			}
 			return lines, nil
+		case session.ReplyBodyChoiceOutcome:
+			outcome := new(session.ChoiceOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			status := outcome.Status()
+			if status == nil {
+				return nil, errors.New("a choice reply has no status")
+			}
+			lines := []string{fmt.Sprintf("REPLY %d CHOICE status=%s cursor=%s", id,
+				session.EnumNamesChoiceStatus[*status], orNone(outcome.PageCursor()))}
+			for index := 0; index < outcome.ChoicesLength(); index++ {
+				choice := new(session.Choice)
+				if !outcome.Choices(choice, index) {
+					return nil, errors.New("a choice is missing")
+				}
+				var selected tableOf
+				if err := union(choice.Value, &selected); err != nil {
+					return nil, err
+				}
+				typed, err := choiceValue(choice.ValueType(), selected)
+				if err != nil {
+					return nil, err
+				}
+				presentation := choice.Presentation(nil)
+				if presentation == nil {
+					return nil, errors.New("a choice has no presentation")
+				}
+				lines = append(lines, fmt.Sprintf("CHOICE value=%s label=%s detail=%s group=%s",
+					typed, text(presentation.Label()), optionalText(presentation.Detail()),
+					optionalText(presentation.Group())))
+			}
+			return lines, nil
 		}
 		return nil, fmt.Errorf("the corpus holds no %s reply", value.BodyType())
 	case session.ServerBodySubscriptionRows:
@@ -307,6 +385,33 @@ func clientLines(frame []byte) ([]string, error) {
 			"REQUEST %d SUGGEST input=%s cursor=%d domain=%s page_size=%d continuation=%s",
 			id, text(suggest.Input()), suggest.Cursor(), orNone(suggest.Domain()),
 			suggest.PageSize(), orNone(suggest.Continuation()))}, nil
+	case session.ClientRequestChoiceLookupRequest:
+		lookup := new(session.ChoiceLookupRequest)
+		lookup.Init(table.Bytes, table.Pos)
+		target := lookup.Target()
+		if target == nil {
+			return nil, errors.New("a choice lookup has no target")
+		}
+		dependencies := make([]string, 0, lookup.DependenciesLength())
+		for index := 0; index < lookup.DependenciesLength(); index++ {
+			selection := new(session.ChoiceSelection)
+			if !lookup.Dependencies(selection, index) {
+				return nil, errors.New("a choice dependency is missing")
+			}
+			var selected tableOf
+			if err := union(selection.Value, &selected); err != nil {
+				return nil, err
+			}
+			value, err := choiceValue(selection.ValueType(), selected)
+			if err != nil {
+				return nil, err
+			}
+			dependencies = append(dependencies, value)
+		}
+		return []string{fmt.Sprintf(
+			"REQUEST %d CHOICE target=%s dependencies=[%s] search=%s page_size=%d cursor=%s",
+			id, session.EnumNamesChoiceTarget[*target], strings.Join(dependencies, ","),
+			text(lookup.Search()), lookup.PageSize(), orNone(lookup.PageCursor()))}, nil
 	case session.ClientRequestCancelRequest:
 		cancel := new(session.CancelRequest)
 		cancel.Init(table.Bytes, table.Pos)
