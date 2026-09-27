@@ -6531,6 +6531,7 @@ dependencies = [
  "meticulous",
  "nervix-client-core",
  "nervix-models",
+ "serde_json",
  "strum 0.26.3",
  "tokio",
  "tokio-util",

@@ -262,6 +262,11 @@ required-features = ["benchmarks"]
 
 [[bench]]
 harness = false
+name = "client_wire_cost"
+required-features = ["benchmarks"]
+
+[[bench]]
+harness = false
 name = "wasm_checkpoint"
 required-features = ["benchmarks"]
 
