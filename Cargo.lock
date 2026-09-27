@@ -4653,10 +4653,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bbbeb23ee808258cef2c5585ff0dc8e41da21a8dde943f6b290da153a042a96"
 dependencies = [
  "futures",
+ "js-sys",
  "or_poisoned",
  "pin-project-lite",
  "serde",
  "throw_error",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -7018,6 +7020,7 @@ name = "nervix-dataflow-graph"
 version = "0.1.0-dev"
 dependencies = [
  "ascii-dag",
+ "error-stack",
  "serde",
  "serde_json",
  "strum 0.26.3",
@@ -7208,6 +7211,7 @@ version = "0.1.0-dev"
 dependencies = [
  "ariadne 0.5.1",
  "clap",
+ "error-stack",
  "ignore",
  "meticulous",
  "nervix-models",
@@ -7533,6 +7537,7 @@ dependencies = [
 name = "nervix-web-console"
 version = "0.1.0-dev"
 dependencies = [
+ "any_spawner",
  "base64 0.22.1",
  "bytes",
  "console_error_panic_hook",
@@ -10745,6 +10750,7 @@ dependencies = [
  "futures",
  "gloo-net 0.6.0",
  "http",
+ "inventory",
  "js-sys",
  "or_poisoned",
  "pin-project-lite",

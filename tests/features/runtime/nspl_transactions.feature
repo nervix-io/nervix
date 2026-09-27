@@ -341,7 +341,7 @@ Feature: NSPL transactions
       """
     Then the last command error contains
       """
-      DESCRIBE TRANSACTION must be executed separately
+      DESCRIBE TRANSACTION and SHOW TRANSACTIONS must be executed separately
       """
     When client "owner" fails to execute these NSPL commands
       """
@@ -1142,7 +1142,6 @@ Feature: NSPL transactions
 
     Examples:
       | statement                                                 | error                                                       |
-      | SHOW TRANSACTIONS;                                        | cannot be queued in a transaction                           |
       | DESCRIBE DOMAIN;                                          | cannot be queued in a transaction                           |
       | CREATE DOMAIN transaction_extra_domain;                   | CREATE DOMAIN cannot be queued in a transaction             |
       | CREATE USER transaction_user WITH PASSWORD 'secret';      | CREATE USER cannot be queued in a transaction               |
@@ -1150,6 +1149,47 @@ Feature: NSPL transactions
       | UPLOAD RESOURCE local_bundle VERSION '/tmp/local_bundle'; | client-local commands are not allowed                       |
       | CORDON NODE node-1;                                       | cannot be queued in a transaction                           |
       | DROP NODE node-1;                                         | cannot be queued in a transaction                           |
+
+  Scenario Outline: SHOW TRANSACTIONS reads the attached transaction without changing its queue
+    Given a <cluster_size> node nervix cluster is started
+    And the active domain is "{{domain}}"
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    Given client "owner" is connected to the leader node
+    When client "owner" executes these NSPL commands
+      """
+      BEGIN;
+      CREATE SCHEMA inspected_event (
+        value STRING
+      );
+      """
+    When client "owner" executes these NSPL commands
+      """
+      SHOW TRANSACTIONS;
+      """
+    Then the last command output contains
+      """
+      domain={{domain}} state=OPEN pending=1
+      """
+    When client "owner" executes these NSPL commands
+      """
+      COMMIT;
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      SHOW CREATE SCHEMA inspected_event;
+      """
+    Then the last command output contains
+      """
+      CREATE SCHEMA inspected_event (
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
 
   @transaction_queue_preflight
   Scenario Outline: Queued statements are preflighted against the transaction prefix

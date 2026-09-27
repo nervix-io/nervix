@@ -116,7 +116,7 @@ async fn encode_pending_broker_payloads(
     pending_rows: Vec<usize>,
 ) -> EmitterRuntimeResult<Vec<PendingRowPayload>> {
     if codec.requires_blocking_encode() {
-        let arrow_batch = batch.batch.batch.clone();
+        let arrow_batch = batch.relay_batch().batch.clone();
         let codec_name = codec.name.as_str().to_string();
         return tokio::task::spawn_blocking(move || {
             let encoder = codec.batch_encoder(&arrow_batch)?;
@@ -143,12 +143,14 @@ async fn encode_pending_broker_payloads(
         });
     }
 
-    let encoder = codec.batch_encoder(&batch.batch.batch).map_err(|error| {
-        Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
-            "emitter '{}' failed to initialize columnar encoding: {error}",
-            context.emitter.as_str()
-        ))
-    })?;
+    let encoder = codec
+        .batch_encoder(&batch.relay_batch().batch)
+        .map_err(|error| {
+            Report::new(EmitterRuntimeError::EncodeBatch).attach_printable(format!(
+                "emitter '{}' failed to initialize columnar encoding: {error}",
+                context.emitter.as_str()
+            ))
+        })?;
     Ok(pending_rows
         .into_iter()
         .map(|row_index| PendingRowPayload::encode(&encoder, row_index))
@@ -164,7 +166,7 @@ async fn encode_broker_records(
     let mut rejected = Vec::new();
     for (batch_index, batch) in batches.iter().enumerate() {
         tokio::task::consume_budget().await;
-        let row_count = batch.batch.batch.batch().num_rows();
+        let row_count = batch.relay_batch().batch.batch().num_rows();
         let pending_rows = (0..row_count)
             .filter(|row_index| !batch.is_delivered(*row_index))
             .collect::<Vec<_>>();
@@ -178,7 +180,7 @@ async fn encode_broker_records(
         for PendingRowPayload { row_index, payload } in payloads {
             tokio::task::consume_budget().await;
             let key = batch
-                .batch
+                .relay_batch()
                 .keys
                 .get(row_index)
                 .ok_or_else(|| {
@@ -218,7 +220,7 @@ async fn encode_broker_records(
                 payload,
                 headers,
                 message_group,
-                execution_now: batch.execution_now,
+                execution_now: batch.execution_now(),
             });
         }
     }
@@ -372,9 +374,9 @@ async fn pack_batch_records(
             continue;
         }
         carriers.push(PackingCarrier {
-            source_relay: batch.source_relay.clone(),
-            branch_key: batch.batch.key.clone(),
-            batch: batch.batch.batch.clone(),
+            source_relay: batch.source_relay().clone(),
+            branch_key: batch.relay_batch().key.clone(),
+            batch: batch.relay_batch().batch.clone(),
             rows,
         });
     }
@@ -410,7 +412,7 @@ async fn pack_batch_records(
                     envelope.key,
                     payload,
                     envelope.headers,
-                    batch.execution_now,
+                    batch.execution_now(),
                 );
                 records.push(match envelope.message_group {
                     Some(message_group) => record.with_message_group(message_group),
@@ -424,7 +426,7 @@ async fn pack_batch_records(
                             .assured("packing positions refer to the source batches it received");
                         BatchMemberOutcome {
                             position,
-                            occurred_at: batch.execution_now,
+                            occurred_at: batch.execution_now(),
                         }
                     })
                     .collect();
@@ -449,7 +451,7 @@ async fn pack_batch_records(
                     position,
                     reason: message.clone(),
                     structured_error: Some(structured_message_error(
-                        batch.execution_now,
+                        batch.execution_now(),
                         MessageErrorCode::Validation,
                         message,
                         MessageErrorOperation::Encode,
@@ -471,7 +473,7 @@ async fn pack_batch_records(
                         .get(position.batch_index)
                         .assured("packing positions refer to the source batches it received");
                     let mut member_error = shared.clone();
-                    member_error.occurred_at = batch.execution_now;
+                    member_error.occurred_at = batch.execution_now();
                     rejected.push(RejectedEmitterRecord {
                         position,
                         reason: shared.message.clone(),
@@ -517,7 +519,7 @@ fn container_failure(
         "messages"
     };
     structured_message_error(
-        batch.execution_now,
+        batch.execution_now(),
         code,
         format!(
             "emitter '{}' codec '{}' {error} for a batch of {member_count} {noun}",
@@ -537,7 +539,7 @@ fn batch_envelope(
     row_index: usize,
 ) -> EmitterRuntimeResult<Result<BatchEnvelope, OrderingGroupError>> {
     let key = batch
-        .batch
+        .relay_batch()
         .keys
         .get(row_index)
         .ok_or_else(|| {

@@ -1158,11 +1158,11 @@ impl SessionServiceImpl {
         // A request that only inspects a transaction reads it rather than changing it, so it
         // takes none of the durable admission, replay and queue-position fencing a transaction
         // request needs, even while the session has one attached.
-        let inspects_transaction_only = matches!(
+        let reads_transaction_state_only = matches!(
             client_statements.as_slice(),
-            [parsed] if parsed.statement.inspects_transaction()
+            [parsed] if parsed.statement.reads_transaction_state()
         );
-        let is_transaction_request = !inspects_transaction_only
+        let is_transaction_request = !reads_transaction_state_only
             && (expected_transaction_position.is_some()
                 || subscriptions.transaction_active()
                 || client_statements.iter().any(|parsed| {
