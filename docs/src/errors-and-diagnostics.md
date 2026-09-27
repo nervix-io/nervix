@@ -93,6 +93,14 @@ retain the selected entity or placement so an operator can correct the request. 
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
+Node startup validates execution memory limits before admitting any work. A Commands budget must
+hold both the bounded resident replication window and one bounded normalized command-state write;
+the larger requirement controls admission. Arithmetic that cannot represent either requirement is
+a typed execution-configuration failure. A budget below the selected requirement names the memory
+class, operation, configured budget, and required bytes, so the node fails startup with an
+actionable diagnostic instead of discovering insufficient storage capacity while applying a
+transaction.
+
 ## Runtime Message Errors
 
 A record-specific failure can become a structured message error. It carries a stable reference,

@@ -155,6 +155,12 @@ if let Some(inspection) = &described.inspection {
 }
 ```
 
+The rendered message and `CommandOutcome::inspection` describe the same complete value. The server
+does not paginate or truncate a large report, so callers that inspect transactions with many
+operations or large affected graphs should budget for one response proportional to the expanded
+report. A successful result always includes all operations, execution steps, topology, and recorded
+outcomes.
+
 `CommandOutcome::transaction` keeps describing this session's own binding, so inspecting another
 transaction by id changes neither `transaction_status()` nor the selected domain. An inspection
 consumes no queue position: the next queued statement receives the operation number it would have

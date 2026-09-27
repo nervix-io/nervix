@@ -44,6 +44,12 @@ Current session behavior:
 
 Sessions are runtime-facing protocol interactions, not part of the persisted namespace model.
 
+A terminal reply may hold up to 64 MiB, including one string of that size. A reply above the 4 MiB
+frame bound is carried as ordered transfer parts that each fit one frame, then validated and
+reassembled before the client exposes it. This is how a rendered transaction report larger than one
+frame reaches the Rust client, CLI, and browser without truncation. A reply above the transfer bound
+is rejected whole; no client receives a successful partial result.
+
 ## Subscription Lifecycle
 
 A subscription is identified by its name together with the generation its session assigns when it

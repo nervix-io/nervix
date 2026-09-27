@@ -1,5 +1,9 @@
-use std::{io::Write as _, num::NonZeroUsize};
+use std::{
+    io::Write as _,
+    num::{NonZeroU32, NonZeroUsize},
+};
 
+use meticulous::OptionExt as _;
 use ubyte::ByteUnit;
 
 use crate::{
@@ -113,8 +117,12 @@ async fn a_management_budget_below_one_event_fails_to_start() {
 async fn a_commands_budget_below_the_resident_replication_window_fails_to_start() {
     let error = Executor::new(ExecutionConfig {
         budgets: MemoryBudgets {
-            commands: ByteUnit::Mebibyte(8),
+            commands: ByteUnit::Mebibyte(16),
             ..MemoryBudgets::default()
+        },
+        limits: OperationLimits {
+            resident_replication_batches: NonZeroU32::new(8).assured("eight is nonzero"),
+            ..OperationLimits::default()
         },
         ..ExecutionConfig::default()
     })
@@ -124,8 +132,29 @@ async fn a_commands_budget_below_the_resident_replication_window_fails_to_start(
         ExecutionConfigError::BudgetBelowOperation {
             class: "commands",
             operation: "resident replication batches beside one being encoded",
-            budget: ByteUnit::Mebibyte(8).as_u64(),
-            required: ByteUnit::Mebibyte(10).as_u64(),
+            budget: ByteUnit::Mebibyte(16).as_u64(),
+            required: ByteUnit::Mebibyte(18).as_u64(),
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_commands_budget_below_one_normalized_state_write_fails_to_start() {
+    let error = Executor::new(ExecutionConfig {
+        budgets: MemoryBudgets {
+            commands: ByteUnit::Mebibyte(15),
+            ..MemoryBudgets::default()
+        },
+        ..ExecutionConfig::default()
+    })
+    .expect_err("a commands budget below one normalized state write is rejected");
+    assert_eq!(
+        *error.current_context(),
+        ExecutionConfigError::BudgetBelowOperation {
+            class: "commands",
+            operation: "normalized command state storage",
+            budget: ByteUnit::Mebibyte(15).as_u64(),
+            required: ByteUnit::Mebibyte(16).as_u64(),
         }
     );
 }
