@@ -6848,6 +6848,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -9060,8 +9061,7 @@ dependencies = [
 [[package]]
 name = "pulsar"
 version = "6.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a56d908fe26714fbd8dffbe6a69b39ea09fb28af14fdd8f971548d2906346b3"
+source = "git+https://github.com/nervix-io/pulsar-rs.git?branch=nervix-max-message-size#37f70aa16d3a6cc0493d25e0ca73c0e7b0c07f80"
 dependencies = [
  "async-channel",
  "async-trait",

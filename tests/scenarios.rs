@@ -17842,6 +17842,22 @@ async fn given_emission_target_is_observed(
         .await;
 }
 
+#[given(expr = "Pulsar topic {string} accepts messages of at most {int} bytes")]
+async fn given_pulsar_topic_accepts_messages_of_at_most(
+    world: &mut ScenarioWorld,
+    topic: String,
+    max_message_size: u32,
+) {
+    let topic = expand_placeholders(world, &topic);
+    world
+        .cluster()
+        .limit_pulsar_topic_message_size(&topic, max_message_size)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to limit the message size of Pulsar topic '{topic}': {error}")
+        });
+}
+
 #[given(expr = "Syslog UDP emission endpoint {string} is observed")]
 async fn given_syslog_udp_emission_endpoint_is_observed(world: &mut ScenarioWorld, addr: String) {
     initialize_scenario_identity(world);

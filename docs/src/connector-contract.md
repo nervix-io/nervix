@@ -222,10 +222,13 @@ Where it can learn that limit it measures the complete message and rejects a rec
 fit before writing it, with a reason naming the size and the limit, so the rejection follows the
 message error policy instead of failing the transport: the MQTT sink measures the `PUBLISH` packet
 against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
-express, the SQS sink counts attributes and the FIFO group against 256 KiB, and the Kafka producer
-and the NATS client check `message.max.bytes` and `max_payload` with the key and headers they
-write. A limit the connector cannot learn stays with the destination, and whatever the destination
-reports when a message exceeds it is classified like any other publish failure.
+express, the SQS sink counts attributes and the FIFO group against 256 KiB, and the Kafka producer,
+the NATS client and the Pulsar client check `message.max.bytes`, `max_payload` and the
+`maxMessageSize` of the connection's `CommandConnected` with the key, headers or message metadata
+they write. A limit the connector cannot learn stays with the destination, and whatever the
+destination reports when a message exceeds it is classified like any other publish failure: a
+Pulsar broker answers a message above a topic's own `maxMessageSize` policy with `NotAllowedError`,
+a definitive rejection of that message.
 
 The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
 key, headers, ordering group and member positions, in the emitter buffer beside the batches the
@@ -277,6 +280,13 @@ sequenceDiagram
   committed partition schedule. The leader observes partition topology and commits assignments;
   executing sources follow that schedule. Offset snapshots can lag a crash, so this mode remains
   at least once. [Kafka ingestion](./ingestors.md#kafka) defines the recovery details.
+- **Pulsar client.** The Pulsar source and sink build on Nervix's fork of `pulsar-rs`,
+  `nervix-io/pulsar-rs`, because the released crate discards `CommandConnected`. The fork keeps each
+  connection's announced `maxMessageSize`, refuses a message whose serialized metadata and payload
+  exceed it before writing it, as the Java client does, and resolves a send the broker answers with
+  `SendError` with that error's server code and reason. The broker itself only closes the
+  connection on a frame larger than the maximum plus 10 KiB of framing, which would fail every
+  other message in flight on it.
 - **Iceberg sink.** It stages Arrow data locally, prepares data files, and publishes a catalog
   update on its explicit commit cadence or maximum size. Staging does not complete an ACK;
   successful catalog commit does. The sink retains ACKs and its client while a failed commit is
