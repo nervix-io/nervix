@@ -18,9 +18,8 @@ use nervix_models::{AlterRelay, DropModel};
 use nervix_models::{
     ClusterSchedule, CreateAvroWireSchema, CreateDeduplicator, CreateEmitter, CreateGenerator,
     CreateIngestor, CreateJunction, CreatePlacement, CreateReingestor, CreateRelay,
-    CreateReorderer, CreateSchema, DomainName, IngestSource, IngestorName, Model, ModelIndex,
-    ModelKind, ModelName, NodeRef, PlacementPolicy, RequestedResourceVersion,
-    TransactionModelTransition, UniquelyKindedModel,
+    CreateReorderer, CreateSchema, DomainName, Model, ModelIndex, ModelKind, ModelName, NodeRef,
+    PlacementPolicy, RequestedResourceVersion, TransactionModelTransition, UniquelyKindedModel,
 };
 use nervix_recovery::Discarded;
 use parking_lot::{Mutex, RwLock};
@@ -68,22 +67,12 @@ pub(crate) struct Registry {
     commit_lock: Mutex<()>,
 }
 
+/// The execution graph one registry state gives a domain. It is `None` when the domain has nothing
+/// left to run, and for a planned batch that changes no Model.
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeChanges {
     pub(crate) domain: DomainName,
     pub(crate) graph: Option<ActiveGraph>,
-    pub(crate) changes: Vec<RuntimeChange>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuntimeChange {
-    StartIngestor {
-        source_model: Box<Model>,
-        ingestor: Box<CreateIngestor>,
-    },
-    StopIngestor {
-        ingestor: IngestorName,
-    },
 }
 
 impl Registry {
@@ -226,15 +215,10 @@ impl Registry {
         let mut startup_changes = Vec::new();
         for domain in domains {
             let domain_state = &state.domains[&domain];
-            let changes = runtime_changes_for_domain(
-                &domain,
-                Some(domain_state.graph.clone()),
-                &ModelIndex::new(),
-                &domain_state.models,
-            );
-            if changes.graph.is_some() || !changes.changes.is_empty() {
-                startup_changes.push(changes);
-            }
+            startup_changes.push(RuntimeChanges {
+                domain: domain.clone(),
+                graph: Some(domain_state.graph.clone()),
+            });
         }
         Ok(startup_changes)
     }
@@ -821,19 +805,14 @@ impl Registry {
             &domain_state.graph,
         );
         let is_noop = models_to_persist.is_empty() && drops_in_batch.is_empty();
-        let runtime_changes = if is_noop {
-            RuntimeChanges {
-                domain: domain.clone(),
-                graph: None,
-                changes: Vec::new(),
-            }
+        let graph = if is_noop || domain_state.graph.node_count() == 0 {
+            None
         } else {
-            runtime_changes_for_domain(
-                domain,
-                (domain_state.graph.node_count() > 0).then_some(domain_state.graph.clone()),
-                &current_state.models,
-                &domain_state.models,
-            )
+            Some(domain_state.graph.clone())
+        };
+        let runtime_changes = RuntimeChanges {
+            domain: domain.clone(),
+            graph,
         };
 
         let candidate_models = domain_state.models.clone();
@@ -926,19 +905,14 @@ impl Registry {
             &domain_state.graph,
         );
         let is_noop = models_to_persist.is_empty() && drops_in_batch.is_empty();
-        let runtime_changes = if is_noop {
-            RuntimeChanges {
-                domain: domain.clone(),
-                graph: None,
-                changes: Vec::new(),
-            }
+        let graph = if is_noop || domain_state.graph.node_count() == 0 {
+            None
         } else {
-            runtime_changes_for_domain(
-                domain,
-                (domain_state.graph.node_count() > 0).then_some(domain_state.graph.clone()),
-                &current_state.models,
-                &domain_state.models,
-            )
+            Some(domain_state.graph.clone())
+        };
+        let runtime_changes = RuntimeChanges {
+            domain: domain.clone(),
+            graph,
         };
         Ok(PlannedMutations {
             domain: domain.clone(),
@@ -1058,12 +1032,15 @@ impl Registry {
             .change_context(RegistryError::PersistBatch)?;
 
         let base_state = self.build_domain_state(&planned.domain, &planned.base_models)?;
-        let runtime_changes = runtime_changes_for_domain(
-            &planned.domain,
-            (base_state.graph.node_count() > 0).then_some(base_state.graph.clone()),
-            &planned.domain_state.models,
-            &base_state.models,
-        );
+        let graph = if base_state.graph.node_count() == 0 {
+            None
+        } else {
+            Some(base_state.graph.clone())
+        };
+        let runtime_changes = RuntimeChanges {
+            domain: planned.domain.clone(),
+            graph,
+        };
         let current = self.state.read();
         let mut domains = current.domains.clone();
         if base_state.graph.node_count() == 0 {
@@ -1499,79 +1476,6 @@ fn deserialize_value(bytes: &[u8]) -> Result<Model, Report<RegistryError>> {
 // preserves rkyv's alignment when the archive is restored.
 const MODEL_ARCHIVE_HEADER: &[u8; 16] = b"NERVIX MODEL BIN";
 
-fn runtime_changes_for_domain(
-    domain: &DomainName,
-    graph: Option<ActiveGraph>,
-    current_models: &ModelIndex,
-    candidate_models: &ModelIndex,
-) -> RuntimeChanges {
-    let current_ingestor_ids = SortedSet::from_unsorted(
-        current_models
-            .iter()
-            .filter_map(|(key, model)| {
-                matches!(model, Model::Ingestor(_)).then_some(key.identifier.clone())
-            })
-            .collect::<Vec<_>>(),
-    )
-    .into_vec();
-    let candidate_ingestor_ids = SortedSet::from_unsorted(
-        candidate_models
-            .iter()
-            .filter_map(|(key, model)| {
-                matches!(model, Model::Ingestor(_)).then_some(key.identifier.clone())
-            })
-            .collect::<Vec<_>>(),
-    )
-    .into_vec();
-
-    let mut changes = Vec::new();
-
-    for ingestor in &current_ingestor_ids {
-        changes.push(RuntimeChange::StopIngestor {
-            ingestor: IngestorName::from(ingestor),
-        });
-    }
-
-    for ingestor in &candidate_ingestor_ids {
-        let Some(Model::Ingestor(ingestor_model)) =
-            candidate_models.get(&NodeRef::new(ModelKind::Ingestor, ingestor.clone()))
-        else {
-            continue;
-        };
-        let source_ref = ingestor_model.source.source_ref();
-        let source_kind = match &ingestor_model.source {
-            IngestSource::Http { .. }
-            | IngestSource::Kafka { .. }
-            | IngestSource::Pulsar { .. }
-            | IngestSource::Prometheus { .. }
-            | IngestSource::RabbitMq { .. }
-            | IngestSource::RedisPubSub { .. }
-            | IngestSource::Mqtt { .. }
-            | IngestSource::Nats { .. }
-            | IngestSource::ZeroMq { .. }
-            | IngestSource::Sqs { .. }
-            | IngestSource::Websockets { .. }
-            | IngestSource::Syslog { .. } => ModelKind::Client,
-            IngestSource::Endpoint { .. } => ModelKind::Endpoint,
-        };
-        let Some(source_model) =
-            candidate_models.get(&NodeRef::new(source_kind, source_ref.clone()))
-        else {
-            continue;
-        };
-        changes.push(RuntimeChange::StartIngestor {
-            source_model: Box::new(source_model.clone()),
-            ingestor: Box::new(ingestor_model.clone()),
-        });
-    }
-
-    RuntimeChanges {
-        domain: domain.clone(),
-        graph,
-        changes,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeSet, fs};
@@ -1581,9 +1485,9 @@ mod tests {
         AckMode, AlterEmitter, AlterJunction, AlterProcessorOperation, AlterRelay,
         AlterRelayOperation, AlterSchema, AlterSchemaError, AlterSchemaOperation, AlterWireSchema,
         AlterWireSchemaOperation, BranchSelection, ClientName, ClusterNodeName, CodecWireFormat,
-        CreateWireSchema, DropModel, EmitterName, FlushPolicy, JsonType, MaterializedRelayState,
-        ParseAsType, ProcessorInputs, ProcessorOutputs, QuiesceLevel, RelayName, SchemaField,
-        SchemaName, WireSchemaField,
+        CreateWireSchema, DropModel, EmitterName, FlushPolicy, IngestorName, JsonType,
+        MaterializedRelayState, ParseAsType, ProcessorInputs, ProcessorOutputs, QuiesceLevel,
+        RelayName, SchemaField, SchemaName, WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -1924,10 +1828,6 @@ mod tests {
                 },
             )
             .expect("alter should succeed");
-        assert!(
-            changes.changes.is_empty(),
-            "capacity updates are applied from the published schedule delta"
-        );
         assert!(changes.graph.is_some());
 
         let stored_relay = registry
@@ -2276,67 +2176,6 @@ mod tests {
             .expect("domain runtime changes should exist");
 
         assert!(change.graph.is_some(), "graph snapshot must be included");
-        assert!(
-            change.changes.is_empty(),
-            "graph-only domain should not synthesize ingestor lifecycle changes"
-        );
-
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn adding_second_ingestor_restarts_existing_ingestor_and_starts_new_one() {
-        let path = temp_db_path();
-        let registry = Registry::open(&path).expect("registry should open");
-        let domain = DomainName::parse("default").expect("valid domain");
-
-        registry
-            .apply_batch(
-                &domain,
-                vec![
-                    schema("event_schema"),
-                    wire_schema("event_wire"),
-                    codec("event_codec", "event_schema"),
-                    client_model("kafka_main"),
-                    relay("notifications", "event_schema"),
-                    ingestor("ing1", "notifications", "event_codec", "kafka_main"),
-                ],
-            )
-            .expect("initial graph should succeed");
-
-        let changes = registry
-            .apply_batch(
-                &domain,
-                vec![ingestor(
-                    "ing2",
-                    "notifications",
-                    "event_codec",
-                    "kafka_main",
-                )],
-            )
-            .expect("adding second ingestor should succeed");
-
-        let stop_names = changes
-            .changes
-            .iter()
-            .filter_map(|change| match change {
-                RuntimeChange::StopIngestor { ingestor } => Some(ingestor.as_str().to_string()),
-                RuntimeChange::StartIngestor { .. } => None,
-            })
-            .collect::<Vec<_>>();
-        let start_names = changes
-            .changes
-            .iter()
-            .filter_map(|change| match change {
-                RuntimeChange::StartIngestor { ingestor, .. } => {
-                    Some(ingestor.name.as_str().to_string())
-                }
-                RuntimeChange::StopIngestor { .. } => None,
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(stop_names, vec!["ing1"]);
-        assert_eq!(start_names, vec!["ing1", "ing2"]);
 
         let _ = fs::remove_dir_all(path);
     }

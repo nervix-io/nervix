@@ -63,9 +63,13 @@ Feature: Altering reingestors and generators
       """
     When http payload is posted to host "http-{{test_id}}-alter-reingestor.example.com" path "/events"
       """
+      {"key":0,"alternate":5}
+      """
+    And http payload is posted to host "http-{{test_id}}-alter-reingestor.example.com" path "/events"
+      """
       {"key":3,"alternate":4}
       """
-    Then the relay subscription receives a payload
+    Then within "10s" the relay subscription receives payloads in order
       """
       {"alternate":99,"key":4}
       """

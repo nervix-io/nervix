@@ -5,7 +5,8 @@
 //! - **Depends on.** Vocabulary, installed plans and runtime infrastructure.
 //! - **Must not know.** Parsing or control-plane placement and transaction decisions.
 //!
-//! Existing model-backed execution fields violate the data-plane plan boundary.
+//! The installed schedule and client Models remain execution fields that violate the data-plane
+//! plan boundary; ingestors and reingestors run from the entrypoint plans installed beside them.
 
 use nervix_connector_websockets::CompiledSignalingProtocol;
 
@@ -81,6 +82,12 @@ impl DomainRouting {
         self.published.clone()
     }
 
+    /// The revision lifecycle code is staging, which is the published revision until it is first
+    /// mutated.
+    pub(super) fn staged(&self) -> StdArc<DomainRoutingSnapshot> {
+        self.current.clone()
+    }
+
     pub(super) fn publish(&mut self) {
         self.published.store(self.current.clone());
     }
@@ -111,7 +118,9 @@ pub(super) struct DomainExecution {
     pub(super) domain_clock: DomainClock,
     pub(super) shutdown: watch::Sender<bool>,
     pub(super) routing: DomainRouting,
-    pub(super) branched_ingestors: HashMap<ModelName, Vec<BranchedIngestorSpec>>,
+    /// The ingestor and reingestor plans decided from `schedule`, which ingestor starts, reingestor
+    /// swaps, source placement and observation read instead of the schedule's Models.
+    pub(super) entrypoints: Arc<EntrypointPlans>,
     pub(super) branched_entrypoints: HashMap<ModelName, Vec<Arc<IngestorRouteRuntime>>>,
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
     pub(super) node_tasks: HashMap<NodeRef, ScheduledNodeTask>,
@@ -368,14 +377,12 @@ impl Runtime {
         let mut generator_specs = Vec::new();
         let mut lookup_specs = Vec::new();
         let mut emitter_specs = Vec::new();
-        let mut reingestor_specs = Vec::<ReingestorInputSpec>::new();
+        let mut reingestor_inputs = Vec::new();
         let tasks = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
-        let mut reingestor_tasks = HashMap::new();
         let branched_specs = branched_node_specs_from_scheduled_nodes(&scheduled_node_map);
-        let branch_relays = branch_relays_from_branched_specs(&branched_specs);
         let model_index = graph
             .nodes()
             .into_iter()
@@ -404,6 +411,11 @@ impl Runtime {
         let activation_plan =
             DomainActivationPlan::from_scheduled_nodes(domain, &scheduled_node_map)
                 .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let entrypoints = Arc::new(
+            EntrypointPlans::from_scheduled_nodes(domain, &scheduled_node_map, &activation_plan)
+                .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
+        );
+        let branch_relays = branch_relays_from_plans(&branched_specs, &entrypoints);
         let ActivatedDomainSurfaces {
             codecs,
             signaling_protocols,
@@ -556,26 +568,22 @@ impl Runtime {
                     }
                     emitter_specs.push((emitter.clone(), inputs));
                 }
-                Model::Reingestor(reingestor) => {
-                    for from_relay in reingestor.from.relays() {
-                        let Some(relay) = relay_builders.get_mut(from_relay) else {
-                            return Err(RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing reingestor input relay '{}'",
-                                    from_relay.as_str()
-                                ),
-                            });
-                        };
-                        let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
-                        reingestor_specs.push(ReingestorInputSpec {
-                            reingestor: reingestor.clone(),
-                            from_relay: from_relay.clone(),
-                            receiver,
-                        });
-                    }
-                }
                 _ => {}
+            }
+        }
+        for plan in entrypoints.reingestors() {
+            for input in &plan.inputs {
+                let relay = relay_builders.get_mut(&input.relay).verified(
+                    "the entrypoint plan resolved every input relay against the activation plan \
+                     these relay boundaries were built from",
+                );
+                reingestor_inputs.push(PlannedReingestorInput {
+                    plan: plan.clone(),
+                    input: input.clone(),
+                    consumer: ReingestorInputConsumer::Registered(
+                        relay.runtime_consumer_fan_in_for_mode(plan.mode),
+                    ),
+                });
             }
         }
 
@@ -641,34 +649,6 @@ impl Runtime {
             })
             .collect();
 
-        let mut branched_entrypoints = HashMap::new();
-        let mut branched_entrypoint_senders = HashMap::new();
-        for spec in &branched_specs.entrypoints {
-            if spec.kind != ModelKind::Reingestor {
-                continue;
-            }
-            let template = materialize_ingestor_route_template(
-                spec,
-                &model_index,
-                &relay_registries,
-                &relay_services,
-            )
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-            let Some(runtime) =
-                self.start_branched_entrypoint_runtime(domain, &spec.identifier, Some(template))
-            else {
-                continue;
-            };
-            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            branched_entrypoints
-                .entry(spec.identifier.clone())
-                .or_insert_with(Vec::new)
-                .push(runtime);
-        }
-
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
         let processor_specs = processor_input_specs
             .iter()
@@ -726,6 +706,7 @@ impl Runtime {
             relay_branchings: &relay_branchings,
             materialized_relay_specs: &materialized_stream_specs,
             lookups: &lookup_runtimes,
+            udfs: Some(&udf_executor),
         };
 
         for (generator, source_branching, route_specs) in generator_specs {
@@ -799,23 +780,20 @@ impl Runtime {
             );
         }
 
-        for spec in reingestor_specs {
-            let entity = NodeRef {
-                kind: ModelKind::Reingestor,
-                identifier: ModelName::from(&spec.reingestor.name),
-            };
-            reingestor_tasks
-                .entry(entity)
-                .or_insert_with(Vec::new)
-                .push(self.spawn_reingestor_task(
-                    domain,
-                    &shutdown_tx,
-                    &branched_entrypoint_senders,
-                    spec.reingestor,
-                    spec.from_relay,
-                    spec.receiver,
-                )?);
-        }
+        let ReingestorRuntimes {
+            branched_entrypoints,
+            tasks: reingestor_tasks,
+        } = self
+            .start_reingestor_runtimes(
+                execution_build_deps,
+                &shutdown_tx,
+                RelayRuntimeHandles {
+                    registries: &relay_registries,
+                    services: &relay_services,
+                },
+                reingestor_inputs,
+            )
+            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
 
         let start_version = match self.inner.domains.get(domain) {
             Some(state) => state.start_version,
@@ -845,7 +823,7 @@ impl Runtime {
                         processor_plans,
                     },
                 ),
-                branched_ingestors: Self::branched_specs_by_identifier(&branched_specs.entrypoints),
+                entrypoints,
                 branched_entrypoints,
                 endpoint_routes,
                 node_tasks,
@@ -874,11 +852,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use nervix_models::{
-        CodecWireFormat, CreateCodec, CreateEndpoint, CreateRelay, CreateSchema,
-        CreateSignalingProtocol, CreateVhost, CreateWireSchema, DomainClockState, DomainConfig,
-        DomainPace, DomainState, DomainStatus, DomainTick, DomainTimeRate, EndpointType, JsonType,
-        MaterializedRelayState, Model, ParseAsType, RelayBranching, SchemaField,
-        SignalingProtocolOnConnect, SignalingWireFormat, Timestamp, WireSchemaField,
+        AckMode, CodecWireFormat, CreateBranch, CreateCodec, CreateEndpoint, CreateReingestor,
+        CreateRelay, CreateSchema, CreateSignalingProtocol, CreateVhost, CreateWireSchema,
+        DomainClockState, DomainConfig, DomainPace, DomainState, DomainStatus, DomainTick,
+        DomainTimeRate, EndpointType, FlushPolicy, JsonType, MaterializedRelayState, Model,
+        OutputBranch, ParseAsType, ProcessorInputs, ProcessorOutputs, RelayBranching, SchemaField,
+        SchemaFingerprint, SignalingProtocolOnConnect, SignalingWireFormat, Timestamp,
+        WireSchemaField,
     };
     use nonzero_ext::nonzero;
 
@@ -1220,5 +1200,145 @@ mod tests {
         execution.routing.deactivate();
         runtime.withdraw_routed_endpoints(&domain, &execution);
         assert!(runtime.inner.routed_endpoints.is_empty());
+    }
+
+    fn tenant_schema(name: &str) -> CreateSchema {
+        CreateSchema {
+            name: named(name),
+            fields: vec![SchemaField {
+                name: named("tenant"),
+                ty: ParseAsType::String,
+                optional: false,
+                sensitive: false,
+            }],
+        }
+    }
+
+    fn tenant_relay(name: &str, branching: RelayBranching) -> Model {
+        Model::Relay(CreateRelay {
+            name: named(name),
+            schema: named("payload"),
+            buffer: nonzero!(4usize),
+            branching,
+            materialized_state: None,
+        })
+    }
+
+    /// A reingestor copying `incoming` into `outgoing`, whose route leaves its records unbranched.
+    fn repartitioning_reingestor() -> Model {
+        Model::Reingestor(CreateReingestor {
+            name: named("repartition"),
+            from: ProcessorInputs::single(named("incoming")),
+            output_routes: with_inherit_all(ProcessorOutputs::single(named("outgoing")))
+                .with_flush_policy(FlushPolicy::Immediate)
+                .with_branch(OutputBranch::Unbranched),
+            mode: AckMode::Attached,
+            materialized_state: Vec::new(),
+            filter_where: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_graph_build_starts_each_planned_reingestor_input() {
+        let runtime = Runtime::new();
+        let domain = domain("graph_reingestor");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let models = [
+            Model::Schema(tenant_schema("payload")),
+            tenant_relay("incoming", RelayBranching::unbranched()),
+            tenant_relay("outgoing", RelayBranching::unbranched()),
+            repartitioning_reingestor(),
+        ];
+        let graph = ActiveGraph::from_scheduled_models(&DomainSchedule::new(
+            domain.clone(),
+            models.into_iter().map(scheduled_model),
+            Vec::new(),
+        ))
+        .assured("two relays and the reingestor between them form a graph");
+
+        runtime
+            .rebuild_domain_execution(&domain, Some(graph))
+            .await
+            .assured("a valid graph builds its domain execution");
+
+        {
+            let execution = runtime
+                .inner
+                .executions
+                .get(&domain)
+                .assured("the build installs the execution");
+            let repartition = named::<ModelName>("repartition");
+            assert!(
+                execution
+                    .entrypoints
+                    .reingestor(&named("repartition"))
+                    .is_some()
+            );
+            assert_eq!(execution.branched_entrypoints[&repartition].len(), 1);
+            assert_eq!(
+                execution.reingestor_tasks[&NodeRef::new(ModelKind::Reingestor, repartition)].len(),
+                1
+            );
+        }
+        runtime
+            .rebuild_domain_execution(&domain, None)
+            .await
+            .assured("removing the graph stops the execution");
+        assert!(!runtime.inner.executions.contains_key(&domain));
+    }
+
+    #[tokio::test]
+    async fn a_build_rejects_a_route_its_relay_is_not_branched_for() {
+        let runtime = Runtime::new();
+        let domain = domain("branch_mismatch");
+        runtime.sync_domains(&BTreeMap::from([(
+            domain.clone(),
+            unpaced_domain_state(domain.as_str()),
+        )]));
+        let branched = ScheduledNode::new(
+            tenant_relay("outgoing", RelayBranching::branched_by(named("by_tenant"))),
+            SchemaFingerprint::from_digest([1; 32]),
+        )
+        .with_resolved_branching(Some(ResolvedBranching::branched(
+            named("by_tenant"),
+            tenant_schema("tenant_key"),
+        )));
+        let schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
+                scheduled_model(Model::Schema(tenant_schema("payload"))),
+                scheduled_model(Model::Schema(tenant_schema("tenant_key"))),
+                scheduled_model(Model::Branch(CreateBranch {
+                    name: named("by_tenant"),
+                    schema: named("tenant_key"),
+                    ttl: "5m".to_string(),
+                    eviction: None,
+                })),
+                scheduled_model(tenant_relay("incoming", RelayBranching::unbranched())),
+                branched,
+                scheduled_model(repartitioning_reingestor()),
+            ],
+            Vec::new(),
+        );
+
+        let error = runtime
+            .build_passive_execution_from_schedule(&domain, &schedule)
+            .await
+            .err()
+            .assured("an unbranched route to a branched relay does not plan");
+
+        assert!(matches!(
+            &error,
+            RuntimeError::EntrypointPlan { domain: failed, report }
+                if failed == &domain
+                    && matches!(
+                        report.current_context(),
+                        EntrypointPlanError::RouteBranchMismatch { relay, .. }
+                            if relay == &named::<RelayName>("outgoing")
+                    )
+        ));
     }
 }

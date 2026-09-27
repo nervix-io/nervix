@@ -34,10 +34,10 @@ impl Runtime {
     /// and start its tasks, so an ingestor that cannot start leaves nothing running behind it.
     pub(in crate::runtime) async fn start_ingestor(
         &self,
-        plan: IngestorStartPlan,
+        plan: &IngestorStartPlan,
     ) -> Result<(), RuntimeError> {
         let IngestorStartPlan { ingestor, source } = plan;
-        let quiesce = self.prepare_ingestor_quiescence(&ingestor.domain, &ingestor);
+        let quiesce = self.prepare_ingestor_quiescence(&ingestor.domain, ingestor);
         if self.inner.ingestors.contains_key(&ingestor.runtime_key()) {
             return Err(RuntimeError::IngestorAlreadyRunning {
                 domain: ingestor.domain.as_str().to_string(),
@@ -45,31 +45,31 @@ impl Runtime {
             });
         }
 
-        let dependencies = self
-            .ingestor_dependencies(&ingestor.domain, &ingestor)
-            .await?;
-        let source = match source {
-            SourceStartPlan::Http(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::Kafka(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::Pulsar(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::Mqtt(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::Nats(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::RabbitMq(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::RedisPubSub(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::Prometheus(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::ZeroMq(plan) => plan.compose(&ingestor).await?,
-            SourceStartPlan::Sqs(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::Endpoint(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::Websockets(plan) => plan.compose(self, &ingestor).await?,
-            SourceStartPlan::Syslog(plan) => plan.compose(self, &ingestor).await?,
+        let dependencies = self.ingestor_dependencies(ingestor).await?;
+        let source = match source.clone() {
+            SourceStartPlan::Http(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::Kafka(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::Pulsar(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::Mqtt(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::Nats(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::RabbitMq(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::RedisPubSub(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::Prometheus(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::ZeroMq(plan) => plan.compose(ingestor).await?,
+            SourceStartPlan::Sqs(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::Endpoint(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::Websockets(plan) => plan.compose(self, ingestor).await?,
+            SourceStartPlan::Syslog(plan) => plan.compose(self, ingestor).await?,
         };
-        self.host_source(&ingestor, quiesce, dependencies, source);
+        self.host_source(ingestor, quiesce, dependencies, source);
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use nervix_models::RabbitMqIngestMode;
+
     use super::*;
 
     fn named<T>(value: &str) -> T
@@ -137,20 +137,66 @@ mod tests {
         ] {
             let ingestor = CreateIngestor {
                 name: named("source"),
-                output_routes: nervix_models::ProcessorOutputs::single(named("events")),
+                output_routes: with_inherit_all(nervix_models::ProcessorOutputs::single(named(
+                    "events",
+                )))
+                .with_flush_policy(FlushPolicy::Immediate)
+                .with_branch(OutputBranch::Unbranched),
                 decode_using_codec: named("json"),
                 timestamp_source: None,
                 source,
                 general_error_policy: GeneralErrorPolicy::Log,
                 filter_where: None,
             };
-            let plan = IngestorStartPlan::decide_unscheduled(&domain, &ingestor, &client_model)
-                .assured("the fixture source and client are paired");
-            let IngestorStartPlan { ingestor, source } = plan;
-            let result = match source {
-                SourceStartPlan::Http(source) => source.compose(&runtime, &ingestor).await,
-                SourceStartPlan::Prometheus(source) => source.compose(&runtime, &ingestor).await,
-                SourceStartPlan::RabbitMq(source) => source.compose(&runtime, &ingestor).await,
+            let plans = planned_entrypoints_for_test(
+                &domain,
+                vec![
+                    Model::Schema(nervix_models::CreateSchema {
+                        name: named("payload"),
+                        fields: vec![nervix_models::SchemaField {
+                            name: named("value"),
+                            ty: ParseAsType::String,
+                            optional: false,
+                            sensitive: false,
+                        }],
+                    }),
+                    Model::WireJsonSchema(nervix_models::CreateJsonWireSchema {
+                        name: named("payload_wire"),
+                        strictness: Default::default(),
+                        fields: vec![nervix_models::WireSchemaField {
+                            name: named("value"),
+                            ty: nervix_models::JsonType::String,
+                            optional: false,
+                        }],
+                    }),
+                    Model::Codec(nervix_models::CreateCodec {
+                        name: named("json"),
+                        wire_format: nervix_models::CodecWireFormat::Json {
+                            wire_schema: named("payload_wire"),
+                        },
+                        schema: named("payload"),
+                        encoding_rules: Vec::new(),
+                    }),
+                    Model::Relay(CreateRelay {
+                        name: named("events"),
+                        schema: named("payload"),
+                        buffer: nonzero_ext::nonzero!(2usize),
+                        branching: nervix_models::RelayBranching::unbranched(),
+                        materialized_state: None,
+                    }),
+                    client_model,
+                    Model::Ingestor(ingestor),
+                ],
+            );
+            let plan = plans
+                .ingestor(&named("source"))
+                .assured("the fixture schedules the ingestor named source");
+            let result = match plan.source.clone() {
+                SourceStartPlan::Http(source) => source.compose(&runtime, &plan.ingestor).await,
+                SourceStartPlan::Prometheus(source) => {
+                    source.compose(&runtime, &plan.ingestor).await
+                }
+                SourceStartPlan::RabbitMq(source) => source.compose(&runtime, &plan.ingestor).await,
                 _ => panic!("the fixture only includes sources that resolve names"),
             };
             let Err(RuntimeError::StartIngestor {

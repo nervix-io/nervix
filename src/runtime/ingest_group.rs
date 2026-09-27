@@ -204,21 +204,11 @@ pub(in crate::runtime) enum IngestGroupError {
         ingestor: IngestorName,
         relay: RelayName,
     },
-    #[error("ingestor '{ingestor}' route '{relay}' has no compiled branch program")]
-    MissingBranchProgram {
-        ingestor: IngestorName,
-        relay: RelayName,
-    },
     #[error("ingestor '{ingestor}' route '{relay}' has no branch result for row {row}")]
     MissingBranchResult {
         ingestor: IngestorName,
         relay: RelayName,
         row: usize,
-    },
-    #[error("ingestor '{ingestor}' route '{relay}' has no branch declaration")]
-    MissingBranchDeclaration {
-        ingestor: IngestorName,
-        relay: RelayName,
     },
     #[error("failed to decode a payload for ingestor '{ingestor}'")]
     DecodePayload { ingestor: IngestorName },
@@ -237,7 +227,7 @@ impl<T> IngestGroupFailure<T> {
 }
 
 pub(super) struct IngestorDependencies {
-    pub(super) output_routes: RelayProcessorOutputsNode,
+    pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
     pub(super) codec: Arc<CompiledCodec>,
     pub(super) branched_templates: HashMap<RelayName, IngestorRouteTemplate>,
@@ -248,7 +238,7 @@ pub(super) struct IngestGroupContext {
     pub(super) domain: DomainName,
     pub(super) ingestor: IngestorName,
     pub(super) timestamp_source: Option<IngestTimestampSource>,
-    pub(super) output_routes: RelayProcessorOutputsNode,
+    pub(super) output_routes: Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<CompiledProgramWithMaterializedInterest>,
 }
 
@@ -264,7 +254,7 @@ pub(super) struct IngestGroupDispatch<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
-    pub(super) output_routes: &'a RelayProcessorOutputsNode,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     /// One entry per decoded payload, read from the borrowed source messages and appended into the
     /// group's own metadata builders once for every message the payload unfolded into.
@@ -282,7 +272,7 @@ pub(super) struct IngestGroupContribution<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
-    pub(super) output_routes: &'a RelayProcessorOutputsNode,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     pub(super) metadata: &'a [IngestMetadataRow<'a>],
     pub(super) acks: Vec<AckSet>,
@@ -293,7 +283,7 @@ pub(super) struct RawIngestDispatch<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
     pub(super) timestamp_source: Option<&'a IngestTimestampSource>,
-    pub(super) output_routes: &'a RelayProcessorOutputsNode,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) filter_where: Option<&'a CompiledProgramWithMaterializedInterest>,
     pub(super) branched_senders: &'a HashMap<RelayName, mpsc::Sender<BranchedEntrypointInput>>,
     pub(super) codec: Arc<CompiledCodec>,
@@ -602,7 +592,7 @@ impl IngestGroupRows {
 pub(super) struct IngestorFilterWhereError<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) ingestor: &'a IngestorName,
-    pub(super) output_routes: &'a RelayProcessorOutputsNode,
+    pub(super) output_routes: &'a Arc<BoundIngestorRoutes>,
     pub(super) record: &'a RuntimeRow,
     pub(super) ingest_metadata: Option<IngestFilterMapMetadata>,
     pub(super) acks: AckSet,
@@ -1502,49 +1492,40 @@ impl Runtime {
             .collect::<Vec<_>>();
         for (output_index, output) in output_routes.routes.iter().enumerate() {
             tokio::task::consume_budget().await;
-            let outcomes = if let Some(filter_map) = output.compiled_program.as_ref() {
-                let side_inputs = self
-                    .load_materialized_side_inputs(
-                        routing,
-                        domain,
-                        &None,
-                        &filter_map.materialized_interest,
-                    )
-                    .await
-                    .change_context(IngestGroupError::RouteMaterializedState {
-                        ingestor: ingestor.clone(),
-                        relay: output.relay.clone(),
-                    })?;
-                let keys = vec![None; rows.len()];
-                evaluate_filter_map_on_batch(
-                    ModelKind::Ingestor.as_str(),
-                    ingestor,
-                    filter_map,
-                    FilterMapOutcomeInputs {
-                        carrier: &rows.batch,
-                        record_metadata: &rows.record_metadata,
-                        keys: &keys,
-                        filter_map_metadata: rows.metadata_rows(),
-                        side_inputs: &side_inputs,
-                    },
-                    execution_now,
+            let side_inputs = self
+                .load_materialized_side_inputs(
+                    routing,
+                    domain,
+                    &None,
+                    &output.program.materialized_interest,
                 )
                 .await
-                .change_context(IngestGroupError::RouteProgram {
+                .change_context(IngestGroupError::RouteMaterializedState {
                     ingestor: ingestor.clone(),
                     relay: output.relay.clone(),
-                })?
-            } else {
-                (0..rows.len())
-                    .map(|row| rows.row(row))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .into_iter()
-                    .map(SingleRecordFilterMapOutcome::Output)
-                    .collect()
-            };
+                })?;
+            let keys = vec![None; rows.len()];
+            let outcomes = evaluate_filter_map_on_batch(
+                ModelKind::Ingestor.as_str(),
+                ingestor,
+                &output.program,
+                FilterMapOutcomeInputs {
+                    carrier: &rows.batch,
+                    record_metadata: &rows.record_metadata,
+                    keys: &keys,
+                    filter_map_metadata: rows.metadata_rows(),
+                    side_inputs: &side_inputs,
+                },
+                execution_now,
+            )
+            .await
+            .change_context(IngestGroupError::RouteProgram {
+                ingestor: ingestor.clone(),
+                relay: output.relay.clone(),
+            })?;
             let mut route_keys = (0..rows.len()).map(|_| None).collect::<Vec<_>>();
             let mut branch_state_snapshot = HashMap::default();
-            if let Some(branch_program) = output.compiled_branch_program.as_ref() {
+            if let BoundRouteBranch::Constructed(branch_program) = &output.branch {
                 let successful = outcomes
                     .iter()
                     .enumerate()
@@ -1605,23 +1586,11 @@ impl Runtime {
                     }
                 }
             } else {
-                let key = match output.branch.as_ref() {
-                    Some(OutputBranch::Unbranched) | None => None,
-                    Some(OutputBranch::BranchedBy { assignments, .. })
-                        if assignments.is_empty() =>
-                    {
-                        None
-                    }
-                    Some(OutputBranch::BranchedBy { .. }) => {
-                        return Err(Report::new(IngestGroupError::MissingBranchProgram {
-                            ingestor: ingestor.clone(),
-                            relay: output.relay.clone(),
-                        }));
-                    }
-                };
+                // An ingestor's input is unbranched, so a route that preserves the incoming
+                // branch leaves its records unbranched as well.
                 for (row, outcome) in outcomes.iter().enumerate() {
                     if let SingleRecordFilterMapOutcome::Output(_) = outcome {
-                        route_keys[row] = Some(Ok(key.clone()));
+                        route_keys[row] = Some(Ok(None));
                     }
                 }
             }
@@ -1737,12 +1706,6 @@ impl Runtime {
                     .pop_front()
                     .verified("the queue above was filled with one ACK entry per route");
                 let output = &output_routes.routes[route_output.output_index];
-                output.branch.as_ref().ok_or_else(|| {
-                    Report::new(IngestGroupError::MissingBranchDeclaration {
-                        ingestor: ingestor.clone(),
-                        relay: output.relay.clone(),
-                    })
-                })?;
                 collector.push(
                     &output.relay,
                     RelayMessage {

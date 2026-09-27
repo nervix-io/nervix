@@ -1272,6 +1272,7 @@ impl Runtime {
 
     pub(in crate::runtime) fn remote_runtime_consumers_for_schedule(
         schedule: &DomainSchedule,
+        entrypoints: &EntrypointPlans,
         local_node_id: &ClusterNodeName,
     ) -> HashMap<RelayName, Vec<RemoteRuntimeConsumer>> {
         let mut consumers = HashMap::<RelayName, Vec<RemoteRuntimeConsumer>>::new();
@@ -1309,34 +1310,42 @@ impl Runtime {
             let Some(target_node) = node.execution_node() else {
                 continue;
             };
-            match node.config.as_ref() {
-                Model::Emitter(emitter) => {
-                    for relay in emitter.from.relays() {
-                        if !owned_relays.contains(relay) || node.executes_on(local_node_id) {
-                            continue;
-                        }
-                        push_remote_runtime_consumer(
-                            consumers.entry(relay.clone()).or_default(),
-                            target_node,
-                            relay,
-                            emitter.mode,
-                        );
+            if let Model::Emitter(emitter) = node.config.as_ref() {
+                for relay in emitter.from.relays() {
+                    if !owned_relays.contains(relay) || node.executes_on(local_node_id) {
+                        continue;
                     }
+                    push_remote_runtime_consumer(
+                        consumers.entry(relay.clone()).or_default(),
+                        target_node,
+                        relay,
+                        emitter.mode,
+                    );
                 }
-                Model::Reingestor(reingestor) => {
-                    for relay in reingestor.from.relays() {
-                        if !owned_relays.contains(relay) || node.executes_on(local_node_id) {
-                            continue;
-                        }
-                        push_remote_runtime_consumer(
-                            consumers.entry(relay.clone()).or_default(),
-                            target_node,
-                            relay,
-                            reingestor.mode,
-                        );
-                    }
+            }
+        }
+        for plan in entrypoints.reingestors() {
+            let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&plan.name));
+            let node = schedule
+                .nodes
+                .get(&identity)
+                .assured("every caller passes the entrypoint plans decided from this schedule");
+            let Some(target_node) = node.execution_node() else {
+                continue;
+            };
+            if node.executes_on(local_node_id) {
+                continue;
+            }
+            for input in &plan.inputs {
+                if !owned_relays.contains(&input.relay) {
+                    continue;
                 }
-                _ => {}
+                push_remote_runtime_consumer(
+                    consumers.entry(input.relay.clone()).or_default(),
+                    target_node,
+                    &input.relay,
+                    plan.mode,
+                );
             }
         }
         consumers
@@ -1367,6 +1376,71 @@ mod tests {
                     .means_peer_left("remote ACK watcher cancellation test");
             }
         }
+    }
+
+    #[test]
+    fn a_reingestor_on_another_node_consumes_the_relays_this_node_owns() {
+        let domain = domain("default");
+        let fixture = EntrypointTestDomain {
+            relays: &["incoming", "outgoing"],
+            fields: &[("value", nervix_models::ParseAsType::I64)],
+            branch_fields: &[],
+        };
+        let reingestor = nervix_models::CreateReingestor {
+            name: named("repartition"),
+            from: nervix_models::ProcessorInputs::single(named("incoming")),
+            output_routes: with_inherit_all(nervix_models::ProcessorOutputs::single(named(
+                "outgoing",
+            )))
+            .with_flush_policy(FlushPolicy::Immediate)
+            .with_branch(nervix_models::OutputBranch::Unbranched),
+            mode: AckMode::Detached,
+            materialized_state: Vec::new(),
+            filter_where: None,
+        };
+        let plans = fixture.plan(
+            &domain,
+            vec![nervix_models::Model::Reingestor(reingestor.clone())],
+        );
+        let owner = ClusterNodeName::parse("node-1").assured("the fixture node name is valid");
+        let executor = ClusterNodeName::parse("node-2").assured("the fixture node name is valid");
+        let placed = |model: nervix_models::Model, node: &ClusterNodeName| {
+            let mut scheduled = scheduled_model(model);
+            scheduled.primary_node = Some(node.clone());
+            scheduled.assigned_nodes = vec![node.clone()];
+            scheduled
+        };
+        let relay = |name: &str| {
+            nervix_models::Model::Relay(CreateRelay {
+                name: named(name),
+                schema: named("entrypoint_payload"),
+                buffer: nonzero_capacity(2),
+                branching: nervix_models::RelayBranching::unbranched(),
+                materialized_state: None,
+            })
+        };
+        let schedule = DomainSchedule::new(
+            domain.clone(),
+            vec![
+                placed(relay("incoming"), &owner),
+                placed(relay("outgoing"), &owner),
+                placed(nervix_models::Model::Reingestor(reingestor), &executor),
+            ],
+            Vec::new(),
+        );
+
+        let owned = Runtime::remote_runtime_consumers_for_schedule(&schedule, &plans, &owner);
+        let consumers = owned
+            .get(&named::<RelayName>("incoming"))
+            .assured("the remote reingestor reads the relay this node owns");
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(consumers[0].node_id, executor);
+        assert_eq!(consumers[0].mode, AckMode::Detached);
+        assert!(!owned.contains_key(&named::<RelayName>("outgoing")));
+
+        let executing =
+            Runtime::remote_runtime_consumers_for_schedule(&schedule, &plans, &executor);
+        assert!(executing.is_empty());
     }
 
     #[tokio::test]
