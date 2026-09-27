@@ -214,6 +214,15 @@ a canonical RFC 4648 standard base64 string with padding; malformed or unpadded 
 error. AVRO `BYTES` fields use Avro's native byte sequence. A wire `STRING` field cannot bind an
 internal `BYTES` field. Nested `ARRAY` and `VEC` byte elements use the same representation.
 
+Live `WIRE JSON` ingestion copies each connector-owned payload into mutable scratch retained by
+the open ingest group, then parses it with simd-json using parser buffers retained beside that
+scratch. The decoder walks simd-json's borrowed values directly into the batch's typed Arrow
+builders. It resolves schema field hashes and Arrow data types when the codec and batch are built,
+parses each datetime once, and streams base64 output into the binary builder. It does not construct
+a serde JSON tree or a row map. Strict and loose field behavior, optional nulls, exact integer
+ranges, nested sequence shapes, invalid UTF-8 and malformed escape rejection remain the public
+wire-schema contract.
+
 JAQ-native codecs parse a transport payload in a jaq-supported format and run explicitly directed
 JAQ transformations. An ingestion transformation turns every value the payload holds into zero
 or more JSON objects, and each object is decoded into the internal schema as one message
@@ -319,6 +328,9 @@ Semantics:
 - `ON EMITTING` runs after the runtime record has been converted into JSON and must yield exactly one native-format or protobuf-message value
 
 JAQ-backed encode/decode is dispatched to blocking workers so expensive transforms do not stall async ingestor or emitter tasks.
+JAQ JSON output intentionally preserves object member declaration order. The serde JSON
+`preserve_order` feature exists for that public JAQ behavior; schemaful `WIRE JSON` ingestion does
+not depend on serde JSON object storage.
 
 ### Batch Transformations
 

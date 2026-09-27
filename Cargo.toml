@@ -590,7 +590,7 @@ shuttle-tokio = { package = "shuttle-tokio", version = "1" }
 shuttle-tokio-stream = { package = "shuttle-tokio-stream", version = "0.1" }
 shuttle-tokio-util = { package = "shuttle-tokio-util", version = "0.7" }
 signal-hook = "0.4"
-simd-json = "0.17.0"
+simd-json = { version = "0.17.0", features = ["known-key"] }
 sorted-vec = "0.8"
 sqlx = { version = "0.9", default-features = false, features = [
   "postgres",

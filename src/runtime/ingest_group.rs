@@ -5,8 +5,6 @@
 //! - **Depends on.** Installed domain capabilities, compiled codecs and branch-local routes.
 //! - **Must not know.** NSPL parsing, consensus decisions or source transport lifecycle.
 
-use std::borrow::Cow;
-
 use ahash::RandomState;
 use bytes::Bytes;
 use error_stack::ResultExt as _;
@@ -333,6 +331,7 @@ pub(super) struct PendingIngestGroup {
     /// The number of rows the group is expected to reach, used to size its builders.
     pub(super) row_bound: usize,
     pub(super) records: Option<RuntimeRecordBatchBuilder>,
+    decoder: JsonDecoder,
     /// How many messages each decoded payload unfolded into, oldest first, for the payloads the
     /// source has not accepted yet.
     pub(super) undispatched_payloads: VecDeque<usize>,
@@ -349,6 +348,7 @@ impl PendingIngestGroup {
             kind,
             row_bound,
             records: None,
+            decoder: JsonDecoder::default(),
             undispatched_payloads: VecDeque::new(),
             metadata: None,
             acks: Vec::new(),
@@ -365,13 +365,13 @@ impl PendingIngestGroup {
     pub(super) async fn decode_payload(
         &mut self,
         codec: &Arc<CompiledCodec>,
-        payload: Cow<'_, [u8]>,
+        payload: &[u8],
     ) -> Result<(), CodecError> {
         let row_bound = self.row_bound;
         let records = self
             .records
             .get_or_insert_with(|| codec.schema().batch_builder(row_bound));
-        match decode_ingested_payload(codec, payload, records).await {
+        match decode_ingested_payload(codec, payload, &mut self.decoder, records).await {
             Ok(messages) => {
                 self.undispatched_payloads.push_back(messages);
                 Ok(())
@@ -660,7 +660,7 @@ impl IngestRouteCollector {
     pub(super) async fn decode_payload(
         &mut self,
         codec: &Arc<CompiledCodec>,
-        payload: Cow<'_, [u8]>,
+        payload: &[u8],
     ) -> Result<(), CodecError> {
         self.pending.decode_payload(codec, payload).await
     }
@@ -1087,18 +1087,19 @@ pub(super) async fn branched_branch_filter_blocking(
 /// none of them.
 pub(super) async fn decode_ingested_payload(
     codec: &Arc<CompiledCodec>,
-    payload: Cow<'_, [u8]>,
+    payload: &[u8],
+    decoder: &mut JsonDecoder,
     builder: &mut RuntimeRecordBatchBuilder,
 ) -> Result<usize, CodecError> {
     if !codec.requires_blocking_decode() {
-        return decode_with_codec(codec, payload, builder);
+        return decode_with_codec(codec, payload, decoder, builder);
     }
 
     // Only the unfolding leaves the reactor. The Arrow append that consumes its result stays here,
     // with the batch builder the decoded rows join.
     let codec_name = codec.name.as_str().to_string();
     let blocking_codec = codec.clone();
-    let payload = Bytes::from(payload.into_owned());
+    let payload = Bytes::copy_from_slice(payload);
     let unfolded = tokio::task::spawn_blocking(move || blocking_codec.unfold_on_ingestion(payload))
         .await
         .map_err(|error| CodecError::InvalidCodec {
@@ -1827,10 +1828,7 @@ impl Runtime {
             tokio::task::consume_budget().await;
             // A request carries all of its payloads or none of them, so a payload that fails to
             // decode takes the payloads decoded before it back out of the group.
-            if let Err(error) = collector
-                .decode_payload(&codec, Cow::Borrowed(source_payload))
-                .await
-            {
+            if let Err(error) = collector.decode_payload(&codec, source_payload).await {
                 collector.discard_undispatched_payloads();
                 return Err(
                     Report::new(error).change_context(IngestGroupError::DecodePayload {

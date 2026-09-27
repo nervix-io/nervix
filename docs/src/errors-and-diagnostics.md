@@ -33,6 +33,12 @@ Values a caller acts on belong in typed fields; display formatting happens when 
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
 
+Schemaful JSON parsing has one codec decode failure carrying the simd-json source. Malformed
+syntax, invalid UTF-8, and invalid escapes enter through that failure; object shape, missing or
+unexpected fields, nullability, exact wire types, integer ranges, datetime parsing, base64, and
+nested sequence shapes keep their existing typed codec or runtime-schema failures. Diagnostics name
+the codec and field when one is known and never attach the rejected payload value.
+
 ```mermaid
 sequenceDiagram
     participant Client

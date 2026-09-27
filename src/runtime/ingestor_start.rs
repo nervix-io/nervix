@@ -7,8 +7,6 @@
 //! - **Must not know.** NSPL parsing, registry validation, placement selection, or which connector
 //!   a source runs on.
 
-use std::borrow::Cow;
-
 use error_stack::ResultExt as _;
 
 use super::*;
@@ -470,6 +468,7 @@ impl Runtime {
         // into any number of rows, so each row remembers the line it came from for the diagnostics
         // below.
         let mut builder = schema.batch_builder(0);
+        let mut decoder = JsonDecoder::default();
         let mut row_lines = Vec::new();
         let mut line_number = 0usize;
         while let Some(line) = lines.next_line().await.map_err(|source| {
@@ -485,7 +484,7 @@ impl Runtime {
                 continue;
             }
             let messages =
-                decode_ingested_payload(&codec, Cow::Owned(line.into_bytes()), &mut builder)
+                decode_ingested_payload(&codec, line.as_bytes(), &mut decoder, &mut builder)
                     .await
                     .map_err(|source| {
                         Report::new(LookupRuntimeError::DecodeLine {

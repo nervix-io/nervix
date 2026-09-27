@@ -193,11 +193,9 @@ async fn ingest_group_builds_one_record_column_set_for_all_of_its_messages() {
     RECORD_COLUMN_SETS_BUILT.with(|count| count.set(0));
 
     for user_id in 0..3i64 {
+        let payload = format!(r#"{{"user_id":{user_id}}}"#);
         collector
-            .decode_payload(
-                &codec,
-                Cow::Owned(format!(r#"{{"user_id":{user_id}}}"#).into_bytes()),
-            )
+            .decode_payload(&codec, payload.as_bytes())
             .await
             .expect("each payload should decode into the open group");
         accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
@@ -250,11 +248,9 @@ async fn ingest_group_accepts_its_decoded_payloads_one_at_a_time() {
     );
 
     for user_id in 0..3i64 {
+        let payload = format!(r#"{{"user_id":{user_id}}}"#);
         collector
-            .decode_payload(
-                &codec,
-                Cow::Owned(format!(r#"{{"user_id":{user_id}}}"#).into_bytes()),
-            )
+            .decode_payload(&codec, payload.as_bytes())
             .await
             .expect("each payload should decode into the open group");
     }
@@ -293,19 +289,19 @@ async fn ingest_group_keeps_its_other_messages_when_one_payload_fails_to_decode(
     );
 
     collector
-        .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":1}"#))
+        .decode_payload(&codec, br#"{"user_id":1}"#)
         .await
         .expect("the first payload should decode");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
         .expect("the first payload should be accepted");
 
     collector
-        .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":"two"}"#))
+        .decode_payload(&codec, br#"{"user_id":"two"}"#)
         .await
         .expect_err("a user id of the wrong type should be rejected");
 
     collector
-        .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":3}"#))
+        .decode_payload(&codec, br#"{"user_id":3}"#)
         .await
         .expect("the payload after the rejected one should decode");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
@@ -343,10 +339,7 @@ async fn ingest_group_gives_every_unfolded_message_its_payload_metadata_and_an_a
     let (payload_acks, completion) = AckSet::tracked_root(tracker.clone());
 
     collector
-        .decode_payload(
-            &codec,
-            Cow::Borrowed(br#"[{"user_id":1},{"user_id":2},{"user_id":3}]"#),
-        )
+        .decode_payload(&codec, br#"[{"user_id":1},{"user_id":2},{"user_id":3}]"#)
         .await
         .expect("the payload should unfold into the open group");
     accept_decoded_payloads(&mut collector, vec![payload_acks])
@@ -405,7 +398,7 @@ async fn ingest_group_acknowledges_a_payload_that_unfolds_into_no_messages() {
     let (payload_acks, completion) = AckSet::tracked_root(tracker.clone());
 
     collector
-        .decode_payload(&codec, Cow::Borrowed(br#"[{"user_id":1,"keep":false}]"#))
+        .decode_payload(&codec, br#"[{"user_id":1,"keep":false}]"#)
         .await
         .expect("a payload the program selects nothing from should decode");
     accept_decoded_payloads(&mut collector, vec![payload_acks])
@@ -440,17 +433,14 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
     );
 
     collector
-        .decode_payload(&codec, Cow::Borrowed(br#"[{"user_id":1}]"#))
+        .decode_payload(&codec, br#"[{"user_id":1}]"#)
         .await
         .expect("the first payload should unfold");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
         .expect("the first payload should be accepted");
 
     let error = collector
-        .decode_payload(
-            &codec,
-            Cow::Borrowed(br#"[{"user_id":2},{"user_id":"confidential"}]"#),
-        )
+        .decode_payload(&codec, br#"[{"user_id":2},{"user_id":"confidential"}]"#)
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
     let message = error.to_string();
@@ -458,7 +448,7 @@ async fn ingest_group_keeps_no_message_of_a_payload_that_fails_part_way_through_
     assert!(!message.contains("confidential"), "{message}");
 
     collector
-        .decode_payload(&codec, Cow::Borrowed(br#"[{"user_id":3},{"user_id":4}]"#))
+        .decode_payload(&codec, br#"[{"user_id":3},{"user_id":4}]"#)
         .await
         .expect("the payload after the rejected one should unfold");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
@@ -490,10 +480,7 @@ async fn ingest_group_releases_the_rows_a_rejected_payload_abandoned_in_an_empty
     );
 
     collector
-        .decode_payload(
-            &codec,
-            Cow::Borrowed(br#"[{"user_id":1},{"user_id":"two"}]"#),
-        )
+        .decode_payload(&codec, br#"[{"user_id":1},{"user_id":"two"}]"#)
         .await
         .expect_err("an element of the wrong type must reject its whole payload");
 
@@ -694,7 +681,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
         grouped_event_ingestor_metrics(),
     );
     undispatched
-        .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":1}"#))
+        .decode_payload(&codec, br#"{"user_id":1}"#)
         .await
         .expect("the fixture payload must decode");
     let undispatched_error = expect_failure(
@@ -713,13 +700,13 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
         grouped_event_ingestor_metrics(),
     );
     collector
-        .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":1}"#))
+        .decode_payload(&codec, br#"{"user_id":1}"#)
         .await
         .expect("the first fixture payload must decode");
     accept_decoded_payloads(&mut collector, vec![AckSet::empty()])
         .expect("the first fixture payload must be accepted");
     collector
-        .decode_payload(&codec, Cow::Borrowed(br#"{"user_id":2}"#))
+        .decode_payload(&codec, br#"{"user_id":2}"#)
         .await
         .expect("the second fixture payload must decode");
 

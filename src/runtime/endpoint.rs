@@ -9,8 +9,6 @@
 //! - **Must not know.** When a route is bound or unbound, which the endpoint source owns; NSPL
 //!   parsing, placement policy or consensus storage.
 
-use std::borrow::Cow;
-
 use nervix_connector::{
     IngestMessageHeaders, RetainedIngestHeaders, physical_time::actual_utc_now,
 };
@@ -283,7 +281,7 @@ impl Runtime {
         let mut collector =
             IngestRouteCollector::new(IngestMetadataKind::Headers, 1, binding.metrics.clone());
         match collector
-            .decode_payload(&binding.codec, Cow::Borrowed(payload.payload()))
+            .decode_payload(&binding.codec, payload.payload())
             .await
         {
             Ok(()) => {

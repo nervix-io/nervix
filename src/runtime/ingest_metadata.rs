@@ -517,8 +517,6 @@ pub(super) fn emit_sink_supports_headers(sink: &EmitSink) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use ahash::HashMap;
     use arrow_array::Array;
     use nervix_connector::NoIngestHeaders;
@@ -662,11 +660,9 @@ mod tests {
         INGEST_METADATA_COLUMN_SETS_BUILT.with(|count| count.set(0));
 
         for offset in 0..3i64 {
+            let payload = format!(r#"{{"value":{offset}}}"#);
             group
-                .decode_payload(
-                    &codec,
-                    Cow::Owned(format!(r#"{{"value":{offset}}}"#).into_bytes()),
-                )
+                .decode_payload(&codec, payload.as_bytes())
                 .await
                 .expect("each payload must decode into the group's record builder");
             group
