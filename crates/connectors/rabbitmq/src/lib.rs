@@ -31,7 +31,7 @@ use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
     ServiceUrl, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord,
-    SinkRecordPosition, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    SinkRecordId, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
     read_tls_file,
 };
 use nervix_models::{ClientConfigEntry, QueueName, Timestamp};
@@ -57,7 +57,7 @@ pub struct RabbitMqSink {
 }
 
 struct PendingRabbitMqConfirmation {
-    position: SinkRecordPosition,
+    record: SinkRecordId,
     occurred_at: Timestamp,
     deadline: Instant,
     confirmation: PublisherConfirm,
@@ -161,10 +161,14 @@ impl RabbitMqSink {
 
     /// `MODE NO_ACK`: the channel is not in confirm mode, so the publisher confirm resolves to the
     /// channel's acceptance and a record is delivered as soon as the broker takes it.
-    async fn publish_unconfirmed(&self, records: Vec<SinkRecord>, outcome: &mut PerRecordOutcome) {
+    async fn publish_unconfirmed(
+        &self,
+        records: Vec<SinkRecord>,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
+    ) {
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
+            let record_id = record.id;
             let occurred_at = record.occurred_at;
             let confirmation = match self.publish_message(&record).await {
                 Ok(confirmation) => confirmation,
@@ -175,12 +179,12 @@ impl RabbitMqSink {
             };
             match confirmation.await {
                 Ok(Confirmation::NotRequested | Confirmation::Ack(None)) => {
-                    outcome.deliver(position);
+                    outcome.deliver(record_id);
                 }
                 Ok(Confirmation::Ack(Some(returned))) => {
                     if Self::is_returned_record_rejection(&returned) {
                         outcome.reject(RejectedSinkRecord::external(
-                            position,
+                            record_id,
                             occurred_at,
                             Self::returned_message_reason(&returned),
                         ));
@@ -214,12 +218,12 @@ impl RabbitMqSink {
             max_in_flight,
             timeout,
         }: AckConfirmation,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         let mut pending: VecDeque<PendingRabbitMqConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
+            let record_id = record.id;
             let occurred_at = record.occurred_at;
             let confirmation = match self.publish_message(&record).await {
                 Ok(confirmation) => confirmation,
@@ -235,7 +239,7 @@ impl RabbitMqSink {
                 return;
             };
             pending.push_back(PendingRabbitMqConfirmation {
-                position,
+                record: record_id,
                 occurred_at,
                 deadline,
                 confirmation,
@@ -259,7 +263,7 @@ impl RabbitMqSink {
     async fn confirm_oldest(
         pending: &mut VecDeque<PendingRabbitMqConfirmation>,
         timeout: Duration,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) -> SinkPublishResult<()> {
         let Some(oldest) = pending.front_mut() else {
             return Err(Self::publish_error(
@@ -283,19 +287,19 @@ impl RabbitMqSink {
             Self::harvest_ready_after_oldest_failure(pending, outcome);
             return Err(Self::confirm_timeout_error(timeout));
         };
-        let position = oldest.position;
+        let record_id = oldest.record;
         let occurred_at = oldest.occurred_at;
         match result {
             Ok(Confirmation::Ack(None)) => {
                 pending.pop_front();
-                outcome.deliver(position);
+                outcome.deliver(record_id);
                 Ok(())
             }
             Ok(Confirmation::Ack(Some(returned))) => {
                 if Self::is_returned_record_rejection(&returned) {
                     pending.pop_front();
                     outcome.reject(RejectedSinkRecord::external(
-                        position,
+                        record_id,
                         occurred_at,
                         Self::returned_message_reason(&returned),
                     ));
@@ -309,7 +313,7 @@ impl RabbitMqSink {
             {
                 pending.pop_front();
                 outcome.reject(RejectedSinkRecord::external(
-                    position,
+                    record_id,
                     occurred_at,
                     Self::returned_message_reason(&returned),
                 ));
@@ -343,7 +347,7 @@ impl RabbitMqSink {
     /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingRabbitMqConfirmation>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         let mut index = 1;
         while index < pending.len() {
@@ -359,12 +363,12 @@ impl RabbitMqSink {
                  removes from",
             );
             match result {
-                Ok(Confirmation::Ack(None)) => outcome.deliver(confirmation.position),
+                Ok(Confirmation::Ack(None)) => outcome.deliver(confirmation.record),
                 Ok(Confirmation::Ack(Some(returned)) | Confirmation::Nack(Some(returned)))
                     if Self::is_returned_record_rejection(&returned) =>
                 {
                     outcome.reject(RejectedSinkRecord::external(
-                        confirmation.position,
+                        confirmation.record,
                         confirmation.occurred_at,
                         Self::returned_message_reason(&returned),
                     ));
@@ -449,7 +453,7 @@ impl SinkLifecycle for RabbitMqSink {}
 
 #[async_trait]
 impl RecordSink for RabbitMqSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         match self.mode {
             BrokerPublishingMode::NoAck => {

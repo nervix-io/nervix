@@ -20,7 +20,8 @@ use async_trait::async_trait;
 use error_stack::Report;
 use nervix_connector::{
     PerRecordOutcome, RecordSink, ServiceUrl, SinkHost, SinkLifecycle, SinkPublishError,
-    SinkRecord, SinkStartResult, client_tls_paths, optional_client_config_value, read_tls_file,
+    SinkRecord, SinkRecordId, SinkStartResult, client_tls_paths, optional_client_config_value,
+    read_tls_file,
 };
 use nervix_models::{ChannelName, ClientConfigEntry, ClientPoolBounds};
 use redis::{
@@ -239,7 +240,7 @@ impl SinkLifecycle for RedisSink {}
 
 #[async_trait]
 impl RecordSink for RedisSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let pool = self.pool.pool();
         for record in records {
@@ -257,7 +258,7 @@ impl RecordSink for RedisSink {
                 .publish(self.channel.as_str(), record.payload.as_slice())
                 .await;
             match published {
-                Ok(_) => outcome.deliver(record.position),
+                Ok(_) => outcome.deliver(record.id),
                 Err(error) if Self::is_record_failure(&error) => {
                     outcome
                         .reject(record.rejected(format!("Redis rejected emitted record: {error}")));

@@ -319,6 +319,16 @@ One payload is one publish. Its confirmation delivers every member, and a destin
 of it rejects every member with one shared error reference. `ACK PARALLEL MAX <n>` therefore counts
 payloads, not records. `nervix_messages_total` keeps counting source records.
 
+A payload whose outcome the emitter did not learn — the destination failed, stopped answering, or
+its confirmation timed out — is retained exactly as it was written. The retry, or a force flush or
+drain before it, writes the same bytes with the same members again, so a duplicate a retry produces
+is the payload the destination may already hold, never a regrouped one. Payloads the destination
+confirmed or rejected in the failed attempt are not written again, and records that arrive while a
+payload is retained go into later payloads. The members of a retained payload keep their upstream
+acknowledgements alive until it resolves; a `DETACHED` emitter still acknowledges upstream at relay
+fan-out and still retries the payload. Where the destination answers for every record itself, as a
+MongoDB bulk write does per document, a retry carries only the records it left unresolved.
+
 Member values and containers are working values that exist only while the released carriers are
 encoded; the records themselves stay in Arrow batches. The packer holds at most `MAX MESSAGES`
 prepared members in one candidate, even when the members come from successive carriers. For a
@@ -1182,7 +1192,9 @@ delivered. Attachment determines whether that outcome participates in the upstre
 Confirming broker modes and request/response `ACK` modes are at least once. A confirmation timeout
 or lost response is not proof that the service rejected a record, so retry can duplicate it. The
 parallel window limits how many records are exposed to that ambiguity at one time, and Nervix
-resends only records not yet confirmed or definitively rejected. `NO_ACK`, MQTT QoS 0, Core NATS,
+resends only records not yet confirmed or definitively rejected. With the
+[batching clause](#batching) the unit is the batch payload: a retry resends exactly the payloads not
+yet confirmed or rejected, with the bytes and members they were first written with. `NO_ACK`, MQTT QoS 0, Core NATS,
 Redis Pub/Sub, and ZeroMQ expose earlier acceptance boundaries and can lose acknowledged records
 after a crash or downstream failure. External broker durability and idempotence settings remain
 the user's client and service configuration.

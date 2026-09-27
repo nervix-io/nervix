@@ -65,6 +65,9 @@ struct FaultInjectionState {
     emitter_faults: DashMap<String, EmitterFaultMode, RandomState>,
     failed_ingestors: DashMap<String, (), RandomState>,
     unavailable_sink_clients: DashMap<String, (), RandomState>,
+    /// One-shot, emitter-scoped sink stalls: the next write of the emitter keeps the sink's answers
+    /// for this many of its records, and the answers for the rest are lost.
+    stalled_emitter_sinks: DashMap<String, usize, RandomState>,
     failed_schedule_publications: DashMap<String, (), RandomState>,
     /// One-shot, domain-scoped rejections consumed before any entity gate engages.
     failed_entity_gate_engagements: DashMap<DomainName, (), RandomState>,
@@ -279,6 +282,7 @@ impl Default for FaultInjection {
                 emitter_faults: DashMap::default(),
                 failed_ingestors: DashMap::default(),
                 unavailable_sink_clients: DashMap::default(),
+                stalled_emitter_sinks: DashMap::default(),
                 failed_schedule_publications: DashMap::default(),
                 failed_entity_gate_engagements: DashMap::default(),
                 forced_entity_drain_timeouts: DashMap::default(),
@@ -616,6 +620,18 @@ impl FaultInjection {
         self.inner
             .unavailable_sink_clients
             .remove(&emitter.to_ascii_lowercase());
+    }
+
+    /// Makes the sink of `emitter` stall after it resolved `resolved` records of its next write.
+    ///
+    /// The sink still writes every record, but the emitter receives only its answers for the first
+    /// `resolved` records in the order it handed them over, as it does from a broker that stops
+    /// answering after it accepted the rest. The write then fails the way an unanswered one does,
+    /// so the emitter cannot tell which of the other records landed.
+    pub fn stall_emitter_sink_after_resolving(&self, emitter: &str, resolved: usize) {
+        self.inner
+            .stalled_emitter_sinks
+            .insert(emitter.to_ascii_lowercase(), resolved);
     }
 
     /// Fails the next schedule publication for a domain so a test can observe recovery after the
@@ -1289,6 +1305,15 @@ impl FaultInjection {
         self.inner
             .unavailable_sink_clients
             .contains_key(&emitter.as_str().to_ascii_lowercase())
+    }
+
+    /// Consumes the sink stall armed for the next write of `emitter`: how many of its records the
+    /// sink resolves before it stalls.
+    pub(crate) fn take_emitter_sink_stall(&self, emitter: &EmitterName) -> Option<usize> {
+        self.inner
+            .stalled_emitter_sinks
+            .remove(&emitter.as_str().to_ascii_lowercase())
+            .map(|(_, resolved)| resolved)
     }
 
     /// Consumes an armed fault so the rollback publication can still reach the cluster.

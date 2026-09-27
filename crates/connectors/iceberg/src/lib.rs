@@ -773,7 +773,7 @@ impl SinkLifecycle for IcebergSink {
 
 #[async_trait::async_trait]
 impl RowSink for IcebergSink {
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome {
+    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
         let staged = match self.staged_batch(&rows) {
             Ok(staged) => staged,

@@ -263,7 +263,11 @@ impl OtelRecordError {
     }
 
     /// The rejection the host delivers for the row this value came from.
-    fn rejected(self, position: SinkRecordPosition, occurred_at: Timestamp) -> RejectedSinkRecord {
+    fn rejected(
+        self,
+        position: SinkRecordPosition,
+        occurred_at: Timestamp,
+    ) -> RejectedSinkRecord<SinkRecordPosition> {
         RejectedSinkRecord::invalid(
             position,
             occurred_at,
@@ -761,7 +765,7 @@ impl SinkLifecycle for OtelSink {}
 
 #[async_trait]
 impl RowSink for OtelSink {
-    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome {
+    async fn publish(&mut self, rows: MappedSinkRows<'_>) -> PerRecordOutcome<SinkRecordPosition> {
         let mut outcome = PerRecordOutcome::with_capacity(rows.selected_rows.len());
         let mapped = OtelMappedBatch {
             batch: rows.batch,
@@ -1373,7 +1377,7 @@ impl OtelMappedBatch<'_> {
         batch_index: usize,
         occurred_at: Timestamp,
         positions: &mut Vec<SinkRecordPosition>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordPosition>,
     ) -> Metric {
         let position = |row: usize| SinkRecordPosition {
             batch_index,

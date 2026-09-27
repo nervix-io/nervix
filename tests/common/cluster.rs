@@ -2191,6 +2191,15 @@ impl Cluster {
         self.fault_injection.clear_sink_client_fault(emitter);
     }
 
+    pub(crate) fn stall_emitter_sink_after_resolving_on_all_nodes(
+        &self,
+        emitter: &str,
+        resolved: usize,
+    ) {
+        self.fault_injection
+            .stall_emitter_sink_after_resolving(emitter, resolved);
+    }
+
     pub(crate) fn fail_next_schedule_publication_on_all_nodes(&self, domain: &str) {
         self.fault_injection.fail_next_schedule_publication(domain);
     }

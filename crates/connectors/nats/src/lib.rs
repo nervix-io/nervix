@@ -42,8 +42,8 @@ use futures_util::{FutureExt, SinkExt};
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, ParsedRetryPolicy, PerRecordOutcome, RecordSink, RejectedSinkRecord, SinkHost,
-    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordPosition,
-    SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
+    SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId, SinkStartError,
+    SinkStartResult, client_config_value, client_tls_paths,
 };
 use nervix_models::{ClientConfigEntry, SubjectName, Timestamp};
 pub use source::{
@@ -95,7 +95,7 @@ type NatsConfirmation =
     Pin<Box<dyn Future<Output = Result<PublishAck, JetStreamPublishError>> + Send>>;
 
 struct PendingNatsConfirmation {
-    position: SinkRecordPosition,
+    record: SinkRecordId,
     occurred_at: Timestamp,
     deadline: Instant,
     confirmation: NatsConfirmation,
@@ -192,13 +192,13 @@ impl NatsSink {
         delay
     }
 
-    async fn publish_core(&self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish_core(&self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut sink = self.client.clone();
         let mut queued = Vec::with_capacity(records.len());
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
+            let record_id = record.id;
             let occurred_at = record.occurred_at;
             let headers = if record.headers.is_empty() {
                 None
@@ -214,10 +214,10 @@ impl NatsSink {
                 })
                 .await;
             match result {
-                Ok(()) => queued.push(position),
+                Ok(()) => queued.push(record_id),
                 Err(error) if Self::is_core_record_rejection(&error) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        position,
+                        record_id,
                         occurred_at,
                         format!("nats rejected record: {error}"),
                     ));
@@ -230,8 +230,8 @@ impl NatsSink {
         }
         match self.client.flush().await {
             Ok(()) => {
-                for position in queued {
-                    outcome.deliver(position);
+                for record_id in queued {
+                    outcome.deliver(record_id);
                 }
             }
             Err(error) => outcome.fail(Self::publish_error(error)),
@@ -247,12 +247,12 @@ impl NatsSink {
             timeout,
         }: AckConfirmation,
         records: Vec<SinkRecord>,
-    ) -> PerRecordOutcome {
+    ) -> PerRecordOutcome<SinkRecordId> {
         let mut outcome = PerRecordOutcome::with_capacity(records.len());
         let mut pending: VecDeque<PendingNatsConfirmation> = VecDeque::new();
         for record in records {
             tokio::task::consume_budget().await;
-            let position = record.position;
+            let record_id = record.id;
             let occurred_at = record.occurred_at;
             let confirmation = if record.headers.is_empty() {
                 jetstream
@@ -271,7 +271,7 @@ impl NatsSink {
                 Ok(confirmation) => confirmation,
                 Err(error) if Self::is_jetstream_record_rejection(&error) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        position,
+                        record_id,
                         occurred_at,
                         format!("nats JetStream rejected record: {error}"),
                     ));
@@ -289,7 +289,7 @@ impl NatsSink {
                 return outcome;
             };
             pending.push_back(PendingNatsConfirmation {
-                position,
+                record: record_id,
                 occurred_at,
                 deadline,
                 confirmation: Box::pin(confirmation.into_future()),
@@ -314,7 +314,7 @@ impl NatsSink {
     async fn confirm_oldest(
         pending: &mut VecDeque<PendingNatsConfirmation>,
         timeout: Duration,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) -> SinkPublishResult<()> {
         let Some(oldest) = pending.front_mut() else {
             return Err(Self::publish_error(
@@ -338,18 +338,18 @@ impl NatsSink {
             Self::harvest_ready_after_oldest_failure(pending, outcome);
             return Err(Self::confirm_timeout_error(timeout));
         };
-        let position = oldest.position;
+        let record_id = oldest.record;
         let occurred_at = oldest.occurred_at;
         match result {
             Ok(_ack) => {
                 pending.pop_front();
-                outcome.deliver(position);
+                outcome.deliver(record_id);
                 Ok(())
             }
             Err(error) if Self::is_jetstream_record_rejection(&error) => {
                 pending.pop_front();
                 outcome.reject(RejectedSinkRecord::external(
-                    position,
+                    record_id,
                     occurred_at,
                     format!("nats JetStream rejected record: {error}"),
                 ));
@@ -371,7 +371,7 @@ impl NatsSink {
     /// caller is returning, and classifying it per record would report one outage many times.
     fn harvest_ready_after_oldest_failure(
         pending: &mut VecDeque<PendingNatsConfirmation>,
-        outcome: &mut PerRecordOutcome,
+        outcome: &mut PerRecordOutcome<SinkRecordId>,
     ) {
         let mut index = 1;
         while index < pending.len() {
@@ -387,10 +387,10 @@ impl NatsSink {
                  removes from",
             );
             match result {
-                Ok(_ack) => outcome.deliver(confirmation.position),
+                Ok(_ack) => outcome.deliver(confirmation.record),
                 Err(error) if Self::is_jetstream_record_rejection(&error) => {
                     outcome.reject(RejectedSinkRecord::external(
-                        confirmation.position,
+                        confirmation.record,
                         confirmation.occurred_at,
                         format!("nats JetStream rejected record: {error}"),
                     ));
@@ -462,7 +462,7 @@ impl SinkLifecycle for NatsSink {
 
 #[async_trait]
 impl RecordSink for NatsSink {
-    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome {
+    async fn publish(&mut self, records: Vec<SinkRecord>) -> PerRecordOutcome<SinkRecordId> {
         match &self.delivery {
             NatsDelivery::Core => self.publish_core(records).await,
             NatsDelivery::JetStream {
