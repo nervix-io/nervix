@@ -90,6 +90,13 @@ ingestor is parsed, so it offers those functions only for sources that can read 
 emitter `INVOKE` completion similarly uses the vocabulary sink capability to offer `write_header`
 only for sinks that can write headers. Runtime validation remains authoritative.
 
+The source host decodes consecutive payloads into one ingest group's Arrow builders. For a
+schemaful JSON codec, that group also owns mutable payload scratch and simd-json parser buffers;
+the connector continues lending immutable payload bytes, and the host reuses its storage until the
+group closes. Compiled field keys direct borrowed JSON values into typed columns without a serde
+tree or an intermediate row representation. A rejected payload abandons only the partial Arrow row
+it started, preserving the accepted rows and transport positions around it.
+
 The host runs three source loop families, with a listener using the broker loop:
 
 | Family | Host behavior | Source behavior |

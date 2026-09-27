@@ -165,7 +165,7 @@ use crate::{
         AckCompletion, AckOutcome, AckProgress, AckRequiredWaitGuard, AckRootTracker, AckSet,
     },
     runtime_schema::{
-        CodecError, CompiledCodec, CompiledSchema, ProtobufCodecDescriptors,
+        CodecError, CompiledCodec, CompiledSchema, JsonDecoder, ProtobufCodecDescriptors,
         ProtobufDescriptorPool, RuntimeProjectionComponent, RuntimeRecordBatch,
         RuntimeRecordBatchBuilder, RuntimeRecordMetadata, RuntimeRow, RuntimeSchemaError,
         RuntimeSchemaOperation, RuntimeValue, RuntimeValueColumn, RuntimeValueLocation,
