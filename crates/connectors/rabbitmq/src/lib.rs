@@ -6,34 +6,37 @@
 //!   the consumer and prefetch window a source reads through, AMQP headers in both
 //!   directions, per-delivery acknowledgement and requeue, publisher confirms, and
 //!   returned-message classification.
-//! - **Depends on.** The connector contract, vocabulary values, `error-stack`, Tokio and `lapin`.
+//! - **Depends on.** The connector contract, vocabulary values, the node resolver, `error-stack`,
+//!   Tokio and `lapin`.
 //! - **Must not know.** Runtime batches, relays, branches, schedules, registry state, or another
 //!   connector implementation.
 
 #[cfg(feature = "shuttle")]
 extern crate shuttle_tokio as tokio;
 
+mod connection;
 mod source;
 
 use std::{collections::VecDeque, time::Duration};
 
 use async_trait::async_trait;
+use connection::RabbitMqBroker;
+pub use connection::RabbitMqConnectError;
 use error_stack::Report;
 use futures_util::FutureExt;
 use lapin::{
-    Confirmation, Connection, ConnectionProperties, PublisherConfirm,
+    Confirmation, PublisherConfirm,
     message::BasicReturnMessage,
     options::{BasicPublishOptions, ConfirmSelectOptions, QueueDeclareOptions},
-    tcp::OwnedTLSConfig,
     types::{AMQPValue, FieldTable},
 };
 use meticulous::OptionExt as _;
 use nervix_connector::{
     AckConfirmation, BrokerPublishingMode, PerRecordOutcome, RecordSink, RejectedSinkRecord,
-    ServiceUrl, SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord,
-    SinkRecordId, SinkStartError, SinkStartResult, client_config_value, client_tls_paths,
-    read_tls_file,
+    SinkHost, SinkLifecycle, SinkPublishError, SinkPublishResult, SinkRecord, SinkRecordId,
+    SinkStartError, SinkStartResult,
 };
+use nervix_dns::DnsResolver;
 use nervix_models::{ClientConfigEntry, QueueName, Timestamp};
 pub use source::{
     RabbitMqDeliveryHeaders, RabbitMqSource, RabbitMqSourceError, RabbitMqSourceMessage,
@@ -43,9 +46,11 @@ use tokio::time::{Instant, sleep};
 
 const RABBITMQ: &str = "rabbitmq";
 
-/// What one RabbitMQ sink publishes through: its client entries, queue and publishing mode.
+/// What one RabbitMQ sink publishes through: its client entries, the node resolver its broker host
+/// resolves through, its queue and its publishing mode.
 pub struct RabbitMqSinkConfig {
     pub config: Vec<ClientConfigEntry>,
+    pub dns: DnsResolver,
     pub queue: QueueName,
     pub mode: BrokerPublishingMode,
 }
@@ -66,7 +71,7 @@ struct PendingRabbitMqConfirmation {
 impl RabbitMqSink {
     pub async fn new(config: RabbitMqSinkConfig, _host: SinkHost) -> SinkStartResult<Self> {
         let mode = config.mode;
-        let channel = Self::channel_from_config(&config.config).await?;
+        let channel = Self::open_channel(&config.config, config.dns).await?;
         channel
             .queue_declare(
                 config.queue.as_str().into(),
@@ -91,41 +96,14 @@ impl RabbitMqSink {
         })
     }
 
-    async fn channel_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<lapin::Channel> {
-        let connection = Self::connection_from_config(config).await?;
+    /// A channel on a new connection to the broker `config` names.
+    async fn open_channel(
+        config: &[ClientConfigEntry],
+        dns: DnsResolver,
+    ) -> SinkStartResult<lapin::Channel> {
+        let broker = RabbitMqBroker::from_config(config, dns).map_err(Self::connect_error)?;
+        let connection = broker.connect().await.map_err(Self::connect_error)?;
         connection.create_channel().await.map_err(Self::start_error)
-    }
-
-    async fn connection_from_config(config: &[ClientConfigEntry]) -> SinkStartResult<Connection> {
-        let addr = Self::config_value(config, "addr")?;
-        if Self::has_scheme(&addr, "amqps")? {
-            let tls = client_tls_paths(config);
-            let cert_chain = if let Some(ca_file) = tls.ca_file.as_ref() {
-                Some(
-                    String::from_utf8(Self::read_tls_file(ca_file, "TLS CA certificate")?)
-                        .map_err(|source| {
-                            Self::config_error(format!("failed to parse RabbitMQ CA PEM: {source}"))
-                        })?,
-                )
-            } else {
-                None
-            };
-            Connection::connect_with_config(
-                &addr,
-                ConnectionProperties::default(),
-                OwnedTLSConfig {
-                    identity: None,
-                    cert_chain,
-                },
-                lapin::runtime::default_runtime().map_err(Self::start_error)?,
-            )
-            .await
-            .map_err(Self::start_error)
-        } else {
-            Connection::connect(&addr, ConnectionProperties::default())
-                .await
-                .map_err(Self::start_error)
-        }
     }
 
     fn properties(headers: &[(String, String)]) -> lapin::BasicProperties {
@@ -403,38 +381,17 @@ impl RabbitMqSink {
         ))
     }
 
-    fn config_value(config: &[ClientConfigEntry], key: &str) -> SinkStartResult<String> {
-        client_config_value(config, key, "RabbitMQ").map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: RABBITMQ })
-                .attach_printable(message)
-        })
-    }
-
-    fn has_scheme(addr: &str, expected_scheme: &str) -> SinkStartResult<bool> {
-        ServiceUrl::new(addr, "RabbitMQ addr")
-            .has_scheme(expected_scheme)
-            .map_err(|error| {
-                let message = error.current_context().to_string();
-                error
-                    .change_context(SinkStartError::InvalidConfiguration { sink: RABBITMQ })
-                    .attach_printable(message)
-            })
-    }
-
-    fn read_tls_file(path: &std::path::PathBuf, label: &str) -> SinkStartResult<Vec<u8>> {
-        read_tls_file(path, label).map_err(|error| {
-            let message = error.current_context().to_string();
-            error
-                .change_context(SinkStartError::InvalidConfiguration { sink: RABBITMQ })
-                .attach_printable(message)
-        })
-    }
-
-    fn config_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
-        Report::new(SinkStartError::InvalidConfiguration { sink: RABBITMQ })
-            .attach_printable(error.to_string())
+    /// A failed connection as a start failure: the client's configuration when it is at fault,
+    /// otherwise the sink's initialization, which the host retries. The connection failure is kept
+    /// as the typed cause and its message leads the report.
+    fn connect_error(report: Report<RabbitMqConnectError>) -> Report<SinkStartError> {
+        let context = if report.current_context().is_configuration() {
+            SinkStartError::InvalidConfiguration { sink: RABBITMQ }
+        } else {
+            SinkStartError::Initialize { sink: RABBITMQ }
+        };
+        let message = report.current_context().to_string();
+        report.change_context(context).attach_printable(message)
     }
 
     fn start_error(error: impl std::fmt::Display) -> Report<SinkStartError> {
@@ -471,8 +428,36 @@ impl RecordSink for RabbitMqSink {
 #[cfg(test)]
 mod tests {
     use lapin::message::Delivery;
+    use nervix_dns::DnsLookupFailure;
 
     use super::*;
+
+    #[test]
+    fn connection_failures_start_as_configuration_or_initialization_failures() {
+        let invalid =
+            RabbitMqSink::connect_error(Report::new(RabbitMqConnectError::InvalidCaCertificate));
+        assert!(matches!(
+            invalid.current_context(),
+            SinkStartError::InvalidConfiguration { sink: RABBITMQ }
+        ));
+
+        let unresolved = RabbitMqSink::connect_error(Report::new(RabbitMqConnectError::Resolve {
+            host: "rabbitmq.nervix.test".to_string(),
+            failure: DnsLookupFailure::NameNotFound,
+        }));
+        assert!(matches!(
+            unresolved.current_context(),
+            SinkStartError::Initialize { sink: RABBITMQ }
+        ));
+        let leading = unresolved
+            .frames()
+            .find_map(|frame| frame.downcast_ref::<String>());
+        assert_eq!(
+            leading.map(String::as_str),
+            Some("resolving RabbitMQ host 'rabbitmq.nervix.test' failed: the name does not exist")
+        );
+        assert!(unresolved.downcast_ref::<RabbitMqConnectError>().is_some());
+    }
 
     fn returned_message(reply_code: u16, reply_text: &str) -> BasicReturnMessage {
         BasicReturnMessage {

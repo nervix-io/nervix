@@ -9,6 +9,11 @@ Consensus traffic uses the authenticated pools and admission classes described i
 [Cluster Interconnect](./interconnect.md). Consensus storage is node-local: a quorum makes a command
 committed, while every node independently persists and applies the committed log.
 
+The replicated transaction report and its content-addressed topology use this durable path;
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines which planned
+and actual facts that report retains. This chapter owns log reading, snapshot transfer, and the
+storage bounds that carry large reports.
+
 ## Durable Write Path
 
 Every consensus mutation uses a full synchronization barrier that asks the filesystem to persist

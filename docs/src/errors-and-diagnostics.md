@@ -47,6 +47,15 @@ is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operatio
 `Unexpected`, with the underlying error retained as its source. Those failures enter the existing
 sink failure and retry path; they do not release a staged record's acknowledgement before commit.
 
+A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
+module: an invalid address or CA file, a lookup failure that keeps the resolver's
+`DnsLookupFailure` as a typed field, no address that accepted a connection, a failed or overdue
+TLS handshake, or a failed AMQP handshake, each naming the broker host. The source keeps it beneath
+its connect and resume contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the
+resolver's own lookup error. The sink changes it into a configuration failure for an invalid
+address or CA file and an initialization failure otherwise, leading with the connection error's
+message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
@@ -237,8 +246,10 @@ attached transaction only as separate requests; combining either read with anoth
 returns a session planning diagnostic before anything enters the queue. An incomplete impact
 report carries its planning diagnostics and cannot supply a commit preview. A stale preview is a
 recoverable command disposition that applies no effects and tells the client to refresh its
-inspection before retrying `COMMIT`. Parse diagnostics retain precise expected and found tokens and
-byte spans into the submitted source for a client to underline, whichever statement of a batch was
+inspection before retrying `COMMIT`. [Transaction Quiescence And Impact
+Inspection](./transaction-quiescence.md) defines the planned and actual report outcomes these
+diagnostics describe. Parse diagnostics retain precise expected and found tokens and byte spans
+into the submitted source for a client to underline, whichever statement of a batch was
 rejected. Validation diagnostics attach a source span when the
 relevant identifier is present in the submitted text; failures without a source location have an
 unlocated diagnostic. HTTP endpoints choose their response status at the boundary according to

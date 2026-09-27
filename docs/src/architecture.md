@@ -30,6 +30,11 @@ has scheduler-selected replicas.
 
 This graph configuration is persisted with strong control-plane consistency. It is separate from runtime execution state and from the hot-path records moving through the graph.
 
+Before a transaction changes that graph, the control plane plans its ordered execution steps and
+their before/after affected topology. Its typed report separates required pause scopes from actual
+gate engagement and remains inspectable through commit and retention. [Transaction Quiescence And
+Impact Inspection](./transaction-quiescence.md) defines those guarantees.
+
 Each boundary carries its decisions forward as types: absence stays explicit, distinct states
 carry their own data, and required identities are validated before execution or recovery. The
 [Typed States And Validation Boundaries](./typed-states.md) chapter covers these rules across the

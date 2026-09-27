@@ -41,6 +41,10 @@ Always read `NSPL Overview`. Add the indexed topics relevant to the requested gr
 | WASM guest ABI and output timing | `WASM Processor Guests` |
 | Writing Rust WASM guests with the SDK | `Rust WASM Guest SDK` |
 
+For transaction preview scopes, operation and step impact, actual engagement, and retained
+inspection, read [Transaction Quiescence And Impact Inspection](https://docs.nervix.io/transaction-quiescence.html)
+directly. It is an architecture chapter and is outside the curated NSPL index.
+
 Prefer the narrow indexed topic over an old copied snippet. Do not leave the immutable version
 selected by the documentation index when following related material.
 
@@ -180,7 +184,11 @@ relay. Do not use them to scan across branches.
   for the largest record rather than sizing it to a typical one. A failing `ON EMITTING BATCH`
   rejects every member of that batch with one shared error reference. A payload whose outcome is
   unknown is retried with the same bytes and members, so consumers deduplicating a retry see a
-  whole repeated batch, never a regrouped one.
+  whole repeated batch, never a regrouped one. Keep `MAX SIZE` below the destination's own message
+  limit with room for the key, headers or attributes written around the payload: a batch message
+  over a limit the client can see (Kafka, MQTT, NATS, SQS) is rejected with every member as an
+  `external` `publish` error, while a larger message to Pulsar or RabbitMQ is retried; see
+  [Emitters](../../../docs/src/emitters.md#broker-and-message-emitters).
   SQS `.fifo` queue names and `FIFO GROUP` appear together, and `FIFO GROUP FROM BRANCH` is used
   only with branched input.
 - Every MongoDB emitter maps integers that fit the BSON signed 64-bit range. A `U64` value above

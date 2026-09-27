@@ -50,6 +50,41 @@ connection setup, TLS and response handling; the resolver's own 30 second ceilin
 clients without a shorter request timeout. DNS failures use the host's existing retry policy and
 do not create application-level probes or acknowledgements.
 
+### DNS for RabbitMQ
+
+Composition also passes the node resolver into every RabbitMQ source plan and sink configuration.
+The connector reads the client's `addr` as an AMQP URI and takes its host from the URL grammar,
+because Lapin's own grammar substitutes `localhost` for an IPv6 literal host. Every connection resolves that host again through the node resolver: a sink's start, its
+reopening after a failed publish, and each source instance's resume. A literal IPv4 or IPv6 address
+is its own answer. The connector tries the answers in resolution order, each within an equal share
+of what remains of a 30 second budget, and for `amqps` completes the TLS handshake within what is
+left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
+addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
+then hands the established transport to Lapin through `Connection::connector`. Lapin's own
+reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
+handshake over it. The AMQP handshake still has no deadline of its own, and the URI's
+`connection_timeout` query parameter has no effect.
+
+Lapin's `hickory-dns` feature is deliberately not selected. It resolves through one process-wide
+async-rs resolver built on first use from the host's `/etc/resolv.conf`, which ignores the node's
+resolver configuration, hosts snapshot, lookup budget and concurrency bound. That resolver also
+keeps name-server connections whose tasks ran on the Tokio runtime of its first lookup, so a later
+runtime inherits connections of one that may have stopped. `just validate-dns-dependencies` keeps
+the feature off in the isolated RabbitMQ connector and in the server, and checks that Lapin's TLS
+stays on AWS-LC.
+
+A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
+unreachable addresses, a failed or overdue TLS handshake, and a failed AMQP handshake are their
+own variants. A source reports the failure as a resume failure and retries on its declared
+`RETRY POLICY`. A sink reports an invalid address or CA file as a configuration failure and every
+other connection failure as an initialization failure, and the emitter host reopens it on its
+backoff. Neither path acknowledges undelivered data: a source that cannot connect holds no
+delivery, and a sink that cannot connect confirms nothing, so the input stays unacknowledged until
+a later connection delivers it. A connection that fails before its AMQP handshake has started no
+Lapin thread, and a failed handshake ends that thread and closes the socket. An established
+connection is not closed because its host's answer changed or expired; the next connection uses
+the new answer.
+
 ```mermaid
 sequenceDiagram
     participant NSPL as NSPL and Models
@@ -187,6 +222,17 @@ group or codec container metadata changes. The codec encodes each candidate unde
 the host subdivides a candidate that does not fit; Arrow memory accounting still belongs to
 `FLUSH`. The connector sees one encoded record per completed payload and answers for it under the
 record's identity, without learning which rows the payload carries.
+
+The connector owns the destination's own limit on each record, whether the record carries one row
+or a whole batch payload, because only the connector knows what it writes around the payload.
+Where it can learn that limit it measures the complete message and rejects a record that cannot
+fit before writing it, with a reason naming the size and the limit, so the rejection follows the
+message error policy instead of failing the transport: the MQTT sink measures the `PUBLISH` packet
+against the Maximum Packet Size of the broker's latest `CONNACK` and the largest packet MQTT can
+express, the SQS sink counts attributes and the FIFO group against 256 KiB, and the Kafka producer
+and the NATS client check `message.max.bytes` and `max_payload` with the key and headers they
+write. A limit the connector cannot learn stays with the destination, and whatever the destination
+reports when a message exceeds it is classified like any other publish failure.
 
 The host owns that membership. It keeps every payload it offers the sink, with its exact bytes,
 key, headers, ordering group and member positions, in the emitter buffer beside the batches the

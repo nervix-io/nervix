@@ -125,6 +125,7 @@ Feature: RabbitMQ emission
             RETRY POLICY BACKOFF 100ms MAX 200ms
           ENCODE USING notification_codec
         INHERIT ALL
+        <batch>
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -140,11 +141,14 @@ Feature: RabbitMQ emission
     When the stallable endpoint "rabbitmq" is resumed
     Then the observed broker receives a payload
       """
-      {"user_id":42}
+      <payload>
       """
     And within "5s" Kafka consumer group "rabbitmq_boundary_group_{{test_id}}" next offset for topic "rabbitmq_boundary_in_{{test_id}}" partition 0 is "at least 1"
 
+    # A batch payload is one message, so its publisher confirm is the completion point.
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | batch                              | payload          |
+      | 1            |                                    | {"user_id":42}   |
+      | 3            |                                    | {"user_id":42}   |
+      | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+      | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |

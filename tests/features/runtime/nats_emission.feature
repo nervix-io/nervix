@@ -326,6 +326,7 @@ Feature: NATS emission
             RETRY POLICY BACKOFF 100ms MAX 500ms
           ENCODE USING notification_codec
         INHERIT ALL
+        <batch>
         FLUSH IMMEDIATE
         ON MESSAGE ERROR LOG
         ON GENERAL ERROR LOG;
@@ -348,11 +349,14 @@ Feature: NATS emission
     When NATS JetStream stream "notifications_{{test_id}}" is provisioned for subject "jetstream_out_{{test_id}}"
     Then NATS JetStream stream "notifications_{{test_id}}" eventually contains a payload on subject "jetstream_out_{{test_id}}"
       """
-      {"user_id":42}
+      <payload>
       """
     And within "5s" Kafka consumer group "jetstream_boundary_group_{{test_id}}" next offset for topic "jetstream_in_{{test_id}}" partition 0 is "at least 1"
 
+    # A batch payload is one stream message, so its PubAck is the completion point.
     Examples:
-      | cluster_size |
-      | 1            |
-      | 3            |
+      | cluster_size | batch                              | payload          |
+      | 1            |                                    | {"user_id":42}   |
+      | 3            |                                    | {"user_id":42}   |
+      | 1            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |
+      | 3            | BATCH MAX MESSAGES 2 MAX SIZE 1KiB | [{"user_id":42}] |

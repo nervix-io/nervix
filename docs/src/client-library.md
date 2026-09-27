@@ -146,6 +146,10 @@ latest structured status so an interactive caller can render `Open` and `Committ
 
 ## Inspecting A Transaction
 
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines the report's
+operation contributions, effective step scopes, actual engagement, and retained topology. This
+section describes how the Rust client receives it and fences a later commit.
+
 `DESCRIBE TRANSACTION` answers twice: rendered in the outcome's `message`, as `TEXT` by default or as
 one JSON document with `FORMAT JSON`, and typed in `CommandOutcome::inspection`. The typed
 `TransactionInspection` holds the inspected transaction's status, the selected operation if the
