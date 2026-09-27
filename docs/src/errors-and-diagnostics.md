@@ -56,6 +56,15 @@ is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operatio
 `Unexpected`, with the underlying error retained as its source. Those failures enter the existing
 sink failure and retry path; they do not release a staged record's acknowledgement before commit.
 
+A RabbitMQ connection that fails is a `RabbitMqConnectError`, owned by the connector's connection
+module: an invalid address or CA file, a lookup failure that keeps the resolver's
+`DnsLookupFailure` as a typed field, no address that accepted a connection, a failed or overdue
+TLS handshake, or a failed AMQP handshake, each naming the broker host. The source keeps it beneath
+its connect and resume contexts, so `DESCRIBE INGESTOR` shows the deepest cause, such as the
+resolver's own lookup error. The sink changes it into a configuration failure for an invalid
+address or CA file and an initialization failure otherwise, leading with the connection error's
+message, which `DESCRIBE EMITTER` shows. Neither attaches credentials from the address.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
@@ -154,6 +163,19 @@ missing its VHOST or signaling protocol. The report identifies the owning relay,
 endpoint and the missing reference. Runtime installation adds domain context to that report; it
 does not select a fallback configuration.
 
+Ingestor and reingestor planning has typed failures for an ingestor whose source is missing or
+resolves to another kind or name, a missing codec, a route or input relay missing from the domain,
+a route whose declared branch is not the branch of its relay, reingestor inputs whose schemas
+differ, a node without inputs or routes, and a filter, route or branch construction that cannot be
+lowered. The report names the ingestor or reingestor, the route or input relay where the contract
+is route-local, and the operation. Binding the lowered programs on a node has its own typed
+failures: a relay or branch schema the node has not instantiated, a program that does not compile
+against the node's schemas, lookups, state and UDFs, and a route or input the node cannot prepare.
+The last carries the runtime planning failure beneath it, such as a relay without its registry or
+an unparseable flush or collection cadence, rather than restating it. Runtime installation adds
+domain context to either report, and an ingestor that fails to start while its domain execution is
+built records that report as its transient error.
+
 Node startup validates execution memory limits before admitting any work. A Commands budget must
 hold both the bounded resident replication window and one bounded normalized command-state write;
 the larger requirement controls admission. Arithmetic that cannot represent either requirement is
@@ -248,6 +270,21 @@ unclassified store failures to `500`. [Sessions](./sessions.md) describes client
 behavior, while [Inspecting A Transaction](./control-plane.md#inspecting-a-transaction) describes
 retained command outcomes and [ALTER Lock And Quiesce Classification](./control-plane.md#alter-lock-and-quiesce-classification)
 describes impact inspection.
+
+A domain clock attachment answers with its own typed disposition rather than a command disposition,
+and every refusal names the domain it concerns. An attach is `Attached` with the observed clock,
+`AlreadyAttached` when the session already follows that domain's clock, `DomainNotFound` when the
+serving node has no such domain, or `Failed` when the request could not run; a detach is
+`Detached`, `NotAttached` when the session does not follow that clock, or `Failed`. While the
+session holds a transaction, both fail with the session-local refusal that other session-scoped
+statements receive. The server ends an attachment with a frame whose typed reason is
+`DomainRemoved`, and the Rust client reports a lost session as an interruption of each clock it
+follows before it attaches again. Each disposition's message is display text for a client that
+prints it; a client decides from the variant. The Rust client's `execute` turns any disposition but
+`Attached` or `Detached` into a `Failed` command outcome carrying that message, and its clock helper
+reports a stopped or uninstalled clock, or a projection outside the timestamp range, as a typed
+`DomainClockReadError`. See
+[Domain Clock Attachment](./sessions.md#domain-clock-attachment).
 
 ## Sensitive Data And Observability
 

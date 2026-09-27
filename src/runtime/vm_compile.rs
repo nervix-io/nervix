@@ -5,7 +5,9 @@
 //! - **Depends on.** Typed execution plans, the expression VM and runtime infrastructure.
 //! - **Must not know.** NSPL text, parser state or control-plane transactions.
 //!
-//! This module still receives semantic Models directly instead of a validated execution plan.
+//! Ingestor and reingestor programs arrive lowered by their decision-layer plans. The remaining
+//! compile functions still receive semantic Models directly instead of a validated execution
+//! plan.
 
 use error_stack::ResultExt as _;
 
@@ -699,28 +701,6 @@ pub(super) fn compile_message_error_set_program(
     })
 }
 
-pub(super) fn compile_expression_filter_program(
-    target: RuntimeCompileTarget<'_>,
-    filter: Option<&nervix_models::Expression>,
-    input: RuntimeVmSchema,
-    allow_header_reads: bool,
-    filter_operation: MessageErrorOperation,
-    context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    compile_scoped_filter_program(
-        target,
-        filter,
-        input,
-        filter_operation,
-        context,
-        RuntimeFilterScope::Source {
-            namespace: "input",
-            allow_header_reads,
-            allow_metadata: allow_header_reads,
-        },
-    )
-}
-
 pub(super) fn compile_finalized_output_filter_program(
     domain: &DomainName,
     identifier: &ModelName,
@@ -786,10 +766,6 @@ pub(super) fn compile_scoped_filter_program(
     scope: RuntimeFilterScope,
 ) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
     let RuntimeCompileTarget { domain, identifier } = target;
-    let RuntimeVmSchema {
-        schema,
-        sensitivity,
-    } = input;
     let Some(filter) = filter else {
         return Ok(None);
     };
@@ -801,14 +777,34 @@ pub(super) fn compile_scoped_filter_program(
             },
             SemanticScopePolicy::read_only("input"),
         ),
-        RuntimeFilterScope::FinalizedOutput => lower_finalized_output_filter(filter, &schema),
+        RuntimeFilterScope::FinalizedOutput => {
+            lower_finalized_output_filter(filter, input.schema.as_ref())
+        }
     }
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
         reason: format!("filter for '{}' is invalid: {reason}", identifier.as_str()),
     })?;
+    bind_scoped_filter_program(target, &parsed, input, filter_operation, context, scope).map(Some)
+}
+
+/// Binds a lowered predicate over one input message to this node's schemas, state, lookups and
+/// UDFs.
+pub(super) fn bind_scoped_filter_program(
+    target: RuntimeCompileTarget<'_>,
+    parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
+    input: RuntimeVmSchema,
+    filter_operation: MessageErrorOperation,
+    context: RuntimeVmCompileContext<'_>,
+    scope: RuntimeFilterScope,
+) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+    let RuntimeCompileTarget { domain, identifier } = target;
+    let RuntimeVmSchema {
+        schema,
+        sensitivity,
+    } = input;
     let error_sites =
-        compiled_message_error_sites(&parsed, &[], Some(filter_operation)).map_err(|reason| {
+        compiled_message_error_sites(parsed, &[], Some(filter_operation)).map_err(|reason| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!("{reason:#}"),
@@ -827,7 +823,7 @@ pub(super) fn compile_scoped_filter_program(
         bindings.push(binding);
     }
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
-        &parsed,
+        parsed,
         &local_namespaces,
         context.available_materialized_streams,
         context.current_branching,
@@ -838,7 +834,7 @@ pub(super) fn compile_scoped_filter_program(
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+        rewrite_lookup_hash_map_program(parsed, context.available_lookups).map_err(|reason| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
@@ -882,7 +878,7 @@ pub(super) fn compile_scoped_filter_program(
         ),
         report: error,
     })?;
-    Ok(Some(CompiledProgramWithMaterializedInterest {
+    Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
         output_namespace_input: match scope {
@@ -891,7 +887,7 @@ pub(super) fn compile_scoped_filter_program(
         },
         lookup_hash_maps,
         error_sites,
-    }))
+    })
 }
 
 pub(super) fn compile_processor_output_filter_map_program(
@@ -948,16 +944,63 @@ pub(super) fn compile_processor_output_filter_map_program(
             }
         })
         .collect::<Vec<_>>();
+    bind_processor_output_filter_map_program(
+        target,
+        input_relays,
+        output_relay,
+        RouteProgram {
+            program: &parsed,
+            set_operations: &set_operations,
+        },
+        RuntimeVmSchemaPair {
+            input: input_schema,
+            input_sensitivity,
+            output: output_schema,
+            output_sensitivity,
+        },
+        inferencer_tensors,
+        context,
+    )
+    .map(Some)
+}
+
+/// A lowered transforming route and the operation each of its SET steps reports failures as.
+#[derive(Clone, Copy)]
+pub(super) struct RouteProgram<'a> {
+    pub(super) program: &'a nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
+    pub(super) set_operations: &'a [MessageErrorOperation],
+}
+
+/// Binds a lowered processor or reingestor route to this node's schemas, state, lookups and UDFs.
+pub(super) fn bind_processor_output_filter_map_program(
+    target: RuntimeCompileTarget<'_>,
+    input_relays: &[RelayName],
+    output_relay: &RelayName,
+    route: RouteProgram<'_>,
+    schemas: RuntimeVmSchemaPair,
+    inferencer_tensors: Option<InferencerFilterMapTensors<'_>>,
+    context: RuntimeVmCompileContext<'_>,
+) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+    let RuntimeCompileTarget { domain, identifier } = target;
+    let RuntimeVmSchemaPair {
+        input: input_schema,
+        input_sensitivity,
+        output: output_schema,
+        output_sensitivity,
+    } = schemas;
+    let RouteProgram {
+        program: parsed,
+        set_operations,
+    } = route;
     let error_sites = compiled_message_error_sites(
-        &parsed,
-        &set_operations,
+        parsed,
+        set_operations,
         Some(MessageErrorOperation::RouteWhere),
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
         domain: domain.as_str().to_string(),
         reason: format!("{reason:#}"),
     })?;
-    let original_parsed = parsed.clone();
     let mut bindings = vec![
         VmCompileBinding::writable("output", output_schema.clone())
             .with_sensitivity(output_sensitivity.clone()),
@@ -994,7 +1037,7 @@ pub(super) fn compile_processor_output_filter_map_program(
         local_namespaces.insert(output_relay.as_str().to_string());
     }
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
-        &original_parsed,
+        parsed,
         &local_namespaces,
         context.available_materialized_streams,
         context.current_branching,
@@ -1005,7 +1048,7 @@ pub(super) fn compile_processor_output_filter_map_program(
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+        rewrite_lookup_hash_map_program(parsed, context.available_lookups).map_err(|reason| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
@@ -1048,53 +1091,28 @@ pub(super) fn compile_processor_output_filter_map_program(
         ),
         report: error,
     })?;
-    Ok(Some(CompiledProgramWithMaterializedInterest {
+    Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
         error_sites,
-    }))
+    })
 }
 
-pub(super) fn compile_output_branch_program(
+/// Binds a lowered branch construction, which writes the outgoing branch key of one route's
+/// records, to this node's schemas, state, lookups and UDFs.
+pub(super) fn bind_output_branch_program(
     target: RuntimeCompileTarget<'_>,
-    branch: Option<&OutputBranch>,
+    parsed: &nervix_vm::program::SpannedNode<nervix_vm::program::Program>,
     input: RuntimeVmSchema,
     output: RuntimeVmSchema,
-    branch_schema: Option<RuntimeVmSchema>,
+    branch_schema: RuntimeVmSchema,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledBranchProgram>, RuntimeError> {
+) -> Result<CompiledBranchProgram, RuntimeError> {
     let RuntimeCompileTarget { domain, identifier } = target;
-    let Some(OutputBranch::BranchedBy { assignments, .. }) = branch else {
-        return Ok(None);
-    };
-    if assignments.is_empty() {
-        return Ok(None);
-    }
-    let branch_schema = branch_schema.ok_or_else(|| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "output branch construction for '{}' has no branch schema",
-            identifier.as_str()
-        ),
-    })?;
-    let parsed = lower_branch_construction(
-        assignments,
-        branch_schema.schema.as_ref(),
-        output.schema.as_ref(),
-        input.schema.as_ref(),
-    )
-    .map_err(|reason| RuntimeError::BuildDomainExecution {
-        domain: domain.as_str().to_string(),
-        reason: format!(
-            "output branch construction for '{}' is invalid: {}",
-            identifier.as_str(),
-            reason
-        ),
-    })?;
     let error_sites = compiled_message_error_sites(
-        &parsed,
+        parsed,
         &vec![MessageErrorOperation::Set; parsed.inner.set.len()],
         None,
     )
@@ -1102,7 +1120,6 @@ pub(super) fn compile_output_branch_program(
         domain: domain.as_str().to_string(),
         reason: format!("{reason:#}"),
     })?;
-    let original_parsed = parsed.clone();
     let mut bindings = vec![
         VmCompileBinding::readonly("input", input.schema.clone())
             .with_sensitivity(input.sensitivity),
@@ -1119,7 +1136,7 @@ pub(super) fn compile_output_branch_program(
         BRANCH_NAMESPACE.to_string(),
     ]);
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
-        &original_parsed,
+        parsed,
         &local_namespaces,
         context.available_materialized_streams,
         context.current_branching,
@@ -1130,7 +1147,7 @@ pub(super) fn compile_output_branch_program(
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+        rewrite_lookup_hash_map_program(parsed, context.available_lookups).map_err(|reason| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
@@ -1176,7 +1193,7 @@ pub(super) fn compile_output_branch_program(
         ),
         report: error,
     })?;
-    Ok(Some(CompiledBranchProgram {
+    Ok(CompiledBranchProgram {
         program: CompiledProgramWithMaterializedInterest {
             compiled: Arc::new(compiled),
             materialized_interest,
@@ -1184,7 +1201,7 @@ pub(super) fn compile_output_branch_program(
             lookup_hash_maps,
             error_sites,
         },
-    }))
+    })
 }
 
 pub(super) fn compile_wasm_output_filter_map_program(
@@ -1729,46 +1746,21 @@ pub(super) fn compile_reorderer_program(
     })
 }
 
-pub(super) fn compile_ingestor_filter_map_program(
-    domain: &DomainName,
-    identifier: impl Into<ModelName>,
+/// Binds a lowered ingestor route, which reads the decoded message and the source's metadata, to
+/// this node's schemas, state, lookups and UDFs.
+pub(super) fn bind_ingestor_filter_map_program(
+    target: RuntimeCompileTarget<'_>,
     metadata_kind: IngestMetadataKind,
     allow_header_reads: bool,
-    construction: &RouteConstruction,
+    construction: &LoweredConstruction,
     schemas: RuntimeVmSchemaPair,
     context: RuntimeVmCompileContext<'_>,
-) -> Result<Option<CompiledProgramWithMaterializedInterest>, RuntimeError> {
-    let identifier = identifier.into();
-    let parsed = lower_transforming_route(construction, &schemas.input, &schemas.output).map_err(
-        |reason| RuntimeError::BuildDomainExecution {
-            domain: domain.as_str().to_string(),
-            reason: format!(
-                "ingestor output construction for '{}' is invalid: {reason}",
-                identifier
-            ),
-        },
-    )?;
-    let inherited_count = parsed
-        .inner
-        .set
-        .len()
-        .checked_sub(construction.assignments.len())
-        .verified(
-            "a compiled construction lists one set operation per inherited field before its \
-             assignments",
-        );
-    let set_operations = (0..parsed.inner.set.len())
-        .map(|index| {
-            if index < inherited_count {
-                MessageErrorOperation::Inherit
-            } else {
-                MessageErrorOperation::Set
-            }
-        })
-        .collect::<Vec<_>>();
+) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+    let RuntimeCompileTarget { domain, identifier } = target;
+    let parsed = construction.program();
     let error_sites = compiled_message_error_sites(
-        &parsed,
-        &set_operations,
+        parsed,
+        &construction.set_operations(),
         Some(MessageErrorOperation::RouteWhere),
     )
     .map_err(|reason| RuntimeError::BuildDomainExecution {
@@ -1790,7 +1782,7 @@ pub(super) fn compile_ingestor_filter_map_program(
         ));
     }
     let (materialized_bindings, materialized_interest) = referenced_materialized_stream_bindings(
-        &parsed,
+        parsed,
         &writable_namespaces,
         context.available_materialized_streams,
         context.current_branching,
@@ -1801,7 +1793,7 @@ pub(super) fn compile_ingestor_filter_map_program(
     })?;
     bindings.extend(materialized_bindings);
     let (parsed, pending_lookup_calls) =
-        rewrite_lookup_hash_map_program(&parsed, context.available_lookups).map_err(|reason| {
+        rewrite_lookup_hash_map_program(parsed, context.available_lookups).map_err(|reason| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
                 reason: format!(
@@ -1845,13 +1837,13 @@ pub(super) fn compile_ingestor_filter_map_program(
         ),
         report: error,
     })?;
-    Ok(Some(CompiledProgramWithMaterializedInterest {
+    Ok(CompiledProgramWithMaterializedInterest {
         compiled: Arc::new(compiled),
         materialized_interest,
         output_namespace_input: OutputNamespaceInput::Uninitialized,
         lookup_hash_maps,
         error_sites,
-    }))
+    })
 }
 
 /// The schema surface a generator's set-only route compiles against: the output it constructs, that
@@ -1963,16 +1955,6 @@ pub(super) fn relay_schema_for_routing(
             relay: relay.clone(),
         })
     })
-}
-
-pub(super) fn relay_branch_schema_for_routing(
-    routing: &DomainRoutingSnapshot,
-    relay: &RelayName,
-) -> Option<RuntimeVmSchema> {
-    routing
-        .relay_branchings
-        .get(relay)
-        .and_then(RuntimeVmSchema::from_branching)
 }
 
 #[cfg(test)]
@@ -2241,6 +2223,8 @@ mod tests {
             output: schema.clone(),
             output_sensitivity: VmSchemaSensitivity::default(),
         };
+        let lowered = LoweredConstruction::transforming(&route, &schema, &schema)
+            .expect("the invalid assignment still lowers as a route");
 
         let failures = [
             (
@@ -2273,12 +2257,14 @@ mod tests {
             ),
             (
                 "ingestor",
-                compile_ingestor_filter_map_program(
-                    &domain,
-                    identifier.clone(),
+                bind_ingestor_filter_map_program(
+                    RuntimeCompileTarget {
+                        domain: &domain,
+                        identifier: &identifier,
+                    },
                     IngestMetadataKind::Headers,
                     true,
-                    &route,
+                    &lowered,
                     schemas(),
                     context(),
                 )
@@ -2344,9 +2330,9 @@ mod tests {
                 },
             ],
         }));
-        let program = compile_ingestor_filter_map_program(
+        let program = bind_ingestor_route_for_test(
             &domain("default"),
-            named::<ModelName>("logic_ingestor"),
+            &named::<ModelName>("logic_ingestor"),
             IngestMetadataKind::Headers,
             true,
             &construction("INHERIT tenant SET normalized = lower(input.raw)"),
@@ -2363,8 +2349,7 @@ mod tests {
                 udfs: None,
             },
         )
-        .expect("filter-map must compile")
-        .expect("program must exist");
+        .expect("filter-map must compile");
 
         let output = execute_filter_map_for_test(
             &program,

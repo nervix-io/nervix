@@ -8,11 +8,16 @@ pub(super) struct ActivatedDomainSurfaces {
     pub(super) endpoint_routes: HashMap<EndpointName, EndpointRoute>,
 }
 
-pub(super) fn branch_relays_from_branched_specs(specs: &BranchedNodeSpecs) -> HashSet<RelayName> {
+/// Every relay that keeps branch instances: each relay a planned ingestor or reingestor route
+/// writes into a branch, and every relay a branched processor reads or writes.
+pub(super) fn branch_relays_from_plans(
+    specs: &BranchedNodeSpecs,
+    entrypoints: &EntrypointPlans,
+) -> HashSet<RelayName> {
     let mut relays = HashSet::default();
-    for spec in &specs.entrypoints {
-        if spec.branch_ttl.is_some() {
-            relays.insert(spec.root_relay.clone());
+    for route in entrypoints.routes() {
+        if route.branch.retention().is_some() {
+            relays.insert(route.relay.clone());
         }
     }
     for node_spec in &specs.processors {
@@ -153,40 +158,26 @@ impl Runtime {
         }
     }
 
-    pub(in crate::runtime) fn start_branched_entrypoint_runtime(
+    /// Starts the branched entrypoint runtime every route of one ingestor or reingestor feeds, and
+    /// returns them with their senders keyed by the relay each route writes.
+    pub(in crate::runtime) fn start_branched_entrypoint_runtimes(
         &self,
         domain: &DomainName,
-        identifier: impl Into<ModelName>,
-        branched: Option<IngestorRouteTemplate>,
-    ) -> Option<Arc<IngestorRouteRuntime>> {
-        let identifier = identifier.into();
-        branched.map(|template| {
-            IngestorRouteRuntime::new(
-                self.clone(),
-                domain.clone(),
-                IngestorName::from(&identifier),
-                template,
-                self.inner.branch_instance_expiration_scan_interval,
-            )
-        })
-    }
-
-    pub(in crate::runtime) fn start_branched_ingestor_runtime(
-        &self,
-        domain: &DomainName,
-        ingestor: &IngestorName,
-        branched: HashMap<RelayName, IngestorRouteTemplate>,
+        identifier: &ModelName,
+        templates: HashMap<RelayName, IngestorRouteTemplate>,
     ) -> IngestorRouteRuntimes {
-        let mut roots = branched.into_iter().collect::<Vec<_>>();
+        let mut roots = templates.into_iter().collect::<Vec<_>>();
         roots.sort_by(|left, right| left.0.cmp(&right.0));
         let mut runtimes = Vec::with_capacity(roots.len());
         let mut senders = HashMap::with_capacity(roots.len());
         for (root_relay, template) in roots {
-            let Some(runtime) =
-                self.start_branched_entrypoint_runtime(domain, ingestor, Some(template))
-            else {
-                continue;
-            };
+            let runtime = IngestorRouteRuntime::new(
+                self.clone(),
+                domain.clone(),
+                IngestorName::from(identifier),
+                template,
+                self.inner.branch_instance_expiration_scan_interval,
+            );
             senders.insert(root_relay, runtime.sender());
             runtimes.push(runtime);
         }
@@ -369,49 +360,51 @@ impl Runtime {
         let mut lookup_specs = Vec::new();
         let mut relay_state_specs = Vec::new();
         let mut emitter_specs = Vec::new();
-        let mut reingestor_specs = Vec::<ReingestorInputSpec>::new();
-        let mut ingestor_specs = Vec::new();
+        let mut reingestor_inputs = Vec::new();
+        let mut local_ingestors = Vec::new();
         let mut node_tasks = HashMap::new();
         let mut emitter_tasks = HashMap::new();
         let mut generator_tasks = HashMap::new();
-        let mut reingestor_tasks = HashMap::new();
         let remote_dispatcher = self.inner.remote_dispatcher.load_full();
         let model_index = schedule
             .nodes
             .values()
             .map(|node| (*node.config).clone())
             .collect::<ModelIndex>();
+        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
+            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let entrypoints = Arc::new(
+            EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
+        );
+        for plan in entrypoints.ingestors() {
+            if let Err(error) = Self::parse_ingest_acknowledgement(
+                domain,
+                &plan.ingestor.name,
+                plan.acknowledgement(),
+            ) {
+                self.record_ingestor_transient_error(
+                    domain,
+                    &plan.ingestor.name,
+                    error.to_string(),
+                );
+                return Err(error);
+            }
+        }
         for node in schedule.nodes.values() {
-            match node.config.as_ref() {
-                Model::Ingestor(ingestor) => {
-                    if let Err(error) = Self::parse_ingest_acknowledgement(
-                        domain,
-                        &ingestor.name,
-                        ingestor.source.acknowledgement(),
-                    ) {
-                        self.record_ingestor_transient_error(
-                            domain,
-                            &ingestor.name,
-                            error.to_string(),
-                        );
-                        return Err(error);
-                    }
-                }
-                Model::WasmProcessor(processor) => {
-                    Box::pin(self.compile_wasm_processor_module(
-                        domain,
-                        &processor.name,
-                        &processor.resource,
-                        processor.resource_version,
-                        &processor.file,
-                    ))
-                    .await
-                    .map_err(|reason| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!("{reason:#}"),
-                    })?;
-                }
-                _ => {}
+            if let Model::WasmProcessor(processor) = node.config.as_ref() {
+                Box::pin(self.compile_wasm_processor_module(
+                    domain,
+                    &processor.name,
+                    &processor.resource,
+                    processor.resource_version,
+                    &processor.file,
+                ))
+                .await
+                .map_err(|reason| RuntimeError::BuildDomainExecution {
+                    domain: domain.as_str().to_string(),
+                    reason: format!("{reason:#}"),
+                })?;
             }
         }
         let udf_executor = Box::pin(
@@ -435,21 +428,8 @@ impl Runtime {
             report: error,
         })?;
         let all_branched_specs = branched_node_specs_from_scheduled_nodes(&schedule.nodes);
-        let branch_relays = branch_relays_from_branched_specs(&all_branched_specs);
-        let branched_specs = all_branched_specs
-            .entrypoints
-            .iter()
-            .filter(|spec| {
-                schedule
-                    .nodes
-                    .get(&NodeRef::new(spec.kind, spec.identifier.clone()))
-                    .is_some_and(|node| node.executes_on(local_node_id))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
+        let branch_relays = branch_relays_from_plans(&all_branched_specs, &entrypoints);
 
-        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
-            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
         let ActivatedDomainSurfaces {
             codecs,
             signaling_protocols,
@@ -526,14 +506,14 @@ impl Runtime {
         let mut materialized_states = HashMap::new();
         for node in schedule.nodes.values() {
             tokio::task::consume_budget().await;
-            let materialized_schema = if node.kind() == ModelKind::Relay {
-                materialized_stream_specs
-                    .get(&RelayName::from(&node.identifier))
-                    .map(|spec| spec.schema.clone())
-            } else {
-                None
-            };
-            if let Some(schema) = materialized_schema.as_ref() {
+            let state = PlacedNodeState::of(
+                node,
+                ScheduledDomainPlans {
+                    activation: &activation_plan,
+                    entrypoints: &entrypoints,
+                },
+            );
+            if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref() {
                 let state_placement = self
                     .state_placement(
                         domain,
@@ -558,7 +538,7 @@ impl Runtime {
                 &shutdown_tx,
                 node,
                 local_node_id,
-                materialized_schema,
+                state,
             )?;
             if let Some(state) = placement.kafka_offset_state {
                 kafka_offset_states.insert(RelayName::from(&node.identifier), state);
@@ -696,31 +676,40 @@ impl Runtime {
                         emitter_specs.push((emitter.clone(), inputs));
                     }
                 }
-                Model::Reingestor(reingestor) => {
-                    for from_relay in reingestor.from.relays() {
-                        let Some(relay) = relay_builders.get_mut(from_relay) else {
-                            return Err(RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing reingestor input relay '{}'",
-                                    from_relay.as_str()
-                                ),
-                            });
-                        };
-                        if node.executes_on(local_node_id) {
-                            let receiver = relay.runtime_consumer_fan_in_for_mode(reingestor.mode);
-                            reingestor_specs.push(ReingestorInputSpec {
-                                reingestor: reingestor.clone(),
-                                from_relay: from_relay.clone(),
-                                receiver,
-                            });
-                        }
-                    }
-                }
-                Model::Ingestor(_) if node.executes_on(local_node_id) => {
-                    ingestor_specs.push(node.clone());
-                }
                 _ => {}
+            }
+        }
+        for plan in entrypoints.reingestors() {
+            let identity = NodeRef::new(ModelKind::Reingestor, ModelName::from(&plan.name));
+            let node = schedule
+                .nodes
+                .get(&identity)
+                .assured("the entrypoint plans were decided from this same schedule");
+            if !node.executes_on(local_node_id) {
+                continue;
+            }
+            for input in &plan.inputs {
+                let relay = relay_builders.get_mut(&input.relay).verified(
+                    "the entrypoint plan resolved every input relay against the activation plan \
+                     these relay boundaries were built from",
+                );
+                reingestor_inputs.push(PlannedReingestorInput {
+                    plan: plan.clone(),
+                    input: input.clone(),
+                    consumer: ReingestorInputConsumer::Registered(
+                        relay.runtime_consumer_fan_in_for_mode(plan.mode),
+                    ),
+                });
+            }
+        }
+        for plan in entrypoints.ingestors() {
+            let identity = NodeRef::new(ModelKind::Ingestor, ModelName::from(&plan.ingestor.name));
+            let node = schedule
+                .nodes
+                .get(&identity)
+                .assured("the entrypoint plans were decided from this same schedule");
+            if node.executes_on(local_node_id) {
+                local_ingestors.push(plan.clone());
             }
         }
 
@@ -761,7 +750,7 @@ impl Runtime {
         // Remote delivery targets follow only from the published schedule, so the same derivation
         // seeds a freshly built domain and re-points the relays of an incrementally moved node.
         let remote_runtime_consumers =
-            Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
+            Self::remote_runtime_consumers_for_schedule(&schedule, &entrypoints, local_node_id);
         for (relay, builder) in relay_builders.iter_mut() {
             builder.remote_runtime_consumers = remote_runtime_consumers
                 .get(relay)
@@ -845,34 +834,6 @@ impl Runtime {
             );
         }
 
-        let mut branched_entrypoints = HashMap::new();
-        let mut branched_entrypoint_senders = HashMap::new();
-        for spec in &branched_specs {
-            if spec.kind != ModelKind::Reingestor {
-                continue;
-            }
-            let template = materialize_ingestor_route_template(
-                spec,
-                &model_index,
-                &relay_registries,
-                &relay_services,
-            )
-            .map_err(|reason| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: reason.to_string(),
-            })?;
-            let Some(runtime) =
-                self.start_branched_entrypoint_runtime(domain, &spec.identifier, Some(template))
-            else {
-                continue;
-            };
-            branched_entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-            branched_entrypoints
-                .entry(spec.identifier.clone())
-                .or_insert_with(Vec::new)
-                .push(runtime);
-        }
-
         let lookup_runtimes = lookup_specs.iter().cloned().collect::<HashMap<_, _>>();
         let local_processor_specs = processor_input_specs
             .iter()
@@ -930,6 +891,7 @@ impl Runtime {
             relay_branchings: &relay_branchings,
             materialized_relay_specs: &materialized_stream_specs,
             lookups: &lookup_runtimes,
+            udfs: Some(&udf_executor),
         };
 
         for (generator, source_branching, route_specs) in generator_specs {
@@ -1010,23 +972,20 @@ impl Runtime {
             );
         }
 
-        for spec in reingestor_specs {
-            let entity = NodeRef {
-                kind: ModelKind::Reingestor,
-                identifier: ModelName::from(&spec.reingestor.name),
-            };
-            reingestor_tasks
-                .entry(entity)
-                .or_insert_with(Vec::new)
-                .push(self.spawn_reingestor_task(
-                    domain,
-                    &shutdown_tx,
-                    &branched_entrypoint_senders,
-                    spec.reingestor,
-                    spec.from_relay,
-                    spec.receiver,
-                )?);
-        }
+        let ReingestorRuntimes {
+            branched_entrypoints,
+            tasks: reingestor_tasks,
+        } = self
+            .start_reingestor_runtimes(
+                execution_build_deps,
+                &shutdown_tx,
+                RelayRuntimeHandles {
+                    registries: &relay_registries,
+                    services: &relay_services,
+                },
+                reingestor_inputs,
+            )
+            .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
 
         self.install_domain_execution(
             domain,
@@ -1052,7 +1011,7 @@ impl Runtime {
                         processor_plans,
                     },
                 ),
-                branched_ingestors: Self::branched_specs_by_identifier(&branched_specs),
+                entrypoints,
                 branched_entrypoints,
                 endpoint_routes,
                 node_tasks,
@@ -1077,31 +1036,11 @@ impl Runtime {
             return Ok(());
         }
 
-        for node in ingestor_specs {
-            let Model::Ingestor(ingestor) = node.config.as_ref() else {
-                continue;
-            };
-            let Some(source_model) = Self::source_model_for_scheduled_ingestor(&schedule, ingestor)
-            else {
-                return Err(RuntimeError::BuildDomainExecution {
-                    domain: domain.as_str().to_string(),
-                    reason: format!("missing ingestor source for '{}'", ingestor.name.as_str()),
-                });
-            };
-            let ingestor_name = ingestor.name.clone();
-            let plan =
-                IngestorStartPlan::decide(domain, &node, &source_model).map_err(|error| {
-                    RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "cannot plan ingestor '{}': {error}",
-                            ingestor.name.as_str()
-                        ),
-                    }
-                })?;
-            self.clear_ingestor_transient_error(domain, &ingestor_name);
-            if let Err(error) = Box::pin(self.start_ingestor(plan)).await {
-                self.record_ingestor_transient_error(domain, &ingestor_name, error.to_string());
+        for plan in local_ingestors {
+            let ingestor_name = &plan.ingestor.name;
+            self.clear_ingestor_transient_error(domain, ingestor_name);
+            if let Err(error) = Box::pin(self.start_ingestor(&plan)).await {
+                self.record_ingestor_transient_error(domain, ingestor_name, error.to_string());
                 Box::pin(self.abort_domain_execution_start(domain)).await;
                 return Err(error);
             }
@@ -1144,6 +1083,10 @@ impl Runtime {
         let mut lookups = HashMap::new();
         let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
             .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let entrypoints = Arc::new(
+            EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
+        );
         let ActivatedDomainSurfaces {
             codecs,
             signaling_protocols,
@@ -1267,7 +1210,7 @@ impl Runtime {
                     processor_plans: HashMap::default(),
                 },
             ),
-            branched_ingestors: HashMap::default(),
+            entrypoints,
             branched_entrypoints: HashMap::default(),
             endpoint_routes,
             node_tasks: HashMap::default(),

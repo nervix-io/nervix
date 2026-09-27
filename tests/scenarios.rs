@@ -107,7 +107,7 @@ use crate::common::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
         MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
-        RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+        RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
     http_receiver::{
         ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET, ReceiverFault,
@@ -121,13 +121,16 @@ use crate::common::{
         HeldResourceUpload, HeldUploadProgress, ServerProcess, ServerProcessHttpLoad,
         ServerProcessLaunch, ServerProcessOption, describe_exit,
     },
+    server_process_cluster::ServerProcessCluster,
     status_request::{STATUS_DIAGNOSTIC_BUDGET, STATUS_REQUEST_TIMEOUT, StatusRequestError},
     suite_watchdog::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
     },
+    tcp_forwarder::TcpForwarders,
 };
 
 mod common;
+mod domain_clock_attachment;
 mod ingestion_time;
 mod session_protocol;
 
@@ -265,6 +268,15 @@ struct ScenarioWorld {
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
     session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// The session a scenario attaches to domain clocks with. Steps that replace the active
+    /// session leave it attached.
+    clock_session: Option<TestSession>,
+    /// Requests the clock session sent under names a scenario gave them.
+    clock_session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// The reply to the clock session's last attach or detach request.
+    last_clock_reply: Option<nervix_client_wire::ReplyBody>,
+    /// When the last `START AT NOW` a scenario sent ran.
+    clock_start_window: Option<domain_clock_attachment::ClockStartWindow>,
     /// Candidates collected by a public session completion paging scenario.
     last_completion_values: Vec<String>,
     last_completion_page_count: usize,
@@ -355,11 +367,14 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
+    tcp_forwarders: Option<TcpForwarders>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
     last_interconnect_attempt_error: Option<String>,
     server_process: Option<ServerProcess>,
+    server_process_cluster: Option<ServerProcessCluster>,
     server_process_http_load: Option<ServerProcessHttpLoad>,
     held_resource_upload: Option<HeldResourceUpload>,
     /// When the last signal was sent to the server process, taken before the signal is delivered
@@ -450,6 +465,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
             .field(
                 "silent_interconnect_peer_count",
@@ -1717,6 +1733,242 @@ fn when_nervix_server_help_is_requested(world: &mut ScenarioWorld) {
 #[given("a nervix-server process is started")]
 async fn given_nervix_server_process_is_started(world: &mut ScenarioWorld) {
     start_ready_server_process(world, &[]).await;
+}
+
+#[given(
+    expr = "a 3 node nervix-server process cluster is started with transaction idle timeout \
+            {string} and tombstone retention {string}"
+)]
+async fn given_server_process_cluster_is_started(
+    world: &mut ScenarioWorld,
+    idle_timeout: String,
+    tombstone_retention: String,
+) {
+    assert!(
+        world.server_process_cluster.is_none(),
+        "a scenario starts at most one real-process cluster"
+    );
+    initialize_scenario_identity(world);
+    let options = [
+        ServerProcessOption::TransactionIdleTimeout(
+            humantime::parse_duration(&idle_timeout)
+                .assured("the scenario's transaction idle timeout is a valid duration literal"),
+        ),
+        ServerProcessOption::TransactionTombstoneRetention(
+            humantime::parse_duration(&tombstone_retention)
+                .assured("the scenario's tombstone retention is a valid duration literal"),
+        ),
+    ];
+    world.server_process_cluster = Some(
+        ServerProcessCluster::start(&options)
+            .await
+            .unwrap_or_else(|error| panic!("failed to start the real-process cluster: {error}")),
+    );
+}
+
+#[given("the server process cluster is configured with these NSPL commands")]
+async fn given_server_process_cluster_is_configured(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let commands = expand_placeholders(world, docstring(step));
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    for statement in nspl_statements(&commands) {
+        tokio::task::consume_budget().await;
+        let output = cluster
+            .run_commands(&world.domain, &statement)
+            .await
+            .unwrap_or_else(|error| panic!("real-process cluster rejected {statement:?}: {error}"));
+        world.last_command_output = Some(output);
+    }
+}
+
+#[when(
+    expr = "this NSPL command request with execution reference {string} is executed on the server \
+            process cluster"
+)]
+async fn when_exact_command_is_executed_on_server_process_cluster(
+    world: &mut ScenarioWorld,
+    execution_reference: String,
+    #[step] step: &Step,
+) {
+    let command = expand_placeholders(world, docstring(step));
+    let execution_reference = command_execution_reference(world, &execution_reference);
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let mut session = cluster
+        .open_session(&world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open a real-process cluster session: {error}"));
+    let result = session
+        .run_command_result_with_reference(&command, &execution_reference)
+        .await
+        .unwrap_or_else(|error| panic!("the exact command received no result: {error}"));
+    assert!(
+        result.succeeded(),
+        "the exact command failed: {}",
+        result.message
+    );
+    world.last_command_output = Some(result.message);
+}
+
+#[when(expr = "an open transaction is held on the server process cluster as placeholder {string}")]
+async fn when_open_transaction_is_held_on_server_process_cluster(
+    world: &mut ScenarioWorld,
+    placeholder: String,
+) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let mut session = cluster
+        .open_session(&world.domain)
+        .await
+        .unwrap_or_else(|error| panic!("failed to open the real-process cluster session: {error}"));
+    let result = session
+        .run_command_result("BEGIN;")
+        .await
+        .unwrap_or_else(|error| panic!("failed to begin the retained transaction: {error}"));
+    assert!(
+        result.succeeded(),
+        "the retained transaction must open: {}",
+        result.message
+    );
+    let transaction = result
+        .transaction
+        .verified("a successful BEGIN returns its transaction identity");
+    world
+        .placeholders
+        .insert(placeholder, transaction.transaction_id().to_string());
+    world.active_session = Some(session);
+}
+
+#[when("the held server process cluster transaction queues these NSPL commands")]
+async fn when_held_server_process_cluster_transaction_queues(
+    world: &mut ScenarioWorld,
+    #[step] step: &Step,
+) {
+    let commands = expand_placeholders(world, docstring(step));
+    let session = world
+        .active_session
+        .as_mut()
+        .verified("the preceding step held a transaction session");
+    for statement in nspl_statements(&commands) {
+        tokio::task::consume_budget().await;
+        let result = session
+            .run_command_result(&statement)
+            .await
+            .unwrap_or_else(|error| panic!("failed to queue {statement:?}: {error}"));
+        assert!(
+            result.succeeded(),
+            "failed to queue {statement:?}: {}",
+            result.message
+        );
+    }
+}
+
+#[when("all server processes receive SIGKILL")]
+async fn when_all_server_processes_receive_sigkill(world: &mut ScenarioWorld) {
+    world
+        .server_process_cluster
+        .as_mut()
+        .verified("the preceding step started a real-process cluster")
+        .kill_all()
+        .await
+        .unwrap_or_else(|error| panic!("the process cluster did not all exit by SIGKILL: {error}"));
+    world.active_session = None;
+}
+
+#[when("all server processes restart from their existing databases")]
+async fn when_all_server_processes_restart(world: &mut ScenarioWorld) {
+    world
+        .server_process_cluster
+        .as_mut()
+        .verified("the preceding step started a real-process cluster")
+        .restart_all()
+        .await
+        .unwrap_or_else(|error| panic!("the process cluster did not recover: {error}"));
+}
+
+#[then(expr = "server process cluster transaction {string} eventually has state {string}")]
+async fn then_server_process_cluster_transaction_eventually_has_state(
+    world: &mut ScenarioWorld,
+    transaction_id: String,
+    expected_state: String,
+) {
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let expected_id = format!("id={transaction_id}");
+    let expected_state = format!("state={}", expected_state.to_ascii_uppercase());
+    let deadline = PhaseDeadline::after(Duration::from_secs(60));
+    let mut last_output = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            !deadline.has_passed(),
+            "real-process cluster transaction '{transaction_id}' did not reach {expected_state}; \
+             last output: {last_output}"
+        );
+        let cluster = world
+            .server_process_cluster
+            .as_ref()
+            .verified("the preceding step started a real-process cluster");
+        match cluster
+            .run_commands(&world.domain, "SHOW TRANSACTIONS;")
+            .await
+        {
+            Ok(output)
+                if output
+                    .lines()
+                    .any(|line| line.contains(&expected_id) && line.contains(&expected_state)) =>
+            {
+                world.last_command_output = Some(output);
+                return;
+            }
+            Ok(output) => last_output = output,
+            Err(error) => last_output = error.to_string(),
+        }
+        deadline.pause(Duration::from_millis(50)).await;
+    }
+}
+
+#[then(expr = "the server process cluster has no schema {string}")]
+async fn then_server_process_cluster_has_no_schema(world: &mut ScenarioWorld, schema: String) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let command = format!("SHOW CREATE SCHEMA {schema};");
+    let failure = match cluster.run_commands(&world.domain, &command).await {
+        Ok(output) => panic!("the expired transaction installed a queued schema: {output}"),
+        Err(failure) => failure,
+    };
+    assert!(
+        failure.to_string().contains("does not exist"),
+        "the schema query failed unexpectedly: {failure}"
+    );
+}
+
+#[then(expr = "the server process cluster has schema {string}")]
+async fn then_server_process_cluster_has_schema(world: &mut ScenarioWorld, schema: String) {
+    let cluster = world
+        .server_process_cluster
+        .as_ref()
+        .verified("the preceding step started a real-process cluster");
+    let command = format!("SHOW CREATE SCHEMA {schema};");
+    let output = cluster
+        .run_commands(&world.domain, &command)
+        .await
+        .unwrap_or_else(|error| panic!("the retained schema is unavailable: {error}"));
+    assert!(
+        output.contains(&format!("CREATE SCHEMA {schema}")),
+        "the recovered schema has the wrong identity: {output}"
+    );
+    world.last_command_output = Some(output);
 }
 
 #[given("a release nervix-server process is started for the client-wire baseline")]
@@ -4374,8 +4626,9 @@ async fn then_follower_held_append_batches_inside_its_commands_budget(
         "follower '{node_id}' must charge the append batches it holds while catching up, but its \
          commands class never reported a reservation against its {capacity} byte budget"
     );
+    // A full reservation is valid; admission must prevent the class from exceeding capacity.
     assert!(
-        peak < capacity,
+        peak <= capacity,
         "follower '{node_id}' must hold its queued append batches inside its commands budget: the \
          class peaked at {peak} bytes against a {capacity} byte budget while it caught up"
     );
@@ -5588,26 +5841,11 @@ async fn when_the_dns_fixture_answers_node_name_with(
 
 #[given("the HTTP mock endpoint is published under fixture DNS")]
 async fn given_http_mock_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    const NAME: &str = "http-source.nervix.test";
-    let endpoint = world
-        .placeholders
-        .get("mock_http_addr")
-        .expect("the HTTP mock server was started");
-    let mut url = url::Url::parse(endpoint).expect("the HTTP mock address is a URL");
-    let address = url
-        .host_str()
-        .expect("the HTTP mock address has a host")
-        .parse::<std::net::IpAddr>()
-        .expect("the HTTP mock listens on a literal address");
-    world
-        .cluster()
-        .publish_dns_service(NAME, address)
-        .expect("the cluster has a DNS fixture");
-    url.set_host(Some(NAME))
-        .expect("the fixture name is a valid URL host");
-    world.placeholders.insert(
-        "mock_http_dns_addr".to_string(),
-        url.to_string().trim_end_matches('/').to_string(),
+    publish_fixture_name(
+        world,
+        "mock_http_addr",
+        "http-source.nervix.test",
+        "mock_http_dns_addr",
     );
 }
 
@@ -5644,26 +5882,7 @@ async fn given_iceberg_endpoints_have_fixture_dns(world: &mut ScenarioWorld) {
             "rustfs_dns_addr",
         ),
     ] {
-        let endpoint = world
-            .placeholders
-            .get(source)
-            .expect("the Iceberg dependency was started");
-        let mut url = url::Url::parse(endpoint).expect("the Iceberg endpoint is a URL");
-        let address = url
-            .host_str()
-            .expect("the Iceberg endpoint has a host")
-            .parse::<std::net::IpAddr>()
-            .expect("the dependency listens on a literal address");
-        world
-            .cluster()
-            .publish_dns_service(name, address)
-            .expect("the cluster has a DNS fixture");
-        url.set_host(Some(name))
-            .expect("the fixture name is a valid URL host");
-        world.placeholders.insert(
-            target.to_string(),
-            url.to_string().trim_end_matches('/').to_string(),
-        );
+        publish_fixture_name(world, source, name, target);
     }
 }
 
@@ -5690,20 +5909,22 @@ async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
     .expect("the Iceberg clients did not ask the configured DNS fixture within 30 seconds");
 }
 
-fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
+/// Publish the literal address of the started dependency whose URL is placeholder `source` under
+/// the fixture name `name`, and record that URL with `name` as its host in placeholder `target`.
+fn publish_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
     let endpoint = world
         .placeholders
         .get(source)
-        .expect("the HTTP dependency was started");
-    let mut url = url::Url::parse(endpoint).expect("the HTTP endpoint is a URL");
+        .unwrap_or_else(|| panic!("the dependency behind '{source}' was not started"));
+    let mut url = url::Url::parse(endpoint).expect("the dependency endpoint is a URL");
     let address = url
         .host_str()
-        .expect("the HTTP endpoint has a host")
+        .expect("the dependency endpoint has a host")
         .parse::<std::net::IpAddr>()
         .expect("the dependency listens on a literal address");
     world
         .cluster()
-        .publish_dns_service(name, address)
+        .publish_dns_service(name, vec![address])
         .expect("the cluster has a DNS fixture");
     url.set_host(Some(name))
         .expect("the fixture name is a valid URL host");
@@ -5715,7 +5936,7 @@ fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str
 
 #[given("the Prometheus endpoint is published under fixture DNS")]
 async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(
+    publish_fixture_name(
         world,
         "prometheus_addr",
         "prometheus.nervix.test",
@@ -5725,17 +5946,137 @@ async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
 
 #[given("the Sentry endpoint is published under fixture DNS")]
 async fn given_sentry_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
+    publish_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
 }
 
 #[given("the OTEL HTTP endpoint is published under fixture DNS")]
 async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(
+    publish_fixture_name(
         world,
         "otel_collector_http_addr",
         "otel-http.nervix.test",
         "otel_collector_dns_addr",
     );
+}
+
+#[given(expr = "the RabbitMQ endpoints are published under fixture DNS name {string}")]
+async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, RABBITMQ_ADDR, &name, "rabbitmq_dns_addr");
+    publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
+}
+
+/// Stand TCP forwarders to the plain RabbitMQ listener at `addresses`, and record in placeholder
+/// `rabbitmq_forwarded_addr` the RabbitMQ URL that reaches them through the fixture name `name`.
+/// The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "RabbitMQ is forwarded as {string} from the fixture addresses {string}")]
+async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = world
+        .placeholders
+        .get(RABBITMQ_ADDR)
+        .expect("RabbitMQ was started");
+    let mut url = url::Url::parse(endpoint).expect("the RabbitMQ endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the RabbitMQ endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("RabbitMQ listens on a literal address");
+    let port = url.port().expect("the RabbitMQ endpoint names its port");
+    let addresses = fixture_addresses(&addresses);
+    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
+        .await
+        .expect("the RabbitMQ forwarders could not listen");
+    url.set_host(Some(&name))
+        .expect("the fixture name is a valid URL host");
+    url.set_port(Some(forwarders.port()))
+        .expect("an AMQP URL carries a port");
+    world
+        .placeholders
+        .insert("rabbitmq_forwarded_addr".to_string(), url.to_string());
+    world.tcp_forwarders = Some(forwarders);
+}
+
+/// The comma-separated loopback addresses a step names, in order.
+fn fixture_addresses(addresses: &str) -> Vec<std::net::IpAddr> {
+    let mut parsed = Vec::new();
+    for address in addresses.split(',') {
+        let address = address
+            .trim()
+            .parse::<std::net::IpAddr>()
+            .unwrap_or_else(|error| panic!("'{address}' is not an IP address: {error}"));
+        parsed.push(address);
+    }
+    parsed
+}
+
+#[given(expr = "the DNS fixture answers {string} with addresses {string}")]
+#[when(expr = "the DNS fixture answers {string} with addresses {string}")]
+async fn when_the_dns_fixture_answers_name_with_addresses(
+    world: &mut ScenarioWorld,
+    name: String,
+    addresses: String,
+) {
+    let addresses = fixture_addresses(&addresses);
+    world
+        .cluster()
+        .publish_dns_service(&name, addresses)
+        .expect("the cluster has a DNS fixture");
+}
+
+#[when(expr = "the DNS fixture answers {string} with {string}")]
+async fn when_the_dns_fixture_answers_name_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    answer: String,
+) {
+    let answer = answer
+        .parse::<FixtureAnswer>()
+        .unwrap_or_else(|_| panic!("unknown DNS fixture answer '{answer}'"));
+    world
+        .cluster()
+        .answer_dns_service(&name, answer)
+        .expect("the cluster has a DNS fixture");
+}
+
+#[when(expr = "the TCP forwarder at {string} stops")]
+async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .expect("the scenario started TCP forwarders")
+        .stop(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+}
+
+#[then(expr = "the TCP forwarder at {string} eventually accepts a connection")]
+async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, address: String) {
+    const ACCEPT_BUDGET: Duration = Duration::from_secs(30);
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    let forwarders = world
+        .tcp_forwarders
+        .as_ref()
+        .expect("the scenario started TCP forwarders");
+    tokio::time::timeout(ACCEPT_BUDGET, async {
+        loop {
+            tokio::task::consume_budget().await;
+            let accepted = forwarders
+                .accepted(address)
+                .unwrap_or_else(|error| panic!("{error}"));
+            if accepted > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the forwarder at {address} accepted no connection within {ACCEPT_BUDGET:?}")
+    });
 }
 
 #[then(expr = "the DNS fixture eventually receives a question for {string}")]
@@ -5754,7 +6095,7 @@ async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) 
         }
     })
     .await
-    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+    .unwrap_or_else(|_| panic!("no client asked the DNS fixture for '{name}' within 10 seconds"));
 }
 
 #[then("the DNS fixture received no questions for node names")]
@@ -23662,6 +24003,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 world.server_process_http_load = None;
                 world.held_resource_upload = None;
                 world.server_process = None;
+                world.server_process_cluster = None;
                 world.broker_observer = None;
                 world.syslog_udp_observer = None;
                 stop_http_receivers(world).await;
@@ -23700,6 +24042,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // proxy standing in front of a node and a socket held silently open against it are
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
+                world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
                 world.web_console_scenario_permit = None;
                 world.wasm_state_reset_scenario_permit = None;

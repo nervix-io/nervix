@@ -16,13 +16,29 @@ pub(super) enum ScheduledNodeHandoffError {
     TaskStopTimeout,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// The node-local surfaces of one domain execution that the programs of its tasks bind against.
+#[derive(Clone, Copy)]
 pub(super) struct ExecutionBuildDeps<'a> {
     pub(super) domain: &'a DomainName,
     pub(super) relay_schemas: &'a HashMap<RelayName, Arc<CompiledSchema>>,
     pub(super) relay_branchings: &'a HashMap<RelayName, ResolvedBranching>,
     pub(super) materialized_relay_specs: &'a HashMap<RelayName, RuntimeMaterializedRelaySpec>,
     pub(super) lookups: &'a HashMap<LookupName, Arc<LookupRuntime>>,
+    pub(super) udfs: Option<&'a UdfExecutor>,
+}
+
+impl<'a> ExecutionBuildDeps<'a> {
+    /// The surfaces an installed domain routing snapshot publishes.
+    pub(super) fn from_routing(domain: &'a DomainName, routing: &'a DomainRoutingSnapshot) -> Self {
+        Self {
+            domain,
+            relay_schemas: &routing.relay_schemas,
+            relay_branchings: &routing.relay_branchings,
+            materialized_relay_specs: &routing.materialized_stream_specs,
+            lookups: &routing.lookups,
+            udfs: Some(&routing.udfs),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +55,57 @@ pub(super) struct EmitterTaskBuildDeps<'a> {
     pub(super) shutdown_tx: &'a watch::Sender<bool>,
     pub(super) codecs: &'a HashMap<CodecName, Arc<CompiledCodec>>,
     pub(super) deps: EmitterTaskDeps,
+}
+
+/// The node-owned state a scheduled node's placement replicates, as the domain's plans decided it.
+#[derive(Debug, Clone)]
+pub(super) enum PlacedNodeState {
+    /// A materialized relay's rows, which its snapshots encode with this schema.
+    MaterializedRelay(StdArc<arrow_schema::Schema>),
+    /// A Kafka ingestor's domain offsets.
+    KafkaDomainOffsets,
+}
+
+impl PlacedNodeState {
+    /// The state the placement of `node` replicates, as the plans decided from its schedule
+    /// describe it.
+    pub(super) fn of(node: &ScheduledNode, plans: ScheduledDomainPlans<'_>) -> Option<Self> {
+        match node.kind() {
+            ModelKind::Relay => {
+                let relay = plans
+                    .activation
+                    .relays
+                    .get(&RelayName::from(&node.identifier))
+                    .assured("the activation plan holds every relay of the schedule it came from");
+                if relay.materialized {
+                    Some(Self::MaterializedRelay(relay.schema.arrow_schema()))
+                } else {
+                    None
+                }
+            }
+            ModelKind::Ingestor => {
+                let plan = plans
+                    .entrypoints
+                    .ingestor(&IngestorName::from(&node.identifier))
+                    .assured(
+                        "the entrypoint plans hold every ingestor of the schedule they came from",
+                    );
+                if plan.keeps_domain_offsets() {
+                    Some(Self::KafkaDomainOffsets)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The decisions of one scheduled domain revision that its node-local runtime is built from.
+#[derive(Clone, Copy)]
+pub(super) struct ScheduledDomainPlans<'a> {
+    pub(super) activation: &'a DomainActivationPlan,
+    pub(super) entrypoints: &'a EntrypointPlans,
 }
 
 /// Everything a scheduled node's assignment gives it on one cluster node: the replicated states it
@@ -130,5 +197,108 @@ impl ScheduledNodeTask {
                 Err(Report::new(ScheduledNodeHandoffError::TaskStopTimeout))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nervix_models::{
+        ConsumerGroupName, CreateClientKafka, CreateIngestor, FlushPolicy, GeneralErrorPolicy,
+        IngestQuiesceMode, IngestSource, KafkaIngestMode, KafkaOffsetMode, Model, OutputBranch,
+        ParseAsType, ProcessorOutputs, SchemaFingerprint,
+    };
+    use nonzero_ext::nonzero;
+
+    use super::*;
+
+    fn kafka_ingestor(name: &str, offset_mode: KafkaOffsetMode) -> Model {
+        Model::Ingestor(CreateIngestor {
+            name: named(name),
+            output_routes: with_inherit_all(ProcessorOutputs::single(named("events")))
+                .with_flush_policy(FlushPolicy::Immediate)
+                .with_branch(OutputBranch::Unbranched),
+            decode_using_codec: named("payload_codec"),
+            timestamp_source: None,
+            source: IngestSource::Kafka {
+                client: named("kafka"),
+                topic: named("events"),
+                offset_mode,
+                instances: nonzero!(1u64),
+                mode: KafkaIngestMode::NoAckParallel,
+                quiesce: IngestQuiesceMode::Suspend,
+            },
+            general_error_policy: GeneralErrorPolicy::Log,
+            filter_where: None,
+        })
+    }
+
+    #[test]
+    fn a_placement_replicates_the_state_its_node_plan_keeps() {
+        let domain = domain("default");
+        let fixture = EntrypointTestDomain {
+            relays: &["events", "state"],
+            fields: &[("value", ParseAsType::I64)],
+            branch_fields: &[],
+        };
+        let kafka_client = || {
+            Model::ClientKafka(CreateClientKafka {
+                name: named("kafka"),
+                mount: None,
+                config: Vec::new(),
+            })
+        };
+        let mut plans = fixture.plans(
+            &domain,
+            vec![
+                kafka_client(),
+                kafka_ingestor("domain_offsets", KafkaOffsetMode::Domain),
+                kafka_ingestor(
+                    "group_offsets",
+                    KafkaOffsetMode::ConsumerGroup(named::<ConsumerGroupName>("group")),
+                ),
+            ],
+        );
+        plans
+            .activation
+            .relays
+            .get_mut(&named::<RelayName>("state"))
+            .assured("the fixture plans every relay it declares")
+            .materialized = true;
+        let node =
+            |model: Model| ScheduledNode::new(model, SchemaFingerprint::from_digest([1; 32]));
+        let relay = |name: &str| {
+            scheduled_model(Model::Relay(CreateRelay {
+                name: named(name),
+                schema: named("entrypoint_payload"),
+                buffer: nonzero_capacity(2),
+                branching: nervix_models::RelayBranching::unbranched(),
+                materialized_state: None,
+            }))
+        };
+
+        assert!(matches!(
+            PlacedNodeState::of(
+                &node(kafka_ingestor("domain_offsets", KafkaOffsetMode::Domain)),
+                plans.scheduled(),
+            ),
+            Some(PlacedNodeState::KafkaDomainOffsets)
+        ));
+        assert!(
+            PlacedNodeState::of(
+                &node(kafka_ingestor(
+                    "group_offsets",
+                    KafkaOffsetMode::ConsumerGroup(named::<ConsumerGroupName>("group")),
+                )),
+                plans.scheduled(),
+            )
+            .is_none()
+        );
+        assert!(matches!(
+            PlacedNodeState::of(&relay("state"), plans.scheduled()),
+            Some(PlacedNodeState::MaterializedRelay(schema))
+                if schema == fixture.relay_schema().arrow_schema()
+        ));
+        assert!(PlacedNodeState::of(&relay("events"), plans.scheduled()).is_none());
+        assert!(PlacedNodeState::of(&node(kafka_client()), plans.scheduled()).is_none());
     }
 }

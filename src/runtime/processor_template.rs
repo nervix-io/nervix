@@ -421,13 +421,11 @@ impl RelayProcessorTemplate {
         RelayProcessorOutputNode {
             relay: output.output_relay.clone(),
             construction: output.construction.clone(),
-            branch: None,
             flush_policy: output.flush_policy,
             message_error_policy: output.message_error_policy.clone(),
             pending: Vec::new(),
             flush_timer: BranchBufferTimer::default(),
             compiled_program: output.compiled_program.clone(),
-            compiled_branch_program: None,
         }
     }
 

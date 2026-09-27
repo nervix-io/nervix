@@ -1221,11 +1221,6 @@ fn branched_node_specs_capture_downstream_processing_tree() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    let spec = &specs.entrypoints[0];
-    assert_eq!(spec.identifier, named("orders_ingestor"));
-    assert_eq!(spec.root_relay, named("orders"));
-    assert_eq!(spec.branch.as_ref(), Some(&named("by_orders")));
     assert_eq!(specs.processors.len(), 2);
     let dedup_orders = &specs.processors[0];
     assert_eq!(dedup_orders.spec.processor, named("dedup_orders"));
@@ -1338,9 +1333,6 @@ fn branched_node_specs_capture_window_processor_as_branch_node() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    let spec = &specs.entrypoints[0];
-    assert_eq!(spec.root_relay, named("metrics"));
     assert_eq!(specs.processors.len(), 2);
     let window = specs
         .processors
@@ -1450,9 +1442,6 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    let spec = &specs.entrypoints[0];
-    assert_eq!(spec.root_relay, named("features"));
     assert_eq!(specs.processors.len(), 2);
     let inferencer = specs
         .processors
@@ -1496,7 +1485,7 @@ fn branched_node_specs_capture_inferencer_as_branch_node() {
 }
 
 #[test]
-fn branched_node_specs_capture_reingestor_entrypoint_tree() {
+fn branched_node_specs_capture_the_processor_behind_a_reingestor() {
     let specs = branched_node_specs_from_models(
         [
             branch_model("tenant", "tenant_orders", &["tenant"]),
@@ -1542,12 +1531,6 @@ fn branched_node_specs_capture_reingestor_entrypoint_tree() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    let spec = &specs.entrypoints[0];
-    assert_eq!(spec.kind, ModelKind::Reingestor);
-    assert_eq!(spec.identifier, named("tenant_partition"));
-    assert_eq!(spec.root_relay, named("tenant_orders"));
-    assert_eq!(spec.branch.as_ref(), Some(&named("by_tenant_orders")));
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(
@@ -1669,7 +1652,6 @@ fn branched_node_specs_capture_processor_output_route_tree() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
     assert_eq!(specs.processors.len(), 3);
     let splitter = specs
         .processors
@@ -1801,7 +1783,6 @@ fn branched_node_specs_capture_junction_as_single_branch_processor() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 2);
     assert_eq!(
         specs
             .processors
@@ -1913,7 +1894,6 @@ fn branched_node_specs_capture_single_processor_output_route_tree() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
     let orders_filter = specs
         .processors
         .iter()
@@ -1996,11 +1976,6 @@ fn branched_node_specs_include_singleton_branch_for_empty_branching() {
         .into_iter(),
     );
 
-    assert_eq!(specs.entrypoints.len(), 1);
-    assert_eq!(specs.entrypoints[0].identifier, named("orders_ingestor"));
-    assert_eq!(specs.entrypoints[0].root_relay, named("orders"));
-    assert_eq!(specs.entrypoints[0].branch, None);
-    assert_eq!(specs.entrypoints[0].branch_ttl, None);
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(specs.processors[0].branch_ttl, None);
@@ -2046,7 +2021,6 @@ fn branched_processor_specs_do_not_require_an_entrypoint() {
         .into_iter(),
     );
 
-    assert!(specs.entrypoints.is_empty());
     assert_eq!(specs.processors.len(), 1);
     assert_eq!(specs.processors[0].spec.processor, named("dedup_orders"));
     assert_eq!(specs.processors[0].spec.input_relays, vec![named("orders")]);
@@ -2102,40 +2076,6 @@ fn branched_wasm_processor_specs_preserve_global_error_policy() {
     assert_eq!(
         specs.processors[0].spec.error_policies.message,
         MessageErrorPolicy::Log
-    );
-}
-
-#[test]
-fn branched_node_specs_include_reingestor_with_declared_branching() {
-    let specs = branched_node_specs_from_models(
-        [
-            branch_model("tenant", "tenant_notifications", &["tenant"]),
-            PlannedModel {
-                kind: ModelKind::Reingestor,
-                identifier: named("tenant_partition"),
-                model: nervix_models::Model::Reingestor(CreateReingestor {
-                    name: named("tenant_partition"),
-                    from: ProcessorInputs::single(named("notifications")),
-                    output_routes: (ProcessorOutputs::single(named("tenant_notifications")))
-                        .with_flush_policy(FlushPolicy::Each {
-                            interval: "100ms".to_string(),
-                            max_batch_size: "1MiB".to_string(),
-                        })
-                        .with_branch(branched_by("tenant_notifications", &["tenant"])),
-                    mode: AckMode::Attached,
-                    filter_where: None,
-                    materialized_state: Vec::new(),
-                }),
-            },
-        ]
-        .into_iter(),
-    );
-
-    assert_eq!(specs.entrypoints.len(), 1);
-    assert_eq!(specs.entrypoints[0].identifier, named("tenant_partition"));
-    assert_eq!(
-        specs.entrypoints[0].root_relay,
-        named("tenant_notifications")
     );
 }
 

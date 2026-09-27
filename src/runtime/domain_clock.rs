@@ -2,8 +2,8 @@
 //!
 //! Layer: data plane.
 //!
-//! - **Owns.** Installing committed mappings, observing progress and adapting clock arithmetic to
-//!   runtime lifecycle decisions.
+//! - **Owns.** Installing committed mappings, observing progress, following installations for
+//!   client attachments, and adapting clock arithmetic to runtime lifecycle decisions.
 //! - **Depends on.** Vocabulary clock models and branch-local runtime state.
 //! - **Must not know.** NSPL parsing, consensus decisions or clock-authority selection.
 
@@ -18,8 +18,9 @@ use nervix_execution::sync::ArcSwap;
 #[cfg(test)]
 use nervix_models::DomainTick;
 use nervix_models::{
-    DomainAdmissionWindow, DomainClockAuthority, DomainClockPeriod, DomainClockProgress,
-    DomainClockSkew, DomainClockState, DomainName, DomainPace, DomainState, Timestamp,
+    DomainAdmissionWindow, DomainClockAuthority, DomainClockObservation, DomainClockObservedState,
+    DomainClockPeriod, DomainClockProgress, DomainClockSkew, DomainClockState, DomainName,
+    DomainPace, DomainState, PacedDomainClock, Timestamp,
 };
 #[cfg(test)]
 use nervix_wasm::WasmExecutionContext;
@@ -168,6 +169,44 @@ impl DomainClockInstallation {
         match self {
             Self::Installed { generation, .. } => Some(*generation),
             Self::Missing | Self::Stopped { .. } | Self::Uninstalled { .. } => None,
+        }
+    }
+
+    /// This installation as a client observes it, or `None` once the domain has left this node.
+    fn observation(&self) -> Option<DomainClockObservation> {
+        match self {
+            Self::Missing => None,
+            Self::Stopped { generation } => Some(DomainClockObservation {
+                generation: *generation,
+                state: DomainClockObservedState::Stopped,
+            }),
+            Self::Uninstalled { generation } => Some(DomainClockObservation {
+                generation: *generation,
+                state: DomainClockObservedState::Uninstalled,
+            }),
+            Self::Installed {
+                generation,
+                source: DomainClockSource::Unpaced,
+            } => Some(DomainClockObservation {
+                generation: *generation,
+                state: DomainClockObservedState::Unpaced,
+            }),
+            Self::Installed {
+                generation,
+                source:
+                    DomainClockSource::Paced {
+                        mapping,
+                        period,
+                        skew,
+                    },
+            } => Some(DomainClockObservation {
+                generation: *generation,
+                state: DomainClockObservedState::Paced(PacedDomainClock {
+                    period: *period,
+                    skew: *skew,
+                    mapping: mapping.clone(),
+                }),
+            }),
         }
     }
 }
@@ -354,6 +393,17 @@ impl DomainClockLifecycle {
         self.bind_for(DomainClockBinding::Active)
     }
 
+    /// Starts following this clock's installation for a client attachment.
+    ///
+    /// The observer subscribes to the lifecycle notification before its first read, so a
+    /// replacement published after that read always wakes it.
+    fn observe(&self) -> DomainClockObserver {
+        DomainClockObserver {
+            changes: self.inner.changes.subscribe(),
+            inner: self.inner.clone(),
+        }
+    }
+
     /// Binds the generation carried by a passive execution for a stopped domain.
     ///
     /// Passive executions own model and routing state but run no domain work. Their clock handle
@@ -414,6 +464,36 @@ impl DomainClockLifecycle {
             }
         }
         self.inner.changes.send_replace(());
+    }
+}
+
+/// Follows the installation one domain clock publishes on this node, for a client attachment.
+///
+/// It reads the publication bound handles read and wakes on the notification logical waiters wake
+/// on, so it takes no lock and holds nothing a publication waits for. It never reads the clock
+/// itself: an observation is the installed generation and its committed mapping, not a projected
+/// time.
+#[derive(Debug)]
+pub(crate) struct DomainClockObserver {
+    inner: Arc<DomainClockInner>,
+    changes: watch::Receiver<()>,
+}
+
+impl DomainClockObserver {
+    /// The installation this node publishes now, or `None` once the domain has left this node.
+    pub(crate) fn current(&self) -> Option<DomainClockObservation> {
+        let published = self.inner.published.load();
+        published.installation.observation()
+    }
+
+    /// Resolves once the published installation has been replaced since the observer was created
+    /// or last woke. Several replacements between two waits wake it once, so a caller that reads
+    /// [`Self::current`] afterwards sees the newest.
+    pub(crate) async fn changed(&mut self) {
+        self.changes
+            .changed()
+            .await
+            .assured("the observer holds the lifecycle that owns the notification sender");
     }
 }
 
@@ -977,6 +1057,13 @@ impl Runtime {
         entry.clock.bind_passive()
     }
 
+    /// Starts observing the clock of `domain` as this node installs it, for a client attachment.
+    /// `None` when this node holds no such domain.
+    pub(crate) fn observe_domain_clock(&self, domain: &DomainName) -> Option<DomainClockObserver> {
+        let entry = self.inner.domains.get(domain)?;
+        Some(entry.clock.observe())
+    }
+
     pub(crate) fn current_paced_domain_time(
         &self,
         domain: &DomainName,
@@ -1009,7 +1096,7 @@ mod tests {
     use crate::{
         runtime::{
             RuntimeValue, domain, named, paced_domain_state, test_domain_clock,
-            test_domain_clock_authority,
+            test_domain_clock_authority, unpaced_domain_state,
         },
         runtime_schema::test_runtime_row,
     };
@@ -1098,6 +1185,119 @@ mod tests {
             .expect("the fixture domain remains installed");
         let progress = observed.progress.lock();
         assert_eq!(progress.as_ref().map(|tick| tick.tick_id), Some(3));
+    }
+
+    #[test]
+    fn an_observer_follows_each_installation_until_the_domain_leaves_the_node() {
+        use futures_util::FutureExt as _;
+
+        let runtime = Runtime::new();
+        let domain_id = domain("observed");
+        assert!(runtime.observe_domain_clock(&domain_id).is_none());
+        let mapping = DomainClockState::new(
+            Timestamp::from_unix_nanos(10),
+            Timestamp::from_unix_nanos(1_000),
+            DomainTimeRate::try_from(2.0).expect("the fixture rate is positive and finite"),
+        );
+        let mut running = paced_domain_state("observed");
+        running.start_version = 1;
+        running.clock = Some(mapping.clone());
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), running.clone())]));
+        let mut observer = runtime
+            .observe_domain_clock(&domain_id)
+            .expect("the synchronized domain is observable");
+        let paced = PacedDomainClock {
+            period: "1s".parse().expect("fixture period is valid"),
+            skew: "250ms".parse().expect("fixture skew is valid"),
+            mapping,
+        };
+        assert_eq!(
+            observer.current(),
+            Some(DomainClockObservation {
+                generation: 1,
+                state: DomainClockObservedState::Paced(paced),
+            })
+        );
+
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), running.clone())]));
+        assert!(
+            observer.changed().now_or_never().is_none(),
+            "synchronizing an unchanged installation wakes no observer"
+        );
+        let mut paused = running.clone();
+        paused.status = nervix_models::DomainStatus::Paused;
+        paused.clock = None;
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), paused)]));
+        assert!(
+            observer.changed().now_or_never().is_none(),
+            "the alteration pause keeps the running clock installed"
+        );
+
+        let mut stopped = running;
+        stopped.status = nervix_models::DomainStatus::Stopped;
+        stopped.clock = None;
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), stopped)]));
+        observer
+            .changed()
+            .now_or_never()
+            .expect("stopping the domain wakes its observer");
+        assert_eq!(
+            observer.current(),
+            Some(DomainClockObservation {
+                generation: 1,
+                state: DomainClockObservedState::Stopped,
+            })
+        );
+
+        let mut unpaced = unpaced_domain_state("observed");
+        unpaced.start_version = 2;
+        runtime.sync_domains(&BTreeMap::from([(domain_id.clone(), unpaced)]));
+        observer
+            .changed()
+            .now_or_never()
+            .expect("a new generation wakes the observer");
+        assert_eq!(
+            observer.current(),
+            Some(DomainClockObservation {
+                generation: 2,
+                state: DomainClockObservedState::Unpaced,
+            })
+        );
+
+        runtime.sync_domains(&BTreeMap::new());
+        observer
+            .changed()
+            .now_or_never()
+            .expect("removing the domain wakes its observer");
+        assert_eq!(observer.current(), None);
+        assert!(runtime.observe_domain_clock(&domain_id).is_none());
+    }
+
+    #[test]
+    fn a_paced_generation_without_an_authority_is_observed_uninstalled() {
+        let runtime = Runtime::new();
+        let domain_id = domain("unowned");
+        let mut state = paced_domain_state("unowned");
+        state.start_version = 3;
+        state.clock = Some(DomainClockState::new(
+            Timestamp::from_unix_nanos(0),
+            Timestamp::from_unix_nanos(0),
+            DomainTimeRate::ONE,
+        ));
+        runtime.sync_committed_domains(
+            &BTreeMap::from([(domain_id.clone(), state)]),
+            &BTreeMap::new(),
+        );
+        let observer = runtime
+            .observe_domain_clock(&domain_id)
+            .expect("the synchronized domain is observable");
+        assert_eq!(
+            observer.current(),
+            Some(DomainClockObservation {
+                generation: 3,
+                state: DomainClockObservedState::Uninstalled,
+            })
+        );
     }
 
     #[test]

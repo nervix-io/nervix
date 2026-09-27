@@ -5,7 +5,8 @@
 //! - **Owns.** One native gRPC exchange per test session: request identities, reply routing and
 //!   transfer reassembly, the subscriptions the session opened and the display text of their rows,
 //!   every frame about a subscription outside the lifetime its replies and events announced, the
-//!   notices it received, and raw frames a scenario sends to probe the server's refusals.
+//!   notices it received, the domain clock replies and frames it read in their arrival order, and
+//!   raw frames a scenario sends to probe the server's refusals.
 //! - **Depends on.** The client wire contract and its gRPC codec, the NSPL client statement parser
 //!   to route subscription statements, and the shared TLS and credential fixtures.
 //! - **Must not know.** Server internals; everything it observes arrives through the public
@@ -25,12 +26,14 @@ use std::{
 use ahash::{HashMap, HashMapExt as _, HashSet, HashSetExt as _};
 use bytes::{BufMut as _, Bytes};
 use nervix_client_wire::{
-    AttachDisposition, AttachOutcome, AttachTransactionRequest, CancelRequest, ClientMessage,
-    ClientRequest, CommandDisposition, CommandOutcome, CommandRequest, Diagnostic, NoticeLevel,
-    OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema, ServerEvent, ServerFrame, ServerMessage,
-    SessionEndReason, SessionLimits, SubscribeDisposition, SubscribeRequest, SubscriptionEnded,
-    SubscriptionHandle, SubscriptionType, TransferAssembly, UnsubscribeDisposition,
-    UnsubscribeRequest, UploadChunk, UploadReply, UploadStart, VerifiedFrame,
+    AttachDisposition, AttachDomainClockRequest, AttachOutcome, AttachTransactionRequest,
+    CancelRequest, ClientMessage, ClientRequest, CommandDisposition, CommandOutcome,
+    CommandRequest, DetachDomainClockRequest, Diagnostic, DomainClockAttachmentEnded,
+    DomainClockObserved, NoticeLevel, OutcomeOrigin, Reply, ReplyBody, RequestId, RowSchema,
+    ServerEvent, ServerFrame, ServerMessage, SessionEndReason, SessionLimits, SubscribeDisposition,
+    SubscribeRequest, SubscriptionEnded, SubscriptionHandle, SubscriptionType, TransferAssembly,
+    UnsubscribeDisposition, UnsubscribeRequest, UploadChunk, UploadReply, UploadStart,
+    VerifiedFrame,
     grpc::{
         ClientExchangeCodec, ClientUploadCodec, EXCHANGE_PATH, FrameDecoder, UPLOAD_RESOURCE_PATH,
     },
@@ -80,6 +83,30 @@ pub(crate) struct TestServerEvent {
 #[derive(Debug)]
 struct OpenSubscription {
     schema: RowSchema,
+}
+
+/// A frame about a domain clock the session follows.
+#[derive(Debug, Clone)]
+pub(crate) enum TestClockFrame {
+    Observed(DomainClockObserved),
+    Ended(DomainClockAttachmentEnded),
+}
+
+impl TestClockFrame {
+    pub(crate) fn domain(&self) -> &DomainName {
+        match self {
+            Self::Observed(observed) => &observed.domain,
+            Self::Ended(ended) => &ended.domain,
+        }
+    }
+}
+
+/// A domain clock reply or frame, in the order the session read it.
+#[derive(Debug, Clone)]
+pub(crate) enum TestClockLogEntry {
+    /// The terminal reply to an attach or detach request.
+    Reply(RequestId),
+    Frame(TestClockFrame),
 }
 
 /// A reply and the bytes of the frames that carried it.
@@ -142,6 +169,10 @@ pub(crate) struct TestSession {
     pending_subscriptions: VecDeque<TestSubscriptionEvent>,
     pending_subscription_ends: VecDeque<SubscriptionEnded>,
     pending_server_errors: VecDeque<TestServerEvent>,
+    /// Domain clock frames no step has taken yet.
+    pending_clock_frames: VecDeque<TestClockFrame>,
+    /// Every domain clock reply and frame, in the order the session read it.
+    clock_log: Vec<TestClockLogEntry>,
     /// Why the server said it ends the session, once it said so.
     ending: Option<SessionEndReason>,
     /// The status the server ended the call with, once it ended it.
@@ -249,6 +280,8 @@ pub(crate) async fn open_session_as(
         pending_subscriptions: VecDeque::new(),
         pending_subscription_ends: VecDeque::new(),
         pending_server_errors: VecDeque::new(),
+        pending_clock_frames: VecDeque::new(),
+        clock_log: Vec::new(),
         ending: None,
         ended: None,
     }))
@@ -488,6 +521,9 @@ impl TestSession {
                     self.closed_subscriptions.insert(handle.clone());
                 }
             }
+            ReplyBody::DomainClockAttach(_) | ReplyBody::DomainClockDetach(_) => {
+                self.clock_log.push(TestClockLogEntry::Reply(request_id));
+            }
             _ => {}
         }
         self.replies
@@ -547,12 +583,75 @@ impl TestSession {
                     self.record_outside_lifetime("a loss report", &lost.subscription);
                 }
             }
+            ServerEvent::DomainClockObserved(observed) => {
+                self.file_clock_frame(TestClockFrame::Observed(observed));
+            }
+            ServerEvent::DomainClockAttachmentEnded(ended) => {
+                self.file_clock_frame(TestClockFrame::Ended(ended));
+            }
             ServerEvent::Leadership(_)
             | ServerEvent::Domains(_)
             | ServerEvent::DomainSnapshot(_)
             | ServerEvent::Cluster(_) => {}
         }
         Ok(())
+    }
+
+    fn file_clock_frame(&mut self, frame: TestClockFrame) {
+        self.clock_log.push(TestClockLogEntry::Frame(frame.clone()));
+        self.pending_clock_frames.push_back(frame);
+    }
+
+    /// Every domain clock reply and frame, in the order the session read them.
+    pub(crate) fn clock_log(&self) -> &[TestClockLogEntry] {
+        &self.clock_log
+    }
+
+    /// Sends a request attaching the session to the clock of `domain`, without waiting for its
+    /// reply.
+    pub(crate) async fn send_domain_clock_attach(
+        &mut self,
+        domain: DomainName,
+    ) -> io::Result<RequestId> {
+        let request = ClientRequest::AttachDomainClock(AttachDomainClockRequest { domain });
+        let (request_id, _) = self.send_request(request).await?;
+        Ok(request_id)
+    }
+
+    /// Sends a request detaching the session from the clock of `domain`, without waiting for its
+    /// reply.
+    pub(crate) async fn send_domain_clock_detach(
+        &mut self,
+        domain: DomainName,
+    ) -> io::Result<RequestId> {
+        let request = ClientRequest::DetachDomainClock(DetachDomainClockRequest { domain });
+        let (request_id, _) = self.send_request(request).await?;
+        Ok(request_id)
+    }
+
+    /// Waits for the next domain clock frame no step has taken yet.
+    pub(crate) async fn try_next_clock_frame(
+        &mut self,
+        timeout_duration: Duration,
+    ) -> io::Result<Option<TestClockFrame>> {
+        let deadline = Instant::now() + timeout_duration;
+        loop {
+            tokio::task::consume_budget().await;
+            if let Some(frame) = self.pending_clock_frames.pop_front() {
+                return Ok(Some(frame));
+            }
+            let read = tokio::time::timeout_at(deadline, self.read_frame()).await;
+            let open = match read {
+                Ok(open) => open?,
+                Err(_) => return Ok(None),
+            };
+            if !open {
+                return Err(io::Error::other(format!(
+                    "the session ended before a domain clock frame: {:?}",
+                    self.ended
+                )));
+            }
+        }
     }
 
     /// Records a frame about `subscription` that arrived while the session did not hold it.

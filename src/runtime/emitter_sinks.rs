@@ -196,6 +196,7 @@ impl EmitterSinkStarter {
                 RabbitMqSink::new(
                     RabbitMqSinkConfig {
                         config: sink.client.config.entries.clone(),
+                        dns: context.dns()?,
                         queue: sink.queue.clone(),
                         mode: sink.mode,
                     },

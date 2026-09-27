@@ -13,11 +13,14 @@
 mod domain_activation_plan;
 mod domain_state;
 mod entity_gate;
+mod entrypoint_plan;
 mod error;
 mod graph;
+mod ingestor_plan;
 mod mutation;
 mod placement;
 mod processor_plan;
+mod reingestor_plan;
 mod relocation;
 mod schedule_delta;
 mod scheduler;
@@ -35,29 +38,41 @@ pub(crate) use entity_gate::{
     EntityGatePlan, entity_pause_relays_for_schedule, gate_boundary,
     ownership_handoff_relays_for_schedule, scheduled_impact_coverage,
 };
+pub(crate) use entrypoint_plan::{
+    BranchInstanceAckBoundary, EntrypointPlanError, EntrypointPlans, LoweredConstruction,
+    PlannedEntryRoute, PlannedRouteBranch,
+};
 /// What the decisions layer exposes. Everything else this module and its submodules declare is
 /// `pub(in crate::registry)` or narrower, so the control plane reaches the registry only through
 /// the names below.
 pub(crate) use error::RegistryError;
 pub(crate) use graph::{ActiveGraph, EdgeKind};
+pub(crate) use ingestor_plan::{
+    EndpointIngestorStartPlan, HttpIngestorStartPlan, IngestorSpec, IngestorStartPlan,
+    KafkaDomainOffsetPlacement, KafkaIngestorStartPlan, KafkaOffsetPlan, MqttIngestorStartPlan,
+    NatsIngestorStartPlan, PrometheusIngestorStartPlan, PulsarIngestorStartPlan,
+    RabbitMqIngestorStartPlan, RedisPubSubIngestorStartPlan, SourceStartPlan, SqsIngestorStartPlan,
+    SyslogIngestorStartPlan, WebsocketsIngestorStartPlan, ZeroMqIngestorStartPlan,
+};
 pub(crate) use mutation::{PlannedMutations, RegistryMutation};
 pub(crate) use placement::{
     PlacementEndpointPairPlan, PlacementPlan, PlacementRequireGroupPlan, PlacementRulePlan,
 };
 pub(crate) use processor_plan::{
-    BranchInstanceAckBoundary, BranchedIngestorSpec, BranchedNodeSpecs, BranchedProcessorNodeSpec,
-    BranchedProcessorOperationSpec, BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec,
-    BranchedProcessorSpec, branched_node_specs_from_scheduled_nodes,
+    BranchedNodeSpecs, BranchedProcessorNodeSpec, BranchedProcessorOperationSpec,
+    BranchedProcessorOutputSpec, BranchedProcessorOutputsSpec, BranchedProcessorSpec,
+    branched_node_specs_from_scheduled_nodes,
 };
 #[cfg(test)]
 pub(crate) use processor_plan::{PlannedModel, branched_node_specs_from_models};
+pub(crate) use reingestor_plan::{ReingestorInputPlan, ReingestorPlan};
 pub(crate) use relocation::{
     RelocationCoverage, RelocationMemberReason, RelocationPlanError, RelocationUnit,
 };
 pub(crate) use schedule_delta::ScheduleDelta;
 #[cfg(feature = "testing")]
 pub use scheduler::SchedulerMode;
-pub(crate) use storage::{Registry, RuntimeChange, RuntimeChanges};
+pub(crate) use storage::{Registry, RuntimeChanges};
 pub(crate) use transaction::{
     PlannedTransaction, PlannedTransactionStep, PlannedTransactionStepKind,
     TransactionPlanningError, TransactionPlanningSnapshot, TransactionScheduleDecision,

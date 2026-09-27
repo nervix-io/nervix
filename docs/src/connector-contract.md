@@ -11,7 +11,7 @@ the resulting Arrow batches inside the graph.
 | Layer | Responsibility |
 | --- | --- |
 | Vocabulary and registry | Define and validate source capabilities, schemas, delivery modes, header availability, branches, and references before activation. The registry names no connector crate. |
-| Decision and composition | Convert a validated Model into a typed source or sink start plan once. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
+| Decision and composition | Convert a validated Model into a typed source or sink start plan once. The registry decides every ingestor's source plan together with its codec and lowered routes, validating the source name, kind, client and route identities as one decision. The server is the composition root and the only crate that names every integration. It resolves client resource mounts before opening a connector. |
 | `nervix-connector` | Define source and sink operations, typed boundary values, and opaque host services. It knows neither a driver nor graph execution state. |
 | `nervix-connector-*` | Own one integration's driver, connection and configuration interpretation, transport headers, protocol acknowledgements, and per-record results. A crate implements the source contract, the sink contract, or both. |
 | Host data plane | Own tasks, intake and Arrow decoding, branch routing, ACK trees, quiesce, buffering, retry and flush scheduling, metrics, events, and drain. It executes typed plans; it does not parse NSPL or read a Model during data-plane execution. |
@@ -50,6 +50,41 @@ connection setup, TLS and response handling; the resolver's own 30 second ceilin
 clients without a shorter request timeout. DNS failures use the host's existing retry policy and
 do not create application-level probes or acknowledgements.
 
+### DNS for RabbitMQ
+
+Composition also passes the node resolver into every RabbitMQ source plan and sink configuration.
+The connector reads the client's `addr` as an AMQP URI and takes its host from the URL grammar,
+because Lapin's own grammar substitutes `localhost` for an IPv6 literal host. Every connection resolves that host again through the node resolver: a sink's start, its
+reopening after a failed publish, and each source instance's resume. A literal IPv4 or IPv6 address
+is its own answer. The connector tries the answers in resolution order, each within an equal share
+of what remains of a 30 second budget, and for `amqps` completes the TLS handshake within what is
+left. The handshake verifies the broker certificate against the host `addr` names, whichever of its
+addresses was dialled, trusting the platform roots and the client's `tls_ca_file`. The connector
+then hands the established transport to Lapin through `Connection::connector`. Lapin's own
+reconnection stays off, so it asks that hook for a transport exactly once and runs the AMQP
+handshake over it. The AMQP handshake still has no deadline of its own, and the URI's
+`connection_timeout` query parameter has no effect.
+
+Lapin's `hickory-dns` feature is deliberately not selected. It resolves through one process-wide
+async-rs resolver built on first use from the host's `/etc/resolv.conf`, which ignores the node's
+resolver configuration, hosts snapshot, lookup budget and concurrency bound. That resolver also
+keeps name-server connections whose tasks ran on the Tokio runtime of its first lookup, so a later
+runtime inherits connections of one that may have stopped. `just validate-dns-dependencies` keeps
+the feature off in the isolated RabbitMQ connector and in the server, and checks that Lapin's TLS
+stays on AWS-LC.
+
+A failed connection is a `RabbitMqConnectError`. A lookup failure keeps its `DnsLookupFailure`, and
+unreachable addresses, a failed or overdue TLS handshake, and a failed AMQP handshake are their
+own variants. A source reports the failure as a resume failure and retries on its declared
+`RETRY POLICY`. A sink reports an invalid address or CA file as a configuration failure and every
+other connection failure as an initialization failure, and the emitter host reopens it on its
+backoff. Neither path acknowledges undelivered data: a source that cannot connect holds no
+delivery, and a sink that cannot connect confirms nothing, so the input stays unacknowledged until
+a later connection delivers it. A connection that fails before its AMQP handshake has started no
+Lapin thread, and a failed handshake ends that thread and closes the socket. An established
+connection is not closed because its host's answer changed or expired; the next connection uses
+the new answer.
+
 ```mermaid
 sequenceDiagram
     participant NSPL as NSPL and Models
@@ -66,6 +101,13 @@ sequenceDiagram
 ```
 
 ## Source boundary
+
+Each domain revision installs its ingestor plans with its schedule. Building a domain, swapping or
+relocating an ingestor, starting the ingestors a runtime revision leaves missing, and placing Kafka
+domain offsets all read those same plans; none of them reads the ingestor's Model. Starting an
+ingestor binds its codec, node filter, routes and branched entrypoints against the installed domain
+surfaces and parses its declared acknowledgement before any connector instance opens, so a start
+that fails leaves nothing running.
 
 A source plan combines connector-specific settings, validated capabilities, and the host's ACK
 policy. Capabilities state whether header reads are available, which typed metadata scope exists,
@@ -293,7 +335,8 @@ drain boundary. This chapter does not redefine those output formats.
    public statement form. Keep external driver configuration raw only where pass-through is its
    intentional contract.
 2. Validate schema, reference, branch, header, quiesce, delivery, and external contract rules in
-   the registry. Convert the validated Model into one typed start-plan variant before execution.
+   the registry. Convert the validated Model into one typed start-plan variant before execution;
+   a source's variant belongs to the registry's ingestor planner.
 3. Add one crate under `crates/connectors/` with its ownership header, driver dependencies, and
    source or sink contract implementation. Add its composition mapping in the server; do not
    teach the contract or registry about the driver.

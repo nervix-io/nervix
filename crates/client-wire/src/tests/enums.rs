@@ -13,6 +13,7 @@ use crate::{
     command::{ALL_EXECUTION_REFERENCE_CONFLICTS, ALL_UNKNOWN_OUTCOME_CAUSES},
     common::{ALL_MODEL_KINDS, ALL_OUTCOME_ORIGINS},
     domain::ALL_DOMAIN_STATUSES,
+    domain_clock::ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
     event::ALL_NOTICE_LEVELS,
     impact::{
         ALL_ACTIVATION_ACTIONS, ALL_DOMAIN_LIFECYCLE_ACTIONS, ALL_IMPACT_DIAGNOSTIC_KINDS,
@@ -139,6 +140,10 @@ fn every_enum_maps_exactly_to_its_schema_enum() {
         wire::SubscriptionEndReason::ENUM_VALUES,
     );
     assert_exact_mapping(ALL_UPLOAD_FAILURES, wire::UploadFailure::ENUM_VALUES);
+    assert_exact_mapping(
+        ALL_DOMAIN_CLOCK_ATTACHMENT_END_REASONS,
+        wire::DomainClockAttachmentEndReason::ENUM_VALUES,
+    );
 }
 
 #[test]
@@ -254,5 +259,9 @@ fn every_undeclared_enum_byte_is_refused() {
     assert_undeclared_refused::<crate::UploadFailure, _>(
         wire::UploadFailure::ENUM_MAX,
         wire::UploadFailure,
+    );
+    assert_undeclared_refused::<crate::DomainClockAttachmentEndReason, _>(
+        wire::DomainClockAttachmentEndReason::ENUM_MAX,
+        wire::DomainClockAttachmentEndReason,
     );
 }

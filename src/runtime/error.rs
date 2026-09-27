@@ -52,6 +52,16 @@ pub enum RuntimeError {
         domain: DomainName,
         report: Report<DomainActivationPlanError>,
     },
+    #[error("failed to plan the ingestors and reingestors of domain '{domain}': {report}")]
+    EntrypointPlan {
+        domain: DomainName,
+        report: Report<EntrypointPlanError>,
+    },
+    #[error("failed to bind an ingestor or reingestor of domain '{domain}': {report}")]
+    EntrypointBinding {
+        domain: DomainName,
+        report: Report<EntrypointBindingError>,
+    },
     #[error(
         "timed out waiting for runtime revision {revision} to be prepared on nodes \
          {pending_nodes:?}"
@@ -91,6 +101,26 @@ impl RuntimeError {
         report: Report<DomainActivationPlanError>,
     ) -> Self {
         Self::DomainActivationPlan {
+            domain: domain.clone(),
+            report,
+        }
+    }
+
+    pub(super) fn entrypoint_plan(
+        domain: &DomainName,
+        report: Report<EntrypointPlanError>,
+    ) -> Self {
+        Self::EntrypointPlan {
+            domain: domain.clone(),
+            report,
+        }
+    }
+
+    pub(super) fn entrypoint_binding(
+        domain: &DomainName,
+        report: Report<EntrypointBindingError>,
+    ) -> Self {
+        Self::EntrypointBinding {
             domain: domain.clone(),
             report,
         }

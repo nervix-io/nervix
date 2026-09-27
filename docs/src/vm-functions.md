@@ -340,8 +340,8 @@ against runtime schemas:
 | --- | --- |
 | Routes of junctions, deduplicators, reorderers, inferencers, correlators, window processors and WASM processors, and processor `FROM ... WHERE` and `FILTER WHERE` | Once when the installed typed processor revision is bound, before its domain routing snapshot is published. Every concrete branch shares the plan's programs and prepared artifacts. A valid route that needs no VM program records that prepared absence and uses direct Arrow projection. |
 | `DEDUPLICATE ON`, reorderer `BY`, and `CORRELATE WHERE` | Once when the installed typed processor revision is bound, then shared by every concrete branch |
-| Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | When the ingestor starts |
-| Reingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | When the reingestor starts |
+| Ingestor `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound when the ingestor starts, before its source opens. Every source instance and ingest group shares the bound programs. |
+| Reingestor `FROM ... WHERE`, `FILTER WHERE`, routes, and `BRANCHED BY ... SET` | Lowered once by the domain's entrypoint plans, then bound for each input relay before that input's task starts |
 | Emitter `FROM ... WHERE`, routes, HTTP `METHOD` and `PATH`, SQS `FIFO GROUP`, `VALUES`, and OpenTelemetry mappings | When the emitter task starts |
 | Window aggregate argument and output programs, inferencer `INPUTS`, and inferencer output routes | Once when the installed typed processor revision is bound, then shared by every concrete branch |
 | Generator routes | When the domain's execution is built |
@@ -407,6 +407,8 @@ All paths are relative to the repository root.
 | `crates/nervix-vm/benches/` | The Criterion harness, workload shapes, and allocation probe |
 | `crates/nervix-roto/src/lib.rs` | The UDF injector and its watchdog |
 | `src/registry/validation/` | Apply-time compilation, including `window_route.rs` and the sketch budget in `processor/sketch.rs` |
+| `src/registry/entrypoint_plan.rs` | Lowering ingestor and reingestor filters, routes, and branch constructions before a node binds them |
+| `src/runtime/entrypoint_routes.rs` | Binding lowered ingestor and reingestor programs to a node's schemas, state, lookups, and UDFs |
 | `src/runtime/vm_compile.rs` | Runtime compilation and message-error sites |
 | `src/runtime/vm_input.rs` | Input projection and lookup key execution |
 | `src/runtime/filter_map.rs` | Program execution and result handling for routes and filters |

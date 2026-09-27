@@ -70,19 +70,6 @@ impl ScheduleApplication {
 }
 
 impl Runtime {
-    pub(super) fn branched_specs_by_identifier(
-        specs: &[BranchedIngestorSpec],
-    ) -> HashMap<ModelName, Vec<BranchedIngestorSpec>> {
-        let mut specs_by_identifier = HashMap::default();
-        for spec in specs {
-            specs_by_identifier
-                .entry(spec.identifier.clone())
-                .or_insert_with(Vec::new)
-                .push(spec.clone());
-        }
-        specs_by_identifier
-    }
-
     #[cfg(test)]
     pub(in crate::runtime) async fn apply_cluster_schedule(
         &self,
@@ -408,6 +395,7 @@ impl Runtime {
         &self,
         domain: &DomainName,
         schedule: &DomainSchedule,
+        plans: ScheduledDomainPlans<'_>,
         reassignments: &[NodeRef],
         local_node_id: Option<&ClusterNodeName>,
     ) -> Result<bool, RuntimeError> {
@@ -417,8 +405,7 @@ impl Runtime {
         if reassignments.is_empty() {
             return Ok(false);
         }
-        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
-            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let activation_plan = plans.activation;
         let shutdown = match self.inner.executions.get(domain) {
             Some(execution) => execution.shutdown.clone(),
             None => {
@@ -536,22 +523,14 @@ impl Runtime {
                 task.join_after_shutdown("placement").await;
             }
 
-            let materialized_relay = match desired_node.config.as_ref() {
-                Model::Relay(relay) if relay.materialized_state.is_some() => {
-                    Some(relay.name.clone())
-                }
-                _ => None,
-            };
-            let materialized_schema = if let Some(relay) = materialized_relay.as_ref()
-                && let Some(execution) = self.inner.executions.get(domain)
-                && let Some(schema) = execution.relay_schemas.get(relay)
-            {
-                Some(schema.arrow_schema())
+            let state = PlacedNodeState::of(desired_node, plans);
+            let materialized_relay = if let Some(PlacedNodeState::MaterializedRelay(_)) = &state {
+                Some(RelayName::from(&entity.identifier))
             } else {
                 None
             };
             if let Some(relay) = materialized_relay.as_ref()
-                && let Some(schema) = materialized_schema.as_ref()
+                && let Some(PlacedNodeState::MaterializedRelay(schema)) = &state
             {
                 let state_placement = self
                     .state_placement(
@@ -630,7 +609,7 @@ impl Runtime {
                 &shutdown,
                 desired_node,
                 local_node_id,
-                materialized_schema,
+                state,
             )?;
             let tasks = placement.tasks;
 
@@ -746,6 +725,10 @@ impl Runtime {
     ) -> Result<(), RuntimeError> {
         let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
             .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let entrypoints = Arc::new(
+            EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
+        );
         let dispatcher = self.inner.remote_dispatcher.load_full();
         let local_node_id = dispatcher.as_deref().map(RemoteDispatcher::local_node_id);
         // A reassignment only replaces this cluster node's runtime when the node stopped or
@@ -812,7 +795,16 @@ impl Runtime {
         // not discard the newly attached state instance.
         self.install_state_identities(&schedule);
         let mut materialized_routing_changed = self
-            .rebind_reassigned_nodes(domain, &schedule, reassignments, local_node_id)
+            .rebind_reassigned_nodes(
+                domain,
+                &schedule,
+                ScheduledDomainPlans {
+                    activation: &activation_plan,
+                    entrypoints: &entrypoints,
+                },
+                reassignments,
+                local_node_id,
+            )
             .await?;
 
         for entity in entities {
@@ -930,7 +922,7 @@ impl Runtime {
                             domain: domain.as_str().to_string(),
                             reason: "local node id is unavailable for relay transition".to_string(),
                         })?,
-                        Some(schema.arrow_schema()),
+                        Some(PlacedNodeState::MaterializedRelay(schema.arrow_schema())),
                     )?;
                     let state_task = if desired_node.executes_on(local_node_id.verified(
                         "the resolution above returned an error unless the local node id is \
@@ -986,66 +978,24 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Ingestor {
-                let ScheduledModel {
-                    config: desired_ingestor,
-                    node: desired_node,
-                } = schedule
-                    .scheduled::<CreateIngestor>(entity.identifier.clone())
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
+                let ingestor = IngestorName::from(&entity.identifier);
+                let Some(desired_plan) = entrypoints.ingestor(&ingestor).cloned() else {
+                    return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing desired ingestor '{}'",
-                            entity.identifier.as_str()
-                        ),
-                    })?;
+                        reason: format!("missing desired ingestor '{}'", ingestor.as_str()),
+                    });
+                };
+                let desired_node = schedule
+                    .nodes
+                    .get(entity)
+                    .assured("the entrypoint plans were decided from this same schedule");
 
                 let key = entity.in_domain(domain);
                 if self.inner.ingestors.contains_key(&key) {
-                    self.stop_ingestor(domain, &IngestorName::from(&entity.identifier))
-                        .await?;
+                    self.stop_ingestor(domain, &ingestor).await?;
                 }
-
-                // The ingestor builds its branch entrypoints from the specs the execution holds
-                // for it, so an ingestor arriving on this node needs its desired specs installed
-                // before it starts and one leaving needs them removed.
-                let desired_entrypoint_specs = desired_specs
-                    .entrypoints
-                    .iter()
-                    .filter(|spec| {
-                        spec.kind == ModelKind::Ingestor && spec.identifier == entity.identifier
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if let Some(mut execution) = self.inner.executions.get_mut(domain) {
-                    if desired_entrypoint_specs.is_empty() {
-                        execution.branched_ingestors.remove(&entity.identifier);
-                    } else {
-                        execution.branched_ingestors.insert(
-                            ModelName::from(&BranchName::from(&entity.identifier)),
-                            desired_entrypoint_specs,
-                        );
-                    }
-                }
-
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
-                    let source_model =
-                        Self::source_model_for_scheduled_ingestor(&schedule, desired_ingestor)
-                            .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                                domain: domain.as_str().to_string(),
-                                reason: format!(
-                                    "missing source model for swapped ingestor '{}'",
-                                    entity.identifier.as_str()
-                                ),
-                            })?;
-                    let plan = IngestorStartPlan::decide(domain, desired_node, &source_model)
-                        .map_err(|error| RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "cannot plan swapped ingestor '{}': {error}",
-                                desired_ingestor.name.as_str()
-                            ),
-                        })?;
-                    self.start_ingestor(plan).await?;
+                    self.start_ingestor(&desired_plan).await?;
                 }
                 continue;
             }
@@ -1159,13 +1109,7 @@ impl Runtime {
                             })
                             .collect::<Result<Vec<_>, RuntimeError>>()?;
                         let deps = self.emitter_task_deps(
-                            ExecutionBuildDeps {
-                                domain,
-                                relay_schemas: &execution.relay_schemas,
-                                relay_branchings: &execution.relay_branchings,
-                                materialized_relay_specs: &execution.materialized_stream_specs,
-                                lookups: &execution.lookups,
-                            },
+                            ExecutionBuildDeps::from_routing(domain, &execution),
                             &desired_emitter,
                         )?;
                         Some(EmitterSpawnInputs {
@@ -1202,41 +1146,27 @@ impl Runtime {
                 continue;
             }
             if entity.kind == ModelKind::Reingestor {
-                let desired_node = schedule
-                    .nodes
-                    .get(&NodeRef::new(
-                        ModelKind::Reingestor,
-                        entity.identifier.clone(),
-                    ))
-                    .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                        domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "missing desired reingestor '{}'",
-                            entity.identifier.as_str()
-                        ),
-                    })?;
-                let Model::Reingestor(desired_reingestor) = desired_node.config.as_ref() else {
+                let reingestor = ReingestorName::from(&entity.identifier);
+                let Some(desired_plan) = entrypoints.reingestor(&reingestor).cloned() else {
                     return Err(RuntimeError::BuildDomainExecution {
                         domain: domain.as_str().to_string(),
-                        reason: format!(
-                            "desired reingestor '{}' has the wrong model kind",
-                            entity.identifier.as_str()
-                        ),
+                        reason: format!("missing desired reingestor '{}'", reingestor.as_str()),
                     });
                 };
-                let desired_reingestor = desired_reingestor.clone();
+                let desired_node = schedule
+                    .nodes
+                    .get(entity)
+                    .assured("the entrypoint plans were decided from this same schedule");
                 /// What the outgoing reingestor left behind, taken out while the execution is
                 /// borrowed so the tasks below are awaited without holding that borrow.
                 struct RetiredReingestor {
                     tasks: Vec<JoinHandle<()>>,
                     entrypoints: Vec<Arc<IngestorRouteRuntime>>,
-                    shutdown: watch::Sender<bool>,
                 }
 
                 let RetiredReingestor {
                     tasks: old_tasks,
                     entrypoints: old_entrypoints,
-                    shutdown,
                 } = {
                     let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
@@ -1245,38 +1175,24 @@ impl Runtime {
                                 .to_string(),
                         }
                     })?;
-                    let old_node = execution
-                        .schedule
-                        .nodes
-                        .get(&NodeRef::new(
-                            ModelKind::Reingestor,
-                            entity.identifier.clone(),
-                        ))
-                        .ok_or_else(|| RuntimeError::BuildDomainExecution {
-                            domain: domain.as_str().to_string(),
-                            reason: format!(
-                                "missing existing reingestor '{}'",
-                                entity.identifier.as_str()
-                            ),
-                        })?;
-                    let Model::Reingestor(old_reingestor) = old_node.config.as_ref() else {
+                    let Some(old_plan) = execution.entrypoints.reingestor(&reingestor).cloned()
+                    else {
                         return Err(RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
                             reason: format!(
                                 "missing existing reingestor '{}'",
-                                entity.identifier.as_str()
+                                reingestor.as_str()
                             ),
                         });
                     };
-                    let old_reingestor = old_reingestor.clone();
                     let old_tasks = execution
                         .reingestor_tasks
                         .remove(entity)
                         .unwrap_or_default();
                     if !old_tasks.is_empty() {
-                        for relay in old_reingestor.from.relays() {
-                            if let Some(services) = execution.relay_services.get(relay) {
-                                services.remove_local_runtime_consumer(old_reingestor.mode);
+                        for input in &old_plan.inputs {
+                            if let Some(services) = execution.relay_services.get(&input.relay) {
+                                services.remove_local_runtime_consumer(old_plan.mode);
                             }
                         }
                     }
@@ -1284,11 +1200,9 @@ impl Runtime {
                         .branched_entrypoints
                         .remove(&entity.identifier)
                         .unwrap_or_default();
-                    execution.branched_ingestors.remove(&entity.identifier);
                     RetiredReingestor {
                         tasks: old_tasks,
                         entrypoints: old_entrypoints,
-                        shutdown: execution.shutdown.clone(),
                     }
                 };
                 for task in old_tasks {
@@ -1302,16 +1216,7 @@ impl Runtime {
                 }
 
                 if Self::scheduled_node_executes_locally(desired_node, local_node_id) {
-                    let desired_entrypoint_specs = desired_specs
-                        .entrypoints
-                        .iter()
-                        .filter(|spec| {
-                            spec.kind == ModelKind::Reingestor
-                                && spec.identifier == entity.identifier
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let templates = {
+                    let (routing, shutdown) = {
                         let execution = self.inner.executions.get(domain).ok_or_else(|| {
                             RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
@@ -1319,81 +1224,36 @@ impl Runtime {
                                     .to_string(),
                             }
                         })?;
-                        desired_entrypoint_specs
-                            .iter()
-                            .map(|spec| {
-                                materialize_ingestor_route_template(
-                                    spec,
-                                    &desired_model_index,
-                                    &execution.relay_registries,
-                                    &execution.relay_services,
-                                )
-                                .map(|template| (spec.clone(), template))
-                                .map_err(|reason| {
-                                    RuntimeError::BuildDomainExecution {
-                                        domain: domain.as_str().to_string(),
-                                        reason: reason.to_string(),
-                                    }
-                                })
-                            })
-                            .collect::<Result<Vec<_>, RuntimeError>>()?
+                        (execution.routing.staged(), execution.shutdown.clone())
                     };
-                    let mut entrypoints = Vec::with_capacity(templates.len());
-                    let mut entrypoint_senders = HashMap::default();
-                    for (spec, template) in templates {
-                        tokio::task::consume_budget().await;
-                        let Some(runtime) = self.start_branched_entrypoint_runtime(
-                            domain,
-                            &entity.identifier,
-                            Some(template),
-                        ) else {
-                            continue;
-                        };
-                        entrypoint_senders.insert(spec.root_relay.clone(), runtime.sender());
-                        entrypoints.push(runtime);
-                    }
-
-                    let receivers = {
-                        let execution = self.inner.executions.get(domain).ok_or_else(|| {
-                            RuntimeError::BuildDomainExecution {
+                    let mut inputs = Vec::with_capacity(desired_plan.inputs.len());
+                    for input in &desired_plan.inputs {
+                        let Some(services) = routing.relay_services.get(&input.relay) else {
+                            return Err(RuntimeError::BuildDomainExecution {
                                 domain: domain.as_str().to_string(),
-                                reason: "domain execution disappeared before reingestor spawn"
-                                    .to_string(),
-                            }
-                        })?;
-                        desired_reingestor
-                            .from
-                            .relays()
-                            .iter()
-                            .map(|relay| {
-                                let Some(services) = execution.relay_services.get(relay) else {
-                                    return Err(RuntimeError::BuildDomainExecution {
-                                        domain: domain.as_str().to_string(),
-                                        reason: format!(
-                                            "missing reingestor input relay services '{}'",
-                                            relay.as_str()
-                                        ),
-                                    });
-                                };
-                                Ok((
-                                    relay.clone(),
-                                    services.add_local_runtime_consumer(desired_reingestor.mode),
-                                ))
-                            })
-                            .collect::<Result<Vec<_>, RuntimeError>>()?
-                    };
-                    let mut tasks = Vec::with_capacity(receivers.len());
-                    for (from_relay, receiver) in receivers {
-                        tokio::task::consume_budget().await;
-                        tasks.push(self.spawn_reingestor_task(
-                            domain,
-                            &shutdown,
-                            &entrypoint_senders,
-                            desired_reingestor.clone(),
-                            from_relay,
-                            receiver,
-                        )?);
+                                reason: format!(
+                                    "missing reingestor input relay services '{}'",
+                                    input.relay.as_str()
+                                ),
+                            });
+                        };
+                        inputs.push(PlannedReingestorInput {
+                            plan: desired_plan.clone(),
+                            input: input.clone(),
+                            consumer: ReingestorInputConsumer::Deferred(services.clone()),
+                        });
                     }
+                    let runtimes = self
+                        .start_reingestor_runtimes(
+                            ExecutionBuildDeps::from_routing(domain, &routing),
+                            &shutdown,
+                            RelayRuntimeHandles {
+                                registries: &routing.relay_registries,
+                                services: &routing.relay_services,
+                            },
+                            inputs,
+                        )
+                        .map_err(|report| RuntimeError::entrypoint_binding(domain, report))?;
                     let mut execution = self.inner.executions.get_mut(domain).ok_or_else(|| {
                         RuntimeError::BuildDomainExecution {
                             domain: domain.as_str().to_string(),
@@ -1401,15 +1261,10 @@ impl Runtime {
                                 .to_string(),
                         }
                     })?;
-                    execution.branched_ingestors.insert(
-                        ModelName::from(&BranchName::from(&entity.identifier)),
-                        desired_entrypoint_specs,
-                    );
-                    execution.branched_entrypoints.insert(
-                        ModelName::from(&BranchName::from(&entity.identifier)),
-                        entrypoints,
-                    );
-                    execution.reingestor_tasks.insert(entity.clone(), tasks);
+                    execution
+                        .branched_entrypoints
+                        .extend(runtimes.branched_entrypoints);
+                    execution.reingestor_tasks.extend(runtimes.tasks);
                 }
                 continue;
             }
@@ -1745,8 +1600,11 @@ impl Runtime {
         let mut routing_published = false;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             if let Some(local_node_id) = local_node_id {
-                let remote_consumers =
-                    Self::remote_runtime_consumers_for_schedule(&schedule, local_node_id);
+                let remote_consumers = Self::remote_runtime_consumers_for_schedule(
+                    &schedule,
+                    &entrypoints,
+                    local_node_id,
+                );
                 for (relay, services) in &execution.relay_services {
                     let owner_node = if let Some(node) = schedule
                         .nodes
@@ -1764,6 +1622,7 @@ impl Runtime {
                 }
             }
             execution.schedule = schedule;
+            execution.entrypoints = entrypoints;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
             routing_published = true;
@@ -1795,6 +1654,12 @@ impl Runtime {
                 domain: domain.as_str().to_string(),
                 reason: format!("{error:#}"),
             })?;
+        let activation_plan = DomainActivationPlan::from_scheduled_nodes(domain, &schedule.nodes)
+            .map_err(|report| RuntimeError::activation_plan(domain, report))?;
+        let entrypoints = Arc::new(
+            EntrypointPlans::from_scheduled_nodes(domain, &schedule.nodes, &activation_plan)
+                .map_err(|report| RuntimeError::entrypoint_plan(domain, report))?,
+        );
         let graph = ActiveGraph::from_scheduled_models(&schedule).map_err(|error| {
             RuntimeError::BuildDomainExecution {
                 domain: domain.as_str().to_string(),
@@ -1808,6 +1673,7 @@ impl Runtime {
         self.apply_dynamic_model_updates(domain, updates).await?;
         if let Some(mut execution) = self.inner.executions.get_mut(domain) {
             execution.schedule = schedule;
+            execution.entrypoints = entrypoints;
             execution.routing.processor_plans = processor_plans;
             execution.routing.publish();
         } else {
@@ -1920,20 +1786,17 @@ impl Runtime {
         shutdown_tx: &watch::Sender<bool>,
         node: &ScheduledNode,
         local_node_id: &ClusterNodeName,
-        materialized_schema: Option<StdArc<arrow_schema::Schema>>,
+        state: Option<PlacedNodeState>,
     ) -> Result<ScheduledNodePlacement, RuntimeError> {
         let mut placement = ScheduledNodePlacement::default();
         let executes_locally = node.executes_on(local_node_id);
         let assigned_locally = node.is_assigned_to(local_node_id);
         let execution_node = node.execution_node().cloned();
-        if let Model::Relay(relay) = node.config.as_ref()
-            && relay.materialized_state.is_some()
+        if let Some(PlacedNodeState::MaterializedRelay(schema)) = state.as_ref()
             && (executes_locally || assigned_locally)
         {
-            let schema = materialized_schema.ok_or_else(|| RuntimeError::BuildDomainExecution {
-                domain: domain.as_str().to_string(),
-                reason: format!("missing materialized relay spec '{}'", relay.name.as_str()),
-            })?;
+            let relay = RelayName::from(&node.identifier);
+            let schema = schema.clone();
             let replica_nodes = node
                 .replica_nodes()
                 .into_iter()
@@ -1944,7 +1807,7 @@ impl Runtime {
                     domain,
                     RuntimeStateKind::MaterializedRelay,
                     ModelKind::Relay,
-                    &relay.name,
+                    &relay,
                     None,
                 )
                 .map_err(|error| RuntimeError::BuildDomainExecution {
@@ -1975,7 +1838,7 @@ impl Runtime {
                             domain: domain.as_str().to_string(),
                             reason: format!(
                                 "materialized relay '{}' lacks authoritative state access",
-                                relay.name.as_str()
+                                relay.as_str()
                             ),
                         }
                     })?);
@@ -1985,7 +1848,7 @@ impl Runtime {
                         domain: domain.as_str().to_string(),
                         reason: format!(
                             "materialized relay '{}' lacks replica installation access",
-                            relay.name.as_str()
+                            relay.as_str()
                         ),
                     }
                 })?;
@@ -1997,13 +1860,10 @@ impl Runtime {
             }
         }
 
-        if let Model::Ingestor(ingestor) = node.config.as_ref()
-            && let IngestSource::Kafka {
-                offset_mode: KafkaOffsetMode::Domain,
-                ..
-            } = &ingestor.source
+        if let Some(PlacedNodeState::KafkaDomainOffsets) = state.as_ref()
             && assigned_locally
         {
+            let ingestor = IngestorName::from(&node.identifier);
             let replica_nodes = node
                 .replica_nodes()
                 .into_iter()
@@ -2040,7 +1900,7 @@ impl Runtime {
                             domain: domain.as_str().to_string(),
                             reason: format!(
                                 "Kafka ingestor '{}' lacks authoritative offset access",
-                                ingestor.name.as_str()
+                                ingestor.as_str()
                             ),
                         }
                     })?);
@@ -2050,7 +1910,7 @@ impl Runtime {
                         domain: domain.as_str().to_string(),
                         reason: format!(
                             "Kafka ingestor '{}' lacks replica installation access",
-                            ingestor.name.as_str()
+                            ingestor.as_str()
                         ),
                     }
                 })?;
@@ -2128,43 +1988,11 @@ impl Runtime {
         Ok(placement)
     }
 
+    /// Installs the graph a domain's registry state holds when the node starts, before the cluster
+    /// schedules it.
     pub(crate) async fn apply_changes(&self, changes: RuntimeChanges) -> Result<(), RuntimeError> {
-        let domain = changes.domain.clone();
-        let graph = changes.graph;
-        let starts_are_scheduled_by_graph = graph.is_some();
-        let mut stops = Vec::new();
-        let mut starts = Vec::new();
-        for change in changes.changes {
-            match change {
-                RuntimeChange::StopIngestor { ingestor } => stops.push(ingestor),
-                RuntimeChange::StartIngestor {
-                    source_model,
-                    ingestor,
-                } => starts.push((*source_model, *ingestor)),
-            }
-        }
-
-        for ingestor in stops {
-            self.stop_ingestor(&domain, &ingestor).await?;
-        }
-
-        self.rebuild_domain_execution(&domain, graph).await?;
-
-        if starts_are_scheduled_by_graph {
-            return Ok(());
-        }
-
-        for (source_model, ingestor) in starts {
-            let plan = IngestorStartPlan::decide_unscheduled(&domain, &ingestor, &source_model)
-                .map_err(|error| RuntimeError::StartIngestor {
-                    domain: domain.as_str().to_string(),
-                    ingestor: ingestor.name.as_str().to_string(),
-                    reason: error.to_string(),
-                })?;
-            self.start_ingestor(plan).await?;
-        }
-
-        Ok(())
+        self.rebuild_domain_execution(&changes.domain, changes.graph)
+            .await
     }
 
     pub(super) fn scheduled_node_executes_locally(

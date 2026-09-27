@@ -1,11 +1,11 @@
 //! Domain and cluster observations: the domain list, active-domain selection, live graph snapshots
 //! and the cluster summary.
 
-use std::{num::NonZeroU64, time::Duration};
+use std::num::NonZeroU64;
 
 use error_stack::Report;
 use flatbuffers::{ForwardsUOffset, Vector, WIPOffset};
-use meticulous::{OptionExt as _, ResultExt as _};
+use meticulous::OptionExt as _;
 use nervix_models::{
     DomainClockPeriod, DomainClockSkew, DomainName, DomainPace, DomainStatus, NodeRef, ResourceName,
 };
@@ -70,11 +70,10 @@ impl DomainInfo {
         let status = decoder.required_enumeration("DomainInfo.status", info.status())?;
         let pace = if let Some(paced) = info.pace_as_paced_domain() {
             let period = decoder.non_zero("PacedDomain.period_nanos", paced.period_nanos())?;
-            let period = DomainClockPeriod::try_from(Duration::from_nanos(period.get()))
-                .assured("a non-zero nanosecond count is a valid domain clock period");
-            let skew = DomainClockSkew::try_from(Duration::from_nanos(paced.skew_nanos()))
-                .assured("any nanosecond count held in u64 is a valid domain clock skew");
-            DomainPace::Paced { period, skew }
+            DomainPace::Paced {
+                period: DomainClockPeriod::from_nanos(period),
+                skew: DomainClockSkew::from_nanos(paced.skew_nanos()),
+            }
         } else if let wire::DomainPace::UnpacedDomain = info.pace_type() {
             DomainPace::Unpaced
         } else {
