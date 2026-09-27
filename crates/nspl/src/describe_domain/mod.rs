@@ -31,7 +31,9 @@ pub fn parse_describe_domain_tokens(
     }
 }
 
-pub fn parse_describe_domain(input: &str) -> Result<DescribeDomain, ParseFromSourceError> {
+pub fn parse_describe_domain(
+    input: &str,
+) -> error_stack::Result<DescribeDomain, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

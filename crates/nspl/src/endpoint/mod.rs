@@ -96,7 +96,7 @@ pub fn parse_create_endpoint_tokens(
 
 pub fn parse_create_endpoint(
     input: &str,
-) -> Result<CreateStatement<CreateEndpoint>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateEndpoint>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

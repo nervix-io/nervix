@@ -32,7 +32,9 @@ pub fn parse_describe_endpoint_tokens(
     }
 }
 
-pub fn parse_describe_endpoint(input: &str) -> Result<DescribeEndpoint, ParseFromSourceError> {
+pub fn parse_describe_endpoint(
+    input: &str,
+) -> error_stack::Result<DescribeEndpoint, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

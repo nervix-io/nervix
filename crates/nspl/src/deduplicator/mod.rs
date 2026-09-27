@@ -9,11 +9,10 @@ use crate::{
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, alter_expression_list,
         alter_op_separator, alter_processor_operation, branch_selection, completion_context,
-        completion_tokens, deduplicator_name, deduplicator_ref, duration_lit,
-        expression_error_message, filter_where_clause, flushed_processor_outputs,
-        from_relay_clauses, if_not_exists_clause, into_parse_error, kw, kw_phrase2, lex_input,
-        materialized_state_dependencies, render_expression_tokens, suggest_from,
-        suggestions_from_errors, tok,
+        completion_tokens, deduplicator_name, deduplicator_ref, duration_lit, filter_where_clause,
+        flushed_processor_outputs, from_relay_clauses, if_not_exists_clause, into_parse_error, kw,
+        kw_phrase2, lex_input, materialized_state_dependencies, render_expression_tokens,
+        suggest_from, suggestions_from_errors, tok,
     },
 };
 
@@ -41,8 +40,9 @@ fn deduplicate_on_exprs<'src>()
                 .labelled("deduplicate_on"),
         )
         .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_expression_tokens(&tokens))
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression_list(&render_expression_tokens(&tokens)).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
 }
 
@@ -171,7 +171,7 @@ pub fn parse_alter_deduplicator_tokens(
 
 pub fn parse_create_deduplicator(
     input: &str,
-) -> Result<CreateStatement<CreateDeduplicator>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateDeduplicator>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -181,7 +181,9 @@ pub fn parse_create_deduplicator(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_deduplicator(input: &str) -> Result<AlterDeduplicator, ParseFromSourceError> {
+pub fn parse_alter_deduplicator(
+    input: &str,
+) -> error_stack::Result<AlterDeduplicator, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

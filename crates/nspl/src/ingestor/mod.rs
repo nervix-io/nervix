@@ -860,7 +860,7 @@ pub fn parse_create_ingestor_tokens(
 
 pub fn parse_create_ingestor(
     input: &str,
-) -> Result<CreateStatement<CreateIngestor>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateIngestor>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -881,7 +881,9 @@ pub fn parse_alter_ingestor_tokens(tokens: &[Token]) -> Result<AlterIngestor, Ve
     }
 }
 
-pub fn parse_alter_ingestor(input: &str) -> Result<AlterIngestor, ParseFromSourceError> {
+pub fn parse_alter_ingestor(
+    input: &str,
+) -> error_stack::Result<AlterIngestor, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -1091,8 +1093,10 @@ mod tests {
 
     #[test]
     fn rejects_alter_ingestor_without_operations() {
-        parse_alter_ingestor("ALTER INGESTOR event_source;")
-            .expect_err("ALTER INGESTOR requires at least one operation");
+        assert!(
+            parse_alter_ingestor("ALTER INGESTOR event_source;").is_err(),
+            "ALTER INGESTOR requires at least one operation"
+        );
     }
 
     #[test]
@@ -2432,7 +2436,7 @@ mod tests {
         "#;
 
         let error = parse_create_ingestor(input).expect_err("parse should fail");
-        match error {
+        match error.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. } => {
                 assert!(!diagnostics.is_empty());
             }

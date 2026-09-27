@@ -32,7 +32,9 @@ pub fn parse_describe_lookup_tokens(
     }
 }
 
-pub fn parse_describe_lookup(input: &str) -> Result<DescribeLookup, ParseFromSourceError> {
+pub fn parse_describe_lookup(
+    input: &str,
+) -> error_stack::Result<DescribeLookup, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

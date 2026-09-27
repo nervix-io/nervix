@@ -32,7 +32,9 @@ pub fn parse_describe_emitter_tokens(
     }
 }
 
-pub fn parse_describe_emitter(input: &str) -> Result<DescribeEmitter, ParseFromSourceError> {
+pub fn parse_describe_emitter(
+    input: &str,
+) -> error_stack::Result<DescribeEmitter, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

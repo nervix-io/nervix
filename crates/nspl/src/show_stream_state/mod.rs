@@ -39,7 +39,7 @@ pub fn parse_show_stream_materialized_state_tokens(
 
 pub fn parse_show_stream_materialized_state(
     input: &str,
-) -> Result<ShowRelayMaterializedState, ParseFromSourceError> {
+) -> error_stack::Result<ShowRelayMaterializedState, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

@@ -12,10 +12,10 @@ use crate::{
     lexer::{Identifier, Token},
     parser_support::{
         LexedInput, ParseError, ParseFromSourceError, ack_mode, branch_selection,
-        expression_error_message, filter_where_clause, flushed_processor_outputs,
-        from_relay_clauses, if_not_exists_clause, inferencer_name, into_parse_error, kw,
-        kw_phrase2, lex_input, materialized_state_dependencies, render_expression_tokens,
-        resource_ref, resource_version_clause, string_lit, suggest_from, tok,
+        filter_where_clause, flushed_processor_outputs, from_relay_clauses, if_not_exists_clause,
+        inferencer_name, into_parse_error, kw, kw_phrase2, lex_input,
+        materialized_state_dependencies, render_expression_tokens, resource_ref,
+        resource_version_clause, string_lit, suggest_from, tok,
     },
 };
 
@@ -32,7 +32,9 @@ fn field_mapping<'src>()
                     schema,
                     expression,
                 })
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+                .map_err(|error| {
+                    Rich::custom(span, error.current_context().embedded_expression_message())
+                })
         })
 }
 
@@ -248,7 +250,10 @@ pub fn parse_create_inferencer_tokens(
 
 pub fn parse_create_inferencer(
     input: &str,
-) -> Result<CreateStatement<CreateInferencer<RequestedResourceVersion>>, ParseFromSourceError> {
+) -> error_stack::Result<
+    CreateStatement<CreateInferencer<RequestedResourceVersion>>,
+    ParseFromSourceError,
+> {
     let LexedInput {
         source,
         spanned_tokens,

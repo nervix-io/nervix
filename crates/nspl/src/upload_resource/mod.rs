@@ -37,7 +37,9 @@ pub fn parse_upload_resource_tokens(
     }
 }
 
-pub fn parse_upload_resource(input: &str) -> Result<UploadResource, ParseFromSourceError> {
+pub fn parse_upload_resource(
+    input: &str,
+) -> error_stack::Result<UploadResource, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -76,7 +78,7 @@ mod tests {
     fn rejects_missing_path_string_literal() {
         let err = parse_upload_resource("UPLOAD RESOURCE fraud_model VERSION /tmp/model;")
             .expect_err("parse should fail");
-        match err {
+        match err.current_context() {
             ParseFromSourceError::Parse { diagnostics, .. }
             | ParseFromSourceError::Lex { diagnostics, .. } => {
                 assert!(!diagnostics.is_empty());

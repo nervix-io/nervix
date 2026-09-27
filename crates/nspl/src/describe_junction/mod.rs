@@ -32,7 +32,9 @@ pub fn parse_describe_junction_tokens(
     }
 }
 
-pub fn parse_describe_junction(input: &str) -> Result<DescribeJunction, ParseFromSourceError> {
+pub fn parse_describe_junction(
+    input: &str,
+) -> error_stack::Result<DescribeJunction, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

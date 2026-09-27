@@ -8,7 +8,9 @@ use std::{
 };
 
 use clap::Parser;
+use error_stack::Report;
 use ignore::WalkBuilder;
+use nervix_nspl::schema::ParseFromSourceError;
 use nervix_nspl_format::{FormatError, diagnostics, format_source};
 use nervix_recovery::{Discarded as _, Reported as _};
 
@@ -248,16 +250,24 @@ fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn report(origin: &str, error: &FormatError) {
-    match error {
-        FormatError::Parse(parse) => diagnostics::report(origin, parse),
-        other => eprintln!("nervix-nspl-format: {origin}: {other}"),
+/// Writes why `origin` could not be formatted to standard error.
+///
+/// A source the parser rejected is drawn as an annotated frame from the language's report beneath
+/// the formatter's context. Every other refusal is a formatter defect, written as its whole chain
+/// so the cause the vocabulary or the reparse gave follows the formatter's own words.
+fn report(origin: &str, error: &Report<FormatError>) {
+    if let FormatError::Parse = error.current_context()
+        && let Some(rejection) = error.downcast_ref::<ParseFromSourceError>()
+    {
+        diagnostics::report(origin, rejection);
+        return;
     }
+    eprintln!("nervix-nspl-format: {origin}: {error:#}");
 }
 
-fn outcome_for(error: &FormatError) -> Outcome {
-    match error {
-        FormatError::Parse(_) => Outcome::Rejected,
+fn outcome_for(error: &Report<FormatError>) -> Outcome {
+    match error.current_context() {
+        FormatError::Parse => Outcome::Rejected,
         FormatError::Render { .. } | FormatError::Verification { .. } => Outcome::Defective,
     }
 }

@@ -186,7 +186,7 @@ pub fn parse_show_create_tokens(tokens: &[Token]) -> Result<ShowCreate, Vec<Pars
     }
 }
 
-pub fn parse_show_create(input: &str) -> Result<ShowCreate, ParseFromSourceError> {
+pub fn parse_show_create(input: &str) -> error_stack::Result<ShowCreate, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

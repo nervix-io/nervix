@@ -37,7 +37,7 @@ pub fn parse_describe_window_processor_tokens(
 
 pub fn parse_describe_window_processor(
     input: &str,
-) -> Result<DescribeWindowProcessor, ParseFromSourceError> {
+) -> error_stack::Result<DescribeWindowProcessor, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

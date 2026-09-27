@@ -15,6 +15,7 @@ are in [Message Errors](./processors.md#message-errors) and [Error Routes](./qui
 | Boundary | Failure meaning it owns | What its caller can decide |
 | --- | --- | --- |
 | Vocabulary Models and the execution-graph description | Alterations the stored Model refuses; invalid placement members, inferencer tensor schemas, and upload identities; values canonical NSPL cannot spell; and execution-graph encoding or decoding | Refuse the command and keep the stored Model unchanged, or report which statement or graph could not be rendered or decoded. |
+| NSPL language and formatter | Source text the lexer or parser rejects, with the stage that rejected it, the rejected text, and every diagnostic's message and byte span; statements the formatter cannot render, and formatted output that does not reparse to the statements it came from | Report the stage and underline each diagnostic in the text that was submitted, or leave a file unchanged and report the formatter defect. |
 | Arrow record and batch layer | Schema, field, column, row, and batch construction or decoding failures | Reject a malformed batch or a field operation without inventing a replacement value. |
 | Expression VM frontend and runtime bridge | Invalid expression scopes, types, sensitivity, compiled program inputs, and evaluation failures | Refuse a model during validation, or classify an affected row or batch during execution. [VM Functions](./vm-functions.md) owns execution detail. |
 | Stateful processors | Branch-local deduplication, ordering, window, correlation, inference, and WASM execution or state failures | Apply the processor's message or node policy, or fail a checkpoint and its held acknowledgements. |
@@ -53,9 +54,24 @@ express, such as encoding rules on `SYSLOG` or a JAQ-transformed format without 
 error names by codec. The execution-graph description keeps the JSON encoder's or decoder's error
 beneath its own when the public wire form cannot be written or read. Registry planning keeps an
 alteration's report beneath its invalid-model refusal of the named Model, and the refusal quotes the
-rejection's message, so a failed `ALTER` shows the same reason the vocabulary gave. The formatter
-reports the source line of a statement it could not render; `SHOW CREATE` answers such a Model with
-a fixed diagnostic.
+rejection's message, so a failed `ALTER` shows the same reason the vocabulary gave. `SHOW CREATE`
+answers a Model canonical NSPL cannot spell with a fixed diagnostic.
+
+The language layer reports rejected source the same way. Lexing and parsing each create the report
+at the stage that failed, and its context names that stage and holds the rejected text with every
+diagnostic's message and byte span into it. A batch of statements is lexed once and each statement
+is parsed from its own run of those tokens, so a diagnostic indexes the whole submitted text
+wherever in the batch the rejected statement starts. The session edge turns the stage into the
+failed command's `lex error` or `parse error` message and passes every span through unchanged, so a
+client underlines it in the text it sent. A statement grammar that embeds an expression reports the
+expression's first diagnostic at the whole embedded region, because a statement diagnostic carries
+one message and one span. A caller that owns a larger operation adds its own context above the
+language's report instead of copying the diagnostics into its error: splitting a client batch reports
+that the batch could not be split, and the formatter reports a source that did not parse, the line
+of a statement the vocabulary could not render, or a rendering defect whose output changed meaning
+or no longer parses. The formatter's command line reads the language's report beneath its context
+to draw each diagnostic over the whole file at its line, and writes a defect as the report's whole
+chain, ending with the cause the vocabulary or the reparse gave.
 
 ```mermaid
 sequenceDiagram
@@ -197,7 +213,8 @@ returns a session planning diagnostic before anything enters the queue. An incom
 report carries its planning diagnostics and cannot supply a commit preview. A stale preview is a
 recoverable command disposition that applies no effects and tells the client to refresh its
 inspection before retrying `COMMIT`. Parse diagnostics retain precise expected and found tokens and
-source byte spans for a client to underline. Validation diagnostics attach a source span when the
+byte spans into the submitted source for a client to underline, whichever statement of a batch was
+rejected. Validation diagnostics attach a source span when the
 relevant identifier is present in the submitted text; failures without a source location have an
 unlocated diagnostic. HTTP endpoints choose their response status at the boundary according to
 the request and failure category. For example, HTTP ingestion returns `202 Accepted` after

@@ -39,7 +39,7 @@ const FILES: &[(&str, &str)] = &[
 #[test]
 fn every_repository_file_is_already_formatted() {
     for (name, source) in FILES {
-        let formatted = format_source(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let formatted = format_source(source).unwrap_or_else(|error| panic!("{name}: {error:?}"));
         assert_eq!(
             formatted, *source,
             "{name} is not formatted; run `just nspl-fmt`"
@@ -50,8 +50,8 @@ fn every_repository_file_is_already_formatted() {
 #[test]
 fn formatting_every_repository_file_is_idempotent() {
     for (name, source) in FILES {
-        let once = format_source(source).unwrap_or_else(|error| panic!("{name}: {error}"));
-        let twice = format_source(&once).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let once = format_source(source).unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        let twice = format_source(&once).unwrap_or_else(|error| panic!("{name}: {error:?}"));
         assert_eq!(once, twice, "{name} kept changing when formatted twice");
     }
 }
@@ -59,7 +59,7 @@ fn formatting_every_repository_file_is_idempotent() {
 #[test]
 fn formatting_every_repository_file_preserves_its_statements() {
     for (name, source) in FILES {
-        let formatted = format_source(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let formatted = format_source(source).unwrap_or_else(|error| panic!("{name}: {error:?}"));
         let before = parse_client_statements(source).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         let after = parse_client_statements(&formatted).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(before, after, "{name} changed meaning when formatted");
@@ -69,7 +69,7 @@ fn formatting_every_repository_file_preserves_its_statements() {
 #[test]
 fn formatting_every_repository_file_keeps_its_comments() {
     for (name, source) in FILES {
-        let formatted = format_source(source).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let formatted = format_source(source).unwrap_or_else(|error| panic!("{name}: {error:?}"));
         let before = comment_lines(source);
         let after = comment_lines(&formatted);
         assert_eq!(before, after, "{name} lost or altered a comment");

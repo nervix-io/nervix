@@ -32,7 +32,7 @@ pub fn parse_lookup_query_tokens(tokens: &[Token]) -> Result<LookupQuery, Vec<Pa
     }
 }
 
-pub fn parse_lookup_query(input: &str) -> Result<LookupQuery, ParseFromSourceError> {
+pub fn parse_lookup_query(input: &str) -> error_stack::Result<LookupQuery, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

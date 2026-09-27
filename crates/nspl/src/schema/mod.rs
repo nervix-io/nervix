@@ -492,7 +492,9 @@ pub fn parse_create_schema_tokens(
     }
 }
 
-pub fn parse_create_wire_schema(input: &str) -> Result<Statement, ParseFromSourceError> {
+pub fn parse_create_wire_schema(
+    input: &str,
+) -> error_stack::Result<Statement, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -504,7 +506,7 @@ pub fn parse_create_wire_schema(input: &str) -> Result<Statement, ParseFromSourc
 
 pub fn parse_create_schema(
     input: &str,
-) -> Result<CreateStatement<CreateSchema>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateSchema>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -514,7 +516,7 @@ pub fn parse_create_schema(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_schema(input: &str) -> Result<AlterSchema, ParseFromSourceError> {
+pub fn parse_alter_schema(input: &str) -> error_stack::Result<AlterSchema, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -524,7 +526,9 @@ pub fn parse_alter_schema(input: &str) -> Result<AlterSchema, ParseFromSourceErr
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_wire_schema(input: &str) -> Result<Statement, ParseFromSourceError> {
+pub fn parse_alter_wire_schema(
+    input: &str,
+) -> error_stack::Result<Statement, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

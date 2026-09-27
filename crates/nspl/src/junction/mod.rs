@@ -88,7 +88,7 @@ pub fn parse_create_junction_tokens(
 
 pub fn parse_create_junction(
     input: &str,
-) -> Result<CreateStatement<CreateJunction>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateJunction>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -109,7 +109,9 @@ pub fn parse_alter_junction_tokens(tokens: &[Token]) -> Result<AlterJunction, Ve
     }
 }
 
-pub fn parse_alter_junction(input: &str) -> Result<AlterJunction, ParseFromSourceError> {
+pub fn parse_alter_junction(
+    input: &str,
+) -> error_stack::Result<AlterJunction, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -355,11 +357,14 @@ mod tests {
 
     #[test]
     fn rejects_input_collection_without_duration() {
-        parse_create_junction(
-            "CREATE JUNCTION join_streams FROM ss1 COLLECT FOR UNBRANCHED TO ss10 INHERIT ALL \
-             FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
-        )
-        .expect_err("input collection requires a duration");
+        assert!(
+            parse_create_junction(
+                "CREATE JUNCTION join_streams FROM ss1 COLLECT FOR UNBRANCHED TO ss10 INHERIT ALL \
+                 FLUSH IMMEDIATE ON MESSAGE ERROR LOG;",
+            )
+            .is_err(),
+            "input collection requires a duration"
+        );
     }
 
     #[test]

@@ -34,7 +34,9 @@ pub fn parse_describe_correlator_tokens(
     }
 }
 
-pub fn parse_describe_correlator(input: &str) -> Result<DescribeCorrelator, ParseFromSourceError> {
+pub fn parse_describe_correlator(
+    input: &str,
+) -> error_stack::Result<DescribeCorrelator, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

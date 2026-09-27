@@ -34,7 +34,9 @@ pub fn parse_show_cluster_status_tokens(
     }
 }
 
-pub fn parse_show_cluster_status(input: &str) -> Result<ShowClusterStatus, ParseFromSourceError> {
+pub fn parse_show_cluster_status(
+    input: &str,
+) -> error_stack::Result<ShowClusterStatus, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
