@@ -24,8 +24,8 @@ use nervix_models::{
     SchemaName, SignalingWireFormat, SqsFifoGroup, VhostName,
 };
 use nervix_vm::{
-    CompileBinding, CompileOptions, CompiledProgram, OutputMode, SchemaSensitivity,
-    SemanticScopePolicy, compile_program_with_options_for_bindings_with_sensitivity,
+    CompileBinding, CompileOptions, OutputMode, SchemaSensitivity, SemanticScopePolicy,
+    compile_program_with_options_for_bindings_with_sensitivity,
     infer_set_expr_types_for_bindings_with_udfs, lower_route_construction,
     lower_transforming_route, program::FunctionName,
 };
@@ -614,27 +614,8 @@ pub(in crate::registry) fn validate_sqs_fifo_group_expression(
     Ok(())
 }
 
-/// The validated request fields and client settings carried by an active HTTP emitter graph node.
-/// The next data-plane stage can evaluate these programs without lowering its Models again.
-#[derive(Debug, Clone)]
-pub(crate) struct HttpEmitterRequestPlan {
-    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
-    pub(crate) client: HttpEmitterClientPlan,
-    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
-    pub(crate) body: HttpBodyMode,
-    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
-    pub(crate) fields: CompiledProgram,
-    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
-    pub(crate) route: Option<CompiledProgram>,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct HttpEmitterClientPlan {
-    pub(crate) origin: HttpOrigin,
-    #[cfg_attr(not(test), expect(dead_code, reason = "HTTP request preparation"))]
-    pub(crate) timeout: Duration,
-}
-
+/// Checks that an HTTP emitter's `METHOD` and `PATH` are exact, non-null and non-sensitive `STRING`
+/// expressions over the scopes its body selection gives them.
 pub(in crate::registry) fn validate_http_request_expressions(
     domain: &DomainName,
     identifier: &ModelName,
@@ -642,9 +623,9 @@ pub(in crate::registry) fn validate_http_request_expressions(
     emitter: &CreateEmitter,
     input_schema: &CreateSchema,
     payload_schema: &CreateSchema,
-) -> Result<Option<CompiledProgram>, Report<RegistryError>> {
+) -> Result<(), Report<RegistryError>> {
     let EmitSink::Http { method, path, .. } = emitter.sink.as_ref() else {
-        return Ok(None);
+        return Ok(());
     };
 
     let mut fields = Vec::with_capacity(2);
@@ -719,7 +700,7 @@ pub(in crate::registry) fn validate_http_request_expressions(
         "HTTP request expression",
     )?);
     bindings.extend(lookup_hash_map_bindings(lookup_fields));
-    let program = compile_program_with_options_for_bindings_with_sensitivity(
+    compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_arrow_schema,
         schema_sensitivity_for_internal_schema(&output_schema),
@@ -744,16 +725,17 @@ pub(in crate::registry) fn validate_http_request_expressions(
         })
     })?;
 
-    Ok(Some(program))
+    Ok(())
 }
 
-/// The origin accepted by an HTTP emitter. The returned URL is safe to use as the base for
+/// The origin accepted by an HTTP emitter, once its client has an explicit, usable request timeout
+/// and complete TLS identity settings. The returned URL is safe to use as the base for
 /// request-target validation; its credentials, path, query and fragment have been ruled out.
 pub(in crate::registry) fn validate_http_emitter_client(
     domain: &DomainName,
     identifier: &ModelName,
     client: &CreateClientHttp,
-) -> Result<HttpEmitterClientPlan, Report<RegistryError>> {
+) -> Result<HttpOrigin, Report<RegistryError>> {
     let invalid = |reason: &'static str| {
         Report::new(RegistryError::InvalidModel {
             domain: domain.as_str().to_string(),
@@ -794,10 +776,7 @@ pub(in crate::registry) fn validate_http_emitter_client(
             "HTTP client TLS requires both tls_cert_file and tls_key_file",
         ));
     }
-    Ok(HttpEmitterClientPlan {
-        origin,
-        timeout: Duration::from_millis(timeout),
-    })
+    Ok(origin)
 }
 
 pub(in crate::registry) fn validate_http_literal_request_fields(
@@ -898,7 +877,7 @@ pub(in crate::registry) fn validate_http_literal_request_fields(
         let mut headers = HttpApplicationHeaders::default();
         let final_invocation = known_headers.last().map(|header| header.invocation);
         for known in known_headers {
-            headers.write(known.name, known.value).map_err(|_| {
+            headers.insert(known.name, known.value).map_err(|_| {
                 invalid(format!(
                     "HTTP invoke #{} application headers exceed the count or 32 KiB limit",
                     known.invocation
@@ -1252,7 +1231,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
     emitter: &nervix_models::CreateEmitter,
     input_schema: &CreateSchema,
     output_schema: &CreateSchema,
-) -> Result<(CreateSchema, Option<CompiledProgram>), Report<RegistryError>> {
+) -> Result<CreateSchema, Report<RegistryError>> {
     let codec_route = emitter.body.codec().is_some();
     let has_output_construction =
         emitter.construction.inherit.is_some() || !emitter.construction.assignments.is_empty();
@@ -1271,7 +1250,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         }));
     }
     if emitter.construction.is_empty() && !codec_route {
-        return Ok((input_schema.clone(), None));
+        return Ok(input_schema.clone());
     }
     let input_arrow_schema = arrow_schema_for_internal_schema(input_schema);
     let output_arrow_schema = arrow_schema_for_internal_schema(output_schema);
@@ -1344,7 +1323,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         (EmitSink::Http { .. }, true) => SchemaSensitivity::default(),
         _ => schema_sensitivity_for_internal_schema(output_schema),
     };
-    let program = compile_program_with_options_for_bindings_with_sensitivity(
+    compile_program_with_options_for_bindings_with_sensitivity(
         &parsed,
         output_arrow_schema,
         output_sensitivity,
@@ -1371,7 +1350,7 @@ pub(in crate::registry) fn effective_emitter_filter_map_schema(
         })
     })?;
 
-    Ok((output_schema.clone(), Some(program)))
+    Ok(output_schema.clone())
 }
 
 pub(in crate::registry) fn validate_vhost_hostnames(

@@ -6618,7 +6618,9 @@ dependencies = [
  "nervix-dns",
  "nervix-models",
  "reqwest 0.13.5",
+ "shuttle-tokio",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

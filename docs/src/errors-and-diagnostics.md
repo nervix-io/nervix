@@ -206,6 +206,17 @@ contract, by naming a record the write did not carry or answering twice for one,
 error of any member. It fails the attempt without a retry, and the emitter's unresolved rows then
 follow `ON MESSAGE ERROR` as a failed publish.
 
+An HTTP emitter rejects a record at the first request field that fails, in the order it evaluates
+them: `METHOD`, `PATH`, and then each header write. A failed expression keeps the `evaluation`
+code and an invalid value has the `validation` code. Method and path failures report the `publish`
+operation and name their request field, `method` or `path`, beside the fields the expression reads;
+a header write reports `invoke` with its zero-based invocation position. A body the codec cannot
+encode rejects its record with the `encode` operation when a flush releases it. The message names
+the emitter and the violated rule and never quotes the evaluated value. An admitted request keeps
+its original source record and the materialized state its batch was admitted with until it
+completes, so every rejection of it after admission gives the handler the same input, state and
+attempted codec record that a request-field failure does.
+
 `ON MESSAGE ERROR` belongs to the route and handles record-specific work. Ingestor and emitter
 `ON GENERAL ERROR` handles node-wide source and sink failures. A WASM processor's node-wide `ON
 GLOBAL ERROR` handles guest failures outside an individual message route. Error delivery preserves
