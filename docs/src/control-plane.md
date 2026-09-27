@@ -99,7 +99,7 @@ Only the bound domain's replicated configuration effects may be queued:
 - model `CREATE`, supported model `ALTER`, and model `DROP` statements;
 - `REBIND RESOURCE`, as one atomic model-mutation batch;
 - `ALTER DOMAIN`, `START`, and `STOP`;
-- `CREATE RESOURCE`.
+- `CREATE RESOURCE` and `RESET WASM PROCESSOR ... STATE`.
 
 Completion on the bound session resolves identifiers against the configuration the queued
 statements produce, applied in written order, so a client is offered the models and resources its
@@ -176,6 +176,10 @@ A VHOST TLS version change is reported as an HTTPS listener refresh activation o
 no paused subgraph and no rebuilt node.
 Commit uses the gate plan and schedule delta captured for this report, so execution cannot silently
 widen the planned scope with a second decision.
+
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) is the full reference
+for the operation, execution-step, and transaction report levels; typed pause scopes; topology and
+attribution; preview freshness; actual engagement; and retained inspection.
 
 An accumulated model run that already forms a complete graph receives the full registry, binding,
 UDF, and scheduling preflight. Cross-model completeness may remain provisional only for the

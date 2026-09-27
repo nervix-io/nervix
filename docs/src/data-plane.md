@@ -19,6 +19,11 @@ It is responsible for:
 
 The data plane is intentionally non-transactional.
 
+Transaction commit can gate admission, drain or force-flush graph work, and activate a new
+schedule. [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) explains
+which work a planned scope covers and how engagement is reported; in-flight batches and ACK state
+remain volatile here.
+
 [Errors And Diagnostics](./errors-and-diagnostics.md) defines how branch-local failures,
 materialized-state outcomes, message errors, and recovery classes reach their reporting boundary.
 

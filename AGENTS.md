@@ -120,6 +120,13 @@ behavior, and a compatibility requirement the user states explicitly for the cur
   dedicated consensus database must keep that chapter current in the same change. Its scope
   includes durable append and apply boundaries, client acknowledgement, stream and memory bounds,
   learner promotion, recovery, operator tuning, and observability.
+- [Transaction Quiescence And Impact Inspection](docs/src/transaction-quiescence.md) is the
+  authoritative architecture reference for transaction-impact planning, scoped quiescence,
+  execution reporting, inspection, and retention. Any change to transaction operation or step
+  impact, affected topology, preview identity or freshness, actual engagement, report persistence,
+  or inspection presentation must keep that chapter current in the same change. Transaction
+  lifecycle, command completion, domain time, interconnect, and client recovery retain their own
+  documentation owners.
 - [Domain Clock](docs/src/domain-clock.md) is the authoritative architecture reference for domain
   time. Any change to the domain-clock architecture, or to domain architecture that changes how
   time is established, propagated, or consumed, must keep that chapter current in the same change.

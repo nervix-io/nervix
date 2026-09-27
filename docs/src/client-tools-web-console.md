@@ -265,6 +265,8 @@ changes.
 The inspector receives the same complete typed report as the Rust client and CLI. It does not
 silently omit nodes, edges, operations, or steps from a large retained report; search, focus, and
 the outline change what is visible in the viewport without narrowing the result that was read.
+The [Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) chapter defines the
+operation, step, and whole-transaction facts behind these views.
 
 ## Uploading Resources
 
