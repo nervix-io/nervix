@@ -8,7 +8,7 @@ use arrow_array::{
 use arrow_buffer::{NullBuffer, OffsetBuffer};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use error_stack::{Report, ResultExt as _};
+use error_stack::ResultExt as _;
 use meticulous::ResultExt as _;
 use nervix_approx_into::ApproxInto as _;
 use nervix_models::Timestamp;
@@ -61,9 +61,8 @@ fn parse_program_with_namespaces(
     source: &str,
     scope_policy: SemanticScopePolicy<'_>,
 ) -> BenchmarkProgramResult<SpannedNode<Program>> {
-    let construction = nervix_nspl::parse_route_construction(source).map_err(|error| {
-        Report::new(BenchmarkProgramError::ParseRouteConstruction).attach_printable(error)
-    })?;
+    let construction = nervix_nspl::parse_route_construction(source)
+        .change_context(BenchmarkProgramError::ParseRouteConstruction)?;
     lower_route_construction(&construction, scope_policy)
         .change_context(BenchmarkProgramError::LowerRouteConstruction)
 }

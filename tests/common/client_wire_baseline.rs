@@ -485,7 +485,7 @@ async fn configure_graph(process: &ServerProcess, domain: &str, host: &str) -> R
         "#
     );
     let statements = nervix_client_core::split_query_statements(&graph)
-        .map_err(|error| anyhow!("failed to split baseline graph: {error}"))?;
+        .map_err(|error| anyhow!("failed to split baseline graph: {error:#}"))?;
     for statement in statements {
         tokio::task::consume_budget().await;
         process

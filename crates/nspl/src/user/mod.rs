@@ -26,7 +26,9 @@ pub fn create_user_parser<'src>()
         })
 }
 
-pub fn parse_create_user(input: &str) -> Result<CreateStatement<CreateUser>, ParseFromSourceError> {
+pub fn parse_create_user(
+    input: &str,
+) -> error_stack::Result<CreateStatement<CreateUser>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -80,7 +82,7 @@ mod tests {
     fn create_user_rejects_missing_password_literal() {
         let err = parse_create_user("CREATE USER app WITH PASSWORD;")
             .expect_err("password literal is required");
-        let diagnostics = match err {
+        let diagnostics = match err.current_context() {
             crate::parser_support::ParseFromSourceError::Parse { diagnostics, .. } => diagnostics,
             crate::parser_support::ParseFromSourceError::Lex { .. } => {
                 panic!("expected parse diagnostics")

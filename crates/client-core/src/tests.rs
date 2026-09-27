@@ -408,13 +408,32 @@ fn statement_splitting_returns_exact_source_slices() {
 
 #[test]
 fn statement_splitting_reports_invalid_source_with_context() {
-    let error = split_query_statements("CREATE SCHEMA ???;")
-        .expect_err("an invalid schema declaration cannot be split");
+    let query = "USE prod;\nCREATE SCHEMA broken (id BOGUS);";
+    let error =
+        split_query_statements(query).expect_err("an invalid schema declaration cannot be split");
+    assert_eq!(
+        error.current_context().to_string(),
+        "failed to parse the statement batch"
+    );
+
+    let rejection = error
+        .downcast_ref::<nervix_nspl::schema::ParseFromSourceError>()
+        .assured("the split keeps the language's report beneath its own context");
+    let nervix_nspl::schema::ParseFromSourceError::Parse { diagnostics, .. } = rejection else {
+        panic!("the batch lexes, so parsing rejects it: {rejection:?}");
+    };
+    let span = diagnostics
+        .first()
+        .assured("a rejected statement carries a diagnostic")
+        .span
+        .clone();
+    assert_eq!(
+        &query[span], "BOGUS",
+        "the diagnostic locates the batch source"
+    );
     assert!(
-        error
-            .current_context()
-            .to_string()
-            .contains("failed to parse")
+        format!("{error:#}").starts_with("failed to parse the statement batch: parse error: "),
+        "{error:#}"
     );
 }
 

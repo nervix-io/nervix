@@ -139,7 +139,7 @@ pub fn parse_alter_generator_tokens(
 
 pub fn parse_create_generator(
     input: &str,
-) -> Result<CreateStatement<CreateGenerator>, ParseFromSourceError> {
+) -> error_stack::Result<CreateStatement<CreateGenerator>, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,
@@ -149,7 +149,9 @@ pub fn parse_create_generator(
         .map_err(|errs| into_parse_error(source, &spanned_tokens, input.len(), errs))
 }
 
-pub fn parse_alter_generator(input: &str) -> Result<AlterGenerator, ParseFromSourceError> {
+pub fn parse_alter_generator(
+    input: &str,
+) -> error_stack::Result<AlterGenerator, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

@@ -904,6 +904,11 @@ validate-clock-boundaries:
 validate-typed-errors:
     python3 -m scripts.check_typed_errors
 
+# Run every test target of the NSPL language and its formatter: unit, integration, completion-walk
+# unit and documentation tests. The walk itself is a separate gate, `nspl-completion-walk`.
+test-nspl *args:
+    cargo test --package nervix-nspl --package nervix-nspl-format --all-targets -- {{ args }}
+
 # Parse every runnable NSPL block in the documentation directly through the parser crate. Syntax
 # synopses and statement fragments remain NSPL-labelled but opt out explicitly with `nspl,ignore`.
 validate-nspl-docs:

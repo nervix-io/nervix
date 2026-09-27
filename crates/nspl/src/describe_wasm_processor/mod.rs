@@ -69,7 +69,7 @@ pub fn parse_describe_wasm_processor_tokens(
 
 pub fn parse_describe_wasm_processor(
     input: &str,
-) -> Result<DescribeWasmProcessor, ParseFromSourceError> {
+) -> error_stack::Result<DescribeWasmProcessor, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

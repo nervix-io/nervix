@@ -221,8 +221,10 @@ pub fn parse_create_signaling_protocol_tokens(
 
 pub fn parse_create_signaling_protocol(
     input: &str,
-) -> Result<CreateStatement<CreateSignalingProtocol<RequestedResourceVersion>>, ParseFromSourceError>
-{
+) -> error_stack::Result<
+    CreateStatement<CreateSignalingProtocol<RequestedResourceVersion>>,
+    ParseFromSourceError,
+> {
     let LexedInput {
         source,
         spanned_tokens,

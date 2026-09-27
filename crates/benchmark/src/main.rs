@@ -1162,7 +1162,7 @@ impl Subject {
         output_path: &Path,
     ) -> Result<()> {
         let statements = split_query_statements(graph)
-            .map_err(|error| anyhow!("failed to split the benchmark graph: {error}"))?;
+            .map_err(|error| anyhow!("failed to split the benchmark graph: {error:#}"))?;
         ensure!(
             !statements.is_empty(),
             "benchmark graph contains no statements"

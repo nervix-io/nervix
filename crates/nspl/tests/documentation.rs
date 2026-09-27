@@ -13,8 +13,9 @@ struct NsplBlock {
 }
 
 impl NsplBlock {
-    fn parse(&self) -> Result<(), ParseFromSourceError> {
-        parse_client_statement_sources(&self.source).map(|_| ())
+    fn parse(&self) -> error_stack::Result<(), ParseFromSourceError> {
+        parse_client_statement_sources(&self.source)?;
+        Ok(())
     }
 }
 
@@ -141,7 +142,8 @@ impl Documentation {
                     NsplBlockValidation::Parse => {
                         parsed_block_count += 1;
                         if let Err(error) = block.parse() {
-                            failures.extend(block.format_error(display_path, &error));
+                            failures
+                                .extend(block.format_error(display_path, error.current_context()));
                         }
                     }
                     NsplBlockValidation::Ignore => ignored_block_count += 1,

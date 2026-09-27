@@ -37,7 +37,9 @@ pub fn parse_describe_stream_tokens(
     }
 }
 
-pub fn parse_describe_stream(input: &str) -> Result<DescribeRelay, ParseFromSourceError> {
+pub fn parse_describe_stream(
+    input: &str,
+) -> error_stack::Result<DescribeRelay, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

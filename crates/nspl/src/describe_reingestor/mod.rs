@@ -34,7 +34,9 @@ pub fn parse_describe_reingestor_tokens(
     }
 }
 
-pub fn parse_describe_reingestor(input: &str) -> Result<DescribeReingestor, ParseFromSourceError> {
+pub fn parse_describe_reingestor(
+    input: &str,
+) -> error_stack::Result<DescribeReingestor, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

@@ -176,6 +176,37 @@ Feature: NSPL file formatting
       """
     And the NSPL file "broken.nspl" is unchanged
 
+  Scenario: A later statement that cannot be parsed is reported at its own line
+    Given an NSPL file "broken.nspl" containing
+      """
+      USE demo;
+      CREATE RELAY;
+      """
+    When nervix-nspl-format formats the NSPL file "broken.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      broken.nspl:2:13
+      """
+    And the last command error contains
+      """
+      expected relay_name
+      """
+    And the NSPL file "broken.nspl" is unchanged
+
+  Scenario: A file that cannot be lexed is reported at the lex stage and left untouched
+    Given an NSPL file "unlexable.nspl" containing
+      """
+      USE 'demo;
+      """
+    When nervix-nspl-format formats the NSPL file "unlexable.nspl"
+    Then the formatter exits with code 3
+    And the last command error contains
+      """
+      lex error
+      """
+    And the NSPL file "unlexable.nspl" is unchanged
+
   Scenario: Standard input is formatted to standard output
     When nervix-nspl-format formats the standard input
       """

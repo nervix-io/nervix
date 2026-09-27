@@ -272,6 +272,9 @@ struct ScenarioWorld {
     /// The whole outcome of the last command a named client ran, for assertions that read more
     /// than its message.
     last_client_outcome: Option<ClientCommandOutcome>,
+    /// The exact source of the last request a named client submitted, which the spans of that
+    /// request's diagnostics index.
+    last_client_request: Option<String>,
     /// Reused when a coordinated WASM reset is retried after an ambiguous or failed response.
     wasm_state_reset_reference: Option<nervix_models::CommandExecutionReference>,
     /// The plan block `DESCRIBE RELOCATION` returned, so the executing `RELOCATE` can be compared
@@ -10224,6 +10227,7 @@ async fn when_named_client_submits_command_request(
         world.last_command_error = Some(outcome.message.clone());
     }
     world.last_client_outcome = Some(outcome);
+    world.last_client_request = Some(request);
 }
 
 #[when(expr = "client {string} fails to execute these NSPL commands")]
@@ -10642,6 +10646,48 @@ fn then_last_client_request_has_diagnostic_span(
         .verified("the parser diagnostic for this malformed command has a source span");
     assert_eq!(span.start(), expected_start);
     assert_eq!(span.end(), expected_end);
+}
+
+/// Reads the text the one diagnostic of the last failed client request underlines in the source
+/// that request submitted.
+#[then(expr = "the last client request diagnostic underlines {string}")]
+fn then_last_client_request_diagnostic_underlines(world: &mut ScenarioWorld, expected: String) {
+    let request = world
+        .last_client_request
+        .as_deref()
+        .verified("the scenario submitted a named client request above");
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .verified("the scenario submitted a named client request above");
+    assert_eq!(outcome.diagnostics.len(), 1, "{:?}", outcome.diagnostics);
+    let span = outcome.diagnostics[0]
+        .span
+        .verified("the diagnostic for this malformed request has a source span");
+    let start: usize = span.start().arch_into();
+    let end: usize = span.end().arch_into();
+    assert_eq!(
+        request.get(start..end),
+        Some(expected.as_str()),
+        "the diagnostic must underline the rejected text in the submitted request {request:?}"
+    );
+}
+
+#[then(expr = "the last client request diagnostic message contains {string}")]
+fn then_last_client_request_diagnostic_message_contains(
+    world: &mut ScenarioWorld,
+    expected: String,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .verified("the scenario submitted a named client request above");
+    assert_eq!(outcome.diagnostics.len(), 1, "{:?}", outcome.diagnostics);
+    let message = &outcome.diagnostics[0].message;
+    assert!(
+        message.contains(&expected),
+        "expected the diagnostic message to contain {expected:?}, got {message:?}"
+    );
 }
 
 /// Compares the typed inspection the last named client command carried with `field: value` lines.

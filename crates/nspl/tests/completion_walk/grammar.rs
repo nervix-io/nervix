@@ -1,5 +1,6 @@
 //! The completion surface under test, and the accept/reject oracle derived from parse diagnostics.
 
+use error_stack::Report;
 use nervix_nspl::schema::{Diagnostic, ParseFromSourceError};
 
 /// Which composed grammar the walk explores.
@@ -45,13 +46,12 @@ impl Grammar {
     /// verdict, but seeing the rest is what explains why a position offers what it offers.
     pub fn diagnostics(self, input: &str) -> Vec<Diagnostic> {
         match self.parse_error(input) {
-            Some(ParseFromSourceError::Lex { diagnostics, .. })
-            | Some(ParseFromSourceError::Parse { diagnostics, .. }) => diagnostics,
+            Some(report) => report.current_context().diagnostics().to_vec(),
             None => Vec::new(),
         }
     }
 
-    fn parse_error(self, input: &str) -> Option<ParseFromSourceError> {
+    fn parse_error(self, input: &str) -> Option<Report<ParseFromSourceError>> {
         match self {
             Self::Server => nervix_nspl::statement::parse_statement(input).err(),
             Self::Client => nervix_nspl::client_statement::parse_client_statement(input).err(),
@@ -79,12 +79,12 @@ pub enum ParseOutcome {
 }
 
 impl ParseOutcome {
-    fn classify(error: Option<&ParseFromSourceError>, input_len: usize) -> Self {
+    fn classify(error: Option<&Report<ParseFromSourceError>>, input_len: usize) -> Self {
         let Some(error) = error else {
             return Self::Accepted;
         };
 
-        let (diagnostics, lexical) = match error {
+        let (diagnostics, lexical) = match error.current_context() {
             ParseFromSourceError::Lex { diagnostics, .. } => (diagnostics, true),
             ParseFromSourceError::Parse { diagnostics, .. } => (diagnostics, false),
         };

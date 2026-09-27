@@ -89,14 +89,25 @@ pub(crate) use suggest_from;
 
 pub type ParseError<'src> = Rich<'src, Token>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why NSPL source text was rejected, and where.
+///
+/// The variant is the stage that rejected the text: lexing stops before any token exists, parsing
+/// after every token was read. Each diagnostic's span is a byte range into `text`, the text that
+/// stage was given. A parse function creates the report of this error at the failing stage; a
+/// caller that owns a larger operation adds its own context above it and reads the stage, text and
+/// diagnostics back from the report.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ParseFromSourceError {
+    /// The text could not be split into tokens.
+    #[error("lex error: {}", DiagnosticMessages(.diagnostics))]
     Lex {
-        source: String,
+        text: String,
         diagnostics: Vec<Diagnostic>,
     },
+    /// The tokens do not form what the grammar expects.
+    #[error("parse error: {}", DiagnosticMessages(.diagnostics))]
     Parse {
-        source: String,
+        text: String,
         diagnostics: Vec<Diagnostic>,
     },
 }
@@ -112,33 +123,43 @@ impl ParseFromSourceError {
     /// The source text that was rejected.
     pub fn source_text(&self) -> &str {
         match self {
-            Self::Lex { source, .. } | Self::Parse { source, .. } => source,
+            Self::Lex { text, .. } | Self::Parse { text, .. } => text,
+        }
+    }
+
+    /// The message a statement grammar reports when this error rejects an expression embedded in
+    /// the statement.
+    ///
+    /// The statement grammar locates the failure at the whole embedded region, so only the first
+    /// diagnostic's message is carried over; its span points into the embedded text, not into the
+    /// statement.
+    pub(crate) fn embedded_expression_message(&self) -> String {
+        match self.diagnostics().first() {
+            Some(diagnostic) => diagnostic.message.clone(),
+            None => "invalid expression".to_string(),
         }
     }
 }
-
-impl std::fmt::Display for ParseFromSourceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let stage = match self {
-            Self::Lex { .. } => "lex",
-            Self::Parse { .. } => "parse",
-        };
-        let messages = self
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect::<Vec<_>>()
-            .join("; ");
-        write!(f, "{stage} error: {messages}")
-    }
-}
-
-impl std::error::Error for ParseFromSourceError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub message: String,
     pub span: Range<usize>,
+}
+
+/// The messages of a rejection's diagnostics on one line, as its report displays them.
+struct DiagnosticMessages<'diagnostics>(&'diagnostics [Diagnostic]);
+
+impl std::fmt::Display for DiagnosticMessages<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (index, diagnostic) in self.0.iter().enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            f.write_str(&diagnostic.message)?;
+        }
+        Ok(())
+    }
 }
 
 pub fn kw<'src>(
@@ -506,8 +527,10 @@ fn materialized_default_assignments<'src>()
         )
         .try_map(|tokens, span| {
             let source = format!("SET {}", render_expression_tokens(&tokens));
-            let construction = crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))?;
+            let construction =
+                crate::semantic_program::parse_route_construction(&source).map_err(|error| {
+                    Rich::custom(span, error.current_context().embedded_expression_message())
+                })?;
             if construction.inherit.is_some()
                 || construction.where_clause.is_some()
                 || !construction.invocations.is_empty()
@@ -1462,8 +1485,9 @@ fn route_construction_clause<'src>(
         .try_map(move |tail, span| {
             let head: &'static str = head.into();
             let source = format!("{head} {}", render_expression_tokens(&tail));
-            crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::semantic_program::parse_route_construction(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -1576,8 +1600,9 @@ fn explicit_route_construction<'src>()
         .ignore_then(route_construction_body("set_assignments"))
         .try_map(|tokens, span| {
             let source = format!("SET {}", render_expression_tokens(&tokens));
-            crate::semantic_program::parse_route_construction(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::semantic_program::parse_route_construction(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .try_map(|construction, span| {
             if construction.assignments.is_empty() {
@@ -1659,8 +1684,9 @@ pub fn expression_before_clause<'src>(
         .labelled("string_expression")
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -1672,8 +1698,9 @@ fn source_where_clause_with_boundary<'src>(
         .ignore_then(nested_expression_tokens(boundary).labelled("where_expression"))
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -1696,8 +1723,9 @@ where
         )
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -1716,8 +1744,9 @@ where
         .at_least(1)
         .collect::<Vec<_>>()
         .try_map(|tokens, span| {
-            crate::parse_expression_list(&render_expression_tokens(&tokens))
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression_list(&render_expression_tokens(&tokens)).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .labelled(label)
         .boxed()
@@ -1787,8 +1816,9 @@ pub fn filter_where_clause<'src>()
         )
         .try_map(|tokens, span| {
             let source = render_expression_tokens(&tokens);
-            crate::parse_expression(&source)
-                .map_err(|error| Rich::custom(span, expression_error_message(error)))
+            crate::parse_expression(&source).map_err(|error| {
+                Rich::custom(span, error.current_context().embedded_expression_message())
+            })
         })
         .boxed()
 }
@@ -2020,22 +2050,32 @@ pub struct LexedInput {
 /// case rather than a failure: an unterminated string or a half-written number leaves the lexer
 /// with nothing, and a caller with no tokens has no expectations to turn into suggestions. The
 /// diagnostics the lexer would produce belong to parsing, which reports them to the user; a
-/// completion offer is not the place to raise them.
+/// completion offer is not the place to raise them, so it builds neither them nor a report.
 pub fn completion_tokens(source: &str) -> Option<Vec<Token>> {
-    lex_input(source).ok().map(|lexed| lexed.tokens)
+    let Ok(spanned_tokens) = lex(source) else {
+        return None;
+    };
+    Some(
+        spanned_tokens
+            .into_iter()
+            .map(|spanned| spanned.token)
+            .collect(),
+    )
 }
 
-pub fn lex_input(input: &str) -> Result<LexedInput, ParseFromSourceError> {
+pub fn lex_input(input: &str) -> error_stack::Result<LexedInput, ParseFromSourceError> {
     let source = input.to_string();
-    let spanned_tokens = lex(input).map_err(|errs| ParseFromSourceError::Lex {
-        source: source.clone(),
-        diagnostics: errs
-            .into_iter()
-            .map(|err| Diagnostic {
-                message: err.to_string(),
-                span: err.span().into_range(),
-            })
-            .collect(),
+    let spanned_tokens = lex(input).map_err(|errs| {
+        Report::new(ParseFromSourceError::Lex {
+            text: source.clone(),
+            diagnostics: errs
+                .into_iter()
+                .map(|err| Diagnostic {
+                    message: err.to_string(),
+                    span: err.span().into_range(),
+                })
+                .collect(),
+        })
     })?;
 
     let tokens = spanned_tokens
@@ -2055,9 +2095,9 @@ pub fn into_parse_error(
     spanned_tokens: &[SpannedToken],
     source_len: usize,
     errs: Vec<ParseError<'_>>,
-) -> ParseFromSourceError {
-    ParseFromSourceError::Parse {
-        source,
+) -> Report<ParseFromSourceError> {
+    Report::new(ParseFromSourceError::Parse {
+        text: source,
         diagnostics: errs
             .into_iter()
             .map(|err| Diagnostic {
@@ -2069,7 +2109,7 @@ pub fn into_parse_error(
                 ),
             })
             .collect(),
-    }
+    })
 }
 
 /// Split completion input at the cursor into the source the grammar should parse and the partial
@@ -2309,16 +2349,6 @@ fn expression_token_to_source(token: &Token) -> String {
     }
 }
 
-pub fn expression_error_message(error: ParseFromSourceError) -> String {
-    match error {
-        ParseFromSourceError::Lex { diagnostics, .. }
-        | ParseFromSourceError::Parse { diagnostics, .. } => match diagnostics.first() {
-            Some(diagnostic) => diagnostic.message.clone(),
-            None => "invalid expression".to_string(),
-        },
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use chumsky::{
@@ -2399,7 +2429,7 @@ mod tests {
         ));
 
         let err = into_parse_error(source, &spanned_tokens, "create kafka".len(), errors);
-        let diagnostics = match err {
+        let diagnostics = match err.current_context() {
             super::ParseFromSourceError::Parse { diagnostics, .. } => diagnostics,
             other => panic!("expected parse error, got {other:?}"),
         };

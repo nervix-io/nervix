@@ -10,7 +10,62 @@ Feature: Typed error qualification through public streams
       """
       CREATE SCHEMA broken (id BOGUS);
       """
-    Then the last client request failed with one diagnostic spanning bytes 25 to 30
+    Then the last client request failed with one diagnostic spanning bytes 26 to 31
+    And the last client request diagnostic underlines "BOGUS"
+    And the last client request diagnostic message contains "found BOGUS"
+    And the last command error contains
+      """
+      parse error
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Parse diagnostics locate the unexpected token in a later statement of the client source
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And client "diagnostics" is connected to the leader node
+    When client "diagnostics" submits this NSPL command request
+      """
+      CREATE SCHEMA accepted (id STRING);
+      CREATE SCHEMA broken (id BOGUS);
+      """
+    Then the last client request failed with one diagnostic spanning bytes 62 to 67
+    And the last client request diagnostic underlines "BOGUS"
+    And the last client request diagnostic message contains "found BOGUS"
+    And the last command error contains
+      """
+      parse error
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |
+
+  Scenario Outline: Lex diagnostics locate the rejected character in the client source
+    Given a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    And client "diagnostics" is connected to the leader node
+    When client "diagnostics" submits this NSPL command request
+      """
+      CREATE SCHEMA accepted (id STRING);
+      CREATE SCHEMA broken (id STRING @);
+      """
+    Then the last client request failed with one diagnostic spanning bytes 69 to 70
+    And the last client request diagnostic underlines "@"
+    And the last command error contains
+      """
+      lex error
+      """
 
     Examples:
       | cluster_size |

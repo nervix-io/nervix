@@ -21,7 +21,7 @@ fn load(slug: &str) -> LoadedBenchmark {
 
 fn statements_starting_with(source: &str, prefix: &str) -> usize {
     split_query_statements(source)
-        .unwrap_or_else(|error| panic!("rendered Nervix graph should parse: {error}"))
+        .unwrap_or_else(|error| panic!("rendered Nervix graph should parse: {error:#}"))
         .iter()
         .filter(|statement| statement.starts_with(prefix))
         .count()

@@ -32,7 +32,9 @@ pub fn parse_describe_reorderer_tokens(
     }
 }
 
-pub fn parse_describe_reorderer(input: &str) -> Result<DescribeReorderer, ParseFromSourceError> {
+pub fn parse_describe_reorderer(
+    input: &str,
+) -> error_stack::Result<DescribeReorderer, ParseFromSourceError> {
     let LexedInput {
         source,
         spanned_tokens,

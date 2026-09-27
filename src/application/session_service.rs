@@ -433,6 +433,21 @@ pub(in crate::application) fn error_response(
     }
 }
 
+/// The failed result for a request whose source the language rejected.
+///
+/// The message names the stage that rejected it, and every diagnostic keeps the span the parser
+/// located in the submitted source, so a client can underline it in the text it sent.
+pub(in crate::application) fn rejected_source_response(
+    rejection: &ParseFromSourceError,
+) -> CommandResult {
+    match rejection {
+        ParseFromSourceError::Lex { diagnostics, .. } => error_response("lex error", diagnostics),
+        ParseFromSourceError::Parse { diagnostics, .. } => {
+            error_response("parse error", diagnostics)
+        }
+    }
+}
+
 /// A failed result whose one diagnostic repeats its message at `span`.
 fn failed_at(message: String, span: Option<std::ops::Range<usize>>) -> CommandResult {
     let diagnostic = CommandDiagnostic {
@@ -1135,19 +1150,10 @@ impl SessionServiceImpl {
             .map(TransactionPosition::accepted_operations);
         let client_statements = match parse_client_statement_sources(&req.query) {
             Ok(statements) => statements,
-            Err(ParseFromSourceError::Lex { diagnostics, .. }) => {
+            Err(report) => {
                 let result = self
                     .command_with_transaction_status(
-                        error_response("lex error", &diagnostics),
-                        subscriptions,
-                    )
-                    .await;
-                return Ok(CommandResponse::executed(result));
-            }
-            Err(ParseFromSourceError::Parse { diagnostics, .. }) => {
-                let result = self
-                    .command_with_transaction_status(
-                        error_response("parse error", &diagnostics),
+                        rejected_source_response(report.current_context()),
                         subscriptions,
                     )
                     .await;
@@ -1606,6 +1612,27 @@ mod tests {
             infer_kind_from_error_target(&missing_target, &identifier),
             None
         );
+    }
+
+    #[test]
+    fn a_rejected_source_names_its_stage_and_keeps_every_span() {
+        let query = "USE demo;\nCREATE SCHEMA broken (id BOGUS);";
+        let parse = nervix_nspl::client_statement::parse_client_statement_sources(query)
+            .expect_err("BOGUS is not a type");
+        let response = rejected_source_response(parse.current_context());
+        assert!(!response.succeeded());
+        assert_eq!(response.message, "parse error");
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(response.diagnostics[0].span, Some(35..40));
+
+        let query = "USE demo;\nCREATE SCHEMA broken (id STRING @);";
+        let lex = nervix_nspl::client_statement::parse_client_statement_sources(query)
+            .expect_err("`@` starts no token");
+        let response = rejected_source_response(lex.current_context());
+        assert!(!response.succeeded());
+        assert_eq!(response.message, "lex error");
+        assert_eq!(response.diagnostics.len(), 1);
+        assert_eq!(response.diagnostics[0].span, Some(42..43));
     }
 
     #[tokio::test]
