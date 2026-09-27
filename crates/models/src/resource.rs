@@ -33,22 +33,24 @@ const MAX_UPLOAD_IDENTITY_BYTES: usize = 128;
 pub struct ResourceUploadIdentity(String);
 
 impl ResourceUploadIdentity {
-    pub fn parse(value: impl Into<String>) -> Result<Self, ResourceUploadIdentityError> {
+    pub fn parse(
+        value: impl Into<String>,
+    ) -> error_stack::Result<Self, ResourceUploadIdentityError> {
         let value = value.into();
         if value.is_empty() {
-            return Err(ResourceUploadIdentityError::Empty);
+            return Err(Report::new(ResourceUploadIdentityError::Empty));
         }
         if value.len() > MAX_UPLOAD_IDENTITY_BYTES {
-            return Err(ResourceUploadIdentityError::TooLong {
+            return Err(Report::new(ResourceUploadIdentityError::TooLong {
                 actual: value.len(),
                 limit: MAX_UPLOAD_IDENTITY_BYTES,
-            });
+            }));
         }
         if !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
-            return Err(ResourceUploadIdentityError::InvalidCharacter);
+            return Err(Report::new(ResourceUploadIdentityError::InvalidCharacter));
         }
         Ok(Self(value))
     }
@@ -806,6 +808,35 @@ mod tests {
             version,
             state,
         }
+    }
+
+    #[test]
+    fn an_upload_identity_outside_the_grammar_reports_the_rule_it_breaks() {
+        let too_long = "u".repeat(MAX_UPLOAD_IDENTITY_BYTES + 1);
+        let cases = [
+            (String::new(), ResourceUploadIdentityError::Empty),
+            (
+                too_long,
+                ResourceUploadIdentityError::TooLong {
+                    actual: MAX_UPLOAD_IDENTITY_BYTES + 1,
+                    limit: MAX_UPLOAD_IDENTITY_BYTES,
+                },
+            ),
+            (
+                "upload one".to_string(),
+                ResourceUploadIdentityError::InvalidCharacter,
+            ),
+        ];
+        for (raw, expected) in cases {
+            let error =
+                ResourceUploadIdentity::parse(raw).expect_err("the identity breaks the grammar");
+            assert_eq!(error.current_context(), &expected);
+        }
+
+        let longest = "u".repeat(MAX_UPLOAD_IDENTITY_BYTES);
+        let identity = ResourceUploadIdentity::parse(longest.clone())
+            .assured("an identity at the byte limit is accepted");
+        assert_eq!(identity.as_str(), longest);
     }
 
     fn completed(root_checksum: &str) -> ResourceUploadState {

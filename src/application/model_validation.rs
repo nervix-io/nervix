@@ -12,8 +12,8 @@ use error_stack::{Report, ResultExt as _};
 use meticulous::OptionExt as _;
 use nervix_models::{
     CreateInferencer, CreateLookup, DomainName, DomainPace, InferencerName,
-    InferencerTensorDimension, InferencerTensorSchema, InferencerTensorSchemaError, IngestorName,
-    LookupName, Model, ModelKind, ResourceId, ResourceName, UdfName, VhostName, WasmProcessorName,
+    InferencerTensorDimension, InferencerTensorSchema, IngestorName, LookupName, Model, ModelKind,
+    ResourceId, ResourceName, UdfName, VhostName, WasmProcessorName,
 };
 use ort::{
     session::Session,
@@ -87,11 +87,8 @@ pub(in crate::application) enum ModelBindingValidationError {
 
 #[derive(Debug, thiserror::Error)]
 enum InferencerBindingValidationError {
-    #[error("inferencer '{node}' has invalid tensor schemas: {source}")]
-    TensorSchemas {
-        node: InferencerName,
-        source: InferencerTensorSchemaError,
-    },
+    #[error("inferencer '{node}' has invalid tensor schemas")]
+    TensorSchemas { node: InferencerName },
     #[error(
         "inferencer '{node}' cannot resolve model resource '{resource}@{version}' file '{file}'"
     )]
@@ -480,12 +477,11 @@ impl SessionServiceImpl {
         domain: &DomainName,
         processor: &CreateInferencer,
     ) -> error_stack::Result<(), InferencerBindingValidationError> {
-        processor.execution_mode().map_err(|source| {
-            Report::new(InferencerBindingValidationError::TensorSchemas {
+        processor.execution_mode().change_context(
+            InferencerBindingValidationError::TensorSchemas {
                 node: processor.name.clone(),
-                source,
-            })
-        })?;
+            },
+        )?;
         let id = ResourceId::new(
             domain.clone(),
             processor.resource.clone(),

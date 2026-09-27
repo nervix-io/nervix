@@ -172,12 +172,8 @@ impl PlacementAnalysis {
         let mut rules = Vec::with_capacity(placement_models.len());
         let mut claims_by_pair = HashMap::<PlacementPair, Vec<PlacementClaim>>::new();
         for placement in placement_models {
-            placement.validate().map_err(|error| {
-                Report::new(RegistryError::InvalidModel {
-                    domain: domain.as_str().to_string(),
-                    identifier: placement.name.as_str().to_string(),
-                    reason: error.to_string(),
-                })
+            placement.validate().map_err(|rejection| {
+                RegistryError::invalid_model(domain, placement.name.as_str(), rejection)
             })?;
             let placement_index = indices
                 .get(&NodeRef::new(ModelKind::Placement, placement.name.clone()))
