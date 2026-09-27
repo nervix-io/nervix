@@ -1728,6 +1728,8 @@ keyUsage = critical, keyCertSign, cRLSign
 subjectKeyIdentifier = hash
 "#,
         )?;
+        // `*.nervix.test` is the zone the scenario DNS fixture answers, so a dependency reached
+        // through a fixture name presents a certificate for the name its client dialled.
         fs::write(
             &leaf_config_path,
             r#"[ req ]
@@ -1747,6 +1749,7 @@ subjectAltName = @alt_names
 
 [ alt_names ]
 DNS.1 = localhost
+DNS.2 = *.nervix.test
 IP.1 = 127.0.0.1
 "#,
         )?;

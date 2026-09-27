@@ -528,6 +528,7 @@ running the same suite, which is why a node startup retries a lost bind on fresh
 | Scenario fixtures | 4: ZeroMQ ingest and emit, syslog ingest and emit | At the end of cleanup |
 | HTTP receiver | 1 per receiver, drawn with the scenario fixtures | At the end of cleanup, with the scenario fixtures |
 | DNS authority | 1 UDP port per cluster addressed by names | When the cluster is dropped at the end of cleanup, after its nodes have stopped |
+| TCP forwarders | 1 port, shared by every forwarder a scenario stands in front of a dependency | At the end of cleanup, after the cluster has stopped |
 | Server process | 6 | When the process is dropped |
 | A node moved to a new interconnect address | 1 new interconnect port | The port it gave up stays reserved for the rest of the run |
 
@@ -644,6 +645,19 @@ the same name, and answer a node's name as a name that does not exist, a name wi
 not at all. A name outside the zone does not exist, with a negative TTL of zero. Every test
 certificate names `localhost`, `127.0.0.1`, `::1`, `node-<n>`, and `node-<n>.nervix.test`, so each
 addressing presents the name its peers expect.
+
+A scenario can also publish a dependency it started under a name in the zone, such as
+`rabbitmq.nervix.test`, answered with the dependency's literal address or with a list of loopback
+addresses in order, and later answer that name as a name that does not exist, a name with no
+address, or not at all. A dependency's published port listens on every local address, so an answer
+that cannot connect needs TCP forwarders: listeners at chosen loopback addresses such as
+`127.0.5.<n>`, all on one port drawn from the pool, that forward to the dependency and count the
+connections each accepted. Stopping a forwarder closes its listener and every connection it
+carried, so a client that still holds a cached answer naming it cannot reconnect there. An address
+the scenario names without a forwarder refuses connections on that port. The TLS
+certificate the harness gives its containerized dependencies names `localhost`, `127.0.0.1` and
+`*.nervix.test`, so a dependency reached through a zone name presents a certificate for the name
+its client dialled, and a name outside the zone does not match it.
 
 The authority answers from memory and holds nothing else: it counts questions for at most 1,024
 names, and a scenario can assert that its nodes asked nothing for their names. It answers until the

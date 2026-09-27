@@ -107,7 +107,7 @@ use crate::common::{
         CLICKHOUSE_ADDR, CLICKHOUSE_TLS_ADDR, DependencyEndpoints, ICEBERG_REST_ADDR, KAFKA_ADDR,
         KAFKA_DOCKER_ADDR, KAFKA_DOCKER_NETWORK, MOCK_HTTP_ADDR, MONGODB_ADDR, MONGODB_TLS_ADDR,
         MQTT_ADDR, MYSQL_ADDR, MYSQL_TLS_ADDR, POSTGRES_ADDR, POSTGRES_TLS_ADDR, PULSAR_ADDR,
-        RABBITMQ_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
+        RABBITMQ_ADDR, RABBITMQ_TLS_ADDR, REDIS_ADDR, RUSTFS_ADDR, TestDependencies,
     },
     http_receiver::{
         ClientCertificatePolicy, HttpReceiver, RECEIVER_STOP_BUDGET, ReceiverFault,
@@ -125,6 +125,7 @@ use crate::common::{
     suite_watchdog::{
         RUNTIME_SHUTDOWN_BUDGET, SuiteOutcome, SuiteRun, SuiteTeardown, SuiteWatchdogArgs,
     },
+    tcp_forwarder::TcpForwarders,
 };
 
 mod common;
@@ -355,6 +356,8 @@ struct ScenarioWorld {
     background_http_publish: Option<AbortOnDropHandle<std::io::Result<()>>>,
     background_https_publish: Option<BackgroundHttpsPublish>,
     stallable_tcp_proxies: BTreeMap<String, StallableTcpProxy>,
+    /// The forwarders a scenario stood in front of a dependency at addresses its DNS answers name.
+    tcp_forwarders: Option<TcpForwarders>,
     /// The HTTP receivers a scenario started, by the name its steps give them.
     http_receivers: BTreeMap<String, HttpReceiver>,
     silent_interconnect_peers: Vec<tokio::net::TcpStream>,
@@ -450,6 +453,7 @@ impl fmt::Debug for ScenarioWorld {
                 "stallable_tcp_proxy_count",
                 &self.stallable_tcp_proxies.len(),
             )
+            .field("tcp_forwarders", &self.tcp_forwarders)
             .field("http_receivers", &self.http_receivers)
             .field(
                 "silent_interconnect_peer_count",
@@ -5588,26 +5592,11 @@ async fn when_the_dns_fixture_answers_node_name_with(
 
 #[given("the HTTP mock endpoint is published under fixture DNS")]
 async fn given_http_mock_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    const NAME: &str = "http-source.nervix.test";
-    let endpoint = world
-        .placeholders
-        .get("mock_http_addr")
-        .expect("the HTTP mock server was started");
-    let mut url = url::Url::parse(endpoint).expect("the HTTP mock address is a URL");
-    let address = url
-        .host_str()
-        .expect("the HTTP mock address has a host")
-        .parse::<std::net::IpAddr>()
-        .expect("the HTTP mock listens on a literal address");
-    world
-        .cluster()
-        .publish_dns_service(NAME, address)
-        .expect("the cluster has a DNS fixture");
-    url.set_host(Some(NAME))
-        .expect("the fixture name is a valid URL host");
-    world.placeholders.insert(
-        "mock_http_dns_addr".to_string(),
-        url.to_string().trim_end_matches('/').to_string(),
+    publish_fixture_name(
+        world,
+        "mock_http_addr",
+        "http-source.nervix.test",
+        "mock_http_dns_addr",
     );
 }
 
@@ -5644,26 +5633,7 @@ async fn given_iceberg_endpoints_have_fixture_dns(world: &mut ScenarioWorld) {
             "rustfs_dns_addr",
         ),
     ] {
-        let endpoint = world
-            .placeholders
-            .get(source)
-            .expect("the Iceberg dependency was started");
-        let mut url = url::Url::parse(endpoint).expect("the Iceberg endpoint is a URL");
-        let address = url
-            .host_str()
-            .expect("the Iceberg endpoint has a host")
-            .parse::<std::net::IpAddr>()
-            .expect("the dependency listens on a literal address");
-        world
-            .cluster()
-            .publish_dns_service(name, address)
-            .expect("the cluster has a DNS fixture");
-        url.set_host(Some(name))
-            .expect("the fixture name is a valid URL host");
-        world.placeholders.insert(
-            target.to_string(),
-            url.to_string().trim_end_matches('/').to_string(),
-        );
+        publish_fixture_name(world, source, name, target);
     }
 }
 
@@ -5690,20 +5660,22 @@ async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
     .expect("the Iceberg clients did not ask the configured DNS fixture within 30 seconds");
 }
 
-fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
+/// Publish the literal address of the started dependency whose URL is placeholder `source` under
+/// the fixture name `name`, and record that URL with `name` as its host in placeholder `target`.
+fn publish_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
     let endpoint = world
         .placeholders
         .get(source)
-        .expect("the HTTP dependency was started");
-    let mut url = url::Url::parse(endpoint).expect("the HTTP endpoint is a URL");
+        .unwrap_or_else(|| panic!("the dependency behind '{source}' was not started"));
+    let mut url = url::Url::parse(endpoint).expect("the dependency endpoint is a URL");
     let address = url
         .host_str()
-        .expect("the HTTP endpoint has a host")
+        .expect("the dependency endpoint has a host")
         .parse::<std::net::IpAddr>()
         .expect("the dependency listens on a literal address");
     world
         .cluster()
-        .publish_dns_service(name, address)
+        .publish_dns_service(name, vec![address])
         .expect("the cluster has a DNS fixture");
     url.set_host(Some(name))
         .expect("the fixture name is a valid URL host");
@@ -5715,7 +5687,7 @@ fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str
 
 #[given("the Prometheus endpoint is published under fixture DNS")]
 async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(
+    publish_fixture_name(
         world,
         "prometheus_addr",
         "prometheus.nervix.test",
@@ -5725,17 +5697,137 @@ async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
 
 #[given("the Sentry endpoint is published under fixture DNS")]
 async fn given_sentry_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
+    publish_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
 }
 
 #[given("the OTEL HTTP endpoint is published under fixture DNS")]
 async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
-    publish_http_fixture_name(
+    publish_fixture_name(
         world,
         "otel_collector_http_addr",
         "otel-http.nervix.test",
         "otel_collector_dns_addr",
     );
+}
+
+#[given(expr = "the RabbitMQ endpoints are published under fixture DNS name {string}")]
+async fn given_rabbitmq_endpoints_have_fixture_dns(world: &mut ScenarioWorld, name: String) {
+    publish_fixture_name(world, RABBITMQ_ADDR, &name, "rabbitmq_dns_addr");
+    publish_fixture_name(world, RABBITMQ_TLS_ADDR, &name, "rabbitmq_tls_dns_addr");
+}
+
+/// Stand TCP forwarders to the plain RabbitMQ listener at `addresses`, and record in placeholder
+/// `rabbitmq_forwarded_addr` the RabbitMQ URL that reaches them through the fixture name `name`.
+/// The scenario decides separately what the DNS fixture answers for `name`.
+#[given(expr = "RabbitMQ is forwarded as {string} from the fixture addresses {string}")]
+async fn given_rabbitmq_is_forwarded(world: &mut ScenarioWorld, name: String, addresses: String) {
+    let endpoint = world
+        .placeholders
+        .get(RABBITMQ_ADDR)
+        .expect("RabbitMQ was started");
+    let mut url = url::Url::parse(endpoint).expect("the RabbitMQ endpoint is a URL");
+    let host = url
+        .host_str()
+        .expect("the RabbitMQ endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("RabbitMQ listens on a literal address");
+    let port = url.port().expect("the RabbitMQ endpoint names its port");
+    let addresses = fixture_addresses(&addresses);
+    let forwarders = TcpForwarders::start(&addresses, std::net::SocketAddr::new(host, port))
+        .await
+        .expect("the RabbitMQ forwarders could not listen");
+    url.set_host(Some(&name))
+        .expect("the fixture name is a valid URL host");
+    url.set_port(Some(forwarders.port()))
+        .expect("an AMQP URL carries a port");
+    world
+        .placeholders
+        .insert("rabbitmq_forwarded_addr".to_string(), url.to_string());
+    world.tcp_forwarders = Some(forwarders);
+}
+
+/// The comma-separated loopback addresses a step names, in order.
+fn fixture_addresses(addresses: &str) -> Vec<std::net::IpAddr> {
+    let mut parsed = Vec::new();
+    for address in addresses.split(',') {
+        let address = address
+            .trim()
+            .parse::<std::net::IpAddr>()
+            .unwrap_or_else(|error| panic!("'{address}' is not an IP address: {error}"));
+        parsed.push(address);
+    }
+    parsed
+}
+
+#[given(expr = "the DNS fixture answers {string} with addresses {string}")]
+#[when(expr = "the DNS fixture answers {string} with addresses {string}")]
+async fn when_the_dns_fixture_answers_name_with_addresses(
+    world: &mut ScenarioWorld,
+    name: String,
+    addresses: String,
+) {
+    let addresses = fixture_addresses(&addresses);
+    world
+        .cluster()
+        .publish_dns_service(&name, addresses)
+        .expect("the cluster has a DNS fixture");
+}
+
+#[when(expr = "the DNS fixture answers {string} with {string}")]
+async fn when_the_dns_fixture_answers_name_with(
+    world: &mut ScenarioWorld,
+    name: String,
+    answer: String,
+) {
+    let answer = answer
+        .parse::<FixtureAnswer>()
+        .unwrap_or_else(|_| panic!("unknown DNS fixture answer '{answer}'"));
+    world
+        .cluster()
+        .answer_dns_service(&name, answer)
+        .expect("the cluster has a DNS fixture");
+}
+
+#[when(expr = "the TCP forwarder at {string} stops")]
+async fn when_the_tcp_forwarder_stops(world: &mut ScenarioWorld, address: String) {
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    world
+        .tcp_forwarders
+        .as_mut()
+        .expect("the scenario started TCP forwarders")
+        .stop(address)
+        .await
+        .unwrap_or_else(|error| panic!("the forwarder at {address} could not stop: {error}"));
+}
+
+#[then(expr = "the TCP forwarder at {string} eventually accepts a connection")]
+async fn then_the_tcp_forwarder_accepts_a_connection(world: &mut ScenarioWorld, address: String) {
+    const ACCEPT_BUDGET: Duration = Duration::from_secs(30);
+    let address = address
+        .parse::<std::net::IpAddr>()
+        .expect("a forwarder is named by its address");
+    let forwarders = world
+        .tcp_forwarders
+        .as_ref()
+        .expect("the scenario started TCP forwarders");
+    tokio::time::timeout(ACCEPT_BUDGET, async {
+        loop {
+            tokio::task::consume_budget().await;
+            let accepted = forwarders
+                .accepted(address)
+                .unwrap_or_else(|error| panic!("{error}"));
+            if accepted > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!("the forwarder at {address} accepted no connection within {ACCEPT_BUDGET:?}")
+    });
 }
 
 #[then(expr = "the DNS fixture eventually receives a question for {string}")]
@@ -5754,7 +5846,7 @@ async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) 
         }
     })
     .await
-    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+    .unwrap_or_else(|_| panic!("no client asked the DNS fixture for '{name}' within 10 seconds"));
 }
 
 #[then("the DNS fixture received no questions for node names")]
@@ -23700,6 +23792,7 @@ async fn run_scenarios(parallelism: TestParallelism) -> SuiteOutcome {
                 // proxy standing in front of a node and a socket held silently open against it are
                 // harness state, and they are given back once the nodes they fronted have ended.
                 world.stallable_tcp_proxies.clear();
+                world.tcp_forwarders = None;
                 world.silent_interconnect_peers.clear();
                 world.web_console_scenario_permit = None;
                 world.wasm_state_reset_scenario_permit = None;
