@@ -139,6 +139,13 @@ retain the selected entity or placement so an operator can correct the request. 
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
 
+Visual schema and branch editors report incomplete names, fields, types, modes, references and
+instance limits before submitting a command, while retaining the editable draft. Once a completed
+branch command reaches the registry, the registry remains the owner of branch key validation: a
+schema containing `BYTES`, even under a collection type, returns the branch, domain and field in
+its diagnostic. The console presents that command failure inline and does not replace it with a
+local guess or silently change the selected schema.
+
 Domain activation has typed failures for a relay or codec missing its schema, a codec missing its
 wire definition, a relay missing its branch or carrying an invalid branch TTL, and an endpoint
 missing its VHOST or signaling protocol. The report identifies the owning relay, codec, or

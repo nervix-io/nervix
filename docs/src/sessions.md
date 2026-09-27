@@ -144,9 +144,11 @@ they neither enter the command admission gate nor change the transaction queue.
 
 `ChoiceLookupRequest` resolves values for structured client controls without constructing partial
 NSPL. It carries a semantic target, typed dependent selections, search text, a page size from 1
-through 100, and an optional page cursor. The first targets resolve domain pace and placement
-policy. Placement requires exactly one domain-pace dependency; an absent or differently typed
-dependency returns `MissingContext`.
+through 100, and an optional page cursor. Targets resolve domain pace, placement policy, and
+internal schema references. Placement requires exactly one domain-pace dependency. Schema lookup
+requires exactly one domain reference; it reads that domain's current Models with the requesting
+session's attached transaction prefix applied, so a staged schema appears before commit. An absent
+or differently typed dependency returns `MissingContext`.
 
 Each result separates semantics from presentation. `ChoiceValue` carries a domain-pace or
 placement-policy variant, or a typed domain, resource, or model reference. `ChoicePresentation`
@@ -156,8 +158,10 @@ never derives behavior from the label. `Ready` with no values is an ordinary emp
 
 A page cursor binds the target, every dependent value, search text, application revision, and the
 ordered typed candidate set including its presentation metadata. Changing any part returns
-`StaleContext` instead of continuing through a different result. Choice lookups are read-only and
-can run concurrently with each other and with commands. The web console additionally correlates
+`StaleContext` instead of continuing through a different result. Schema pages also bind the full
+field shape of each matching schema, so a change within an attached transaction invalidates a
+cursor even when names and field counts stay the same. Choice lookups are read-only and can run
+concurrently with each other and with commands. The web console additionally correlates
 each lookup with its control, draft revision, and session generation, so a late reply cannot
 replace the choices for a newer edit or connection.
 

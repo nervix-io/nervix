@@ -49,6 +49,9 @@ test-scenarios *args: tests-deps
     export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
     cargo test --features testing --test scenarios -- {{ args }}
 
+test-web-console:
+    CARGO_TARGET_DIR={{ cargo_target_dir }} cargo test --package nervix-web-console --bin nervix-web-console
+
 test-harness-liveness *args: tests-deps
     cargo test --features testing --test harness_liveness -- {{ args }}
 
@@ -537,6 +540,22 @@ coverage-clients-units:
     cargo llvm-cov --no-report --bins \
         --package nervix-web-console --package nervix-cli
     just coverage-clients-report
+
+# Measure the visual schema/branch patch across its Model, language, wire, browser, and server
+# owners, including the public browser scenarios that exercise the attached transaction prefix.
+coverage-visual-create output="target/visual-create.lcov": tests-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export ORT_DYLIB_PATH="$(bash scripts/download_onnxruntime.sh --print-path)"
+    cargo llvm-cov clean --workspace
+    cargo llvm-cov --no-report --lib \
+        --package nervix-models --package nervix-client-wire --package nervix-nspl
+    cargo llvm-cov --no-report --bin nervix-web-console --package nervix-web-console
+    cargo llvm-cov --no-report --features testing --package nervix-server --lib
+    cargo llvm-cov --no-report --features testing --package nervix-server \
+        --test scenarios -- --input tests/features/web-console/visual_create_schema.feature \
+        --concurrency 1 --retry 0
+    cargo llvm-cov report --workspace --lcov --output-path {{ quote(output) }}
 
 # Write the line coverage of the unit tests of the packages named in `args`, such as
 # `--package nervix-vm --package nervix-nspl`, as LCOV to `output`. It checks the patch coverage of

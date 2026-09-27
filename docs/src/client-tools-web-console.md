@@ -54,7 +54,7 @@ Sidebar entries are counted per kind and each group collapses. Selecting an endp
 The **Cluster** footer stays independent of the selected domain: it reports the number of running
 domains, non-relay graph nodes, and relays across the current cluster graph.
 
-## Creating Domains, Users, And Resources
+## Creating Domains, Users, Resources, Schemas, And Branches
 
 The top bar's **Create** menu opens keyboard-accessible forms for domains, users, and resource
 catalogs. The resource group in the sidebar also provides a contextual create action. A form keeps
@@ -82,6 +82,24 @@ transaction**, **Completed**, or **Failed** from the correlated outcome. A queue
 operation is not presented as externally complete. A successful standalone resource create opens
 the existing resource version dialog, where upload identity and completion continue to be owned by
 the upload workflow.
+
+The **Create** menu also opens forms for internal schemas, JSON/CBOR/AVRO wire schemas, and named
+branches. Schema fields are added in declaration order and can be moved or removed. An internal
+field selects its exact scalar type, then may wrap it in any sequence of variable vectors and
+fixed arrays; each fixed array needs a positive length. Optional and sensitive flags are separate
+controls. Wire fields select the types of their chosen format and an explicit `STRICT` or `LOOSE`
+mode. A wire schema's format is part of its identity, so JSON, CBOR, and AVRO definitions may
+share a name. The preview and submitted command come from the completed semantic Model's
+canonical renderer, just as they do for the earlier forms.
+
+A branch form selects an internal key schema from a server-backed, searchable, paged list, then
+requires a TTL. It may set a positive maximum instance count with LRU eviction. The schema list
+uses the draft's captured domain and the session's attached transaction prefix, so a schema staged
+earlier in the same transaction is selectable. Changing the captured domain keeps a previous
+selection visible but marks it invalid until it is selected again. An invalid branch key schema,
+including one containing `BYTES`, is rejected by registry validation and shown inline with the
+branch and field named. These domain-owned drafts keep their captured scope when reopened; **Use
+current domain** changes it explicitly.
 
 ## The Execution Graph
 

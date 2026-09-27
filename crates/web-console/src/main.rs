@@ -8271,6 +8271,10 @@ mod tests {
         let placement = requests
             .accept(placement)
             .assured("an independent choice control is sent at once");
+        let schema = requests.issue(choice_request(ChoiceControl::BranchSchema, 1));
+        let schema = requests
+            .accept(schema)
+            .assured("the branch schema control is sent independently");
         let later = requests.issue(choice_request(ChoiceControl::DomainPace, 1));
         let later = requests
             .accept(later)
@@ -8282,6 +8286,10 @@ mod tests {
         ));
         assert!(matches!(
             requests.route(reply(placement.request_id, ready_choice_reply())),
+            Routed::Reply(_)
+        ));
+        assert!(matches!(
+            requests.route(reply(schema.request_id, ready_choice_reply())),
             Routed::Reply(_)
         ));
 
@@ -9276,6 +9284,7 @@ mod tests {
         let target = match control {
             ChoiceControl::DomainPace => nervix_client_wire::ChoiceTarget::DomainPace,
             ChoiceControl::PlacementPolicy => nervix_client_wire::ChoiceTarget::PlacementPolicy,
+            ChoiceControl::BranchSchema => nervix_client_wire::ChoiceTarget::Schema,
         };
         ConsoleRequest::Choice {
             request: ChoiceLookupRequest::new(target, Vec::new(), String::new()),
