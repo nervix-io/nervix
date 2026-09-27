@@ -10,6 +10,7 @@ Use it for:
 - [connector crate ownership, the shared source and sink contract, and host execution](./connector-contract.md)
 - domain-clock mapping, authority, lifecycle, progress, and execution-time semantics
 - cluster interconnect security, traffic isolation, and delivery semantics
+- [transaction impact planning, scoped quiescence, inspection, and retained outcomes](./transaction-quiescence.md)
 - [consensus durability, replication pacing, log retention, and snapshot recovery](./consensus-storage-and-replication.md)
 - [resource versions, pinned bindings, `LATEST` resolution, rebinding, and the HTTPS listener refresh](./resource-versions.md)
 - [WASM guest state: checkpoints, generations, resets, rejected-state recovery, and replay](./wasm-state.md)

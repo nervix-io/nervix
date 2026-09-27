@@ -78,24 +78,27 @@ Use `BEGIN; ... COMMIT;` when sending multiple queueable configuration statement
 belongs to one already-existing domain: `BEGIN` binds it to the selected domain and every queued
 statement must select that same domain. Transactions and commit progress are replicated and
 resumable, but their content is deliberately limited to that domain's model mutations, domain
-configuration/lifecycle, and `CREATE RESOURCE`. Keep `CREATE DOMAIN`, `CREATE USER`, other read-only
-statements, subscriptions, `USE`, `ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, and
-node administration outside the transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
+configuration/lifecycle, `CREATE RESOURCE`, and `RESET WASM PROCESSOR ... STATE`. Keep
+`CREATE DOMAIN`, `CREATE USER`, other read-only statements, subscriptions, `USE`,
+`ATTACH DOMAIN CLOCK`/`DETACH DOMAIN CLOCK`, resource uploads, and node administration outside the
+transaction. Use `SHOW TRANSACTIONS;` when transaction state or a retained outcome needs
 verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TEXT | JSON ];` to
 explain what an open, committing, or retained transaction requires and changes before or after
 `COMMIT`. These two reads are allowed while a transaction is open, are sent on their own, and neither
-queues content nor shifts operation numbers. Read `NSPL Overview` for its forms and `Control Plane`
-→ `Inspecting A Transaction` for what each transaction state reports. Treat a successful inspection
+queues content nor shifts operation numbers. Read `NSPL Overview` for its forms and
+[Transaction Quiescence And Impact Inspection](https://docs.nervix.io/transaction-quiescence.html)
+for report scopes, execution outcomes, and retained inspection. Treat a successful inspection
 as one complete result: selecting an operation changes presentation focus without narrowing the
 transaction, and neither text, JSON, the Rust result, nor the browser graph paginates or truncates a
 large report. Queue admission preflights each statement against the replicated prefix without
 applying effects. Consecutive model mutations form one atomic run and report the run's effective
-base-to-final quiesce level at the current prefix; a lifecycle, domain, or resource statement ends
-that run, and a later run cannot repair it. `COMMIT` reports only the maximum level actually
-executed and does not repeat statement outputs. Correct a rejected statement and continue the same
-transaction. A `COMMIT` refused because the preview it expected no longer describes the transaction
-applies nothing and leaves the transaction open; inspect the attached transaction again before
-retrying the commit against its reviewed basis. Do not imply that one undivided request can mix
+base-to-final quiesce level at the current prefix; a lifecycle, domain, resource-catalog, or WASM
+state-reset statement ends that run, and a later run cannot repair it. `COMMIT` reports only the
+maximum level actually executed and does not repeat statement outputs. Correct a rejected statement
+and continue the same transaction. A `COMMIT` refused because the preview it expected no longer
+describes the transaction applies nothing and leaves the transaction open; inspect the attached
+transaction again before retrying the commit against its reviewed basis. Do not imply that one
+undivided request can mix
 those phases.
 
 Treat a successful administrative command as a completed effect. After `UPLOAD RESOURCE`, model or

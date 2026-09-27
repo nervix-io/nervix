@@ -81,7 +81,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_sources_report_missing_node_dns_as_start_failure() {
+    async fn sources_that_resolve_names_report_missing_node_dns_as_start_failure() {
         let runtime = Runtime::default();
         let domain: DomainName = named("sales");
         let client_name: ClientName = named("upstream");
@@ -114,6 +114,26 @@ mod tests {
                     config: Vec::new(),
                 }),
             ),
+            (
+                IngestSource::RabbitMq {
+                    client: client_name.clone(),
+                    queue: named("events"),
+                    instances: NonZeroU64::MIN,
+                    mode: RabbitMqIngestMode::AckSequential {
+                        timeout: "5s".to_string(),
+                        retry_policy: nervix_models::RetryPolicy {
+                            backoff: "100ms".to_string(),
+                            max_backoff: "1s".to_string(),
+                        },
+                    },
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+                Model::ClientRabbitMq(CreateClientRabbitMq {
+                    name: client_name.clone(),
+                    mount: None,
+                    config: Vec::new(),
+                }),
+            ),
         ] {
             let ingestor = CreateIngestor {
                 name: named("source"),
@@ -130,7 +150,8 @@ mod tests {
             let result = match source {
                 SourceStartPlan::Http(source) => source.compose(&runtime, &ingestor).await,
                 SourceStartPlan::Prometheus(source) => source.compose(&runtime, &ingestor).await,
-                _ => panic!("the fixture only includes HTTP sources"),
+                SourceStartPlan::RabbitMq(source) => source.compose(&runtime, &ingestor).await,
+                _ => panic!("the fixture only includes sources that resolve names"),
             };
             let Err(RuntimeError::StartIngestor {
                 domain,
@@ -138,7 +159,7 @@ mod tests {
                 reason,
             }) = result
             else {
-                panic!("an HTTP source without node DNS must fail before it opens");
+                panic!("a source that resolves names must fail without node DNS before it opens");
             };
             assert_eq!(domain, "sales");
             assert_eq!(ingestor, "source");

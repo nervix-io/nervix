@@ -12,6 +12,11 @@ In particular, a transport response is not automatically a statement that runtim
 Relay delivery exposes separate receipt, admission, and downstream-completion boundaries so callers
 can distinguish those outcomes.
 
+For a transaction, a timed-out remote gate response may mean that engagement happened. The
+control plane retains that uncertainty and any later recovery scope in the impact report;
+[Transaction Quiescence And Impact Inspection](./transaction-quiescence.md) defines those
+outcomes. This chapter owns the transport deadline and failure signal.
+
 [Errors And Diagnostics](./errors-and-diagnostics.md) explains how local typed reports and remote
 failure classes reach their callers and public edges. This chapter owns their wire representation
 and transport failure semantics.
@@ -185,10 +190,10 @@ applies only as far as the name server the configuration names applies it, for e
 `systemd-resolved` stub at `127.0.0.53`. Docker's embedded DNS and Kubernetes cluster DNS, with
 their search lists and `ndots`, are reached through the `resolv.conf` those platforms provide.
 
-The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP, and Iceberg REST and
-object-store clients. Other connectors and client libraries still resolve through their own
-drivers. The ledger in `tests/dns-resolution-ledger.md` records each boundary and its current
-owner.
+The node resolver also serves HTTP polling, Prometheus, Sentry, OTEL HTTP, Iceberg REST and
+object-store clients, and RabbitMQ sources and sinks. Other connectors and client libraries still
+resolve through their own drivers. The ledger in `tests/dns-resolution-ledger.md` records each
+boundary and its current owner.
 
 ## Peer Identity And Authentication
 
