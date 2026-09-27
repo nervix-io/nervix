@@ -52,6 +52,7 @@ use fjall::Database;
 use futures_util::{future::BoxFuture, stream::FuturesUnordered};
 use meticulous::{OptionExt as _, ResultExt as _};
 use nervix_approx_into::{ApproxInto as _, CheckedApproxInto as _};
+use nervix_dns::DnsResolver;
 use nervix_execution::{
     ChargedBytes, Executor,
     sync::{AbortOnDropHandle, ArcSwap, ArcSwapOption, Cache, DashMap},

@@ -67,3 +67,82 @@ impl Runtime {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn named<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_string()).assured("the fixture name is valid")
+    }
+
+    #[tokio::test]
+    async fn http_sources_report_missing_node_dns_as_start_failure() {
+        let runtime = Runtime::default();
+        let domain: DomainName = named("sales");
+        let client_name: ClientName = named("upstream");
+        let cadence: nervix_models::DomainClockPeriod = "1s"
+            .parse()
+            .assured("the fixture cadence is a positive duration");
+        for (source, client_model) in [
+            (
+                IngestSource::Http {
+                    client: client_name.clone(),
+                    every: cadence,
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+                Model::ClientHttp(CreateClientHttp {
+                    name: client_name.clone(),
+                    mount: None,
+                    config: Vec::new(),
+                }),
+            ),
+            (
+                IngestSource::Prometheus {
+                    client: client_name.clone(),
+                    query: "up".to_string(),
+                    every: cadence,
+                    quiesce: IngestQuiesceMode::Suspend,
+                },
+                Model::ClientPrometheus(CreateClientPrometheus {
+                    name: client_name.clone(),
+                    mount: None,
+                    config: Vec::new(),
+                }),
+            ),
+        ] {
+            let ingestor = CreateIngestor {
+                name: named("source"),
+                output_routes: nervix_models::ProcessorOutputs::single(named("events")),
+                decode_using_codec: named("json"),
+                timestamp_source: None,
+                source,
+                general_error_policy: GeneralErrorPolicy::Log,
+                filter_where: None,
+            };
+            let plan = IngestorStartPlan::decide_unscheduled(&domain, &ingestor, &client_model)
+                .assured("the fixture source and client are paired");
+            let IngestorStartPlan { ingestor, source } = plan;
+            let result = match source {
+                SourceStartPlan::Http(source) => source.compose(&runtime, &ingestor).await,
+                SourceStartPlan::Prometheus(source) => source.compose(&runtime, &ingestor).await,
+                _ => panic!("the fixture only includes HTTP sources"),
+            };
+            let Err(RuntimeError::StartIngestor {
+                domain,
+                ingestor,
+                reason,
+            }) = result
+            else {
+                panic!("an HTTP source without node DNS must fail before it opens");
+            };
+            assert_eq!(domain, "sales");
+            assert_eq!(ingestor, "source");
+            assert_eq!(reason, "the node DNS resolver is not installed");
+        }
+    }
+}

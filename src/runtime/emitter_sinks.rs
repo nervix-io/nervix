@@ -297,6 +297,7 @@ impl EmitterSinkStarter {
                 SentrySink::new(
                     SentrySinkConfig {
                         config: sink.client.config.entries.clone(),
+                        dns: context.dns()?,
                     },
                     context.sink_host(),
                 ),
@@ -325,6 +326,7 @@ impl EmitterSinkStarter {
                 let resource = otel_resource_attributes(&sink.resource)?;
                 let config = OtelSinkConfig {
                     config: sink.client.config.entries.clone(),
+                    dns: context.dns()?,
                     signal: sink.signal.clone(),
                     values: mapped_column_names(&sink.values),
                     attributes: mapped_column_names(&sink.attributes),
@@ -459,6 +461,7 @@ impl EmitterSinkStarter {
                 let opened = IcebergSink::new(
                     IcebergSinkConfig {
                         backend: sink.backend,
+                        dns: context.dns()?,
                         storage_config: sink.storage.config.entries.clone(),
                         catalog_name: sink.catalog.name.as_str().to_string(),
                         catalog_config: sink.catalog.config.entries.clone(),

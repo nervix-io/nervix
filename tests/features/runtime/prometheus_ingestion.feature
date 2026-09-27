@@ -2,7 +2,9 @@ Feature: Prometheus ingestion
   Scenario Outline: Prometheus ingestor delivers queried samples to a subscribed relay
     Given Prometheus is running
     Given runtime replication is configured with replica count <replica_count> and snapshot interval "100ms"
+    And cluster peers are addressed by "DNS names"
     And a <cluster_size> node nervix cluster is started
+    And the Prometheus endpoint is published under fixture DNS
     And the leader node is configured with these NSPL commands
       """
       CREATE UNPACED DOMAIN {{domain}};
@@ -28,7 +30,7 @@ Feature: Prometheus ingestion
         CREATE CLIENT prom_main
         TYPE PROMETHEUS
         CONFIG {
-          'addr' = '{{prometheus_addr}}',
+          'addr' = '{{prometheus_dns_addr}}',
           'timeout_ms' = 5000
         };
         CREATE INGESTOR prom_samples
@@ -49,6 +51,7 @@ Feature: Prometheus ingestion
       "source":"local"
       """
     And the last relay subscription payload contains key fragment '{"source":"local"}'
+    And the DNS fixture eventually receives a question for "prometheus.nervix.test"
 
     Examples:
       | cluster_size | replica_count |
