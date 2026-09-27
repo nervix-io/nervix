@@ -81,13 +81,18 @@ enum SqsRecordError {
     InvalidAttributeName { name: String },
     #[error("SQS message attribute '{name}' contains a forbidden character")]
     ForbiddenAttributeCharacter { name: String },
+    #[error("SQS message attribute '{name}' has an empty value, which SQS does not accept")]
+    EmptyAttributeValue { name: String },
     #[error("invalid SQS message attribute '{name}'")]
     BuildAttribute { name: String },
     #[error("SQS FIFO message group must contain 1 to 128 characters")]
     MessageGroupLength,
     #[error("SQS FIFO message group contains an unsupported character")]
     MessageGroupCharacter,
-    #[error("SQS record is {bytes} bytes; the protocol limit is 256 KiB")]
+    #[error(
+        "SQS message is {bytes} bytes counting its attributes and message group; SQS accepts at \
+         most {maximum} bytes"
+    )]
     RequestSize { bytes: usize, maximum: usize },
 }
 
@@ -549,6 +554,11 @@ impl SqsSink {
                 name: name.to_string(),
             }));
         }
+        if value.is_empty() {
+            return Err(Report::new(SqsRecordError::EmptyAttributeValue {
+                name: name.to_string(),
+            }));
+        }
         if !Self::has_valid_message_characters(value) {
             return Err(Report::new(SqsRecordError::ForbiddenAttributeCharacter {
                 name: name.to_string(),
@@ -772,6 +782,15 @@ mod tests {
             value.current_context(),
             SqsRecordError::ForbiddenAttributeCharacter { .. }
         ));
+
+        let empty_value = build(vec![b'x'], vec![("tenant".to_string(), String::new())])
+            .expect_err("SQS refuses a message attribute without a value");
+        assert_eq!(
+            empty_value.current_context(),
+            &SqsRecordError::EmptyAttributeValue {
+                name: "tenant".to_string()
+            }
+        );
     }
 
     #[test]
@@ -889,6 +908,61 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(records, [vec![0, 1], vec![2, 3]]);
+    }
+
+    fn delivered_entry(id: &str) -> aws_sdk_sqs::types::SendMessageBatchResultEntry {
+        aws_sdk_sqs::types::SendMessageBatchResultEntry::builder()
+            .id(id)
+            .message_id(format!("message-{id}"))
+            .md5_of_message_body("unchecked")
+            .build()
+            .expect("the test entry names every required field")
+    }
+
+    fn failed_entry(
+        id: &str,
+        sender_fault: bool,
+        code: &str,
+    ) -> aws_sdk_sqs::types::BatchResultErrorEntry {
+        aws_sdk_sqs::types::BatchResultErrorEntry::builder()
+            .id(id)
+            .sender_fault(sender_fault)
+            .code(code)
+            .build()
+            .expect("the test entry names every required field")
+    }
+
+    /// Each entry of a batch request is one record, which with the emitter's `BATCH` clause is one
+    /// batch payload, so the service's answer for an entry is the answer for the whole payload.
+    #[test]
+    fn a_partial_batch_response_answers_each_entry_and_leaves_the_rest_to_a_retry() {
+        let records = (0..4)
+            .map(|index| prepared_as(index, 16))
+            .collect::<Vec<_>>();
+        let response =
+            aws_sdk_sqs::operation::send_message_batch::SendMessageBatchOutput::builder()
+                .successful(delivered_entry("m0"))
+                .failed(failed_entry("m1", true, "InvalidMessageContents"))
+                .failed(failed_entry("m2", false, "ServiceUnavailable"))
+                .build()
+                .expect("the test response names every required field");
+        let mut outcome = PerRecordOutcome::empty();
+
+        let infrastructure = SqsSink::apply_batch_response(&records, &response, &mut outcome)
+            .expect("an entry the service failed on its side and an omitted entry are retried");
+        let outcome = outcome.into_parts();
+
+        assert_eq!(outcome.delivered, vec![SinkRecordId::new(0)]);
+        assert_eq!(
+            outcome
+                .rejected
+                .iter()
+                .map(|rejected| rejected.id)
+                .collect::<Vec<_>>(),
+            vec![SinkRecordId::new(1)]
+        );
+        assert!(infrastructure.contains("SQS batch entry failed with ServiceUnavailable"));
+        assert!(infrastructure.contains("SQS omitted a result for batch entry m3"));
     }
 
     #[test]
