@@ -31,8 +31,9 @@ Resolution](../docs/src/interconnect.md#peer-name-resolution) is the public acco
 | Interconnect: every outbound pool connection to a discovered peer | Node resolver, again for each attempt inside its setup deadline; every answer dialled in order | Hickory DNS 01 | `cluster/dns_resolution.feature`: *Peers reach a node through the answer that connects*, *Single-label names are completed by the search domain*, *Names the hosts file lists resolve without asking DNS*, *Peers follow a node that returns at a new address after its name stopped resolving*, *A stopped leader rejoins through its advertised name*; `just test-interconnect` |
 | Interconnect: a gossip bootstrap exchange | The exact seed address the startup lookup produced | Hickory DNS 01 | The three-node examples above join through a named bootstrap endpoint |
 | Interconnect in the `turmoil` build | Turmoil's simulated DNS table behind `PeerResolver::simulated`; no Hickory resolver is built | Hickory DNS 01 | `just test-turmoil`: every committed seed, run twice in fresh processes |
-| HTTP polling ingestion, Prometheus, Sentry and OTEL HTTP export (Reqwest 0.13) | Reqwest's own Hickory adapter, selected indirectly through the OTEL crate's feature | [Hickory DNS 02](https://app.clickup.com/t/86bc7zpn7) | Not yet on the node resolver |
-| Iceberg REST catalog (Reqwest 0.12) and OpenDAL object storage (Reqwest 0.13) | The C library resolver for Reqwest 0.12; Reqwest's adapter for OpenDAL | Hickory DNS 02 | Not yet on the node resolver |
+| HTTP polling ingestion, Prometheus, Sentry and OTEL HTTP export (Reqwest 0.13) | Node resolver injected through `HttpClientConfig`, including TLS and request timeout setup | [Hickory DNS 02](https://app.clickup.com/t/86bc7zpn7) | `runtime/http_client_ingestion.feature`: *HTTP polling resolves its endpoint with the node DNS fixture*; the hostname endpoint scenarios in `runtime/prometheus_ingestion.feature`, `runtime/sentry_emission.feature`, and `runtime/otel_emission.feature`; `just validate-http-dns-dependencies` |
+| Iceberg REST catalog and its OAuth request (Reqwest 0.12) | Node resolver injected through `RestCatalogBuilder::with_client`; both catalog and token requests use that client | Hickory DNS 02 | `runtime/iceberg_emission.feature`: *Iceberg catalog and object storage resolve through the node DNS fixture*, one and three nodes; `just validate-http-dns-dependencies` |
+| Iceberg S3, GCS and Azure object storage and its credential HTTP path (OpenDAL 0.57, Reqwest 0.13) | Node resolver injected through OpenDAL's `HttpClientLayer`; `AccessorInfoHttpSend` shares the client used by object requests | Hickory DNS 02 | The Iceberg scenario above writes and commits to a hostname S3 endpoint; `just validate-http-dns-dependencies` verifies the isolated connector feature graph |
 | RabbitMQ source and sink (Lapin) | The driver's default resolver | [Hickory DNS 03](https://app.clickup.com/t/86bc7zpnc) | Not yet on the node resolver |
 | Syslog UDP, TCP and TLS emission, WebSocket ingestion | Tokio's `lookup_host` and host-name dials, on the blocking pool | [Hickory DNS 04](https://app.clickup.com/t/86bc7zpnf) | Not yet on the node resolver |
 | ClickHouse and SQS | Hyper's default connector and the AWS SDK's default client | [Hickory DNS 05](https://app.clickup.com/t/86bc7zpng) | Not yet on the node resolver |
@@ -63,3 +64,21 @@ platforms write.
 | Turmoil exchange, identity rejection, partition and reconnect, replay and recorded seeds stay deterministic with simulated names | `just test-turmoil` and `just test-turmoil-replay-check`; the scenarios register peers by name, so every connection resolves through the simulated table |
 | Production builds select Hickory and contain no simulation scheduler; the combined-mode diagnostic still works | `just validate-turmoil-dependencies`, `just validate-shuttle-dependencies`, `just validate-simulation-feature-conflict` |
 | Resolver protocol checks use local DNS authorities outside the Turmoil boundary | `nervix-test-environment`'s `dns_authority`, used by `just test-dns` and the Cucumber harness |
+
+## Hickory DNS 02 acceptance
+
+The node passes its validated resolver to every migrated client. Reqwest 0.13 and the separate
+Reqwest 0.12 Iceberg dependency explicitly select `hickory-dns`; isolated connector roots are
+checked by `just validate-http-dns-dependencies`. The custom adapters do not construct Reqwest's
+default Hickory resolver, whose system-configuration error path can choose a public name server.
+The Iceberg REST client's OAuth exchange uses its injected client. OpenDAL's S3 `detect_region`
+helper has a separate client, but no Nervix path calls that helper; operator construction uses its
+configured region or the driver's environment policy. The object and credential paths use the
+operator's injected HTTP client.
+
+| Acceptance item | Evidence |
+| --- | --- |
+| HTTP polling, Prometheus, Sentry, OTEL HTTP, and Iceberg catalog/object storage reach fixture names without changing request authority or commit behavior | The hostname endpoint scenarios in `runtime/http_client_ingestion.feature`, `runtime/prometheus_ingestion.feature`, `runtime/sentry_emission.feature`, `runtime/otel_emission.feature`, and `runtime/iceberg_emission.feature`, each with one and three node examples |
+| Reqwest 0.13 and 0.12 use configured DNS, multiple addresses, redirect destinations, timeout cancellation and TTL reconnect | `just test-dns`: `http_clients` integration checks |
+| A bad resolver configuration has no fallback | `just test-dns` configuration checks; node startup loads `DnsResolver` before any connector starts |
+| Isolated consumer builds retain the selected Reqwest features | `just validate-http-dns-dependencies`; `just check-package` for each affected connector |

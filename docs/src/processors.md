@@ -187,9 +187,12 @@ exactly one route. A junction must retain at least one route.
 Filter, per-input `WHERE`, construction, flush, collect, and same-target message-error policy
 changes are classified dynamic and hot-applied from the published schedule. Existing input
 collectors, buffered route output, pending materialized-state work, subscriptions, and branch-local
-processor state remain in place. The runtime invalidates only compiled expression programs whose
-source changed; a flush-policy update also forces an immediate convergence pass so buffered output
-is evaluated against the new policy without waiting for another input.
+processor state remain in place. Before publication, the runtime binds a complete typed plan for
+each changed processor against its installed schemas, branch contract, lookups and UDFs. Existing
+branches adopt that plan by typed revision identity, and branches that appear later start from the
+same plan. Unchanged processors retain the exact prepared programs they already hold. A flush-policy
+update also forces an immediate convergence pass so buffered output is evaluated against the new
+policy without waiting for another input.
 
 Input/route topology, attachment, branching, dependencies, and changed error-route targets are
 classified entity pause. Nervix gates their source relays across the cluster, drains affected

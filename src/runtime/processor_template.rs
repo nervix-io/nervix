@@ -20,7 +20,7 @@ pub(super) enum ProcessorTemplateError {
     CorrelatorTimeoutWiring,
     #[error("dynamic inferencer update changed its inference session")]
     InferencerSession,
-    #[error("WASM processors do not support dynamic configuration refresh")]
+    #[error("dynamic WASM update changed its guest binding or limits")]
     WasmRefresh,
     #[error("dynamic processor update changed its operation kind")]
     OperationKind,
@@ -104,20 +104,6 @@ pub(super) enum MaterializedDependencyResolution {
 }
 
 impl RelayProcessorOutputsNode {
-    pub(super) fn matches_template(&self, template: &RelayProcessorOutputsTemplate) -> bool {
-        self.routes.len() == template.routes.len()
-            && self
-                .routes
-                .iter()
-                .zip(&template.routes)
-                .all(|(runtime, desired)| {
-                    runtime.relay == desired.output_relay
-                        && runtime.construction == desired.construction
-                        && runtime.flush_policy == desired.flush_policy
-                        && runtime.message_error_policy == desired.message_error_policy
-                })
-    }
-
     pub(super) fn apply_template(
         &mut self,
         template: &RelayProcessorOutputsTemplate,
@@ -137,12 +123,10 @@ impl RelayProcessorOutputsNode {
             let program_changed = runtime.construction != desired.construction
                 || runtime.message_error_policy != desired.message_error_policy;
             changed |= program_changed || runtime.flush_policy != desired.flush_policy;
-            if program_changed {
-                runtime.compiled_program = None;
-            }
             runtime.construction = desired.construction.clone();
             runtime.flush_policy = desired.flush_policy;
             runtime.message_error_policy = desired.message_error_policy.clone();
+            runtime.compiled_program = desired.compiled_program.clone();
         }
         Ok(changed)
     }
@@ -159,12 +143,14 @@ impl RelayProcessorOperationNode {
                     output_routes,
                     deduplicate_on,
                     max_time,
+                    compiled_key_program,
                     ..
                 },
                 RelayProcessorOperationTemplate::Deduplicator {
                     output_routes: desired_outputs,
                     deduplicate_on: desired_deduplicate_on,
                     max_time: desired_max_time,
+                    compiled_key_program: desired_compiled_key_program,
                 },
             ) => {
                 if deduplicate_on != desired_deduplicate_on {
@@ -172,6 +158,7 @@ impl RelayProcessorOperationNode {
                 }
                 output_routes.apply_template(desired_outputs)?;
                 *max_time = *desired_max_time;
+                *compiled_key_program = desired_compiled_key_program.clone().map(Box::new);
                 Ok(())
             }
             (
@@ -213,12 +200,14 @@ impl RelayProcessorOperationNode {
                     output_routes,
                     order_by,
                     max_time,
+                    compiled_program,
                     ..
                 },
                 RelayProcessorOperationTemplate::Reorderer {
                     output_routes: desired_outputs,
                     order_by: desired_order_by,
                     max_time: desired_max_time,
+                    compiled_program: desired_compiled_program,
                 },
             ) => {
                 if order_by != desired_order_by {
@@ -226,6 +215,7 @@ impl RelayProcessorOperationNode {
                 }
                 output_routes.apply_template(desired_outputs)?;
                 *max_time = *desired_max_time;
+                *compiled_program = desired_compiled_program.clone().map(Box::new);
                 Ok(())
             }
             (
@@ -249,6 +239,8 @@ impl RelayProcessorOperationNode {
                     match_policy: desired_match_policy,
                     max_time: desired_max_time,
                     timeout_policy: desired_timeout_policy,
+                    compiled_where_program: desired_where_program,
+                    compiled_output_programs: desired_output_programs,
                 },
             ) => {
                 if left_relays != desired_left_relays || right_relays != desired_right_relays {
@@ -257,17 +249,16 @@ impl RelayProcessorOperationNode {
                 if timeout_policy != desired_timeout_policy {
                     return Err(Report::new(ProcessorTemplateError::CorrelatorTimeoutWiring));
                 }
-                if correlate_where != desired_correlate_where {
-                    *compiled_where_program = None;
-                }
-                if output_routes.apply_template(desired_outputs)? {
-                    for program in compiled_output_programs {
-                        *program = None;
-                    }
-                }
+                output_routes.apply_template(desired_outputs)?;
                 *correlate_where = desired_correlate_where.clone();
                 *match_policy = *desired_match_policy;
                 *max_time = *desired_max_time;
+                *compiled_where_program = desired_where_program.clone().map(Box::new);
+                *compiled_output_programs = desired_output_programs
+                    .iter()
+                    .cloned()
+                    .map(|program| program.map(Box::new))
+                    .collect();
                 Ok(())
             }
             (
@@ -316,6 +307,7 @@ impl RelayProcessorOperationNode {
                     resource_version,
                     file,
                     limits,
+                    rejected_state_policy,
                     ..
                 },
                 RelayProcessorOperationTemplate::WasmProcessor {
@@ -324,14 +316,16 @@ impl RelayProcessorOperationNode {
                     resource_version: desired_resource_version,
                     file: desired_file,
                     limits: desired_limits,
+                    rejected_state_policy: desired_rejected_state_policy,
                     ..
                 },
             ) if resource == desired_resource
                 && resource_version == desired_resource_version
                 && file == desired_file
-                && limits == desired_limits
-                && output_routes.matches_template(desired_outputs) =>
+                && limits == desired_limits =>
             {
+                output_routes.apply_template(desired_outputs)?;
+                *rejected_state_policy = *desired_rejected_state_policy;
                 Ok(())
             }
             (Self::WasmProcessor { .. }, RelayProcessorOperationTemplate::WasmProcessor { .. }) => {
@@ -432,7 +426,7 @@ impl RelayProcessorTemplate {
             message_error_policy: output.message_error_policy.clone(),
             pending: Vec::new(),
             flush_timer: BranchBufferTimer::default(),
-            compiled_program: None,
+            compiled_program: output.compiled_program.clone(),
             compiled_branch_program: None,
         }
     }
@@ -455,6 +449,7 @@ impl RelayProcessorTemplate {
         domain: &DomainName,
         key: &Option<BranchKey>,
         incarnation: u64,
+        revision: &ProcessorPlanRevision,
     ) -> error_stack::Result<RelayProcessorNode, ProcessorTemplateError> {
         Ok(RelayProcessorNode {
             kind: self.kind,
@@ -467,16 +462,17 @@ impl RelayProcessorTemplate {
                 .collect(),
             error_policies: self.error_policies.clone(),
             from_where: self.from_where.clone(),
-            compiled_from_where: HashMap::default(),
+            compiled_from_where: self.compiled_from_where.clone(),
             filter_where: self.filter_where.clone(),
             materialized_state: self.materialized_state.clone(),
             pending_materialized: VecDeque::new(),
-            compiled_filter_where: HashMap::default(),
+            compiled_filter_where: self.compiled_filter_where.clone(),
             operation: match &self.operation {
                 RelayProcessorOperationTemplate::Deduplicator {
                     output_routes,
                     deduplicate_on,
                     max_time,
+                    compiled_key_program,
                 } => {
                     let placement = runtime
                         .state_placement(
@@ -502,7 +498,7 @@ impl RelayProcessorTemplate {
                         output_routes: Self::instantiate_outputs(output_routes),
                         deduplicate_on: deduplicate_on.clone(),
                         max_time: *max_time,
-                        compiled_key_program: None,
+                        compiled_key_program: compiled_key_program.clone().map(Box::new),
                         keyspace: ReplicatedDeduplicatorState::keyspace(&state),
                     }
                 }
@@ -569,6 +565,7 @@ impl RelayProcessorTemplate {
                     output_routes,
                     order_by,
                     max_time,
+                    compiled_program,
                 } => {
                     let output_routes = Self::instantiate_outputs(output_routes);
                     let output_buffers = (0..output_routes.routes.len())
@@ -578,7 +575,7 @@ impl RelayProcessorTemplate {
                         output_routes,
                         order_by: order_by.clone(),
                         max_time: *max_time,
-                        compiled_program: None,
+                        compiled_program: compiled_program.clone().map(Box::new),
                         output_buffers,
                         arrival_sequence: 0,
                     }
@@ -591,10 +588,10 @@ impl RelayProcessorTemplate {
                     match_policy,
                     max_time,
                     timeout_policy,
+                    compiled_where_program,
+                    compiled_output_programs,
                 } => {
                     let output_routes = Self::instantiate_outputs(output_routes);
-                    let compiled_output_programs =
-                        (0..output_routes.routes.len()).map(|_| None).collect();
                     RelayProcessorOperationNode::Correlator {
                         output_routes,
                         left_relays: left_relays.clone(),
@@ -603,8 +600,12 @@ impl RelayProcessorTemplate {
                         match_policy: *match_policy,
                         max_time: *max_time,
                         timeout_policy: timeout_policy.clone(),
-                        compiled_where_program: None,
-                        compiled_output_programs,
+                        compiled_where_program: compiled_where_program.clone().map(Box::new),
+                        compiled_output_programs: compiled_output_programs
+                            .iter()
+                            .cloned()
+                            .map(|program| program.map(Box::new))
+                            .collect(),
                         state: CorrelatorBranchState::default(),
                     }
                 }
@@ -684,8 +685,7 @@ impl RelayProcessorTemplate {
                     }
                 }
             },
-            last_graph: None,
-            applied_generation: 0,
+            applied_revision: revision.clone(),
         })
     }
 }
@@ -754,7 +754,7 @@ impl BranchInstanceTemplate {
         for (processor, template) in &self.processors {
             tokio::task::consume_budget().await;
             let node = template
-                .instantiate(runtime, domain, &key, incarnation)
+                .instantiate(runtime, domain, &key, incarnation, &self.revision)
                 .await?;
             processors.insert(processor.clone(), node);
         }
@@ -864,7 +864,11 @@ impl BranchInstanceTemplate {
 #[cfg(test)]
 mod tests {
     use ahash::HashMap;
-    use nervix_models::{ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, RelayName};
+    use nervix_models::{
+        ErrorPolicies, MessageErrorPolicy, ModelKind, ModelName, RelayName, ResourceName,
+        WasmProcessorLimits, WasmRejectedStatePolicy,
+    };
+    use nonzero_ext::nonzero;
     use tokio::time::Duration;
 
     use super::*;
@@ -893,7 +897,9 @@ mod tests {
             input_collect_policies: [(input.clone(), collect_policy)].into_iter().collect(),
             error_policies: ErrorPolicies::handled_by_log(),
             from_where: HashMap::default(),
+            compiled_from_where: HashMap::default(),
             filter_where: None,
+            compiled_filter_where: HashMap::default(),
             materialized_state: Vec::new(),
             operation: RelayProcessorOperationTemplate::Deduplicator {
                 output_routes: RelayProcessorOutputsTemplate {
@@ -902,14 +908,17 @@ mod tests {
                         construction: nervix_models::RouteConstruction::default(),
                         flush_policy: Some(RuntimeFlushPolicy::Immediate),
                         message_error_policy: MessageErrorPolicy::Log,
+                        compiled_program: None,
                     }],
                 },
                 deduplicate_on: vec![expression("input.event_id")],
                 max_time: Duration::from_secs(600),
+                compiled_key_program: None,
             },
         };
+        let revision = ProcessorPlanRevision::new();
         let mut node = template
-            .instantiate(&runtime, &domain, &None, 1)
+            .instantiate(&runtime, &domain, &None, 1, &revision)
             .await
             .expect("deduplicator template must instantiate");
 
@@ -961,6 +970,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wasm_template_refresh_keeps_the_guest_and_updates_its_routes() {
+        let runtime = Runtime::default();
+        let domain = domain("default");
+        let processor = named::<ModelName>("transform_events");
+        publish_state_identity(
+            &runtime,
+            &domain,
+            ModelKind::WasmProcessor,
+            processor.clone(),
+        );
+        let input = named::<RelayName>("events");
+        let template = RelayProcessorTemplate {
+            kind: ModelKind::WasmProcessor,
+            processor,
+            input_relays: vec![input.clone()],
+            input_collect_policies: HashMap::default(),
+            error_policies: ErrorPolicies::handled_by_log(),
+            from_where: HashMap::default(),
+            compiled_from_where: HashMap::default(),
+            filter_where: None,
+            compiled_filter_where: HashMap::default(),
+            materialized_state: Vec::new(),
+            operation: RelayProcessorOperationTemplate::WasmProcessor {
+                output_routes: RelayProcessorOutputsTemplate {
+                    routes: vec![RelayProcessorOutputTemplate {
+                        output_relay: named("transformed_events"),
+                        construction: nervix_models::RouteConstruction::default(),
+                        flush_policy: Some(RuntimeFlushPolicy::Immediate),
+                        message_error_policy: MessageErrorPolicy::Log,
+                        compiled_program: None,
+                    }],
+                },
+                resource: named::<ResourceName>("event_transform"),
+                resource_version: 1,
+                file: "processors/event_transform.wasm".to_string(),
+                limits: WasmProcessorLimits {
+                    max_fuel: nonzero!(1_000_000u64),
+                    max_memory_bytes: nonzero!(1_048_576u64),
+                },
+                rejected_state_policy: WasmRejectedStatePolicy::Preserve,
+                compiled: None,
+            },
+        };
+        let revision = ProcessorPlanRevision::new();
+        let mut node = template
+            .instantiate(&runtime, &domain, &None, 1, &revision)
+            .await
+            .assured("the test publishes the WASM processor state identity before instantiation");
+
+        let mut desired = template;
+        assert!(matches!(
+            &desired.operation,
+            RelayProcessorOperationTemplate::WasmProcessor { .. }
+        ));
+        if let RelayProcessorOperationTemplate::WasmProcessor {
+            output_routes,
+            rejected_state_policy,
+            ..
+        } = &mut desired.operation
+        {
+            output_routes.routes[0].flush_policy = Some(RuntimeFlushPolicy::Each {
+                interval: Duration::from_secs(2),
+                max_batch_size: 4096,
+            });
+            output_routes.routes[0].message_error_policy = MessageErrorPolicy::Ignore;
+            *rejected_state_policy = WasmRejectedStatePolicy::Reset;
+        }
+
+        node.apply_node_template(desired)
+            .assured("an output-only WASM revision preserves the guest binding");
+        assert!(matches!(
+            &node.operation,
+            RelayProcessorOperationNode::WasmProcessor { .. }
+        ));
+        if let RelayProcessorOperationNode::WasmProcessor {
+            output_routes,
+            rejected_state_policy,
+            compiled,
+            instance,
+            ..
+        } = &node.operation
+        {
+            assert_eq!(
+                output_routes.routes[0].flush_policy,
+                Some(RuntimeFlushPolicy::Each {
+                    interval: Duration::from_secs(2),
+                    max_batch_size: 4096,
+                })
+            );
+            assert_eq!(
+                output_routes.routes[0].message_error_policy,
+                MessageErrorPolicy::Ignore
+            );
+            assert_eq!(*rejected_state_policy, WasmRejectedStatePolicy::Reset);
+            assert!(compiled.is_none());
+            assert!(instance.is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn processor_template_refresh_rejects_other_targets_topologies_and_kinds() {
         let runtime = Runtime::default();
         let domain = domain("default");
@@ -986,7 +1095,9 @@ mod tests {
             .collect(),
             error_policies: ErrorPolicies::handled_by_log(),
             from_where: HashMap::default(),
+            compiled_from_where: HashMap::default(),
             filter_where: None,
+            compiled_filter_where: HashMap::default(),
             materialized_state: Vec::new(),
             operation: RelayProcessorOperationTemplate::Deduplicator {
                 output_routes: RelayProcessorOutputsTemplate {
@@ -995,14 +1106,17 @@ mod tests {
                         construction: nervix_models::RouteConstruction::default(),
                         flush_policy: Some(RuntimeFlushPolicy::Immediate),
                         message_error_policy: MessageErrorPolicy::Log,
+                        compiled_program: None,
                     }],
                 },
                 deduplicate_on: vec![expression("input.event_id")],
                 max_time: Duration::from_secs(600),
+                compiled_key_program: None,
             },
         };
+        let revision = ProcessorPlanRevision::new();
         let mut node = template
-            .instantiate(&runtime, &domain, &None, 1)
+            .instantiate(&runtime, &domain, &None, 1, &revision)
             .await
             .expect("deduplicator template must instantiate");
         let refusal = |node: &mut RelayProcessorNode, desired: RelayProcessorTemplate| {

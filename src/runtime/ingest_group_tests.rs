@@ -11,7 +11,6 @@ use std::sync::Arc as StdArc;
 
 use ahash::HashMap;
 use nervix_connector::{IngestMetadataRow, NoIngestHeaders};
-use nervix_execution::sync::ArcSwapOption;
 use nervix_models::{
     AckMode, CodecJaqFormat, CodecJaqTransformations, CodecWireFormat, CreateCodec, CreateSchema,
     CreateWireSchema, ErrorPolicies, JsonType, ModelKind, ParseAsType, ResolvedCodecWireFormat,
@@ -1046,12 +1045,10 @@ async fn branched_root_without_children_acks_success() {
             processor_outputs: HashMap::default(),
         },
     };
-    let graph = StdArc::new(ArcSwapOption::from(None));
     let (acks, completion) = AckSet::root();
     let schema = test_schema(&[("tenant", ParseAsType::String)]);
 
     root.dispatch(
-        &graph,
         RelayRecordBatch::single(
             schema,
             string_branch_key("tenant", "acme"),
@@ -1100,8 +1097,8 @@ async fn branch_entrypoint_dispatches_an_ingestor_prepared_batch_immediately() {
         runtime,
         domain,
         named("notifications_ingestor"),
-        StdArc::new(ArcSwapOption::from(None)),
         BranchInstanceTemplate {
+            revision: ProcessorPlanRevision::new(),
             source_kind: ModelKind::Ingestor,
             source: named("notifications_ingestor"),
             root_relay: root_relay.clone(),
@@ -1208,9 +1205,9 @@ async fn ingestor_and_reingestor_routes_apply_size_boundaries_independently_per_
             runtime,
             domain,
             named(source),
-            StdArc::new(ArcSwapOption::from(None)),
             IngestorRouteTemplate {
                 branch: BranchInstanceTemplate {
+                    revision: ProcessorPlanRevision::new(),
                     source_kind,
                     source: named(source),
                     root_relay: root_relay.clone(),

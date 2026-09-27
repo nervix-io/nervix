@@ -34,6 +34,12 @@ Values a caller acts on belong in typed fields; display formatting happens when 
 reported. `anyhow` remains at integration and tooling boundaries whose caller has no domain choice
 to make, such as a foreign callback that only accepts a general error.
 
+Iceberg object storage retains the Iceberg storage error contract when it installs the node's
+HTTP resolver. Invalid object URLs are `DataInvalid`, and an unsupported Azure connection string
+is `FeatureUnsupported`. Building the storage HTTP client or an OpenDAL operation can fail as
+`Unexpected`, with the underlying error retained as its source. Those failures enter the existing
+sink failure and retry path; they do not release a staged record's acknowledgement before commit.
+
 The vocabulary is the innermost owner, and its Model operations report the same way. An alteration
 is applied to a copy of the stored Model, which replaces the original only when every operation
 succeeds, so a refusal leaves the stored Model unchanged. Each refusal names what it refused in
@@ -110,6 +116,14 @@ invalid-model failure naming the node and output in its diagnostic. Planning fai
 retain the selected entity or placement so an operator can correct the request. See [Control
 Plane](./control-plane.md) for activation and [Typed States And Validation
 Boundaries](./typed-states.md) for required state.
+
+Node startup validates execution memory limits before admitting any work. A Commands budget must
+hold both the bounded resident replication window and one bounded normalized command-state write;
+the larger requirement controls admission. Arithmetic that cannot represent either requirement is
+a typed execution-configuration failure. A budget below the selected requirement names the memory
+class, operation, configured budget, and required bytes, so the node fails startup with an
+actionable diagnostic instead of discovering insufficient storage capacity while applying a
+transaction.
 
 ## Runtime Message Errors
 

@@ -1,3 +1,4 @@
+@transaction_quiesce_qualification
 Feature: Web console transaction inspector
   Scenario: Inspecting an attached transaction shows its steps and preserves its commit basis
     Given a 1 node nervix cluster is started

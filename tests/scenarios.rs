@@ -153,8 +153,11 @@ const MAX_DURABLE_CATCH_UP_WRITES: usize = 128;
 /// The execution class a follower charges its decoded append batches to.
 const COMMANDS_MEMORY_LABEL: &str = "class=\"commands\"";
 const BULK_MEMORY_LABEL: &str = "class=\"bulk\"";
-const WEB_CONSOLE_FEATURE_NAMES: [&str; 2] =
-    ["Web console NSPL REPL", "Web console execution graph"];
+const WEB_CONSOLE_FEATURE_NAMES: [&str; 3] = [
+    "Web console NSPL REPL",
+    "Web console execution graph",
+    "Web console transaction inspector",
+];
 const WASM_STATE_RESET_FEATURE_NAME: &str = "Coordinated WASM processor state reset";
 const DEPENDENCY_LIFECYCLE_HELPER_ENV: &str = "NERVIX_DEPENDENCY_LIFECYCLE_HELPER";
 const DEPENDENCY_LIFECYCLE_STARTED: &str = "NERVIX_DEPENDENCY_LIFECYCLE_STARTED=";
@@ -238,6 +241,15 @@ struct FollowerCommandsMemoryObservation {
     task: AbortOnDropHandle<f64>,
 }
 
+/// Evidence retained across the replication and restart phases of the large transaction report
+/// qualification scenario.
+#[derive(Debug)]
+struct TransactionQualificationObservation {
+    leader: String,
+    retention_before: nervix_consensus::RaftLogRetention,
+    committed_inspection: Option<Box<nervix_models::TransactionInspection>>,
+}
+
 #[derive(cucumber::World, Default)]
 struct ScenarioWorld {
     scenario_execution_permit: Option<ScenarioExecutionPermit>,
@@ -317,6 +329,7 @@ struct ScenarioWorld {
     durable_catch_up: Option<DurableCatchUpObservation>,
     durable_catch_up_writer: Option<DurableCatchUpWriter>,
     follower_commands_memory: Option<FollowerCommandsMemoryObservation>,
+    transaction_qualification: Option<TransactionQualificationObservation>,
     cluster_config: TestClusterConfig,
     temp_root: Option<TempDir>,
     formatter_root: Option<TempDir>,
@@ -418,6 +431,7 @@ impl fmt::Debug for ScenarioWorld {
                 &self.avro_http_optional_fields.len(),
             )
             .field("burst_raft_retention_peak", &self.burst_raft_retention_peak)
+            .field("transaction_qualification", &self.transaction_qualification)
             .field("temp_root_initialized", &self.temp_root.is_some())
             .field("browser_initialized", &self.browser.is_some())
             .field(
@@ -5569,6 +5583,177 @@ async fn when_the_dns_fixture_answers_node_name_with(
         });
 }
 
+#[given("the HTTP mock endpoint is published under fixture DNS")]
+async fn given_http_mock_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    const NAME: &str = "http-source.nervix.test";
+    let endpoint = world
+        .placeholders
+        .get("mock_http_addr")
+        .expect("the HTTP mock server was started");
+    let mut url = url::Url::parse(endpoint).expect("the HTTP mock address is a URL");
+    let address = url
+        .host_str()
+        .expect("the HTTP mock address has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the HTTP mock listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service(NAME, address)
+        .expect("the cluster has a DNS fixture");
+    url.set_host(Some(NAME))
+        .expect("the fixture name is a valid URL host");
+    world.placeholders.insert(
+        "mock_http_dns_addr".to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+}
+
+#[then("the DNS fixture eventually receives a question for the HTTP mock")]
+async fn then_dns_fixture_queried_http_mock(world: &mut ScenarioWorld) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name("http-source.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+}
+
+#[given("the Iceberg endpoints are published under fixture DNS")]
+async fn given_iceberg_endpoints_have_fixture_dns(world: &mut ScenarioWorld) {
+    for (source, name, target) in [
+        (
+            "iceberg_rest_addr",
+            "iceberg-catalog.nervix.test",
+            "iceberg_rest_dns_addr",
+        ),
+        (
+            "rustfs_addr",
+            "iceberg-objects.nervix.test",
+            "rustfs_dns_addr",
+        ),
+    ] {
+        let endpoint = world
+            .placeholders
+            .get(source)
+            .expect("the Iceberg dependency was started");
+        let mut url = url::Url::parse(endpoint).expect("the Iceberg endpoint is a URL");
+        let address = url
+            .host_str()
+            .expect("the Iceberg endpoint has a host")
+            .parse::<std::net::IpAddr>()
+            .expect("the dependency listens on a literal address");
+        world
+            .cluster()
+            .publish_dns_service(name, address)
+            .expect("the cluster has a DNS fixture");
+        url.set_host(Some(name))
+            .expect("the fixture name is a valid URL host");
+        world.placeholders.insert(
+            target.to_string(),
+            url.to_string().trim_end_matches('/').to_string(),
+        );
+    }
+}
+
+#[then("the DNS fixture eventually receives Iceberg catalog and object-store questions")]
+async fn then_dns_fixture_queried_iceberg(world: &mut ScenarioWorld) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let catalog = world
+                .cluster()
+                .dns_questions_for_name("iceberg-catalog.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            let objects = world
+                .cluster()
+                .dns_questions_for_name("iceberg-objects.nervix.test")
+                .expect("the cluster has a DNS fixture");
+            if catalog > 0 && objects > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the Iceberg clients did not ask the configured DNS fixture within 30 seconds");
+}
+
+fn publish_http_fixture_name(world: &mut ScenarioWorld, source: &str, name: &str, target: &str) {
+    let endpoint = world
+        .placeholders
+        .get(source)
+        .expect("the HTTP dependency was started");
+    let mut url = url::Url::parse(endpoint).expect("the HTTP endpoint is a URL");
+    let address = url
+        .host_str()
+        .expect("the HTTP endpoint has a host")
+        .parse::<std::net::IpAddr>()
+        .expect("the dependency listens on a literal address");
+    world
+        .cluster()
+        .publish_dns_service(name, address)
+        .expect("the cluster has a DNS fixture");
+    url.set_host(Some(name))
+        .expect("the fixture name is a valid URL host");
+    world.placeholders.insert(
+        target.to_string(),
+        url.to_string().trim_end_matches('/').to_string(),
+    );
+}
+
+#[given("the Prometheus endpoint is published under fixture DNS")]
+async fn given_prometheus_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(
+        world,
+        "prometheus_addr",
+        "prometheus.nervix.test",
+        "prometheus_dns_addr",
+    );
+}
+
+#[given("the Sentry endpoint is published under fixture DNS")]
+async fn given_sentry_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(world, "sentry_dsn", "sentry.nervix.test", "sentry_dns_dsn");
+}
+
+#[given("the OTEL HTTP endpoint is published under fixture DNS")]
+async fn given_otel_http_endpoint_has_fixture_dns(world: &mut ScenarioWorld) {
+    publish_http_fixture_name(
+        world,
+        "otel_collector_http_addr",
+        "otel-http.nervix.test",
+        "otel_collector_dns_addr",
+    );
+}
+
+#[then(expr = "the DNS fixture eventually receives a question for {string}")]
+async fn then_dns_fixture_queried_name(world: &mut ScenarioWorld, name: String) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::task::consume_budget().await;
+            let count = world
+                .cluster()
+                .dns_questions_for_name(&name)
+                .expect("the cluster has a DNS fixture");
+            if count > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the HTTP client did not ask the configured DNS fixture within 10 seconds");
+}
+
 #[then("the DNS fixture received no questions for node names")]
 async fn then_the_dns_fixture_received_no_questions_for_node_names(world: &mut ScenarioWorld) {
     let questions = world
@@ -10682,6 +10867,19 @@ async fn then_last_inspection_reports(world: &mut ScenarioWorld, #[step] step: &
                 None => "none".to_string(),
             },
             "report operations" => inspection.report.operations().len().to_string(),
+            "execution steps" => inspection.report.execution_steps().len().to_string(),
+            "applied steps" => inspection
+                .report
+                .execution_steps()
+                .iter()
+                .filter(|step| {
+                    matches!(
+                        &step.actual().outcome,
+                        nervix_models::ExecutionStepOutcome::Applied
+                    )
+                })
+                .count()
+                .to_string(),
             "quiesce level" => inspection.report.summary().level().as_str().to_string(),
             other => panic!("unknown inspection field '{other}'"),
         };
@@ -11342,6 +11540,235 @@ async fn read_transaction_impact_report(
         .current_transaction_report(preview)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[given(expr = "a stopped transaction qualification graph with {int} relays is configured")]
+async fn given_stopped_transaction_qualification_graph(
+    world: &mut ScenarioWorld,
+    relay_count: usize,
+) {
+    let leader = current_leader_node(world).await;
+    let mut session = world
+        .cluster()
+        .open_session(&leader, &world.domain)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to open the transaction qualification setup session: {error}")
+        });
+    session
+        .run_command("CREATE SCHEMA qualification_event ( value I64 );")
+        .await
+        .unwrap_or_else(|error| {
+            panic!("failed to create the transaction qualification schema: {error}")
+        });
+    for index in 0..relay_count {
+        tokio::task::consume_budget().await;
+        let relay = format!("qualification_relay_{index:04}");
+        let command =
+            format!("CREATE RELAY {relay} SCHEMA qualification_event UNBRANCHED CAPACITY 1;");
+        session
+            .run_command(&command)
+            .await
+            .unwrap_or_else(|error| panic!("failed to create relay '{relay}': {error}"));
+    }
+}
+
+#[given("the leader raft log position and retained bytes are remembered")]
+async fn given_leader_raft_log_retention_is_remembered(world: &mut ScenarioWorld) {
+    let leader = running_leader_node(world).await;
+    let retention_before = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&leader))
+        .raft_log_retention();
+    world.transaction_qualification = Some(TransactionQualificationObservation {
+        leader,
+        retention_before,
+        committed_inspection: None,
+    });
+}
+
+#[when(expr = "client {string} queues {int} transaction qualification schema changes")]
+async fn when_named_client_queues_transaction_qualification_changes(
+    world: &mut ScenarioWorld,
+    name: String,
+    change_count: usize,
+) {
+    world.last_command_error = None;
+    world.last_command_output = None;
+    world.last_client_outcome = None;
+    let name = expand_placeholders(world, &name);
+    let client = world
+        .transaction_clients
+        .get(&name)
+        .unwrap_or_else(|| panic!("client '{name}' must be connected"))
+        .clone();
+    let begun = client
+        .execute("BEGIN;")
+        .await
+        .unwrap_or_else(|error| panic!("client '{name}' could not begin a transaction: {error}"));
+    assert!(
+        begun.succeeded(),
+        "client '{name}' must begin the qualification transaction: {}",
+        begun.message
+    );
+    for index in 0..change_count {
+        tokio::task::consume_budget().await;
+        let field = format!("qualification_field_{index:03}");
+        let command =
+            format!("ALTER SCHEMA qualification_event ADD FIELD {field} STRING OPTIONAL;");
+        let outcome = client
+            .execute(command.clone())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("client '{name}' qualification command failed: {command}: {error}")
+            });
+        assert!(
+            outcome.succeeded(),
+            "client '{name}' qualification command must succeed: {command}: {}",
+            outcome.message
+        );
+        world.last_command_output = Some(outcome.message.clone());
+        world.last_client_outcome = Some(outcome);
+    }
+}
+
+#[then(
+    expr = "the last JSON inspection matches its typed result, exceeds {int} bytes, and reports \
+            {int} operations and {int} execution steps"
+)]
+async fn then_last_json_inspection_is_complete_and_large(
+    world: &mut ScenarioWorld,
+    minimum_bytes: usize,
+    expected_operations: usize,
+    expected_steps: usize,
+) {
+    let outcome = world
+        .last_client_outcome
+        .as_ref()
+        .verified("the scenario executed a transaction inspection above");
+    let inspection = outcome
+        .inspection
+        .as_ref()
+        .verified("the successful inspection carries its typed result");
+    let rendered: serde_json::Value =
+        serde_json::from_str(&outcome.message).assured("FORMAT JSON renders one JSON document");
+    let typed = serde_json::to_value(inspection)
+        .assured("a typed transaction inspection has a JSON representation");
+    assert_eq!(
+        rendered, typed,
+        "the JSON presentation must contain the exact typed inspection"
+    );
+    assert!(
+        outcome.message.len() > minimum_bytes,
+        "the expanded inspection must exceed {minimum_bytes} bytes, but contained {} bytes",
+        outcome.message.len()
+    );
+    assert_eq!(inspection.report.operations().len(), expected_operations);
+    assert_eq!(inspection.report.execution_steps().len(), expected_steps);
+}
+
+#[then(expr = "the remembered raft log grew by more than {int} bytes")]
+async fn then_remembered_raft_log_grew_by_more_than(world: &mut ScenarioWorld, minimum_bytes: u64) {
+    let observation = world
+        .transaction_qualification
+        .as_ref()
+        .verified("the scenario remembered the leader's Raft log before queueing");
+    let retention_after = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&observation.leader))
+        .raft_log_retention();
+    let growth = retention_after
+        .retained_bytes
+        .checked_sub(observation.retention_before.retained_bytes)
+        .assured("the default retention policy does not purge this bounded transaction range");
+    assert!(
+        growth > minimum_bytes,
+        "the committed transaction log range must exceed {minimum_bytes} bytes; it grew by \
+         {growth} bytes from {:?} to {:?}",
+        observation.retention_before,
+        retention_after
+    );
+    assert!(
+        retention_after.last_log_index > observation.retention_before.last_log_index,
+        "queueing the transaction must advance the committed log range"
+    );
+}
+
+#[then(
+    expr = "within {string} node {string} retains transaction {string} with {int} report \
+            operations"
+)]
+async fn then_node_retains_transaction_report(
+    world: &mut ScenarioWorld,
+    duration: String,
+    node_id: String,
+    transaction_id: String,
+    expected_operations: usize,
+) {
+    let node_id = expand_placeholders(world, &node_id);
+    let transaction_id = expand_placeholders(world, &transaction_id);
+    let observer = world
+        .fault_injection
+        .consensus_observer(&crate::common::cluster::node_name(&node_id));
+    let deadline =
+        Instant::now() + humantime::parse_duration(&duration).assured("the step duration is valid");
+    let mut observed = String::new();
+    loop {
+        tokio::task::consume_budget().await;
+        assert!(
+            Instant::now() < deadline,
+            "node '{node_id}' did not retain transaction '{transaction_id}' with \
+             {expected_operations} operations within {duration}; last observation: {observed}"
+        );
+        if let Some(transaction) = observer.current_transaction(&transaction_id).await {
+            if let Some(identity) = transaction.latest_preview() {
+                match observer.current_transaction_report(identity).await {
+                    Ok(report) if report.operations().len() == expected_operations => return,
+                    Ok(report) => {
+                        observed = format!("{} report operations", report.operations().len());
+                    }
+                    Err(error) => observed = error.to_string(),
+                }
+            } else {
+                observed = "transaction has no preview".to_string();
+            }
+        } else {
+            observed = "transaction is absent".to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[then("the last transaction inspection is remembered for restart comparison")]
+async fn then_last_transaction_inspection_is_remembered(world: &mut ScenarioWorld) {
+    let inspection = world
+        .last_client_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.inspection.clone())
+        .verified("the preceding command returned a typed transaction inspection");
+    world
+        .transaction_qualification
+        .as_mut()
+        .verified("the scenario remembered its pre-transaction Raft state")
+        .committed_inspection = Some(inspection);
+}
+
+#[then("the last transaction inspection matches the report remembered before restart")]
+async fn then_last_transaction_inspection_matches_remembered(world: &mut ScenarioWorld) {
+    let actual = world
+        .last_client_outcome
+        .as_ref()
+        .and_then(|outcome| outcome.inspection.as_ref())
+        .verified("the post-restart command returned a typed transaction inspection");
+    let expected = world
+        .transaction_qualification
+        .as_ref()
+        .and_then(|observation| observation.committed_inspection.as_ref())
+        .verified("the scenario remembered the committed inspection before restart");
+    assert_eq!(
+        actual, expected,
+        "restart must preserve the complete retained transaction report"
+    );
 }
 
 #[then(

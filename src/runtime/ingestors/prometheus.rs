@@ -30,10 +30,16 @@ impl PrometheusIngestorStartPlan {
         let resolved = runtime
             .resolve_client_config(&ingestor.domain, client.mount.as_ref(), &client.config)
             .map_err(|error| ingestor.start_failure(error.to_string()))?;
+        let Some(dns) = runtime.dns() else {
+            return Err(
+                ingestor.start_failure("the node DNS resolver is not installed".to_string())
+            );
+        };
         PacedSourceStart {
             connector: PrometheusSourcePlan {
                 config: resolved.entries,
                 query,
+                dns: dns.clone(),
             },
             every,
             cadence_start: DomainCadenceStart::AfterInterval,

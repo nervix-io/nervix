@@ -85,7 +85,10 @@ verification. Use `DESCRIBE TRANSACTION [ '<id>' ] [ OPERATION <n> ] [ FORMAT TE
 explain what an open, committing, or retained transaction requires and changes before or after
 `COMMIT`. These two reads are allowed while a transaction is open, are sent on their own, and neither
 queues content nor shifts operation numbers. Read `NSPL Overview` for its forms and `Control Plane`
-→ `Inspecting A Transaction` for what each transaction state reports. Queue admission preflights each statement against the replicated prefix without
+→ `Inspecting A Transaction` for what each transaction state reports. Treat a successful inspection
+as one complete result: selecting an operation changes presentation focus without narrowing the
+transaction, and neither text, JSON, the Rust result, nor the browser graph paginates or truncates a
+large report. Queue admission preflights each statement against the replicated prefix without
 applying effects. Consecutive model mutations form one atomic run and report the run's effective
 base-to-final quiesce level at the current prefix; a lifecycle, domain, or resource statement ends
 that run, and a later run cannot repair it. `COMMIT` reports only the maximum level actually

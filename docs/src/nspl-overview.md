@@ -284,6 +284,9 @@ belong to the same user, and reading it never attaches it or selects its domain.
 statements were queued, and leads the report with that operation and the
 execution step it belongs to without narrowing the rest. `TEXT` is the default;
 `FORMAT JSON` prints the same report as one JSON document.
+Both formats contain the complete report. Large affected graphs and repeated execution steps are
+not paginated or shortened; plan client response memory and output handling for the transaction's
+accepted operation count and affected topology.
 In the Rust client, reading the attached transaction at its current queue position refreshes the
 preview supplied with a later `COMMIT`. An inspection of another id leaves that preview and the
 session binding untouched. After a stale-preview refusal, inspect the attached transaction again

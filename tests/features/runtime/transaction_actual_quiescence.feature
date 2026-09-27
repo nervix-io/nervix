@@ -1,3 +1,4 @@
+@transaction_quiesce_qualification
 Feature: Transaction actual quiescence
   @transaction_actual_quiescence
   Scenario Outline: A gate rejected before engagement stays dynamic in the transaction result
