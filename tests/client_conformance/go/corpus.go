@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,6 +71,33 @@ func choiceValue(kind session.ChoiceValue, table tableOf) (string, error) {
 		return fmt.Sprintf("model:%s/%s", strings.ToLower(session.EnumNamesModelKind[*node.Kind()]), node.Name()), nil
 	}
 	return "", fmt.Errorf("undeclared choice value %d", kind)
+}
+
+// clockLine renders a domain clock as the serving node has it installed.
+func clockLine(clock *session.DomainClockObservation) (string, error) {
+	generation := clock.Generation()
+	switch clock.StateType() {
+	case session.DomainClockObservedStateStoppedDomainClock:
+		return fmt.Sprintf("CLOCK generation=%d state=stopped", generation), nil
+	case session.DomainClockObservedStateUninstalledDomainClock:
+		return fmt.Sprintf("CLOCK generation=%d state=uninstalled", generation), nil
+	case session.DomainClockObservedStateUnpacedDomainClock:
+		return fmt.Sprintf("CLOCK generation=%d state=unpaced", generation), nil
+	case session.DomainClockObservedStatePacedDomainClock:
+		paced := new(session.PacedDomainClock)
+		if err := union(clock.State, paced); err != nil {
+			return "", err
+		}
+		rate := paced.TimeRate()
+		if paced.PeriodNanos() == 0 || rate == nil {
+			return "", errors.New("a paced clock lacks its period or rate")
+		}
+		return fmt.Sprintf(
+			"CLOCK generation=%d state=paced period=%d skew=%d origin=%d anchor=%d rate=f64:%016x",
+			generation, paced.PeriodNanos(), paced.SkewNanos(), paced.LogicalOriginUnixNanos(),
+			paced.UtcAnchorUnixNanos(), math.Float64bits(*rate)), nil
+	}
+	return "", fmt.Errorf("undeclared domain clock state %d", clock.StateType())
 }
 
 func frameRoot(frame []byte, identifier string) error {
@@ -290,6 +318,69 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 					optionalText(presentation.Group())))
 			}
 			return lines, nil
+		case session.ReplyBodyDomainClockAttachOutcome:
+			outcome := new(session.DomainClockAttachOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			message := text(outcome.Message())
+			switch outcome.DispositionType() {
+			case session.DomainClockAttachDispositionDomainClockAttached:
+				attached := new(session.DomainClockAttached)
+				if err := union(outcome.Disposition, attached); err != nil {
+					return nil, err
+				}
+				clock := attached.Clock(nil)
+				if clock == nil {
+					return nil, errors.New("an attached clock is missing")
+				}
+				line, err := clockLine(clock)
+				if err != nil {
+					return nil, err
+				}
+				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH attached domain=%s message=%s",
+					id, attached.Domain(), message), line}, nil
+			case session.DomainClockAttachDispositionDomainClockAlreadyAttached:
+				already := new(session.DomainClockAlreadyAttached)
+				if err := union(outcome.Disposition, already); err != nil {
+					return nil, err
+				}
+				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH already_attached domain=%s message=%s",
+					id, already.Domain(), message)}, nil
+			case session.DomainClockAttachDispositionDomainNotFound:
+				notFound := new(session.DomainNotFound)
+				if err := union(outcome.Disposition, notFound); err != nil {
+					return nil, err
+				}
+				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH domain_not_found domain=%s message=%s",
+					id, notFound.Domain(), message)}, nil
+			case session.DomainClockAttachDispositionRequestFailed:
+				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_ATTACH failed message=%s", id, message)}, nil
+			}
+			return nil, fmt.Errorf("undeclared attach disposition %d", outcome.DispositionType())
+		case session.ReplyBodyDomainClockDetachOutcome:
+			outcome := new(session.DomainClockDetachOutcome)
+			if err := union(value.Body, outcome); err != nil {
+				return nil, err
+			}
+			message := text(outcome.Message())
+			switch outcome.DispositionType() {
+			case session.DomainClockDetachDispositionDomainClockDetached:
+				detached := new(session.DomainClockDetached)
+				if err := union(outcome.Disposition, detached); err != nil {
+					return nil, err
+				}
+				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_DETACH detached domain=%s message=%s",
+					id, detached.Domain(), message)}, nil
+			case session.DomainClockDetachDispositionDomainClockNotAttached:
+				notAttached := new(session.DomainClockNotAttached)
+				if err := union(outcome.Disposition, notAttached); err != nil {
+					return nil, err
+				}
+				return []string{fmt.Sprintf("REPLY %d DOMAIN_CLOCK_DETACH not_attached domain=%s message=%s",
+					id, notAttached.Domain(), message)}, nil
+			}
+			return nil, fmt.Errorf("the corpus holds no %d detach disposition", outcome.DispositionType())
 		}
 		return nil, fmt.Errorf("the corpus holds no %s reply", value.BodyType())
 	case session.ServerBodySubscriptionRows:
@@ -334,6 +425,31 @@ func serverLines(frame []byte, fields, keys []field) ([]string, error) {
 		return []string{fmt.Sprintf("EVENT ENDED name=%s generation=%d reason=%s message=%s",
 			handle.Name(), handle.Generation(), session.EnumNamesSubscriptionEndReason[*reason],
 			text(ended.Message()))}, nil
+	case session.ServerBodyDomainClockObserved:
+		observed := new(session.DomainClockObserved)
+		if err := union(message.Body, observed); err != nil {
+			return nil, err
+		}
+		clock := observed.Clock(nil)
+		if clock == nil {
+			return nil, errors.New("an observed clock is missing")
+		}
+		line, err := clockLine(clock)
+		if err != nil {
+			return nil, err
+		}
+		return []string{"EVENT DOMAIN_CLOCK domain=" + string(observed.Domain()), line}, nil
+	case session.ServerBodyDomainClockAttachmentEnded:
+		ended := new(session.DomainClockAttachmentEnded)
+		if err := union(message.Body, ended); err != nil {
+			return nil, err
+		}
+		reason := ended.Reason()
+		if reason == nil {
+			return nil, errors.New("an ended attachment has no reason")
+		}
+		return []string{fmt.Sprintf("EVENT DOMAIN_CLOCK_ENDED domain=%s reason=%s", ended.Domain(),
+			session.EnumNamesDomainClockAttachmentEndReason[*reason])}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s message", message.BodyType())
 }
@@ -416,6 +532,14 @@ func clientLines(frame []byte) ([]string, error) {
 		cancel := new(session.CancelRequest)
 		cancel.Init(table.Bytes, table.Pos)
 		return []string{fmt.Sprintf("REQUEST %d CANCEL target=%d", id, cancel.TargetRequestId())}, nil
+	case session.ClientRequestAttachDomainClockRequest:
+		attach := new(session.AttachDomainClockRequest)
+		attach.Init(table.Bytes, table.Pos)
+		return []string{fmt.Sprintf("REQUEST %d ATTACH_DOMAIN_CLOCK domain=%s", id, attach.Domain())}, nil
+	case session.ClientRequestDetachDomainClockRequest:
+		detach := new(session.DetachDomainClockRequest)
+		detach.Init(table.Bytes, table.Pos)
+		return []string{fmt.Sprintf("REQUEST %d DETACH_DOMAIN_CLOCK domain=%s", id, detach.Domain())}, nil
 	}
 	return nil, fmt.Errorf("the corpus holds no %s request", message.RequestType())
 }

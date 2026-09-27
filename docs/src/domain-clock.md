@@ -238,6 +238,45 @@ Applying a cluster revision synchronizes all domain lifecycles before applying i
 joining node therefore cannot instantiate work and then discover that its clock mapping is absent.
 Removing a domain marks the shared lifecycle missing before node-local state is discarded.
 
+## Session Observation
+
+A session attached with `ATTACH DOMAIN CLOCK` observes the installation its serving node publishes.
+It binds no capability, takes no execution snapshot, reads no tick progress, and adds no
+interconnect traffic: every node serves attachments from its own installation, which it derives
+from the same committed revision as every other node.
+
+The runtime exposes an observer of one domain's lifecycle. The observer subscribes to the
+lifecycle's change notification before it reads the published installation, so a replacement
+published after any read wakes it. It maps each installation to the public observed clock, a
+vocabulary model shared by the server and the Rust client:
+
+| Installation | Observed clock |
+| --- | --- |
+| Missing | None: the attachment ends |
+| Stopped | Stopped, with its generation |
+| Uninstalled | Uninstalled, with its generation and no mapping |
+| Installed unpaced | Unpaced, with its generation |
+| Installed paced | Paced, with its generation, period, skew, and committed mapping |
+
+The session edge runs one delivery task per attached domain against its observer. The attach reply
+carries the observation read when the observer was created, and the task starts only once that
+reply is queued, remembering the observation the reply carried. On each wake it reads the newest
+installation and queues a frame on the session's control lane only when the observation differs
+from the one the client last received. Replacing an installation with an equal one publishes
+nothing, and neither an authority move within a generation nor the alteration pause changes the
+installation, so none of them wakes delivery. A frame waits for room on the control lane rather than
+buffering: changes published meanwhile collapse into the newest installation read after it is
+queued. A slow client therefore holds back at most one frame per attached domain and never receives
+an older observation after a newer one.
+
+Attach and detach run on the session's ordered lane, in order with its commands. Detach stops the
+delivery task and waits for it to end before queueing its reply, so no frame about the domain follows
+that reply. When the observer reports the domain missing, the task marks the attachment ending,
+queues the end frame with reason `DomainRemoved`, and ends. Because the mark precedes the frame, a
+request the client sends after reading the frame finds the attachment ending: an attach replaces it
+and a detach reports it not attached. The end of the session stops every delivery task without a
+frame. See [Domain Clock Attachment](./sessions.md#domain-clock-attachment) for the public contract.
+
 ## Execution-Time Snapshots
 
 The clock is sampled once when a unit of domain work is accepted. The resulting execution snapshot

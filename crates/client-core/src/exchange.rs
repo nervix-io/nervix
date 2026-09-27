@@ -8,7 +8,7 @@
 //!
 //! - **Owns.** Request identities, the waiters of an exchange, the reassembly of replies too large
 //!   for one frame, the subscriptions an exchange holds, and the delivery of unsolicited messages
-//!   to the client's event sinks.
+//!   and domain clock replies to the client's event sinks.
 //! - **Depends on.** The wire contract's frames and tonic's gRPC client.
 //! - **Must not know.** What a request means, how its outcome is routed, or how a lost exchange is
 //!   recovered.
@@ -36,6 +36,7 @@ use triomphe::Arc;
 
 use crate::{
     connection::GrpcConnector,
+    domain_clock::DomainClockAttachments,
     error::ClientError,
     events::{ServerEvent, SubscriptionEvent, SubscriptionRowsEvent},
     subscriptions::DesiredSubscriptions,
@@ -360,6 +361,8 @@ pub(crate) struct EventSinks {
     pub(crate) leadership: watch::Sender<Option<Leadership>>,
     /// The latest complete domain list, replaced the same way.
     pub(crate) domains: watch::Sender<Option<Vec<DomainInfo>>>,
+    /// The domain clocks the client follows, and the events about them.
+    pub(crate) clocks: DomainClockAttachments,
 }
 
 impl EventSinks {
@@ -372,6 +375,7 @@ impl EventSinks {
 
     pub(crate) fn close_generation(&self, generation: &Arc<()>) {
         self.desired.ended(generation);
+        self.clocks.exchange_ended(generation);
         self.subscriptions.close(generation);
         self.notices.close(generation);
     }
@@ -398,6 +402,7 @@ impl SessionEvents {
                 notices: notices.clone(),
                 leadership,
                 domains,
+                clocks: DomainClockAttachments::new(),
             },
             leadership: observed_leadership,
             domains: Mutex::new(observed_domains),
@@ -693,6 +698,13 @@ impl ExchangeReader {
                 .acknowledge(&opened.subscription, &self.generation);
         }
         self.subscriptions.track(&reply.body);
+        match &reply.body {
+            ReplyBody::DomainClockAttach(outcome) => {
+                self.sinks.clocks.apply_attach(outcome, &self.generation);
+            }
+            ReplyBody::DomainClockDetach(outcome) => self.sinks.clocks.apply_detach(outcome),
+            _ => {}
+        }
         let waiter = self.pending.lock().take(reply.request_id);
         let Some(waiter) = waiter else {
             // No request of this exchange waits under the identity, so no one is owed the reply.
@@ -775,6 +787,14 @@ impl ExchangeReader {
                     return ReaderFlow::Continue;
                 }
                 self.forward(SubscriptionEvent::Ended(ended))
+            }
+            wire::ServerEvent::DomainClockObserved(observed) => {
+                self.sinks.clocks.apply_observed(observed, &self.generation);
+                ReaderFlow::Continue
+            }
+            wire::ServerEvent::DomainClockAttachmentEnded(ended) => {
+                self.sinks.clocks.apply_ended(ended, &self.generation);
+                ReaderFlow::Continue
             }
             // No reply follows for any request still in flight; the waiters observe the closed
             // session when the exchange ends.
