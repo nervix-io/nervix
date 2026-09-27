@@ -792,8 +792,8 @@ fn format_emit_sink(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsp
         } => format!(
             "HTTP client={} method={} path={}",
             client.as_str(),
-            expression_to_nspl(method).map_err(error_stack::Report::new)?,
-            expression_to_nspl(path).map_err(error_stack::Report::new)?
+            expression_to_nspl(method)?,
+            expression_to_nspl(path)?
         ),
         EmitSink::Kafka { client, topic } => {
             format!("KAFKA client={} topic={}", client.as_str(), topic.as_str())

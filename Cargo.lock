@@ -6944,6 +6944,7 @@ name = "nervix-dataflow-graph"
 version = "0.1.0-dev"
 dependencies = [
  "ascii-dag",
+ "error-stack",
  "serde",
  "serde_json",
  "strum 0.26.3",
@@ -7130,6 +7131,7 @@ version = "0.1.0-dev"
 dependencies = [
  "ariadne 0.5.1",
  "clap",
+ "error-stack",
  "ignore",
  "meticulous",
  "nervix-models",

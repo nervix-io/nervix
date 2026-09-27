@@ -5,12 +5,11 @@
 //! - **Depends on.** Vocabulary types and their declared semantic order.
 //! - **Must not know.** Parser recovery, registry state or runtime execution.
 
-use std::{
-    fmt::{Display, Formatter},
-    num::NonZeroU64,
-};
+use std::{fmt::Display, num::NonZeroU64};
 
+use error_stack::Report;
 use meticulous::OptionExt as _;
+use thiserror::Error;
 
 use crate::{
     AlterDeduplicator, AlterDeduplicatorOperation, AlterEmitter, AlterEmitterOperation,
@@ -20,7 +19,7 @@ use crate::{
     AlterSchemaOperation, AlterWireSchema, AlterWireSchemaOperation, AssignmentTargetScope,
     AvroType, BinaryOperator, BranchEviction, BranchSelection, ClickHouseValueMapping,
     ClientConfigEntry, ClientResourceMount, CodecEncoding, CodecEncodingRule,
-    CodecJaqTransformations, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
+    CodecJaqTransformations, CodecName, CodecWireFormat, CorrelationTimeoutAction, CreateBranch,
     CreateClientAzureBlob, CreateClientClickHouse, CreateClientGcs, CreateClientHttp,
     CreateClientIcebergRest, CreateClientKafka, CreateClientMongoDb, CreateClientMqtt,
     CreateClientMySql, CreateClientNats, CreateClientOtel, CreateClientPostgres,
@@ -32,8 +31,8 @@ use crate::{
     CreateSchema, CreateSignalingProtocol, CreateUdf, CreateVhost, CreateWasmProcessor,
     CreateWindowProcessor, CreateWireSchema, DescribeTransaction, DomainPace, DomainStartPoint,
     EmitSink, EmitterAckWindow, EmitterBatchPolicy, EmitterBody, EmitterPublishingMode,
-    EndpointIngestMode, Expression, FieldName, FieldScope, FlushPolicy, GeneralErrorPolicy,
-    IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
+    EndpointIngestMode, Expression, FieldName, FieldScope, Float64Literal, FlushPolicy,
+    GeneralErrorPolicy, IcebergCatalog, InferencerTensorDeclaration, InferencerTensorDimension,
     InferencerTensorMapping, IngestSource, IngestTimestampSource, Inheritance, InputCollectPolicy,
     InspectionFormat, JsonType, KafkaIngestMode, KafkaOffsetMode, Literal, MaterializedRelayState,
     MaterializedStateDependency, MaterializedStatePolicy, MembershipOperator, MessageErrorPolicy,
@@ -226,7 +225,10 @@ fn precedence(expression: &Expression) -> u8 {
 ///
 /// Callers pass the operator's own level for a left operand and one level tighter for a right
 /// operand, which is what makes the left-associative ladder round-trip.
-fn operand_to_nspl(expression: &Expression, minimum: u8) -> Result<String, CanonicalNsplError> {
+fn operand_to_nspl(
+    expression: &Expression,
+    minimum: u8,
+) -> error_stack::Result<String, CanonicalNsplError> {
     let rendered = expression_to_nspl(expression)?;
     if precedence(expression) < minimum {
         Ok(format!("({rendered})"))
@@ -235,10 +237,12 @@ fn operand_to_nspl(expression: &Expression, minimum: u8) -> Result<String, Canon
     }
 }
 
-pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNsplError> {
+pub fn expression_to_nspl(
+    expression: &Expression,
+) -> error_stack::Result<String, CanonicalNsplError> {
     match expression {
         Expression::Literal(Literal::I64(value)) => Ok(value.to_string()),
-        Expression::Literal(Literal::F64(value)) => float_literal(value.value()),
+        Expression::Literal(Literal::F64(value)) => float_literal(*value),
         Expression::Literal(Literal::Bool(value)) => Ok(value.to_string().to_ascii_uppercase()),
         Expression::Literal(Literal::String(value)) => Ok(string_literal(value)),
         Expression::Literal(Literal::Null) => Ok("NULL".to_string()),
@@ -437,7 +441,7 @@ pub fn expression_to_nspl(expression: &Expression) -> Result<String, CanonicalNs
 
 fn route_construction_to_nspl(
     construction: &RouteConstruction,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     Ok(route_construction_clauses(construction)?
         .into_iter()
         .map(|clause| match clause {
@@ -452,7 +456,7 @@ fn route_construction_to_nspl(
 /// The clauses of a route's construction, in the order they must be written.
 fn route_construction_clauses(
     construction: &RouteConstruction,
-) -> Result<Vec<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<Clause>, CanonicalNsplError> {
     let mut clauses: Vec<Clause> = Vec::new();
     if let Some(inherit) = &construction.inherit {
         let clause = match inherit {
@@ -503,7 +507,7 @@ fn route_construction_clauses(
                         expression_to_nspl(&assignment.value)?
                     ))
                 })
-                .collect::<Result<Vec<_>, CanonicalNsplError>>()?,
+                .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?,
         ));
     }
     if let Some(where_clause) = &construction.where_clause {
@@ -528,7 +532,7 @@ fn route_construction_clauses(
                         .collect::<Result<Vec<_>, _>>()?
                         .join(", ")
                 )))
-                .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
                 .join(", ")
         )));
     }
@@ -537,7 +541,7 @@ fn route_construction_clauses(
 
 fn value_mapping_items(
     values: &[ClickHouseValueMapping],
-) -> Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
     values
         .iter()
         .map(|mapping| {
@@ -550,7 +554,9 @@ fn value_mapping_items(
         .collect()
 }
 
-fn value_mappings_to_nspl(values: &[ClickHouseValueMapping]) -> Result<String, CanonicalNsplError> {
+fn value_mappings_to_nspl(
+    values: &[ClickHouseValueMapping],
+) -> error_stack::Result<String, CanonicalNsplError> {
     Ok(value_mapping_items(values)?.join(", "))
 }
 
@@ -563,7 +569,9 @@ fn branch_selection_to_nspl(branching: &BranchSelection) -> String {
     }
 }
 
-fn output_branch_to_nspl(branching: &OutputBranch) -> Result<String, CanonicalNsplError> {
+fn output_branch_to_nspl(
+    branching: &OutputBranch,
+) -> error_stack::Result<String, CanonicalNsplError> {
     match branching {
         OutputBranch::BranchedBy {
             branch,
@@ -584,27 +592,26 @@ fn output_branch_to_nspl(branching: &OutputBranch) -> Result<String, CanonicalNs
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why a Model has no canonical NSPL rendering.
+///
+/// Each variant is a value NSPL has no spelling for. It carries that typed value or names the Model
+/// holding it, so a caller can locate the refusal without reading its message.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CanonicalNsplError {
-    UnrepresentableFloat { value: String },
-    InvalidCodec { reason: String },
+    /// An `F64` literal that is NaN or infinite. NSPL spells a float only as a finite decimal.
+    #[error("cannot represent non-finite float in NSPL: {}", .value.value())]
+    UnrepresentableFloat { value: Float64Literal },
+    /// A `SYSLOG` codec that declares encoding rules. Its record shape is fixed, so it has no
+    /// fields a rule could encode.
+    #[error("invalid codec `{codec}`: SYSLOG codec must not declare encoding rules")]
+    SyslogEncodingRules { codec: CodecName },
+    /// A codec whose wire format runs JAQ transformations but declares no program to run.
+    #[error("invalid codec `{codec}`: codec is missing JAQ transformation")]
+    MissingJaqTransformation { codec: CodecName },
 }
-
-impl Display for CanonicalNsplError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnrepresentableFloat { value } => {
-                write!(f, "cannot represent non-finite float in NSPL: {value}")
-            }
-            Self::InvalidCodec { reason } => write!(f, "invalid codec: {reason}"),
-        }
-    }
-}
-
-impl std::error::Error for CanonicalNsplError {}
 
 impl AlterPlacement {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
@@ -646,7 +653,7 @@ impl Statement {
     /// Unlike [`Model::to_canonical_nspl`], this covers the whole executable language -- the
     /// creation modifiers, the domain lifecycle, administration, and the read-only queries -- so a
     /// parsed script can be rendered back statement for statement.
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         match self {
             Self::Create(create) => {
                 let rendered = create.body.to_canonical_nspl()?;
@@ -942,7 +949,7 @@ fn subscription_literal_to_nspl(literal: &SubscriptionLiteral) -> String {
 }
 
 impl<Version: Display> Model<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         match self {
             Self::Schema(schema) => schema.to_canonical_nspl(),
             Self::WireJsonSchema(schema) => wire_schema_to_nspl("JSON", schema),
@@ -995,7 +1002,7 @@ impl<Version: Display> Model<Version> {
 }
 
 impl CreatePlacement {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut rendered = format!(
             "CREATE PLACEMENT {} FROM {} TO {} {}",
             self.name.as_str(),
@@ -1020,7 +1027,7 @@ impl CreatePlacement {
 }
 
 impl CreateUdf {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let arguments = self
             .arguments
             .iter()
@@ -1056,12 +1063,12 @@ impl CreateUdf {
 }
 
 impl CreateSchema {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let fields = self
             .fields
             .iter()
             .map(schema_field_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?;
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?;
 
         Ok(block_statement(
             format!("CREATE SCHEMA {}", self.name.as_str()),
@@ -1071,12 +1078,12 @@ impl CreateSchema {
 }
 
 impl AlterSchema {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
             .map(alter_schema_operation_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
             "ALTER SCHEMA {} {operations};",
@@ -1086,7 +1093,7 @@ impl AlterSchema {
 }
 
 impl AlterRelay {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
@@ -1115,12 +1122,12 @@ impl AlterRelay {
 }
 
 impl AlterJunction {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
             .map(alter_processor_operation_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
             "ALTER JUNCTION {} {operations};",
@@ -1130,12 +1137,12 @@ impl AlterJunction {
 }
 
 impl AlterDeduplicator {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
             .map(alter_deduplicator_operation_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
             "ALTER DEDUPLICATOR {} {operations};",
@@ -1145,12 +1152,12 @@ impl AlterDeduplicator {
 }
 
 impl AlterReorderer {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
             .map(alter_reorderer_operation_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
             "ALTER REORDERER {} {operations};",
@@ -1160,12 +1167,12 @@ impl AlterReorderer {
 }
 
 impl AlterReingestor {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
             .map(alter_processor_operation_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
             "ALTER REINGESTOR {} {operations};",
@@ -1175,12 +1182,12 @@ impl AlterReingestor {
 }
 
 impl AlterGenerator {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
             .map(alter_generator_operation_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
             "ALTER GENERATOR {} {operations};",
@@ -1190,12 +1197,12 @@ impl AlterGenerator {
 }
 
 impl AlterEmitter {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
             .map(alter_emitter_operation_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
             "ALTER EMITTER {} {operations};",
@@ -1205,12 +1212,12 @@ impl AlterEmitter {
 }
 
 impl AlterIngestor {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let operations = self
             .operations
             .iter()
             .map(alter_ingestor_operation_to_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
         Ok(format!(
             "ALTER INGESTOR {} {operations};",
@@ -1221,19 +1228,19 @@ impl AlterIngestor {
 
 pub fn alter_json_wire_schema_to_canonical_nspl(
     alter: &AlterWireSchema<JsonType>,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     alter_wire_schema_to_nspl("JSON", alter)
 }
 
 pub fn alter_cbor_wire_schema_to_canonical_nspl(
     alter: &AlterWireSchema<JsonType>,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     alter_wire_schema_to_nspl("CBOR", alter)
 }
 
 pub fn alter_avro_wire_schema_to_canonical_nspl(
     alter: &AlterWireSchema<AvroType>,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     alter_wire_schema_to_nspl("AVRO", alter)
 }
 
@@ -1273,12 +1280,12 @@ macro_rules! impl_standard_client_canonical_nspl {
     ($($Client:ident => $type_label:literal, $pooling:ident;)+) => {
         $(
             impl<Version: Display> $Client<Version> {
-                pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+                pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
                     let config = self
                         .config
                         .iter()
                         .map(ClientConfigEntry::to_canonical_nspl)
-                        .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                        .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
                         .join(", ");
 
                     let mut clauses = client_head_clauses!(self, $type_label, $pooling);
@@ -1318,12 +1325,12 @@ impl_standard_client_canonical_nspl! {
 }
 
 impl<Version: Display> CreateClientS3<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let config = self
             .config
             .iter()
             .map(ClientConfigEntry::to_canonical_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
 
         Ok(format!(
@@ -1336,12 +1343,12 @@ impl<Version: Display> CreateClientS3<Version> {
 }
 
 impl<Version: Display> CreateClientWebsockets<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let config = self
             .config
             .iter()
             .map(ClientConfigEntry::to_canonical_nspl)
-            .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+            .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
             .join(", ");
 
         Ok(clause_statement(
@@ -1377,7 +1384,7 @@ fn signaling_protocol_clause(signaling_protocol: Option<&SignalingProtocolName>)
 }
 
 impl<Version: Display> CreateVhost<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let tls = match &self.tls {
             Some(tls) => format!(
                 " WITH TLS {} VERSION {}",
@@ -1396,7 +1403,7 @@ impl<Version: Display> CreateVhost<Version> {
 }
 
 impl CreateEndpoint {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         Ok(format!(
             "CREATE ENDPOINT {} ON {} PATH {} TYPE {}{};",
             self.name.as_str(),
@@ -1409,7 +1416,7 @@ impl CreateEndpoint {
 }
 
 impl<Version: Display> CreateSignalingProtocol<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = String::new();
         if self.on_connect.accept_data {
             clauses.push_str(" ACCEPT DATA");
@@ -1444,7 +1451,7 @@ impl<Version: Display> CreateSignalingProtocol<Version> {
 }
 
 impl<Version: Display> SignalingWireFormat<Version> {
-    fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let Self::Protobuf(config) = self else {
             return Ok(self.as_ref().to_string());
         };
@@ -1466,7 +1473,7 @@ impl<Version: Display> SignalingWireFormat<Version> {
 }
 
 impl SignalingWaitStep {
-    fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut rendered = format!(" WAIT JAQ {}", jaq_program_list_to_nspl(&self.matchers));
         if !self.fail_matchers.is_empty() {
             rendered.push_str(" FAIL JAQ ");
@@ -1492,7 +1499,7 @@ fn jaq_program_list_to_nspl(programs: &[String]) -> String {
 }
 
 impl<Version: Display> CreateCodec<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let (wire, transformations) = match &self.wire_format {
             CodecWireFormat::Json { wire_schema } => (
                 format!("WIRE JSON SCHEMA {}", wire_schema.as_str()),
@@ -1508,9 +1515,9 @@ impl<Version: Display> CreateCodec<Version> {
             ),
             CodecWireFormat::Syslog => {
                 if !self.encoding_rules.is_empty() {
-                    return Err(CanonicalNsplError::InvalidCodec {
-                        reason: "SYSLOG codec must not declare encoding rules".to_string(),
-                    });
+                    return Err(Report::new(CanonicalNsplError::SyslogEncodingRules {
+                        codec: self.name.clone(),
+                    }));
                 }
                 ("SYSLOG".to_string(), String::new())
             }
@@ -1519,7 +1526,7 @@ impl<Version: Display> CreateCodec<Version> {
                 transformations,
             } => (
                 format.as_ref().to_string(),
-                codec_jaq_transformations_to_nspl(transformations)?,
+                codec_jaq_transformations_to_nspl(&self.name, transformations)?,
             ),
             CodecWireFormat::Protobuf(config) => {
                 let protobuf_config = config
@@ -1541,7 +1548,7 @@ impl<Version: Display> CreateCodec<Version> {
                         protobuf_config,
                         string_literal(&config.message)
                     ),
-                    codec_jaq_transformations_to_nspl(&config.transformations)?,
+                    codec_jaq_transformations_to_nspl(&self.name, &config.transformations)?,
                 )
             }
         };
@@ -1622,13 +1629,15 @@ fn split_config_entries(entries: &str) -> Vec<String> {
     items
 }
 
+/// Renders the JAQ programs a codec runs; `codec` names the codec a refusal reports.
 fn codec_jaq_transformations_to_nspl(
+    codec: &CodecName,
     transformations: &CodecJaqTransformations,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     if !transformations.has_any() {
-        return Err(CanonicalNsplError::InvalidCodec {
-            reason: "codec is missing JAQ transformation".to_string(),
-        });
+        return Err(Report::new(CanonicalNsplError::MissingJaqTransformation {
+            codec: codec.clone(),
+        }));
     }
     let mut rendered = String::from(" WITH JAQ TRANSFORMATIONS");
     if let Some(program) = transformations.on_ingestion.as_deref() {
@@ -1661,7 +1670,7 @@ fn codec_encoding_to_nspl(encoding: CodecEncoding) -> &'static str {
 }
 
 impl CreateBranch {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut rendered = format!(
             "CREATE BRANCH {} SCHEMA {} TTL {}",
             self.name.as_str(),
@@ -1681,7 +1690,7 @@ impl CreateBranch {
 }
 
 impl CreateIngestor {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let timestamp = match &self.timestamp_source {
             Some(IngestTimestampSource::Now) => " TIMESTAMP NOW".to_string(),
             Some(IngestTimestampSource::At(field)) => format!(" TIMESTAMP AT {}", field.as_str()),
@@ -1712,7 +1721,7 @@ impl CreateIngestor {
 }
 
 impl CreateGenerator {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![
             Clause::line(format!(
                 "USING MATERIALIZED STATE {}",
@@ -1731,7 +1740,7 @@ impl CreateGenerator {
 }
 
 impl CreateRelay {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut rendered = format!(
             "CREATE RELAY {} SCHEMA {}",
             self.name.as_str(),
@@ -1756,7 +1765,7 @@ impl CreateRelay {
 }
 
 impl<Version: Display> CreateLookup<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         Ok(format!(
             "CREATE HASH MAP {} KEY {} FROM RESOURCE {} VERSION {} PATH {} DECODE USING {};",
             self.name.as_str(),
@@ -1799,7 +1808,9 @@ fn collect_policy_to_nspl(policy: &InputCollectPolicy) -> String {
     format!("COLLECT FOR {}{max_batch_size}", policy.collect_for)
 }
 
-fn message_error_policy_to_nspl(policy: &MessageErrorPolicy) -> Result<String, CanonicalNsplError> {
+fn message_error_policy_to_nspl(
+    policy: &MessageErrorPolicy,
+) -> error_stack::Result<String, CanonicalNsplError> {
     Ok(match policy {
         MessageErrorPolicy::Ignore => "ON MESSAGE ERROR IGNORE".to_string(),
         MessageErrorPolicy::Log => "ON MESSAGE ERROR LOG".to_string(),
@@ -1813,7 +1824,7 @@ fn message_error_policy_to_nspl(policy: &MessageErrorPolicy) -> Result<String, C
                         expression_to_nspl(&assignment.value)?
                     ))
                 })
-                .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
                 .join(", ");
             format!(
                 "ON MESSAGE ERROR SEND TO {} SET {}",
@@ -1826,7 +1837,7 @@ fn message_error_policy_to_nspl(policy: &MessageErrorPolicy) -> Result<String, C
 
 fn materialized_state_policy_to_nspl(
     policy: &MaterializedStatePolicy,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     match policy {
         MaterializedStatePolicy::RequiredSkip => Ok("REQUIRED SKIP".to_string()),
         MaterializedStatePolicy::RequiredWait => Ok("REQUIRED WAIT".to_string()),
@@ -1841,7 +1852,7 @@ fn materialized_state_policy_to_nspl(
                         expression_to_nspl(&assignment.value)?
                     ))
                 })
-                .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+                .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
                 .join(", ")
         )),
     }
@@ -1855,7 +1866,7 @@ fn general_error_policy_to_nspl(policy: &GeneralErrorPolicy) -> &'static str {
 }
 
 impl CreateJunction {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -1879,7 +1890,7 @@ impl CreateJunction {
 }
 
 impl CreateDeduplicator {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -1912,7 +1923,7 @@ impl CreateDeduplicator {
 }
 
 impl CreateCorrelator {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![
             Clause::line(prefixed_processor_inputs_to_nspl("LEFT", &self.left)?),
             Clause::line(prefixed_processor_inputs_to_nspl("RIGHT", &self.right)?),
@@ -1953,7 +1964,7 @@ fn correlation_timeout_action_to_nspl(action: &CorrelationTimeoutAction) -> Stri
 }
 
 impl CreateReorderer {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -1986,7 +1997,7 @@ impl CreateReorderer {
 }
 
 impl CreateWindowProcessor {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -2021,7 +2032,7 @@ impl CreateWindowProcessor {
 }
 
 impl CreateEmitter {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let flush_policy = format!(" {}", self.flush_policy.to_canonical_nspl());
         let commit_policy = match self.sink.commit_policy() {
             Some((policy, max_size)) => format!(" {}", commit_policy_to_nspl(policy, max_size)),
@@ -2093,7 +2104,7 @@ fn window_bound_to_nspl(bound: &WindowBound) -> String {
 }
 
 impl CreateReingestor {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -2114,7 +2125,7 @@ impl CreateReingestor {
 }
 
 impl<Version: Display> CreateInferencer<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -2152,7 +2163,7 @@ impl<Version: Display> CreateInferencer<Version> {
 }
 
 impl<Version: Display> CreateWasmProcessor<Version> {
-    pub fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    pub fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let mut clauses = vec![Clause::line(format!(
             "FROM {}",
             processor_inputs_to_nspl(&self.from)?
@@ -2195,7 +2206,7 @@ impl<Version: Display> CreateWasmProcessor<Version> {
 
 fn inference_mapping_items(
     mappings: &[InferencerTensorMapping],
-) -> Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
     mappings
         .iter()
         .map(|mapping| {
@@ -2223,7 +2234,7 @@ fn inference_mapping_items(
 
 fn inference_output_schema_items(
     declarations: &[InferencerTensorDeclaration],
-) -> Result<Vec<String>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<String>, CanonicalNsplError> {
     declarations
         .iter()
         .map(|declaration| {
@@ -2251,7 +2262,7 @@ fn inference_output_schema_items(
 fn from_relay_to_nspl(
     relay: &RelayName,
     from_where: &[ProcessorInputWhere],
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     let where_suffix = from_where
         .iter()
         .find(|item| item.relay == *relay)
@@ -2263,7 +2274,9 @@ fn from_relay_to_nspl(
     Ok(format!("{}{where_suffix}", relay.as_str()))
 }
 
-fn processor_inputs_to_nspl(inputs: &ProcessorInputs) -> Result<String, CanonicalNsplError> {
+fn processor_inputs_to_nspl(
+    inputs: &ProcessorInputs,
+) -> error_stack::Result<String, CanonicalNsplError> {
     let relays = inputs
         .from
         .iter()
@@ -2280,7 +2293,7 @@ fn processor_inputs_to_nspl(inputs: &ProcessorInputs) -> Result<String, Canonica
 fn prefixed_processor_inputs_to_nspl(
     prefix: &str,
     inputs: &ProcessorInputs,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     Ok(format!(
         "{prefix} FROM {}",
         processor_inputs_to_nspl(inputs)?
@@ -2290,7 +2303,7 @@ fn prefixed_processor_inputs_to_nspl(
 /// The optional `FILTER WHERE` clause of a processor.
 fn filter_where_clause(
     filter_where: &Option<Expression>,
-) -> Result<Option<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Option<Clause>, CanonicalNsplError> {
     filter_where
         .as_ref()
         .map(|condition| {
@@ -2305,7 +2318,7 @@ fn filter_where_clause(
 /// One clause per materialized-state dependency, in declaration order.
 fn materialized_state_clauses(
     dependencies: &[MaterializedStateDependency],
-) -> Result<Vec<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<Clause>, CanonicalNsplError> {
     dependencies
         .iter()
         .map(|dependency| {
@@ -2323,7 +2336,7 @@ fn processor_tail_clauses(
     branched_by: &BranchSelection,
     materialized_state: &[MaterializedStateDependency],
     outputs: &ProcessorOutputs,
-) -> Result<Vec<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<Clause>, CanonicalNsplError> {
     let mut clauses = vec![Clause::line(branch_selection_to_nspl(branched_by))];
     clauses.extend(materialized_state_clauses(materialized_state)?);
     clauses.extend(processor_outputs_clauses(outputs)?);
@@ -2333,12 +2346,14 @@ fn processor_tail_clauses(
 /// The routes of a processor, each as a `TO <relay>` group.
 fn processor_outputs_clauses(
     outputs: &ProcessorOutputs,
-) -> Result<Vec<Clause>, CanonicalNsplError> {
+) -> error_stack::Result<Vec<Clause>, CanonicalNsplError> {
     outputs.routes.iter().map(processor_output_clause).collect()
 }
 
 /// One route: the relay it targets, then the clauses that construct and emit its messages.
-fn processor_output_clause(output: &crate::ProcessorOutput) -> Result<Clause, CanonicalNsplError> {
+fn processor_output_clause(
+    output: &crate::ProcessorOutput,
+) -> error_stack::Result<Clause, CanonicalNsplError> {
     let mut nested = route_construction_clauses(&output.construction)?;
 
     if let Some(branch) = &output.branch {
@@ -2357,7 +2372,9 @@ fn processor_output_clause(output: &crate::ProcessorOutput) -> Result<Clause, Ca
     ))
 }
 
-fn processor_output_to_nspl(output: &crate::ProcessorOutput) -> Result<String, CanonicalNsplError> {
+fn processor_output_to_nspl(
+    output: &crate::ProcessorOutput,
+) -> error_stack::Result<String, CanonicalNsplError> {
     let flush = match &output.flush_policy {
         Some(policy) => format!(" {}", policy.to_canonical_nspl()),
         None => String::new(),
@@ -2382,7 +2399,7 @@ fn processor_output_to_nspl(output: &crate::ProcessorOutput) -> Result<String, C
     ))
 }
 
-fn schema_field_to_nspl(field: &SchemaField) -> Result<String, CanonicalNsplError> {
+fn schema_field_to_nspl(field: &SchemaField) -> error_stack::Result<String, CanonicalNsplError> {
     Ok(format!(
         "{} {}{}{}",
         field.name.as_str(),
@@ -2394,7 +2411,7 @@ fn schema_field_to_nspl(field: &SchemaField) -> Result<String, CanonicalNsplErro
 
 fn alter_deduplicator_operation_to_nspl(
     operation: &AlterDeduplicatorOperation,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     match operation {
         AlterDeduplicatorOperation::Processor(operation) => {
             alter_processor_operation_to_nspl(operation)
@@ -2415,7 +2432,7 @@ fn alter_deduplicator_operation_to_nspl(
 
 fn alter_reorderer_operation_to_nspl(
     operation: &AlterReordererOperation,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     match operation {
         AlterReordererOperation::Processor(operation) => {
             alter_processor_operation_to_nspl(operation)
@@ -2434,7 +2451,7 @@ fn alter_reorderer_operation_to_nspl(
 
 fn alter_generator_operation_to_nspl(
     operation: &AlterGeneratorOperation,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     match operation {
         AlterGeneratorOperation::SetMaterializedState { relay } => {
             Ok(format!("SET MATERIALIZED STATE {}", relay.as_str()))
@@ -2458,20 +2475,18 @@ fn alter_generator_operation_to_nspl(
 
 fn alter_processor_operation_to_nspl(
     operation: &AlterProcessorOperation,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     match operation {
         AlterProcessorOperation::AddFrom {
             relay,
             where_clause,
-        } => Ok(format!(
-            "ADD FROM {}{}",
-            relay.as_str(),
-            where_clause
-                .as_ref()
-                .map(|expression| Ok(format!(" WHERE {}", expression_to_nspl(expression)?)))
-                .transpose()?
-                .unwrap_or_default()
-        )),
+        } => {
+            let where_suffix = match where_clause {
+                Some(expression) => format!(" WHERE {}", expression_to_nspl(expression)?),
+                None => String::new(),
+            };
+            Ok(format!("ADD FROM {}{where_suffix}", relay.as_str()))
+        }
         AlterProcessorOperation::DropFrom { relay } => Ok(format!("DROP FROM {}", relay.as_str())),
         AlterProcessorOperation::AlterFromSetWhere {
             relay,
@@ -2525,7 +2540,7 @@ fn alter_processor_operation_to_nspl(
 
 fn alter_emitter_operation_to_nspl(
     operation: &AlterEmitterOperation,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     match operation {
         AlterEmitterOperation::AddFrom {
             relay,
@@ -2603,7 +2618,7 @@ fn alter_emitter_operation_to_nspl(
 
 fn alter_ingestor_operation_to_nspl(
     operation: &AlterIngestorOperation,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     match operation {
         AlterIngestorOperation::SetSource { source } => {
             Ok(format!("SET FROM {}", ingest_source_to_nspl(source)))
@@ -2648,7 +2663,7 @@ fn alter_ingestor_operation_to_nspl(
 
 fn alter_schema_operation_to_nspl(
     operation: &AlterSchemaOperation,
-) -> Result<String, CanonicalNsplError> {
+) -> error_stack::Result<String, CanonicalNsplError> {
     match operation {
         AlterSchemaOperation::AddField { field } => {
             Ok(format!("ADD FIELD {}", schema_field_to_nspl(field)?))
@@ -2684,7 +2699,7 @@ fn sensitive_suffix(sensitive: bool) -> &'static str {
 fn wire_schema_to_nspl<T>(
     format_kw: &str,
     schema: &CreateWireSchema<T>,
-) -> Result<String, CanonicalNsplError>
+) -> error_stack::Result<String, CanonicalNsplError>
 where
     T: NativeTypeToNspl,
 {
@@ -2692,7 +2707,7 @@ where
         .fields
         .iter()
         .map(wire_schema_field_to_nspl::<T>)
-        .collect::<Result<Vec<_>, CanonicalNsplError>>()?;
+        .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?;
 
     Ok(block_statement(
         format!(
@@ -2707,7 +2722,7 @@ where
 fn alter_wire_schema_to_nspl<T>(
     format_kw: &str,
     alter: &AlterWireSchema<T>,
-) -> Result<String, CanonicalNsplError>
+) -> error_stack::Result<String, CanonicalNsplError>
 where
     T: NativeTypeToNspl,
 {
@@ -2715,7 +2730,7 @@ where
         .operations
         .iter()
         .map(alter_wire_schema_operation_to_nspl::<T>)
-        .collect::<Result<Vec<_>, CanonicalNsplError>>()?
+        .collect::<error_stack::Result<Vec<_>, CanonicalNsplError>>()?
         .join(", ");
     Ok(format!(
         "ALTER WIRE {format_kw} SCHEMA {} {operations};",
@@ -2725,7 +2740,7 @@ where
 
 fn alter_wire_schema_operation_to_nspl<T>(
     operation: &AlterWireSchemaOperation<T>,
-) -> Result<String, CanonicalNsplError>
+) -> error_stack::Result<String, CanonicalNsplError>
 where
     T: NativeTypeToNspl,
 {
@@ -2755,7 +2770,9 @@ where
     }
 }
 
-fn wire_schema_field_to_nspl<T>(field: &WireSchemaField<T>) -> Result<String, CanonicalNsplError>
+fn wire_schema_field_to_nspl<T>(
+    field: &WireSchemaField<T>,
+) -> error_stack::Result<String, CanonicalNsplError>
 where
     T: NativeTypeToNspl,
 {
@@ -2772,7 +2789,7 @@ fn optional_suffix(optional: bool) -> &'static str {
 }
 
 impl ClientConfigEntry {
-    fn to_canonical_nspl(&self) -> Result<String, CanonicalNsplError> {
+    fn to_canonical_nspl(&self) -> error_stack::Result<String, CanonicalNsplError> {
         let key = string_literal(&self.key);
         let value = string_literal(&self.value);
         Ok(format!("{key} = {value}"))
@@ -3199,7 +3216,9 @@ impl EmitterPublishingMode {
 ///
 /// Only sinks carrying a `VALUES` map have clauses of their own; the rest name themselves fully on
 /// one line. Splitting here is what keeps a wide column mapping from becoming one enormous line.
-fn emit_sink_clauses(sink: &EmitSink) -> Result<(String, Vec<Clause>), CanonicalNsplError> {
+fn emit_sink_clauses(
+    sink: &EmitSink,
+) -> error_stack::Result<(String, Vec<Clause>), CanonicalNsplError> {
     /// A sink that carries a `VALUES` map, split into the text naming it, that map, and the
     /// clauses written after the map.
     struct MappedSink<'sink> {
@@ -3312,7 +3331,7 @@ fn conflict_clauses(conflict_action: String) -> Vec<Clause> {
     clauses
 }
 
-fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
+fn emit_sink_to_nspl(sink: &EmitSink) -> error_stack::Result<String, CanonicalNsplError> {
     match sink {
         EmitSink::Http {
             client,
@@ -3363,16 +3382,13 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             } else {
                 string_literal(queue)
             };
-            let fifo_group = fifo_group
-                .as_ref()
-                .map(|group| match group {
-                    SqsFifoGroup::FromBranch => Ok(" FIFO GROUP FROM BRANCH".to_string()),
-                    SqsFifoGroup::Expression(expression) => {
-                        Ok(format!(" FIFO GROUP {}", expression_to_nspl(expression)?))
-                    }
-                })
-                .transpose()?
-                .unwrap_or_default();
+            let fifo_group = match fifo_group {
+                Some(SqsFifoGroup::FromBranch) => " FIFO GROUP FROM BRANCH".to_string(),
+                Some(SqsFifoGroup::Expression(expression)) => {
+                    format!(" FIFO GROUP {}", expression_to_nspl(expression)?)
+                }
+                None => String::new(),
+            };
             Ok(format!(
                 "SQS {} QUEUE {}{}",
                 client.as_str(),
@@ -3394,14 +3410,12 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
                 OtelSignal::Logs => "LOGS".to_string(),
                 OtelSignal::Traces => "TRACES".to_string(),
                 OtelSignal::Metric(metric) => {
-                    let description = metric
-                        .description
-                        .as_ref()
-                        .map(|description| {
-                            Ok(format!(" DESCRIPTION {}", string_literal(description)))
-                        })
-                        .transpose()?
-                        .unwrap_or_default();
+                    let description = match &metric.description {
+                        Some(description) => {
+                            format!(" DESCRIPTION {}", string_literal(description))
+                        }
+                        None => String::new(),
+                    };
                     let kind = match &metric.kind {
                         OtelMetricKind::Gauge => "GAUGE".to_string(),
                         OtelMetricKind::Sum {
@@ -3435,19 +3449,16 @@ fn emit_sink_to_nspl(sink: &EmitSink) -> Result<String, CanonicalNsplError> {
             } else {
                 format!(" RESOURCE {{{}}}", value_mappings_to_nspl(resource)?)
             };
-            let scope = scope
-                .as_ref()
-                .map(|scope| {
-                    let version = scope
-                        .version
-                        .as_ref()
-                        .map(|version| Ok(format!(" VERSION {}", string_literal(version))))
-                        .transpose()?
-                        .unwrap_or_default();
-                    Ok(format!(" SCOPE {}{version}", string_literal(&scope.name)))
-                })
-                .transpose()?
-                .unwrap_or_default();
+            let scope = match scope {
+                Some(scope) => {
+                    let version = match &scope.version {
+                        Some(version) => format!(" VERSION {}", string_literal(version)),
+                        None => String::new(),
+                    };
+                    format!(" SCOPE {}{version}", string_literal(&scope.name))
+                }
+                None => String::new(),
+            };
             Ok(format!(
                 "OTEL {} {} VALUES {{{}}}{}{}{}",
                 client.as_str(),
@@ -3639,11 +3650,12 @@ fn parse_as_to_keyword(parse_as: &ParseAsType) -> String {
 ///
 /// `f64`'s `Display` drops a zero fraction, so `80.0` would otherwise render as `80` and reparse as
 /// an `I64`. NSPL decides float-versus-integer purely on the presence of a decimal point.
-fn float_literal(value: f64) -> Result<String, CanonicalNsplError> {
+fn float_literal(literal: Float64Literal) -> error_stack::Result<String, CanonicalNsplError> {
+    let value = literal.value();
     if !value.is_finite() {
-        return Err(CanonicalNsplError::UnrepresentableFloat {
-            value: value.to_string(),
-        });
+        return Err(Report::new(CanonicalNsplError::UnrepresentableFloat {
+            value: literal,
+        }));
     }
 
     let rendered = value.to_string();
@@ -3987,7 +3999,7 @@ mod tests {
     #[test]
     fn canonical_error_display_includes_original_value() {
         let err = super::CanonicalNsplError::UnrepresentableFloat {
-            value: "inf".to_string(),
+            value: crate::Float64Literal::new(f64::INFINITY),
         };
         assert_eq!(
             err.to_string(),
@@ -4832,6 +4844,89 @@ mod tests {
     }
 
     #[test]
+    fn renders_optional_clauses_only_when_the_model_declares_them() {
+        let add_from = |where_clause| crate::AlterProcessorOperation::AddFrom {
+            relay: named("incoming"),
+            where_clause,
+        };
+        let alter = crate::AlterJunction {
+            junction: named("route_events"),
+            operations: vec![
+                add_from(None),
+                add_from(Some(scoped_field(FieldScope::Input, "active"))),
+            ],
+        };
+        assert_eq!(
+            alter.to_canonical_nspl().expect("must render"),
+            "ALTER JUNCTION route_events ADD FROM incoming, ADD FROM incoming WHERE input.active;"
+        );
+
+        let sqs = |fifo_group| EmitSink::Sqs {
+            client: named("sqs_main"),
+            queue: "orders_queue".to_string(),
+            fifo_group,
+        };
+        assert_eq!(
+            super::emit_sink_to_nspl(&sqs(Some(crate::SqsFifoGroup::FromBranch)))
+                .expect("must render"),
+            "SQS sqs_main QUEUE orders_queue FIFO GROUP FROM BRANCH"
+        );
+        assert_eq!(
+            super::emit_sink_to_nspl(&sqs(Some(crate::SqsFifoGroup::Expression(scoped_field(
+                FieldScope::Input,
+                "tenant"
+            )))))
+            .expect("must render"),
+            "SQS sqs_main QUEUE orders_queue FIFO GROUP input.tenant"
+        );
+
+        let otel = EmitSink::Otel {
+            client: named("otel_main"),
+            signal: crate::OtelSignal::Metric(crate::OtelMetric {
+                name: "queue.depth".to_string(),
+                unit: "1".to_string(),
+                description: None,
+                kind: crate::OtelMetricKind::Gauge,
+            }),
+            values: vec![crate::ClickHouseValueMapping {
+                column: "value".to_string(),
+                expression: scoped_field(FieldScope::Input, "depth"),
+            }],
+            attributes: Vec::new(),
+            resource: Vec::new(),
+            scope: Some(crate::OtelScope {
+                name: "nervix".to_string(),
+                version: None,
+            }),
+        };
+        assert_eq!(
+            super::emit_sink_to_nspl(&otel).expect("must render"),
+            "OTEL otel_main METRIC 'queue.depth' UNIT '1' GAUGE VALUES {'value' = input.depth} \
+             SCOPE 'nervix'"
+        );
+
+        let default_policy = crate::MaterializedStatePolicy::Default(vec![crate::Assignment {
+            target: crate::AssignmentTarget::bare(named("tier")),
+            value: Expression::Literal(Literal::String("basic".to_string())),
+        }]);
+        assert_eq!(
+            super::materialized_state_policy_to_nspl(&default_policy).expect("must render"),
+            "DEFAULT { tier = 'basic' }"
+        );
+
+        let cbor = crate::AlterWireSchema {
+            schema: named("orders_wire"),
+            operations: vec![crate::AlterWireSchemaOperation::DropField {
+                field: named("note"),
+            }],
+        };
+        assert_eq!(
+            crate::alter_cbor_wire_schema_to_canonical_nspl(&cbor).expect("must render"),
+            "ALTER WIRE CBOR SCHEMA orders_wire DROP FIELD note;"
+        );
+    }
+
+    #[test]
     fn renders_postgres_conflict_action_canonical() {
         let emitter = CreateEmitter {
             name: named("emit_notifications"),
@@ -5429,7 +5524,112 @@ mod tests {
     #[test]
     fn refuses_to_render_non_finite_floats() {
         for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-            expression_to_nspl(&float_value(value)).expect_err("must not render");
+            let error = expression_to_nspl(&float_value(value)).expect_err("must not render");
+            assert_eq!(
+                error.current_context(),
+                &super::CanonicalNsplError::UnrepresentableFloat {
+                    value: crate::Float64Literal::new(value),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_statement_holding_a_non_finite_float_reports_the_literal_it_cannot_spell() {
+        let junction = CreateJunction {
+            name: named("scored_orders"),
+            from: ProcessorInputs::single(named("orders")),
+            output_routes: flushed_outputs("scored"),
+            branched_by: BranchSelection::unbranched(),
+            mode: AckMode::Attached,
+            filter_where: Some(Expression::Binary {
+                operator: BinaryOperator::LessThan,
+                left: Box::new(scoped_field(FieldScope::Input, "score")),
+                right: Box::new(float_value(f64::NEG_INFINITY)),
+            }),
+            materialized_state: Vec::new(),
+        };
+        let statement = crate::Statement::Create(crate::CreateStatement::new(
+            Box::new(Model::Junction(junction)),
+            false,
+        ));
+
+        let error = statement
+            .to_canonical_nspl()
+            .expect_err("an infinite literal has no NSPL spelling");
+
+        assert_eq!(
+            error.current_context(),
+            &super::CanonicalNsplError::UnrepresentableFloat {
+                value: crate::Float64Literal::new(f64::NEG_INFINITY),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "cannot represent non-finite float in NSPL: -inf"
+        );
+    }
+
+    #[test]
+    fn a_codec_without_a_spelling_names_itself_and_the_rule_it_breaks() {
+        let syslog: CreateCodec = CreateCodec {
+            name: named("syslog_codec"),
+            wire_format: CodecWireFormat::Syslog,
+            schema: named("syslog_event"),
+            encoding_rules: vec![CodecEncodingRule {
+                field: named("timestamp"),
+                encoding: CodecEncoding::Rfc3339,
+            }],
+        };
+        let error = syslog
+            .to_canonical_nspl()
+            .expect_err("a SYSLOG codec has no fields to encode");
+        assert_eq!(
+            error.current_context(),
+            &super::CanonicalNsplError::SyslogEncodingRules {
+                codec: named("syslog_codec"),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "invalid codec `syslog_codec`: SYSLOG codec must not declare encoding rules"
+        );
+
+        let no_programs = CodecJaqTransformations::default();
+        let jaq: CreateCodec = CreateCodec {
+            name: named("jaq_codec"),
+            wire_format: CodecWireFormat::JaqNative {
+                format: CodecJaqFormat::Json,
+                transformations: no_programs.clone(),
+            },
+            schema: named("orders"),
+            encoding_rules: Vec::new(),
+        };
+        let protobuf: CreateCodec = CreateCodec {
+            name: named("proto_codec"),
+            wire_format: CodecWireFormat::Protobuf(CodecProtobufConfig {
+                resource: named("proto_bundle"),
+                resource_version: 3,
+                config: Vec::new(),
+                message: "nervix.test.Order".to_string(),
+                batch_message: None,
+                transformations: no_programs,
+            }),
+            schema: named("orders"),
+            encoding_rules: Vec::new(),
+        };
+        for (codec, name) in [(jaq, "jaq_codec"), (protobuf, "proto_codec")] {
+            let error = codec
+                .to_canonical_nspl()
+                .expect_err("a JAQ-transformed codec needs a program");
+            assert_eq!(
+                error.current_context(),
+                &super::CanonicalNsplError::MissingJaqTransformation { codec: named(name) }
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("invalid codec `{name}`: codec is missing JAQ transformation")
+            );
         }
     }
 

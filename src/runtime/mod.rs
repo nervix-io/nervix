@@ -313,8 +313,8 @@ use emitter_buffer::{
 use emitter_encoding::EncodedRecordSink;
 use emitter_ordering_group::{CompiledOrderingGroup, OrderingGroupError, OrderingGroups};
 use emitter_publishing::{
-    EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterSink,
-    EmitterSinkState, RejectedEmitterRecord, await_emitter_confirmation,
+    EmitterPublishBatchOwner, EmitterPublishControl, EmitterPublishFailure, EmitterPublishResult,
+    EmitterSink, EmitterSinkState, RejectedEmitterRecord, await_emitter_confirmation,
     emitter_unavailable_reason, finish_record_sink_publish, finish_rejected_records,
 };
 use emitter_retry::{

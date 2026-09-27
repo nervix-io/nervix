@@ -1,5 +1,6 @@
 use std::num::NonZeroU32;
 
+use error_stack::Report;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 use strum::AsRefStr;
@@ -126,12 +127,15 @@ pub enum AlterWireSchemaError {
 }
 
 impl CreateSchema {
-    pub fn apply_alter(&mut self, alter: &AlterSchema) -> Result<(), AlterSchemaError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterSchema,
+    ) -> error_stack::Result<(), AlterSchemaError> {
         if self.name != alter.schema {
-            return Err(AlterSchemaError::SchemaNameMismatch {
+            return Err(Report::new(AlterSchemaError::SchemaNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.schema.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -145,7 +149,7 @@ impl CreateSchema {
     fn apply_alter_operation(
         &mut self,
         operation: &AlterSchemaOperation,
-    ) -> Result<(), AlterSchemaError> {
+    ) -> error_stack::Result<(), AlterSchemaError> {
         match operation {
             AlterSchemaOperation::AddField { field } => {
                 self.ensure_field_absent(&field.name)?;
@@ -154,7 +158,7 @@ impl CreateSchema {
             AlterSchemaOperation::DropField { field } => {
                 let index = self.field_index(field)?;
                 if self.fields.len() == 1 {
-                    return Err(AlterSchemaError::CannotDropLastField);
+                    return Err(Report::new(AlterSchemaError::CannotDropLastField));
                 }
                 self.fields.remove(index);
             }
@@ -179,20 +183,22 @@ impl CreateSchema {
         Ok(())
     }
 
-    fn field_index(&self, field: &FieldName) -> Result<usize, AlterSchemaError> {
+    fn field_index(&self, field: &FieldName) -> error_stack::Result<usize, AlterSchemaError> {
         self.fields
             .iter()
             .position(|candidate| candidate.name == *field)
-            .ok_or_else(|| AlterSchemaError::FieldNotFound {
-                field: field.clone(),
+            .ok_or_else(|| {
+                Report::new(AlterSchemaError::FieldNotFound {
+                    field: field.clone(),
+                })
             })
     }
 
-    fn ensure_field_absent(&self, field: &FieldName) -> Result<(), AlterSchemaError> {
+    fn ensure_field_absent(&self, field: &FieldName) -> error_stack::Result<(), AlterSchemaError> {
         if self.fields.iter().any(|candidate| candidate.name == *field) {
-            return Err(AlterSchemaError::FieldAlreadyExists {
+            return Err(Report::new(AlterSchemaError::FieldAlreadyExists {
                 field: field.clone(),
-            });
+            }));
         }
         Ok(())
     }
@@ -201,16 +207,16 @@ impl CreateSchema {
         &self,
         source: &FieldName,
         target: &FieldName,
-    ) -> Result<(), AlterSchemaError> {
+    ) -> error_stack::Result<(), AlterSchemaError> {
         if source != target
             && self
                 .fields
                 .iter()
                 .any(|candidate| candidate.name == *target)
         {
-            return Err(AlterSchemaError::RenameTargetAlreadyExists {
+            return Err(Report::new(AlterSchemaError::RenameTargetAlreadyExists {
                 field: target.clone(),
-            });
+            }));
         }
         Ok(())
     }
@@ -220,12 +226,15 @@ impl<T> CreateWireSchema<T>
 where
     T: Clone,
 {
-    pub fn apply_alter(&mut self, alter: &AlterWireSchema<T>) -> Result<(), AlterWireSchemaError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterWireSchema<T>,
+    ) -> error_stack::Result<(), AlterWireSchemaError> {
         if self.name != alter.schema {
-            return Err(AlterWireSchemaError::SchemaNameMismatch {
+            return Err(Report::new(AlterWireSchemaError::SchemaNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.schema.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -239,7 +248,7 @@ where
     fn apply_alter_operation(
         &mut self,
         operation: &AlterWireSchemaOperation<T>,
-    ) -> Result<(), AlterWireSchemaError> {
+    ) -> error_stack::Result<(), AlterWireSchemaError> {
         match operation {
             AlterWireSchemaOperation::SetMode { mode } => {
                 self.strictness = *mode;
@@ -251,7 +260,7 @@ where
             AlterWireSchemaOperation::DropField { field } => {
                 let index = self.field_index(field)?;
                 if self.fields.len() == 1 {
-                    return Err(AlterWireSchemaError::CannotDropLastField);
+                    return Err(Report::new(AlterWireSchemaError::CannotDropLastField));
                 }
                 self.fields.remove(index);
             }
@@ -272,20 +281,25 @@ where
         Ok(())
     }
 
-    fn field_index(&self, field: &FieldName) -> Result<usize, AlterWireSchemaError> {
+    fn field_index(&self, field: &FieldName) -> error_stack::Result<usize, AlterWireSchemaError> {
         self.fields
             .iter()
             .position(|candidate| candidate.name == *field)
-            .ok_or_else(|| AlterWireSchemaError::FieldNotFound {
-                field: field.clone(),
+            .ok_or_else(|| {
+                Report::new(AlterWireSchemaError::FieldNotFound {
+                    field: field.clone(),
+                })
             })
     }
 
-    fn ensure_field_absent(&self, field: &FieldName) -> Result<(), AlterWireSchemaError> {
+    fn ensure_field_absent(
+        &self,
+        field: &FieldName,
+    ) -> error_stack::Result<(), AlterWireSchemaError> {
         if self.fields.iter().any(|candidate| candidate.name == *field) {
-            return Err(AlterWireSchemaError::FieldAlreadyExists {
+            return Err(Report::new(AlterWireSchemaError::FieldAlreadyExists {
                 field: field.clone(),
-            });
+            }));
         }
         Ok(())
     }
@@ -294,16 +308,18 @@ where
         &self,
         source: &FieldName,
         target: &FieldName,
-    ) -> Result<(), AlterWireSchemaError> {
+    ) -> error_stack::Result<(), AlterWireSchemaError> {
         if source != target
             && self
                 .fields
                 .iter()
                 .any(|candidate| candidate.name == *target)
         {
-            return Err(AlterWireSchemaError::RenameTargetAlreadyExists {
-                field: target.clone(),
-            });
+            return Err(Report::new(
+                AlterWireSchemaError::RenameTargetAlreadyExists {
+                    field: target.clone(),
+                },
+            ));
         }
         Ok(())
     }
@@ -665,7 +681,7 @@ mod tests {
                     operations: vec![operation],
                 })
                 .expect_err("alter should fail");
-            assert_eq!(error, expected);
+            assert_eq!(error.current_context(), &expected);
             assert_eq!(schema, original);
         }
     }
@@ -689,7 +705,10 @@ mod tests {
             })
             .expect_err("alter should fail");
 
-        assert_eq!(error, AlterSchemaError::CannotDropLastField);
+        assert_eq!(
+            error.current_context(),
+            &AlterSchemaError::CannotDropLastField
+        );
         assert_eq!(schema.fields.len(), 1);
     }
 
@@ -742,5 +761,155 @@ mod tests {
                 optional: true,
             }
         );
+    }
+
+    #[test]
+    fn rejects_an_internal_schema_alteration_aimed_elsewhere_or_renaming_onto_a_field() {
+        let original = CreateSchema {
+            name: schema_name("events"),
+            fields: vec![
+                SchemaField {
+                    name: field("id"),
+                    ty: ParseAsType::U64,
+                    optional: false,
+                    sensitive: false,
+                },
+                SchemaField {
+                    name: field("note"),
+                    ty: ParseAsType::String,
+                    optional: true,
+                    sensitive: false,
+                },
+            ],
+        };
+
+        let mut schema = original.clone();
+        let error = schema
+            .apply_alter(&AlterSchema {
+                schema: schema_name("other"),
+                operations: Vec::new(),
+            })
+            .expect_err("the alteration names another schema");
+        assert_eq!(
+            error.current_context(),
+            &AlterSchemaError::SchemaNameMismatch {
+                stored: schema_name("events"),
+                requested: schema_name("other"),
+            }
+        );
+
+        let error = schema
+            .apply_alter(&AlterSchema {
+                schema: schema_name("events"),
+                operations: vec![AlterSchemaOperation::RenameField {
+                    field: field("note"),
+                    to: field("id"),
+                }],
+            })
+            .expect_err("the rename target already exists");
+        assert_eq!(
+            error.current_context(),
+            &AlterSchemaError::RenameTargetAlreadyExists { field: field("id") }
+        );
+        assert_eq!(schema, original);
+    }
+
+    #[test]
+    fn rejects_invalid_wire_schema_operations_without_partial_application() {
+        let original = CreateWireSchema {
+            name: wire_schema("payload"),
+            strictness: WireSchemaStrictness::Strict,
+            fields: vec![
+                WireSchemaField {
+                    name: field("id"),
+                    ty: JsonType::Integer,
+                    optional: false,
+                },
+                WireSchemaField {
+                    name: field("note"),
+                    ty: JsonType::String,
+                    optional: true,
+                },
+            ],
+        };
+        let set_loose = AlterWireSchemaOperation::SetMode {
+            mode: WireSchemaStrictness::Loose,
+        };
+        let cases = [
+            (
+                AlterWireSchemaOperation::AddField {
+                    field: original.fields[0].clone(),
+                },
+                AlterWireSchemaError::FieldAlreadyExists { field: field("id") },
+            ),
+            (
+                AlterWireSchemaOperation::DropField {
+                    field: field("missing"),
+                },
+                AlterWireSchemaError::FieldNotFound {
+                    field: field("missing"),
+                },
+            ),
+            (
+                AlterWireSchemaOperation::RenameField {
+                    field: field("note"),
+                    to: field("id"),
+                },
+                AlterWireSchemaError::RenameTargetAlreadyExists { field: field("id") },
+            ),
+            (
+                AlterWireSchemaOperation::SetFieldType {
+                    field: field("missing"),
+                    ty: JsonType::Object,
+                },
+                AlterWireSchemaError::FieldNotFound {
+                    field: field("missing"),
+                },
+            ),
+        ];
+
+        for (operation, expected) in cases {
+            let mut schema = original.clone();
+            let error = schema
+                .apply_alter(&AlterWireSchema {
+                    schema: wire_schema("payload"),
+                    operations: vec![set_loose.clone(), operation],
+                })
+                .expect_err("alter should fail");
+            assert_eq!(error.current_context(), &expected);
+            assert_eq!(schema, original);
+        }
+
+        let mut schema = original.clone();
+        let error = schema
+            .apply_alter(&AlterWireSchema {
+                schema: wire_schema("other"),
+                operations: vec![set_loose],
+            })
+            .expect_err("the alteration names another wire schema");
+        assert_eq!(
+            error.current_context(),
+            &AlterWireSchemaError::SchemaNameMismatch {
+                stored: wire_schema("payload"),
+                requested: wire_schema("other"),
+            }
+        );
+
+        let error = schema
+            .apply_alter(&AlterWireSchema {
+                schema: wire_schema("payload"),
+                operations: vec![
+                    AlterWireSchemaOperation::DropField {
+                        field: field("note"),
+                    },
+                    AlterWireSchemaOperation::DropField { field: field("id") },
+                ],
+            })
+            .expect_err("the last wire field stays");
+        assert_eq!(
+            error.current_context(),
+            &AlterWireSchemaError::CannotDropLastField
+        );
+        assert_eq!(schema, original);
     }
 }

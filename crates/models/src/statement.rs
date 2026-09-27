@@ -8,6 +8,7 @@
 
 use std::{
     collections::BTreeMap,
+    marker::PhantomData,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     ops::{Deref, DerefMut},
 };
@@ -1054,7 +1055,7 @@ impl CreatePlacement {
         to: Vec<ModelName>,
         policy: PlacementPolicy,
         rank: Option<NonZeroU64>,
-    ) -> Result<Self, AlterPlacementError> {
+    ) -> error_stack::Result<Self, AlterPlacementError> {
         let mut placement = Self {
             name,
             from,
@@ -1067,12 +1068,15 @@ impl CreatePlacement {
         Ok(placement)
     }
 
-    pub fn apply_alter(&mut self, alter: &AlterPlacement) -> Result<(), AlterPlacementError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterPlacement,
+    ) -> error_stack::Result<(), AlterPlacementError> {
         if self.name != alter.placement {
-            return Err(AlterPlacementError::PlacementNameMismatch {
+            return Err(Report::new(AlterPlacementError::PlacementNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.placement.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -1094,12 +1098,12 @@ impl CreatePlacement {
         Ok(())
     }
 
-    pub fn validate(&self) -> Result<(), AlterPlacementError> {
+    pub fn validate(&self) -> error_stack::Result<(), AlterPlacementError> {
         if self.from.is_empty() {
-            return Err(AlterPlacementError::EmptyFrom);
+            return Err(Report::new(AlterPlacementError::EmptyFrom));
         }
         if self.to.is_empty() {
-            return Err(AlterPlacementError::EmptyTo);
+            return Err(Report::new(AlterPlacementError::EmptyTo));
         }
         Ok(())
     }
@@ -1681,21 +1685,24 @@ impl EmitterBody {
 }
 
 impl CreateEmitter {
-    pub fn apply_alter(&mut self, alter: &AlterEmitter) -> Result<(), AlterEmitterError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterEmitter,
+    ) -> error_stack::Result<(), AlterEmitterError> {
         if self.name != alter.emitter {
-            return Err(AlterEmitterError::EmitterNameMismatch {
+            return Err(Report::new(AlterEmitterError::EmitterNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.emitter.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
         for operation in &alter.operations {
             candidate.apply_alter_operation(operation)?;
         }
-        candidate
-            .validate_batch()
-            .map_err(|report| AlterEmitterError::Batch(report.current_context().clone()))?;
+        if let Some(violation) = candidate.batch_contract_violation() {
+            return Err(Report::new(AlterEmitterError::Batch(violation)));
+        }
         *self = candidate;
         Ok(())
     }
@@ -1703,38 +1710,47 @@ impl CreateEmitter {
     /// Checks the batching clause against what this emitter's sink requires of it: present where
     /// the sink has no unbounded write, and no larger than a payload the destination can carry.
     pub fn validate_batch(&self) -> error_stack::Result<(), EmitterBatchContractError> {
+        match self.batch_contract_violation() {
+            Some(violation) => Err(Report::new(violation)),
+            None => Ok(()),
+        }
+    }
+
+    /// The requirement of its sink's batching contract that this emitter's clause breaks, if any.
+    ///
+    /// Both the standalone check and an alteration report a violation from here, each in its own
+    /// error, so neither has to rebuild the other's report.
+    fn batch_contract_violation(&self) -> Option<EmitterBatchContractError> {
         let sink = self.sink.transport_label();
         if let EmitSink::Http { .. } = self.sink.as_ref()
             && self.batch.is_some()
         {
-            return Err(Report::new(EmitterBatchContractError::HttpUnsupported));
+            return Some(EmitterBatchContractError::HttpUnsupported);
         }
         let Some(batch) = &self.batch else {
             return match self.sink.batch_requirement() {
-                crate::EmitterBatchRequirement::Optional => Ok(()),
+                crate::EmitterBatchRequirement::Optional => None,
                 crate::EmitterBatchRequirement::Required => {
-                    Err(Report::new(EmitterBatchContractError::Required { sink }))
+                    Some(EmitterBatchContractError::Required { sink })
                 }
             };
         };
         if let Some(maximum) = self.sink.batch_size_maximum()
             && batch.max_size.bytes() > maximum.bytes()
         {
-            return Err(Report::new(
-                EmitterBatchContractError::SizeAboveSinkMaximum {
-                    sink,
-                    declared: batch.max_size,
-                    maximum,
-                },
-            ));
+            return Some(EmitterBatchContractError::SizeAboveSinkMaximum {
+                sink,
+                declared: batch.max_size,
+                maximum,
+            });
         }
-        Ok(())
+        None
     }
 
     fn apply_alter_operation(
         &mut self,
         operation: &AlterEmitterOperation,
-    ) -> Result<(), AlterEmitterError> {
+    ) -> error_stack::Result<(), AlterEmitterError> {
         match operation {
             AlterEmitterOperation::AddFrom {
                 relay,
@@ -1752,7 +1768,7 @@ impl CreateEmitter {
             AlterEmitterOperation::DropFrom { relay } => {
                 let index = self.input_index(relay)?;
                 if self.from.from.len() == 1 {
-                    return Err(AlterEmitterError::CannotDropLastInput);
+                    return Err(Report::new(AlterEmitterError::CannotDropLastInput));
                 }
                 self.from.from.remove(index);
                 self.from
@@ -1786,9 +1802,9 @@ impl CreateEmitter {
                     .iter()
                     .position(|input_where| input_where.relay == *relay)
                 else {
-                    return Err(AlterEmitterError::InputWhereNotConfigured {
+                    return Err(Report::new(AlterEmitterError::InputWhereNotConfigured {
                         relay: relay.clone(),
-                    });
+                    }));
                 };
                 self.from.r#where.remove(index);
             }
@@ -1798,10 +1814,10 @@ impl CreateEmitter {
                 body,
             } => {
                 if !sink.accepts_publishing_mode(publishing_mode) {
-                    return Err(AlterEmitterError::PublishingModeUnsupported {
+                    return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
                         sink: sink.transport_label().to_string(),
                         mode: publishing_mode.kind_label().to_string(),
-                    });
+                    }));
                 }
                 self.sink = sink.clone();
                 self.publishing_mode = publishing_mode.clone();
@@ -1819,10 +1835,10 @@ impl CreateEmitter {
             }
             AlterEmitterOperation::DropEncode => {
                 if let EmitSink::Http { .. } = self.sink.as_ref() {
-                    return Err(AlterEmitterError::HttpDropEncode);
+                    return Err(Report::new(AlterEmitterError::HttpDropEncode));
                 }
                 if self.body.codec().is_none() {
-                    return Err(AlterEmitterError::EncodeNotConfigured);
+                    return Err(Report::new(AlterEmitterError::EncodeNotConfigured));
                 }
                 self.body = EmitterBody::Values;
             }
@@ -1837,10 +1853,10 @@ impl CreateEmitter {
             }
             AlterEmitterOperation::SetPublishingMode { mode } => {
                 if !self.sink.accepts_publishing_mode(mode) {
-                    return Err(AlterEmitterError::PublishingModeUnsupported {
+                    return Err(Report::new(AlterEmitterError::PublishingModeUnsupported {
                         sink: self.sink.transport_label().to_string(),
                         mode: mode.kind_label().to_string(),
-                    });
+                    }));
                 }
                 self.publishing_mode = mode.clone();
             }
@@ -1849,7 +1865,7 @@ impl CreateEmitter {
             }
             AlterEmitterOperation::DropBatch => {
                 if self.batch.take().is_none() {
-                    return Err(AlterEmitterError::BatchNotConfigured);
+                    return Err(Report::new(AlterEmitterError::BatchNotConfigured));
                 }
             }
             AlterEmitterOperation::SetFlush { flush_policy } => {
@@ -1865,7 +1881,7 @@ impl CreateEmitter {
                     ..
                 } = self.sink.as_mut()
                 else {
-                    return Err(AlterEmitterError::CommitPolicyUnsupported);
+                    return Err(Report::new(AlterEmitterError::CommitPolicyUnsupported));
                 };
                 *current_commit_each = commit_each.clone();
                 *current_max_commit_size = max_commit_size.clone();
@@ -1874,21 +1890,23 @@ impl CreateEmitter {
         Ok(())
     }
 
-    fn input_index(&self, relay: &RelayName) -> Result<usize, AlterEmitterError> {
+    fn input_index(&self, relay: &RelayName) -> error_stack::Result<usize, AlterEmitterError> {
         self.from
             .from
             .iter()
             .position(|candidate| candidate == relay)
-            .ok_or_else(|| AlterEmitterError::InputNotFound {
-                relay: relay.clone(),
+            .ok_or_else(|| {
+                Report::new(AlterEmitterError::InputNotFound {
+                    relay: relay.clone(),
+                })
             })
     }
 
-    fn ensure_input_absent(&self, relay: &RelayName) -> Result<(), AlterEmitterError> {
+    fn ensure_input_absent(&self, relay: &RelayName) -> error_stack::Result<(), AlterEmitterError> {
         if self.from.from.iter().any(|candidate| candidate == relay) {
-            Err(AlterEmitterError::InputAlreadyExists {
+            Err(Report::new(AlterEmitterError::InputAlreadyExists {
                 relay: relay.clone(),
-            })
+            }))
         } else {
             Ok(())
         }
@@ -1982,7 +2000,7 @@ pub enum AlterEmitterError {
     #[error("emitter batching is not configured")]
     BatchNotConfigured,
     #[error(transparent)]
-    Batch(#[from] EmitterBatchContractError),
+    Batch(EmitterBatchContractError),
 }
 
 /// Why an emitter's batching clause does not fit the sink it publishes to.
@@ -2053,12 +2071,15 @@ pub enum AlterGeneratorError {
 }
 
 impl CreateGenerator {
-    pub fn apply_alter(&mut self, alter: &AlterGenerator) -> Result<(), AlterGeneratorError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterGenerator,
+    ) -> error_stack::Result<(), AlterGeneratorError> {
         if self.name != alter.generator {
-            return Err(AlterGeneratorError::GeneratorNameMismatch {
+            return Err(Report::new(AlterGeneratorError::GeneratorNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.generator.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -2079,7 +2100,7 @@ impl CreateGenerator {
                 AlterGeneratorOperation::DropRoute { relay } => {
                     let index = candidate.unique_route_index(relay)?;
                     if candidate.output_routes.routes.len() == 1 {
-                        return Err(AlterGeneratorError::CannotDropLastRoute);
+                        return Err(Report::new(AlterGeneratorError::CannotDropLastRoute));
                     }
                     candidate.output_routes.routes.remove(index);
                 }
@@ -2093,7 +2114,10 @@ impl CreateGenerator {
         Ok(())
     }
 
-    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterGeneratorError> {
+    fn unique_route_index(
+        &self,
+        relay: &RelayName,
+    ) -> error_stack::Result<usize, AlterGeneratorError> {
         let mut indexes = self
             .output_routes
             .routes
@@ -2101,14 +2125,14 @@ impl CreateGenerator {
             .enumerate()
             .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
         let Some(index) = indexes.next() else {
-            return Err(AlterGeneratorError::RouteTargetNotFound {
+            return Err(Report::new(AlterGeneratorError::RouteTargetNotFound {
                 relay: relay.clone(),
-            });
+            }));
         };
         if indexes.next().is_some() {
-            return Err(AlterGeneratorError::RouteTargetAmbiguous {
+            return Err(Report::new(AlterGeneratorError::RouteTargetAmbiguous {
                 relay: relay.clone(),
-            });
+            }));
         }
         Ok(index)
     }
@@ -3114,12 +3138,15 @@ pub struct CreateIngestor {
 }
 
 impl CreateIngestor {
-    pub fn apply_alter(&mut self, alter: &AlterIngestor) -> Result<(), AlterIngestorError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterIngestor,
+    ) -> error_stack::Result<(), AlterIngestorError> {
         if self.name != alter.ingestor {
-            return Err(AlterIngestorError::IngestorNameMismatch {
+            return Err(Report::new(AlterIngestorError::IngestorNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.ingestor.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -3133,7 +3160,7 @@ impl CreateIngestor {
     fn apply_alter_operation(
         &mut self,
         operation: &AlterIngestorOperation,
-    ) -> Result<(), AlterIngestorError> {
+    ) -> error_stack::Result<(), AlterIngestorError> {
         match operation {
             AlterIngestorOperation::SetSource { source } => {
                 self.source = source.clone();
@@ -3162,7 +3189,7 @@ impl CreateIngestor {
             AlterIngestorOperation::DropRoute { relay } => {
                 let index = self.unique_route_index(relay)?;
                 if self.output_routes.routes.len() == 1 {
-                    return Err(AlterIngestorError::CannotDropLastRoute);
+                    return Err(Report::new(AlterIngestorError::CannotDropLastRoute));
                 }
                 self.output_routes.routes.remove(index);
             }
@@ -3177,7 +3204,10 @@ impl CreateIngestor {
         Ok(())
     }
 
-    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterIngestorError> {
+    fn unique_route_index(
+        &self,
+        relay: &RelayName,
+    ) -> error_stack::Result<usize, AlterIngestorError> {
         let mut indexes = self
             .output_routes
             .routes
@@ -3185,14 +3215,14 @@ impl CreateIngestor {
             .enumerate()
             .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
         let Some(index) = indexes.next() else {
-            return Err(AlterIngestorError::RouteTargetNotFound {
+            return Err(Report::new(AlterIngestorError::RouteTargetNotFound {
                 relay: relay.clone(),
-            });
+            }));
         };
         if indexes.next().is_some() {
-            return Err(AlterIngestorError::RouteTargetAmbiguous {
+            return Err(Report::new(AlterIngestorError::RouteTargetAmbiguous {
                 relay: relay.clone(),
-            });
+            }));
         }
         Ok(index)
     }
@@ -3458,12 +3488,15 @@ pub enum AlterReingestorError {
 }
 
 impl CreateReingestor {
-    pub fn apply_alter(&mut self, alter: &AlterReingestor) -> Result<(), AlterReingestorError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterReingestor,
+    ) -> error_stack::Result<(), AlterReingestorError> {
         if self.name != alter.reingestor {
-            return Err(AlterReingestorError::ReingestorNameMismatch {
+            return Err(Report::new(AlterReingestorError::ReingestorNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.reingestor.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -3474,7 +3507,7 @@ impl CreateReingestor {
         Ok(())
     }
 
-    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_, AlterReingestorError> {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
@@ -3482,6 +3515,7 @@ impl CreateReingestor {
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
+            rejection: PhantomData,
         }
     }
 }
@@ -3507,7 +3541,9 @@ pub struct CreateInferencer<Version = u64> {
 }
 
 impl CreateInferencer {
-    pub fn execution_mode(&self) -> Result<InferencerExecutionMode, InferencerTensorSchemaError> {
+    pub fn execution_mode(
+        &self,
+    ) -> error_stack::Result<InferencerExecutionMode, InferencerTensorSchemaError> {
         let mut execution_mode = None;
         for (tensor, schema) in self
             .inputs
@@ -3521,14 +3557,18 @@ impl CreateInferencer {
         {
             let batch_axis_count = schema.batch_axis_count();
             if batch_axis_count > 1 {
-                return Err(InferencerTensorSchemaError::MultipleBatchAxes {
-                    tensor: tensor.to_string(),
-                });
+                return Err(Report::new(
+                    InferencerTensorSchemaError::MultipleBatchAxes {
+                        tensor: tensor.to_string(),
+                    },
+                ));
             }
             if schema.fixed_element_count().is_none() {
-                return Err(InferencerTensorSchemaError::ElementCountOverflow {
-                    tensor: tensor.to_string(),
-                });
+                return Err(Report::new(
+                    InferencerTensorSchemaError::ElementCountOverflow {
+                        tensor: tensor.to_string(),
+                    },
+                ));
             }
             let mapping_mode = if batch_axis_count == 1 {
                 InferencerExecutionMode::Batched
@@ -3538,7 +3578,9 @@ impl CreateInferencer {
             if let Some(execution_mode) = execution_mode
                 && execution_mode != mapping_mode
             {
-                return Err(InferencerTensorSchemaError::MixedExecutionModes);
+                return Err(Report::new(
+                    InferencerTensorSchemaError::MixedExecutionModes,
+                ));
             }
             execution_mode = Some(mapping_mode);
         }
@@ -4242,12 +4284,15 @@ impl IngestSource {
         }
     }
 
-    pub fn set_quiesce(&mut self, quiesce: IngestQuiesceMode) -> Result<(), AlterIngestorError> {
+    pub fn set_quiesce(
+        &mut self,
+        quiesce: IngestQuiesceMode,
+    ) -> error_stack::Result<(), AlterIngestorError> {
         if !self.supports_quiesce(&quiesce) {
-            return Err(AlterIngestorError::UnsupportedQuiesceMode {
+            return Err(Report::new(AlterIngestorError::UnsupportedQuiesceMode {
                 transport: self.transport_label().to_string(),
                 mode: quiesce.kind_label().to_string(),
-            });
+            }));
         }
         match self {
             Self::Http {
@@ -4771,12 +4816,12 @@ pub struct CreateRelay {
 }
 
 impl CreateRelay {
-    pub fn apply_alter(&mut self, alter: &AlterRelay) -> Result<(), AlterRelayError> {
+    pub fn apply_alter(&mut self, alter: &AlterRelay) -> error_stack::Result<(), AlterRelayError> {
         if self.name != alter.relay {
-            return Err(AlterRelayError::RelayNameMismatch {
+            return Err(Report::new(AlterRelayError::RelayNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.relay.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -4790,7 +4835,7 @@ impl CreateRelay {
     fn apply_alter_operation(
         &mut self,
         operation: &AlterRelayOperation,
-    ) -> Result<(), AlterRelayError> {
+    ) -> error_stack::Result<(), AlterRelayError> {
         match operation {
             AlterRelayOperation::SetCapacity { capacity } => {
                 self.buffer = *capacity;
@@ -4806,7 +4851,7 @@ impl CreateRelay {
             }
             AlterRelayOperation::DropMaterializedState => {
                 if self.materialized_state.take().is_none() {
-                    return Err(AlterRelayError::MaterializedStateNotConfigured);
+                    return Err(Report::new(AlterRelayError::MaterializedStateNotConfigured));
                 }
             }
         }
@@ -5487,12 +5532,15 @@ pub enum AlterJunctionError {
 }
 
 impl CreateJunction {
-    pub fn apply_alter(&mut self, alter: &AlterJunction) -> Result<(), AlterJunctionError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterJunction,
+    ) -> error_stack::Result<(), AlterJunctionError> {
         if self.name != alter.junction {
-            return Err(AlterJunctionError::JunctionNameMismatch {
+            return Err(Report::new(AlterJunctionError::JunctionNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.junction.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -5503,7 +5551,7 @@ impl CreateJunction {
         Ok(())
     }
 
-    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_, AlterJunctionError> {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
@@ -5511,6 +5559,7 @@ impl CreateJunction {
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
+            rejection: PhantomData,
         }
     }
 }
@@ -5561,12 +5610,17 @@ pub enum AlterDeduplicatorError {
 }
 
 impl CreateDeduplicator {
-    pub fn apply_alter(&mut self, alter: &AlterDeduplicator) -> Result<(), AlterDeduplicatorError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterDeduplicator,
+    ) -> error_stack::Result<(), AlterDeduplicatorError> {
         if self.name != alter.deduplicator {
-            return Err(AlterDeduplicatorError::DeduplicatorNameMismatch {
-                stored: self.name.clone(),
-                requested: alter.deduplicator.clone(),
-            });
+            return Err(Report::new(
+                AlterDeduplicatorError::DeduplicatorNameMismatch {
+                    stored: self.name.clone(),
+                    requested: alter.deduplicator.clone(),
+                },
+            ));
         }
 
         let mut candidate = self.clone();
@@ -5587,7 +5641,7 @@ impl CreateDeduplicator {
         Ok(())
     }
 
-    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_, AlterDeduplicatorError> {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
@@ -5595,6 +5649,7 @@ impl CreateDeduplicator {
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
+            rejection: PhantomData,
         }
     }
 }
@@ -5702,12 +5757,15 @@ pub enum AlterReordererError {
 }
 
 impl CreateReorderer {
-    pub fn apply_alter(&mut self, alter: &AlterReorderer) -> Result<(), AlterReordererError> {
+    pub fn apply_alter(
+        &mut self,
+        alter: &AlterReorderer,
+    ) -> error_stack::Result<(), AlterReordererError> {
         if self.name != alter.reorderer {
-            return Err(AlterReordererError::ReordererNameMismatch {
+            return Err(Report::new(AlterReordererError::ReordererNameMismatch {
                 stored: self.name.clone(),
                 requested: alter.reorderer.clone(),
-            });
+            }));
         }
 
         let mut candidate = self.clone();
@@ -5728,7 +5786,7 @@ impl CreateReorderer {
         Ok(())
     }
 
-    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_> {
+    fn processor_alter_target(&mut self) -> ProcessorAlterTarget<'_, AlterReordererError> {
         ProcessorAlterTarget {
             from: &mut self.from,
             output_routes: &mut self.output_routes,
@@ -5736,6 +5794,7 @@ impl CreateReorderer {
             mode: &mut self.mode,
             filter_where: &mut self.filter_where,
             materialized_state: &mut self.materialized_state,
+            rejection: PhantomData,
         }
     }
 }
@@ -5817,17 +5876,32 @@ pub enum AlterProcessorError {
     BranchingUnsupported,
 }
 
-struct ProcessorAlterTarget<'a> {
+/// The input, route and dependency fields every processor alters the same way, borrowed from the
+/// processor being altered.
+///
+/// `E` is that processor's alteration error. A rejection is reported in it where it is detected, so
+/// the report starts at the failure rather than at a conversion in the processor's `apply_alter`.
+struct ProcessorAlterTarget<'a, E> {
     from: &'a mut ProcessorInputs,
     output_routes: &'a mut ProcessorOutputs,
     branched_by: Option<&'a mut BranchSelection>,
     mode: &'a mut AckMode,
     filter_where: &'a mut Option<crate::Expression>,
     materialized_state: &'a mut Vec<crate::MaterializedStateDependency>,
+    rejection: PhantomData<E>,
 }
 
-impl ProcessorAlterTarget<'_> {
-    fn apply(&mut self, operation: &AlterProcessorOperation) -> Result<(), AlterProcessorError> {
+impl<E> ProcessorAlterTarget<'_, E>
+where
+    E: From<AlterProcessorError> + error_stack::Context,
+{
+    /// Reports `rejection` as the altered processor's own error.
+    #[track_caller]
+    fn reject(rejection: AlterProcessorError) -> Report<E> {
+        Report::new(E::from(rejection))
+    }
+
+    fn apply(&mut self, operation: &AlterProcessorOperation) -> error_stack::Result<(), E> {
         match operation {
             AlterProcessorOperation::AddFrom {
                 relay,
@@ -5845,7 +5919,7 @@ impl ProcessorAlterTarget<'_> {
             AlterProcessorOperation::DropFrom { relay } => {
                 let index = self.input_index(relay)?;
                 if self.from.from.len() == 1 {
-                    return Err(AlterProcessorError::CannotDropLastInput);
+                    return Err(Self::reject(AlterProcessorError::CannotDropLastInput));
                 }
                 self.from.from.remove(index);
                 self.from
@@ -5879,9 +5953,9 @@ impl ProcessorAlterTarget<'_> {
                     .iter()
                     .position(|input_where| input_where.relay == *relay)
                 else {
-                    return Err(AlterProcessorError::InputWhereNotConfigured {
+                    return Err(Self::reject(AlterProcessorError::InputWhereNotConfigured {
                         relay: relay.clone(),
-                    });
+                    }));
                 };
                 self.from.r#where.remove(index);
             }
@@ -5902,7 +5976,7 @@ impl ProcessorAlterTarget<'_> {
             }
             AlterProcessorOperation::SetBranching { branching } => {
                 let Some(branched_by) = self.branched_by.as_deref_mut() else {
-                    return Err(AlterProcessorError::BranchingUnsupported);
+                    return Err(Self::reject(AlterProcessorError::BranchingUnsupported));
                 };
                 *branched_by = branching.clone();
             }
@@ -5912,9 +5986,11 @@ impl ProcessorAlterTarget<'_> {
                     .iter()
                     .any(|existing| existing.relay == dependency.relay)
                 {
-                    return Err(AlterProcessorError::MaterializedStateAlreadyConfigured {
-                        relay: dependency.relay.clone(),
-                    });
+                    return Err(Self::reject(
+                        AlterProcessorError::MaterializedStateAlreadyConfigured {
+                            relay: dependency.relay.clone(),
+                        },
+                    ));
                 }
                 self.materialized_state.push(dependency.clone());
             }
@@ -5932,7 +6008,7 @@ impl ProcessorAlterTarget<'_> {
             AlterProcessorOperation::DropRoute { relay } => {
                 let index = self.unique_route_index(relay)?;
                 if self.output_routes.routes.len() == 1 {
-                    return Err(AlterProcessorError::CannotDropLastRoute);
+                    return Err(Self::reject(AlterProcessorError::CannotDropLastRoute));
                 }
                 self.output_routes.routes.remove(index);
             }
@@ -5944,36 +6020,40 @@ impl ProcessorAlterTarget<'_> {
         Ok(())
     }
 
-    fn input_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
+    fn input_index(&self, relay: &RelayName) -> error_stack::Result<usize, E> {
         self.from
             .from
             .iter()
             .position(|candidate| candidate == relay)
-            .ok_or_else(|| AlterProcessorError::InputNotFound {
-                relay: relay.clone(),
+            .ok_or_else(|| {
+                Self::reject(AlterProcessorError::InputNotFound {
+                    relay: relay.clone(),
+                })
             })
     }
 
-    fn ensure_input_absent(&self, relay: &RelayName) -> Result<(), AlterProcessorError> {
+    fn ensure_input_absent(&self, relay: &RelayName) -> error_stack::Result<(), E> {
         if self.from.from.iter().any(|candidate| candidate == relay) {
-            Err(AlterProcessorError::InputAlreadyExists {
+            Err(Self::reject(AlterProcessorError::InputAlreadyExists {
                 relay: relay.clone(),
-            })
+            }))
         } else {
             Ok(())
         }
     }
 
-    fn materialized_state_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
+    fn materialized_state_index(&self, relay: &RelayName) -> error_stack::Result<usize, E> {
         self.materialized_state
             .iter()
             .position(|dependency| dependency.relay == *relay)
-            .ok_or_else(|| AlterProcessorError::MaterializedStateNotConfigured {
-                relay: relay.clone(),
+            .ok_or_else(|| {
+                Self::reject(AlterProcessorError::MaterializedStateNotConfigured {
+                    relay: relay.clone(),
+                })
             })
     }
 
-    fn unique_route_index(&self, relay: &RelayName) -> Result<usize, AlterProcessorError> {
+    fn unique_route_index(&self, relay: &RelayName) -> error_stack::Result<usize, E> {
         let mut indexes = self
             .output_routes
             .routes
@@ -5981,14 +6061,14 @@ impl ProcessorAlterTarget<'_> {
             .enumerate()
             .filter_map(|(index, route)| (route.relay == *relay).then_some(index));
         let Some(index) = indexes.next() else {
-            return Err(AlterProcessorError::RouteTargetNotFound {
+            return Err(Self::reject(AlterProcessorError::RouteTargetNotFound {
                 relay: relay.clone(),
-            });
+            }));
         };
         if indexes.next().is_some() {
-            return Err(AlterProcessorError::RouteTargetAmbiguous {
+            return Err(Self::reject(AlterProcessorError::RouteTargetAmbiguous {
                 relay: relay.clone(),
-            });
+            }));
         }
         Ok(index)
     }
@@ -6115,17 +6195,19 @@ mod tests {
         CodecWireFormat, CreateDeduplicator, CreateEmitter, CreateGenerator, CreatePlacement,
         CreateReingestor, CreateRelay, CreateReorderer, CreateSchema, DomainSchedule, EmitSink,
         EmitterBatchContractError, EmitterBody, EmitterPublishingMode, ErrorPolicies, FlushPolicy,
-        GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, InferencerTensorDimension,
-        InferencerTensorElementType, InferencerTensorRepresentation, InferencerTensorSchema,
-        KafkaPartitionSchedule, MaterializedRelayState, Model, ModelKind, MongoDbConflictAction,
-        MySqlConflictAction, OtelSignal, PlacementPolicy, PostgresConflictAction, RelayBranching,
-        ResolvedBranching, RetryPolicy, ScheduledNode,
+        GeneralErrorPolicy, IcebergCatalog, IcebergStorageBackend, InferencerExecutionMode,
+        InferencerTensorDeclaration, InferencerTensorDimension, InferencerTensorElementType,
+        InferencerTensorMapping, InferencerTensorRepresentation, InferencerTensorSchema,
+        InferencerTensorSchemaError, KafkaPartitionSchedule, MaterializedRelayState, Model,
+        ModelKind, MongoDbConflictAction, MySqlConflictAction, OtelSignal, PlacementPolicy,
+        PostgresConflictAction, RelayBranching, ResolvedBranching, RetryPolicy, ScheduledNode,
     };
     use crate::{
-        ClientName, ClusterNodeName, CollectionName, CreateIngestor, CreateJunction, DomainName,
-        EndpointIngestMode, Expression, IngestQuiesceMode, IngestSource, Literal,
-        MaterializedStateDependency, MaterializedStatePolicy, ParseAsType, ProcessorInputs,
-        ProcessorOutput, ProcessorOutputs, SchemaField, SchemaFingerprint, TableName,
+        ClientName, ClusterNodeName, CollectionName, CreateInferencer, CreateIngestor,
+        CreateJunction, DomainName, EndpointIngestMode, Expression, IngestQuiesceMode,
+        IngestSource, Literal, MaterializedStateDependency, MaterializedStatePolicy, ParseAsType,
+        ProcessorInputs, ProcessorOutput, ProcessorOutputs, SchemaField, SchemaFingerprint,
+        TableName,
     };
 
     #[test]
@@ -6591,7 +6673,10 @@ mod tests {
                 ],
             })
             .expect_err("the second drop must fail");
-        assert_eq!(error, AlterRelayError::MaterializedStateNotConfigured);
+        assert_eq!(
+            error.current_context(),
+            &AlterRelayError::MaterializedStateNotConfigured
+        );
         assert_eq!(relay, before, "failed ALTER must not partially apply");
     }
 
@@ -6636,8 +6721,8 @@ mod tests {
             })
             .expect_err("duplicate route targets must be ambiguous");
         assert_eq!(
-            error,
-            AlterJunctionError::Processor(AlterProcessorError::RouteTargetAmbiguous {
+            error.current_context(),
+            &AlterJunctionError::Processor(AlterProcessorError::RouteTargetAmbiguous {
                 relay: named("accepted"),
             })
         );
@@ -6789,7 +6874,13 @@ mod tests {
         ];
         for (alter, expected) in cases {
             let mut candidate = relay.clone();
-            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(
+                candidate
+                    .apply_alter(&alter)
+                    .expect_err("the alteration is rejected")
+                    .current_context(),
+                &expected
+            );
             assert_eq!(candidate, relay);
         }
     }
@@ -6917,7 +7008,13 @@ mod tests {
 
         for (alter, expected) in cases {
             let mut candidate = base.clone();
-            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(
+                candidate
+                    .apply_alter(&alter)
+                    .expect_err("the alteration is rejected")
+                    .current_context(),
+                &expected
+            );
             assert_eq!(candidate, base);
         }
 
@@ -7011,7 +7108,10 @@ mod tests {
                 ],
             })
             .expect_err("the second codec drop must fail");
-        assert_eq!(error, AlterEmitterError::EncodeNotConfigured);
+        assert_eq!(
+            error.current_context(),
+            &AlterEmitterError::EncodeNotConfigured
+        );
         assert_eq!(emitter, before, "failed ALTER must not partially apply");
     }
 
@@ -7072,8 +7172,35 @@ mod tests {
                 AlterEmitterOperation::DropEncode,
             ],
         });
-        assert_eq!(error, Err(AlterEmitterError::HttpDropEncode));
+        assert_eq!(
+            error
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterEmitterError::HttpDropEncode
+        );
         assert_eq!(emitter, before);
+
+        let error = emitter
+            .apply_alter(&AlterEmitter {
+                emitter: named("request_sink"),
+                operations: vec![AlterEmitterOperation::SetBatch {
+                    policy: batch_policy(10, "64KiB"),
+                }],
+            })
+            .expect_err("an HTTP emitter sends one request per record");
+        assert_eq!(
+            error.current_context(),
+            &AlterEmitterError::Batch(EmitterBatchContractError::HttpUnsupported)
+        );
+        assert_eq!(emitter, before);
+        let batched = CreateEmitter {
+            batch: Some(batch_policy(10, "64KiB")),
+            ..emitter
+        };
+        assert_eq!(
+            batch_violation(&batched),
+            Some(EmitterBatchContractError::HttpUnsupported)
+        );
     }
 
     fn batch_policy(max_messages: u32, max_size: &str) -> crate::EmitterBatchPolicy {
@@ -7145,8 +7272,11 @@ mod tests {
         emitter.apply_alter(&drop).expect("DROP BATCH removes it");
         assert_eq!(emitter.batch, None);
         assert_eq!(
-            emitter.apply_alter(&drop),
-            Err(AlterEmitterError::BatchNotConfigured)
+            emitter
+                .apply_alter(&drop)
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterEmitterError::BatchNotConfigured
         );
     }
 
@@ -7162,8 +7292,8 @@ mod tests {
             })
             .expect_err("a Postgres emitter cannot drop its batching clause");
         assert_eq!(
-            error,
-            AlterEmitterError::Batch(EmitterBatchContractError::Required { sink: "POSTGRES" })
+            error.current_context(),
+            &AlterEmitterError::Batch(EmitterBatchContractError::Required { sink: "POSTGRES" })
         );
         assert_eq!(dropped, base, "a failed ALTER must not partially apply");
 
@@ -7190,10 +7320,10 @@ mod tests {
         assert_eq!(
             unbatched
                 .clone()
-                .apply_alter(&to_postgres(vec![sink_change.clone()])),
-            Err(AlterEmitterError::Batch(
-                EmitterBatchContractError::Required { sink: "POSTGRES" }
-            ))
+                .apply_alter(&to_postgres(vec![sink_change.clone()]))
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterEmitterError::Batch(EmitterBatchContractError::Required { sink: "POSTGRES" })
         );
         unbatched
             .apply_alter(&to_postgres(vec![
@@ -7403,10 +7533,65 @@ mod tests {
                 },
                 AlterEmitterError::CannotDropLastInput,
             ),
+            (
+                AlterEmitter {
+                    emitter: named("event_sink"),
+                    operations: vec![AlterEmitterOperation::AlterFromDropWhere {
+                        relay: named("events"),
+                    }],
+                },
+                AlterEmitterError::InputWhereNotConfigured {
+                    relay: named("events"),
+                },
+            ),
+            (
+                AlterEmitter {
+                    emitter: named("event_sink"),
+                    operations: vec![AlterEmitterOperation::SetPublishingMode {
+                        mode: EmitterPublishingMode::SqsSingle {
+                            retry_policy: RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                        },
+                    }],
+                },
+                AlterEmitterError::PublishingModeUnsupported {
+                    sink: "ZEROMQ".to_string(),
+                    mode: "SINGLE".to_string(),
+                },
+            ),
+            (
+                AlterEmitter {
+                    emitter: named("event_sink"),
+                    operations: vec![AlterEmitterOperation::SetSink {
+                        sink: Box::new(EmitSink::ZeroMq {
+                            client: named("other_sink"),
+                        }),
+                        publishing_mode: EmitterPublishingMode::SqsSingle {
+                            retry_policy: RetryPolicy {
+                                backoff: "250ms".to_string(),
+                                max_backoff: "30s".to_string(),
+                            },
+                        },
+                        body: None,
+                    }],
+                },
+                AlterEmitterError::PublishingModeUnsupported {
+                    sink: "ZEROMQ".to_string(),
+                    mode: "SINGLE".to_string(),
+                },
+            ),
         ];
         for (alter, expected) in cases {
             let mut candidate = emitter.clone();
-            assert_eq!(candidate.apply_alter(&alter), Err(expected));
+            assert_eq!(
+                candidate
+                    .apply_alter(&alter)
+                    .expect_err("the alteration is rejected")
+                    .current_context(),
+                &expected
+            );
             assert_eq!(candidate, emitter);
         }
     }
@@ -7513,8 +7698,8 @@ mod tests {
             })
             .expect_err("missing route target should fail");
         assert_eq!(
-            error,
-            AlterIngestorError::RouteTargetNotFound {
+            error.current_context(),
+            &AlterIngestorError::RouteTargetNotFound {
                 relay: named("missing")
             }
         );
@@ -7542,26 +7727,32 @@ mod tests {
 
         let mut candidate = base.clone();
         assert_eq!(
-            candidate.apply_alter(&AlterIngestor {
-                ingestor: named("other"),
-                operations: Vec::new(),
-            }),
-            Err(AlterIngestorError::IngestorNameMismatch {
+            candidate
+                .apply_alter(&AlterIngestor {
+                    ingestor: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterIngestorError::IngestorNameMismatch {
                 stored: named("event_source"),
                 requested: named("other"),
-            })
+            }
         );
         assert_eq!(candidate, base);
 
         let mut candidate = base.clone();
         assert_eq!(
-            candidate.apply_alter(&AlterIngestor {
-                ingestor: named("event_source"),
-                operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: named("events"),
-                }],
-            }),
-            Err(AlterIngestorError::CannotDropLastRoute)
+            candidate
+                .apply_alter(&AlterIngestor {
+                    ingestor: named("event_source"),
+                    operations: vec![AlterIngestorOperation::DropRoute {
+                        relay: named("events"),
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterIngestorError::CannotDropLastRoute
         );
         assert_eq!(candidate, base);
 
@@ -7569,15 +7760,18 @@ mod tests {
         ambiguous.output_routes.routes.push(route);
         let before = ambiguous.clone();
         assert_eq!(
-            ambiguous.apply_alter(&AlterIngestor {
-                ingestor: named("event_source"),
-                operations: vec![AlterIngestorOperation::DropRoute {
-                    relay: named("events"),
-                }],
-            }),
-            Err(AlterIngestorError::RouteTargetAmbiguous {
+            ambiguous
+                .apply_alter(&AlterIngestor {
+                    ingestor: named("event_source"),
+                    operations: vec![AlterIngestorOperation::DropRoute {
+                        relay: named("events"),
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterIngestorError::RouteTargetAmbiguous {
                 relay: named("events"),
-            })
+            }
         );
         assert_eq!(ambiguous, before);
     }
@@ -7700,38 +7894,55 @@ mod tests {
         let mut deduplicator = deduplicator();
         let original = deduplicator.clone();
         assert_eq!(
-            deduplicator.apply_alter(&AlterDeduplicator {
-                deduplicator: named("dedup_events"),
-                operations: vec![
-                    AlterDeduplicatorOperation::SetMaxTime {
-                        max_time: "1s".to_string(),
-                    },
-                    AlterDeduplicatorOperation::Processor(Box::new(
-                        AlterProcessorOperation::DropRoute {
-                            relay: named("missing"),
+            deduplicator
+                .apply_alter(&AlterDeduplicator {
+                    deduplicator: named("dedup_events"),
+                    operations: vec![
+                        AlterDeduplicatorOperation::SetMaxTime {
+                            max_time: "1s".to_string(),
                         },
-                    )),
-                ],
-            }),
-            Err(AlterDeduplicatorError::Processor(
-                AlterProcessorError::RouteTargetNotFound {
-                    relay: named("missing"),
-                }
-            ))
+                        AlterDeduplicatorOperation::Processor(Box::new(
+                            AlterProcessorOperation::DropRoute {
+                                relay: named("missing"),
+                            },
+                        )),
+                    ],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterDeduplicatorError::Processor(AlterProcessorError::RouteTargetNotFound {
+                relay: named("missing"),
+            })
         );
         assert_eq!(deduplicator, original);
+        assert_eq!(
+            deduplicator
+                .apply_alter(&AlterDeduplicator {
+                    deduplicator: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration names another deduplicator")
+                .current_context(),
+            &AlterDeduplicatorError::DeduplicatorNameMismatch {
+                stored: named("dedup_events"),
+                requested: named("other"),
+            }
+        );
 
         let mut reorderer = reorderer();
         let original = reorderer.clone();
         assert_eq!(
-            reorderer.apply_alter(&AlterReorderer {
-                reorderer: named("other"),
-                operations: Vec::new(),
-            }),
-            Err(AlterReordererError::ReordererNameMismatch {
+            reorderer
+                .apply_alter(&AlterReorderer {
+                    reorderer: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterReordererError::ReordererNameMismatch {
                 stored: named("order_events"),
                 requested: named("other"),
-            })
+            }
         );
         assert_eq!(reorderer, original);
     }
@@ -7769,22 +7980,36 @@ mod tests {
 
         let before = reingestor.clone();
         assert_eq!(
-            reingestor.apply_alter(&AlterReingestor {
-                reingestor: named("repartition"),
-                operations: vec![
-                    AlterProcessorOperation::SetMode {
-                        mode: AckMode::Attached,
-                    },
-                    AlterProcessorOperation::SetBranching {
-                        branching: BranchSelection::unbranched(),
-                    },
-                ],
-            }),
-            Err(AlterReingestorError::Processor(
-                AlterProcessorError::BranchingUnsupported
-            ))
+            reingestor
+                .apply_alter(&AlterReingestor {
+                    reingestor: named("repartition"),
+                    operations: vec![
+                        AlterProcessorOperation::SetMode {
+                            mode: AckMode::Attached,
+                        },
+                        AlterProcessorOperation::SetBranching {
+                            branching: BranchSelection::unbranched(),
+                        },
+                    ],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterReingestorError::Processor(AlterProcessorError::BranchingUnsupported)
         );
         assert_eq!(reingestor, before, "failed ALTER must not partially apply");
+        assert_eq!(
+            reingestor
+                .apply_alter(&AlterReingestor {
+                    reingestor: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration names another reingestor")
+                .current_context(),
+            &AlterReingestorError::ReingestorNameMismatch {
+                stored: named("repartition"),
+                requested: named("other"),
+            }
+        );
     }
 
     #[test]
@@ -7828,50 +8053,72 @@ mod tests {
 
         let before = generator.clone();
         assert_eq!(
-            generator.apply_alter(&AlterGenerator {
-                generator: named("synth"),
-                operations: vec![
-                    AlterGeneratorOperation::SetEach {
-                        each: "10ms"
-                            .parse()
-                            .assured("the fixture cadence is a positive duration"),
-                    },
-                    AlterGeneratorOperation::DropRoute {
-                        relay: named("missing"),
-                    },
-                ],
-            }),
-            Err(AlterGeneratorError::RouteTargetNotFound {
+            generator
+                .apply_alter(&AlterGenerator {
+                    generator: named("synth"),
+                    operations: vec![
+                        AlterGeneratorOperation::SetEach {
+                            each: "10ms"
+                                .parse()
+                                .assured("the fixture cadence is a positive duration"),
+                        },
+                        AlterGeneratorOperation::DropRoute {
+                            relay: named("missing"),
+                        },
+                    ],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterGeneratorError::RouteTargetNotFound {
                 relay: named("missing")
-            })
+            }
         );
         assert_eq!(generator, before, "failed ALTER must not partially apply");
+        assert_eq!(
+            generator
+                .apply_alter(&AlterGenerator {
+                    generator: named("other"),
+                    operations: Vec::new(),
+                })
+                .expect_err("the alteration names another generator")
+                .current_context(),
+            &AlterGeneratorError::GeneratorNameMismatch {
+                stored: named("synth"),
+                requested: named("other"),
+            }
+        );
 
         let mut single = CreateGenerator {
             output_routes: ProcessorOutputs::new(vec![route.clone()]),
             ..generator
         };
         assert_eq!(
-            single.apply_alter(&AlterGenerator {
-                generator: named("synth"),
-                operations: vec![AlterGeneratorOperation::DropRoute {
-                    relay: named("outgoing"),
-                }],
-            }),
-            Err(AlterGeneratorError::CannotDropLastRoute)
+            single
+                .apply_alter(&AlterGenerator {
+                    generator: named("synth"),
+                    operations: vec![AlterGeneratorOperation::DropRoute {
+                        relay: named("outgoing"),
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterGeneratorError::CannotDropLastRoute
         );
 
         single.output_routes.routes.push(route);
         assert_eq!(
-            single.apply_alter(&AlterGenerator {
-                generator: named("synth"),
-                operations: vec![AlterGeneratorOperation::DropRoute {
-                    relay: named("outgoing"),
-                }],
-            }),
-            Err(AlterGeneratorError::RouteTargetAmbiguous {
+            single
+                .apply_alter(&AlterGenerator {
+                    generator: named("synth"),
+                    operations: vec![AlterGeneratorOperation::DropRoute {
+                        relay: named("outgoing"),
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterGeneratorError::RouteTargetAmbiguous {
                 relay: named("outgoing")
-            })
+            }
         );
     }
 
@@ -7932,17 +8179,180 @@ mod tests {
 
         let before = placement.clone();
         assert_eq!(
-            placement.apply_alter(&AlterPlacement {
-                placement: named("other"),
-                operations: vec![AlterPlacementOperation::SetPolicy {
-                    policy: PlacementPolicy::Neutral,
-                }],
-            }),
-            Err(AlterPlacementError::PlacementNameMismatch {
+            placement
+                .apply_alter(&AlterPlacement {
+                    placement: named("other"),
+                    operations: vec![AlterPlacementOperation::SetPolicy {
+                        policy: PlacementPolicy::Neutral,
+                    }],
+                })
+                .expect_err("the alteration is rejected")
+                .current_context(),
+            &AlterPlacementError::PlacementNameMismatch {
                 stored: named("critical"),
                 requested: named("other"),
-            })
+            }
         );
         assert_eq!(placement, before, "failed ALTER must not partially apply");
+    }
+
+    #[test]
+    fn a_placement_without_members_on_either_side_is_refused() {
+        let error = CreatePlacement::new(
+            named("corridor"),
+            Vec::new(),
+            vec![named("emit")],
+            PlacementPolicy::Neutral,
+            None,
+        )
+        .expect_err("a placement needs a FROM member");
+        assert_eq!(error.current_context(), &AlterPlacementError::EmptyFrom);
+
+        let error = CreatePlacement::new(
+            named("corridor"),
+            vec![named("ingest")],
+            Vec::new(),
+            PlacementPolicy::Neutral,
+            None,
+        )
+        .expect_err("a placement needs a TO member");
+        assert_eq!(error.current_context(), &AlterPlacementError::EmptyTo);
+
+        let mut placement = CreatePlacement::new(
+            named("corridor"),
+            vec![named("ingest")],
+            vec![named("emit")],
+            PlacementPolicy::Neutral,
+            None,
+        )
+        .expect("placement should be valid");
+        let before = placement.clone();
+        let error = placement
+            .apply_alter(&AlterPlacement {
+                placement: named("corridor"),
+                operations: vec![
+                    AlterPlacementOperation::SetPolicy {
+                        policy: PlacementPolicy::RequireColocation,
+                    },
+                    AlterPlacementOperation::SetMembers {
+                        from: vec![named("source")],
+                        to: Vec::new(),
+                    },
+                ],
+            })
+            .expect_err("an alteration may not empty the TO members");
+        assert_eq!(error.current_context(), &AlterPlacementError::EmptyTo);
+        assert_eq!(placement, before, "failed ALTER must not partially apply");
+    }
+
+    fn tensor(dimensions: Vec<InferencerTensorDimension>) -> InferencerTensorSchema {
+        InferencerTensorSchema {
+            representation: InferencerTensorRepresentation::Dense,
+            element_type: InferencerTensorElementType::F32,
+            dimensions,
+        }
+    }
+
+    fn inferencer(
+        input: Vec<InferencerTensorDimension>,
+        output: Vec<InferencerTensorDimension>,
+    ) -> CreateInferencer {
+        CreateInferencer {
+            name: named("scorer"),
+            from: ProcessorInputs::single(named("features")),
+            output_routes: ProcessorOutputs::new(vec![ProcessorOutput::new(named("scores"))]),
+            branched_by: BranchSelection::unbranched(),
+            resource: named("models"),
+            resource_version: 1,
+            file: "score.onnx".to_string(),
+            inputs: vec![InferencerTensorMapping {
+                tensor: "input".to_string(),
+                schema: tensor(input),
+                expression: Expression::Literal(Literal::Bool(true)),
+            }],
+            output_schema: vec![InferencerTensorDeclaration {
+                tensor: "output".to_string(),
+                schema: tensor(output),
+            }],
+            mode: AckMode::Attached,
+            filter_where: None,
+            materialized_state: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn inferencer_execution_mode_follows_the_batch_axes_of_every_tensor() {
+        let one = InferencerTensorDimension::Fixed(nonzero!(1u32));
+        let batch = InferencerTensorDimension::Batch;
+
+        let per_message = inferencer(vec![one], vec![one]);
+        assert_eq!(
+            per_message
+                .execution_mode()
+                .expect("no tensor declares a batch axis"),
+            InferencerExecutionMode::PerMessage
+        );
+        let batched = inferencer(vec![batch, one], vec![batch, one]);
+        assert_eq!(
+            batched
+                .execution_mode()
+                .expect("every tensor declares one batch axis"),
+            InferencerExecutionMode::Batched
+        );
+
+        let widest = InferencerTensorDimension::Fixed(nonzero!(4_294_967_295u32));
+        let cases = [
+            (
+                inferencer(vec![batch, batch], vec![one]),
+                InferencerTensorSchemaError::MultipleBatchAxes {
+                    tensor: "input".to_string(),
+                },
+            ),
+            (
+                inferencer(vec![one], vec![widest, widest, widest]),
+                InferencerTensorSchemaError::ElementCountOverflow {
+                    tensor: "output".to_string(),
+                },
+            ),
+            (
+                inferencer(vec![batch, one], vec![one]),
+                InferencerTensorSchemaError::MixedExecutionModes,
+            ),
+        ];
+        for (processor, expected) in cases {
+            let error = processor
+                .execution_mode()
+                .expect_err("the tensor schemas admit no execution mode");
+            assert_eq!(error.current_context(), &expected);
+        }
+    }
+
+    #[test]
+    fn an_ingest_source_refuses_a_quiesce_mode_its_transport_lacks() {
+        let buffer = IngestQuiesceMode::EndpointBuffer {
+            max_size: "1MiB".to_string(),
+        };
+        let mut source = IngestSource::Endpoint {
+            endpoint: named("ingress"),
+            mode: EndpointIngestMode::NoAckSequential,
+            quiesce: buffer.clone(),
+        };
+
+        let error = source
+            .set_quiesce(IngestQuiesceMode::Suspend)
+            .expect_err("an endpoint cannot suspend its callers");
+
+        assert_eq!(
+            error.current_context(),
+            &AlterIngestorError::UnsupportedQuiesceMode {
+                transport: "ENDPOINT".to_string(),
+                mode: "SUSPEND".to_string(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "ENDPOINT ingestors do not support ON QUIESCE SUSPEND"
+        );
+        assert_eq!(source.quiesce(), &buffer);
     }
 }
