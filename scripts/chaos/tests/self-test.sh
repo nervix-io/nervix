@@ -47,10 +47,13 @@ jq -n \
       "com.docker.compose.project":$project,
       "com.docker.compose.service":"nervix-1"
     }},Mounts:[{Type:"volume",Name:($project+"_node-1-data")}],
-    State:{Running:true,ExitCode:0,OOMKilled:false}}]
+    State:{Running:true,ExitCode:0,OOMKilled:false,StartedAt:"2026-09-27T00:00:00Z"}}]
     ' >"${inspection_before}"
+jq '.[0].HostConfig.RestartPolicy.Name = "no"' "${inspection_before}" >"${tmp_dir}/before-with-policy.json"
+mv "${tmp_dir}/before-with-policy.json" "${inspection_before}"
 jq '.[0].State.Running = false' "${inspection_before}" >"${inspection_stopped}"
-cp "${inspection_before}" "${inspection_started}"
+jq '.[0].State.StartedAt = "2026-09-27T00:01:00Z"' \
+    "${inspection_before}" >"${inspection_started}"
 printf '%s\n' \
     'shutdown admission phase finished outcome=Completed' \
     'shutdown drain-support phase finished outcome=Completed' \
@@ -90,6 +93,55 @@ jq '.[0].Mounts[0].Name = "other-volume"' \
 expect_restart_failure 'changed volume' started "${test_run_id}" "${test_project}" nervix-1 \
     "${test_image_id}" "${inspection_before}" "${tmp_dir}/wrong-volume.json"
 
+crash_verifier="${chaos_dir}/verify-crash-evidence.sh"
+inspection_killed="${tmp_dir}/killed.json"
+crash_events="${tmp_dir}/crash-events.ndjson"
+jq '.[0].State.Running = false | .[0].State.ExitCode = 137' \
+    "${inspection_before}" >"${inspection_killed}"
+printf '%s\n' \
+    "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"kill",Actor:{ID:$id,Attributes:{signal:"9"}}}')" \
+    "$(jq -nc --arg id "${test_container_id}" '{Type:"container",Action:"die",Actor:{ID:$id,Attributes:{exitCode:"137"}}}')" \
+    >"${crash_events}"
+"${crash_verifier}" before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${inspection_before}" "${inspection_before}"
+"${crash_verifier}" killed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${inspection_before}" "${inspection_killed}" "${crash_events}"
+"${crash_verifier}" started "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${inspection_before}" "${inspection_started}"
+"${crash_verifier}" recovered "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${inspection_started}" "${inspection_started}"
+
+expect_crash_failure() {
+    local case_name="$1"
+    shift
+    local status=0
+    "${crash_verifier}" "$@" >"${tmp_dir}/crash-failure.txt" 2>&1 || status=$?
+    [[ "${status}" -eq 1 ]] || fail "${case_name} returned ${status}, expected failure 1"
+}
+
+expect_crash_failure 'ineffective kill' killed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${inspection_before}" "${inspection_before}" "${crash_events}"
+expect_crash_failure 'start kept the crashed process incarnation' started \
+    "${test_run_id}" "${test_project}" nervix-1 "${test_image_id}" \
+    "${inspection_before}" "${inspection_before}"
+expect_crash_failure 'target restarted twice' recovered \
+    "${test_run_id}" "${test_project}" nervix-1 "${test_image_id}" \
+    "${inspection_started}" "${inspection_before}"
+expect_crash_failure 'changed target' before "${test_run_id}" "${test_project}" nervix-2 \
+    "${test_image_id}" "${inspection_before}" "${inspection_before}"
+printf '%s\n' "$(head -n 1 "${crash_events}")" >"${tmp_dir}/missing-die.ndjson"
+expect_crash_failure 'missing die event' killed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${inspection_before}" "${inspection_killed}" "${tmp_dir}/missing-die.ndjson"
+sed 's/"signal":"9"/"signal":"15"/' "${crash_events}" >"${tmp_dir}/wrong-signal.ndjson"
+expect_crash_failure 'wrong signal' killed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${inspection_before}" "${inspection_killed}" "${tmp_dir}/wrong-signal.ndjson"
+jq '.[0].State.OOMKilled = true' "${inspection_killed}" >"${tmp_dir}/oom-killed.json"
+expect_crash_failure 'OOM kill' killed "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${inspection_before}" "${tmp_dir}/oom-killed.json" "${crash_events}"
+jq '.[0].HostConfig.RestartPolicy.Name = "always"' "${inspection_before}" >"${tmp_dir}/auto-restart.json"
+expect_crash_failure 'automatic restart' before "${test_run_id}" "${test_project}" nervix-1 \
+    "${test_image_id}" "${tmp_dir}/auto-restart.json" "${tmp_dir}/auto-restart.json"
+
 expected="${tmp_dir}/expected.ndjson"
 observed="${tmp_dir}/observed.ndjson"
 result="${tmp_dir}/result.json"
@@ -116,12 +168,29 @@ expect_verification_failure \
     "duplicate cannot replace missing" "${expected}" "${observed}" "${result}" \
     '.verdict == "fail" and (.duplicates | length) == 1 and .duplicates[0].event_id == "run-0" and .duplicates[0].count == 2 and (.missing_ids | index("run-1")) != null'
 
+cp "${expected}" "${observed}"
+head -n 1 "${expected}" >>"${observed}"
+expect_verification_failure \
+    "strict duplicate" "${expected}" "${observed}" "${result}" \
+    '.verdict == "fail" and .duplicate_records == 1 and (.missing_ids | length) == 0'
+"${chaos_dir}/verify-ledger.sh" "${expected}" "${observed}" "${result}" --allow-replay-duplicates
+jq -e '.verdict == "pass" and .duplicate_records == 1 and .duplicates[0].event_id == "run-0"' \
+    "${result}" >/dev/null || fail "an exact replay duplicate was not reported separately"
+
 printf '%s\n' \
     '{"event_id":"run-0","branch_name":"alpha","sequence":0,"content":"corrupt"}' \
     '{"event_id":"run-1","branch_name":"beta","sequence":1,"content":"payload-1"}' \
     >"${observed}"
 expect_verification_failure \
     "corrupt record" "${expected}" "${observed}" "${result}" \
+    '.verdict == "fail" and (.incorrect_content | length) == 1 and .incorrect_content[0].event_id == "run-0"'
+
+printf '%s\n' \
+    '{"event_id":"run-0","branch_name":"beta","sequence":0,"content":"payload-0"}' \
+    '{"event_id":"run-1","branch_name":"beta","sequence":1,"content":"payload-1"}' \
+    >"${observed}"
+expect_verification_failure \
+    "wrong branch" "${expected}" "${observed}" "${result}" \
     '.verdict == "fail" and (.incorrect_content | length) == 1 and .incorrect_content[0].event_id == "run-0"'
 
 printf '%s\n' '{not-json}' >"${observed}"
@@ -136,6 +205,28 @@ grep -Fq 'baseline' <<<"${list_output}" || fail "scenario list omits baseline"
 grep -Fq 'one-node' <<<"${list_output}" || fail "scenario list omits one-node support"
 grep -Fq 'three-node' <<<"${list_output}" || fail "scenario list omits three-node support"
 grep -Fq 'rolling-restart' <<<"${list_output}" || fail "scenario list omits rolling-restart"
+for scenario in leader-crash follower-crash ingestor-owner-crash emitter-owner-crash; do
+    grep -Fq "${scenario}" <<<"${list_output}" || fail "scenario list omits ${scenario}"
+done
+
+expect_setup_rejection() {
+    local case_name="$1" expected="$2"
+    shift 2
+    local status=0
+    "$@" >"${tmp_dir}/setup-rejection.out" 2>&1 || status=$?
+    [[ "${status}" -eq 2 ]] || fail "${case_name} returned ${status}, expected setup error 2"
+    grep -Fq -- "${expected}" "${tmp_dir}/setup-rejection.out" \
+        || fail "${case_name} did not explain the rejected option"
+}
+
+expect_setup_rejection 'follower requires three nodes' 'requires --nodes 3' \
+    "${chaos_dir}/run-baseline.sh" --scenario follower-crash --image fixture --nodes 1
+expect_setup_rejection 'outage is bounded' '--outage-seconds must be an integer from 5 through 120' \
+    "${chaos_dir}/run-baseline.sh" --scenario leader-crash --image fixture --outage-seconds 4
+expect_setup_rejection 'outage option is parsed' '--nodes must be 1 or 3' \
+    "${chaos_dir}/run-baseline.sh" --scenario leader-crash --image fixture --nodes 2 --outage-seconds 8
+expect_setup_rejection 'unknown scenario' 'unknown scenario: unknown-crash' \
+    "${chaos_dir}/run-baseline.sh" --scenario unknown-crash --image fixture
 
 status=0
 "${chaos_dir}/chaos.sh" run rolling-restart >"${tmp_dir}/rolling-missing-image.out" 2>&1 || status=$?

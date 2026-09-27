@@ -120,7 +120,7 @@ fn accept_decoded_payloads(
             domain: &domain("default"),
             ingestor: &named("grouped_event_source"),
             timestamp_source: None,
-            output_routes: &RelayProcessorOutputsNode { routes: Vec::new() },
+            output_routes: &Arc::new(BoundIngestorRoutes { routes: Vec::new() }),
             filter_where: None,
             metadata: &metadata,
             acks,
@@ -711,7 +711,7 @@ async fn ingest_route_collector_reports_identity_and_unaccepted_payloads() {
 
     let other_domain = domain("other");
     let ingestor: IngestorName = named("grouped_event_source");
-    let routes = RelayProcessorOutputsNode { routes: Vec::new() };
+    let routes = Arc::new(BoundIngestorRoutes { routes: Vec::new() });
     let metadata = [IngestMetadataRow::Headers {
         headers: &NoIngestHeaders,
     }];

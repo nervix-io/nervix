@@ -130,6 +130,7 @@ use crate::common::{
 };
 
 mod common;
+mod domain_clock_attachment;
 mod ingestion_time;
 mod session_protocol;
 
@@ -267,6 +268,15 @@ struct ScenarioWorld {
     client_subscription_rows: BTreeMap<String, VecDeque<String>>,
     /// Requests the active session sent under names a scenario gave them.
     session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// The session a scenario attaches to domain clocks with. Steps that replace the active
+    /// session leave it attached.
+    clock_session: Option<TestSession>,
+    /// Requests the clock session sent under names a scenario gave them.
+    clock_session_requests: BTreeMap<String, nervix_client_wire::RequestId>,
+    /// The reply to the clock session's last attach or detach request.
+    last_clock_reply: Option<nervix_client_wire::ReplyBody>,
+    /// When the last `START AT NOW` a scenario sent ran.
+    clock_start_window: Option<domain_clock_attachment::ClockStartWindow>,
     /// Candidates collected by a public session completion paging scenario.
     last_completion_values: Vec<String>,
     last_completion_page_count: usize,

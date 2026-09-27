@@ -24,13 +24,13 @@ use triomphe::Arc;
 
 use super::{
     BranchBufferDeadline, BranchBufferTimer, BranchBufferTimingResult, BranchKey, BranchRuntime,
-    CompiledBranchProgram, CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest,
-    DeduplicatorKeyspace, DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch,
-    RelayBoundaryServices, RelayMessage, RelayRecordBatch, RelayRegistry,
-    ReplicatedWasmProcessorState, ReplicatedWindowProcessorState, RuntimeFlushPolicy,
-    RuntimeInputCollectPolicy, RuntimeInputCollector, WasmGuestStateResetFence, WasmLiveInstance,
-    WindowAccumulatorPlan, WindowProcessorState, branch_key_display,
-    inferencer::OnnxInferencerSession, relay_batch::RelayRecordBatchError,
+    CompiledDeduplicatorKeyProgram, CompiledProgramWithMaterializedInterest, DeduplicatorKeyspace,
+    DomainClock, DomainExecutionSnapshot, PendingMaterializedBatch, RelayBoundaryServices,
+    RelayMessage, RelayRecordBatch, RelayRegistry, ReplicatedWasmProcessorState,
+    ReplicatedWindowProcessorState, RuntimeFlushPolicy, RuntimeInputCollectPolicy,
+    RuntimeInputCollector, WasmGuestStateResetFence, WasmLiveInstance, WindowAccumulatorPlan,
+    WindowProcessorState, branch_key_display, inferencer::OnnxInferencerSession,
+    relay_batch::RelayRecordBatchError,
 };
 use crate::{
     registry::{BranchInstanceAckBoundary, BranchedProcessorNodeSpec},
@@ -587,10 +587,6 @@ pub(super) struct RelayProcessorOutputsNode {
 }
 
 impl RelayProcessorOutputsNode {
-    pub(super) fn base_relay(&self) -> Option<RelayName> {
-        self.routes.first().map(|output| output.relay.clone())
-    }
-
     pub(super) fn buffer_deadlines(&self) -> Vec<BranchBufferDeadline> {
         self.routes
             .iter()
@@ -603,13 +599,11 @@ impl RelayProcessorOutputsNode {
 pub(super) struct RelayProcessorOutputNode {
     pub(super) relay: RelayName,
     pub(super) construction: nervix_models::RouteConstruction,
-    pub(super) branch: Option<nervix_models::OutputBranch>,
     pub(super) flush_policy: Option<RuntimeFlushPolicy>,
     pub(super) message_error_policy: MessageErrorPolicy,
     pub(super) pending: Vec<RelayRecordBatch>,
     pub(super) flush_timer: BranchBufferTimer,
     pub(super) compiled_program: Option<CompiledProgramWithMaterializedInterest>,
-    pub(super) compiled_branch_program: Option<CompiledBranchProgram>,
 }
 
 impl RelayProcessorOutputNode {

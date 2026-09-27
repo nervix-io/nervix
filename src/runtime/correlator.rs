@@ -1211,13 +1211,11 @@ pub(super) async fn handle_correlator_timeout_action(
                     inherit: Some(nervix_models::Inheritance::All),
                     ..RouteConstruction::default()
                 },
-                branch: None,
                 flush_policy: None,
                 message_error_policy: error_policies.message.clone(),
                 pending: Vec::new(),
                 flush_timer: BranchBufferTimer::default(),
                 compiled_program: None,
-                compiled_branch_program: None,
             };
             let output_schema = match branch.relay_schema(relay) {
                 Ok(schema) => schema,

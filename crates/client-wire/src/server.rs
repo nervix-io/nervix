@@ -15,6 +15,10 @@ use crate::{
     domain::{
         ClusterObserved, DomainList, DomainSelection, DomainSnapshotObserved, DomainsObserved,
     },
+    domain_clock::{
+        DomainClockAttachOutcome, DomainClockAttachmentEnded, DomainClockDetachOutcome,
+        DomainClockObserved,
+    },
     event::{LeadershipObserved, ServerNotice, SessionEnding},
     frame::{EncodedFrame, ServerFrame, VerifiedFrame},
     limits::SessionLimits,
@@ -44,6 +48,8 @@ pub enum ReplyBody {
     Cancel(CancelOutcome),
     Cancelled(RequestCancelled),
     Rejected(RequestRejected),
+    DomainClockAttach(DomainClockAttachOutcome),
+    DomainClockDetach(DomainClockDetachOutcome),
 }
 
 /// A complete reply to one request.
@@ -80,6 +86,8 @@ impl Reply {
             ReplyBody::Cancel(outcome) => outcome.encode_body(&mut encoder),
             ReplyBody::Cancelled(cancelled) => cancelled.encode_body(&mut encoder),
             ReplyBody::Rejected(rejected) => rejected.encode_body(&mut encoder)?,
+            ReplyBody::DomainClockAttach(outcome) => outcome.encode_body(&mut encoder)?,
+            ReplyBody::DomainClockDetach(outcome) => outcome.encode_body(&mut encoder)?,
         };
         let reply = wire::Reply::create(
             encoder.fbb(),
@@ -158,6 +166,18 @@ impl Reply {
                 decoder,
                 reply_member(reply.body_as_request_rejected()),
             )?),
+            wire::ReplyBody::DomainClockAttachOutcome => {
+                ReplyBody::DomainClockAttach(DomainClockAttachOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_domain_clock_attach_outcome()),
+                )?)
+            }
+            wire::ReplyBody::DomainClockDetachOutcome => {
+                ReplyBody::DomainClockDetach(DomainClockDetachOutcome::decode(
+                    decoder,
+                    reply_member(reply.body_as_domain_clock_detach_outcome()),
+                )?)
+            }
             undeclared => return Err(decoder.unknown_union("Reply.body", undeclared.0)),
         };
         Ok(Self { request_id, body })
@@ -182,6 +202,8 @@ pub enum ServerEvent {
     SubscriptionRowsSkipped(SubscriptionRowsSkipped),
     SubscriptionEnded(SubscriptionEnded),
     SessionEnding(SessionEnding),
+    DomainClockObserved(DomainClockObserved),
+    DomainClockAttachmentEnded(DomainClockAttachmentEnded),
 }
 
 /// Everything a server frame can hold.
@@ -261,6 +283,18 @@ impl ServerMessage {
                 decoder,
                 server_member(message.body_as_session_ending()),
             )?),
+            wire::ServerBody::DomainClockObserved => {
+                ServerEvent::DomainClockObserved(DomainClockObserved::decode(
+                    decoder,
+                    server_member(message.body_as_domain_clock_observed()),
+                )?)
+            }
+            wire::ServerBody::DomainClockAttachmentEnded => {
+                ServerEvent::DomainClockAttachmentEnded(DomainClockAttachmentEnded::decode(
+                    decoder,
+                    server_member(message.body_as_domain_clock_attachment_ended()),
+                )?)
+            }
             undeclared => {
                 return Err(decoder.unknown_union("ServerMessage.body", undeclared.0));
             }

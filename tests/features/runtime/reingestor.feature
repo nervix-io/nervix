@@ -478,3 +478,74 @@ Feature: Reingestor repartitioning
       | cluster_size | replica_count |
       | 1            | 0             |
       | 3            | 0             |
+
+  @reingestor_node_filter
+  Scenario Outline: Reingestor source and node filters drop input before its routes construct a branch
+    Given runtime replication is configured with replica count 0 and snapshot interval "100ms"
+    And a <cluster_size> node nervix cluster is started
+    And the leader node is configured with these NSPL commands
+      """
+      CREATE UNPACED DOMAIN {{domain}};
+      """
+    When these NSPL commands are executed on the leader node
+      """
+      CREATE SCHEMA reading ( tenant STRING, sensor STRING, value I64 );
+      CREATE WIRE JSON SCHEMA reading_wire MODE STRICT ( tenant string, sensor string, value integer );
+      CREATE CODEC reading_codec FROM WIRE JSON SCHEMA reading_wire TO SCHEMA reading;
+      CREATE IF NOT EXISTS SCHEMA tenant_branch ( tenant STRING );
+      CREATE IF NOT EXISTS BRANCH by_reading_tenant SCHEMA tenant_branch TTL 5m;
+      CREATE IF NOT EXISTS SCHEMA sensor_branch ( sensor STRING );
+      CREATE IF NOT EXISTS BRANCH by_reading_sensor SCHEMA sensor_branch TTL 5m;
+      CREATE RELAY readings SCHEMA reading BRANCHED BY by_reading_tenant;
+      CREATE RELAY sensor_readings SCHEMA reading BRANCHED BY by_reading_sensor;
+      CREATE VHOST edge http-{{test_id}}-reingestor-filters.example.com;
+      CREATE ENDPOINT reading_ingress ON edge PATH '/readings' TYPE HTTP;
+      CREATE INGESTOR reading_source
+        FROM ENDPOINT reading_ingress MODE NO_ACK SEQUENTIAL
+        ON QUIESCE BUFFER MAX SIZE 1MiB DECODE USING reading_codec
+        TO readings
+        INHERIT ALL
+        BRANCHED BY by_reading_tenant
+        SET tenant = message.tenant
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG
+        ON GENERAL ERROR LOG;
+      CREATE REINGESTOR sensor_partition
+        FROM readings WHERE input.sensor != 'ignored'
+        FILTER WHERE input.value > 10
+        TO sensor_readings
+        INHERIT ALL
+        BRANCHED BY by_reading_sensor
+        SET sensor = message.sensor
+        FLUSH IMMEDIATE
+        ON MESSAGE ERROR LOG;
+      CREATE SUBSCRIPTION sensor_readings_subscription TO sensor_readings;
+      START;
+      """
+    When http payload is posted to host "http-{{test_id}}-reingestor-filters.example.com" path "/readings"
+      """
+      {"tenant":"acme","sensor":"s1","value":1}
+      """
+    And http payload is posted to host "http-{{test_id}}-reingestor-filters.example.com" path "/readings"
+      """
+      {"tenant":"beta","sensor":"ignored","value":50}
+      """
+    Then the relay subscription does not receive a payload within "3s"
+    When http payload is posted to host "http-{{test_id}}-reingestor-filters.example.com" path "/readings"
+      """
+      {"tenant":"acme","sensor":"s2","value":20}
+      """
+    And http payload is posted to host "http-{{test_id}}-reingestor-filters.example.com" path "/readings"
+      """
+      {"tenant":"beta","sensor":"s1","value":30}
+      """
+    Then within "10s" the relay subscription receives payloads containing all fragments
+      """
+      "sensor":"s2" | "tenant":"acme" | "value":20
+      "sensor":"s1" | "tenant":"beta" | "value":30
+      """
+
+    Examples:
+      | cluster_size |
+      | 1            |
+      | 3            |

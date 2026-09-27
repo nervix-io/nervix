@@ -28,6 +28,48 @@ just chaos run rolling-restart --image nervix:debian
 just chaos run rolling-restart --image nervix:debian --nodes 1
 ```
 
+Run abrupt process crashes against the observed public role:
+
+```bash
+just chaos run leader-crash --image nervix:debian
+just chaos run leader-crash --image nervix:debian --nodes 1
+just chaos run follower-crash --image nervix:debian
+just chaos run ingestor-owner-crash --image nervix:debian
+just chaos run emitter-owner-crash --image nervix:debian
+```
+
+The follower and execution-owner variants require three nodes. `--outage-seconds N` holds the
+selected node down for at least 5–120 seconds (default 8). The controller reads the leader and
+ingestor/emitter owners through the packaged CLI, selects the corresponding exact Compose node,
+and checks its image, labels, restart policy and persistent volume through Docker inspection. It
+rechecks the public role immediately before invoking digest-pinned Pumba with `kill --signal
+SIGKILL`. A dry run must resolve only that container. The real kill must yield a Docker signal-9
+event, a die event with exit code 137, and a stopped container throughout the declared outage.
+The controller then starts the same container ID explicitly and verifies its original image and
+volume. It checks the final process start time against that explicit restart so a second crash
+cannot be mistaken for recovery. Automatic restarts are disabled in Compose.
+
+The three-node cases require a caught-up survivor leader, replacement owners for all graph nodes,
+and sink progress while the target is down. The one-node case requires listener, cluster and
+delivery recovery after restart. Every case measures election, placement, outage, listener and
+settlement times in `results/crash-progress.json`; election and placement durations are `null`
+when the fault does not require them. Survivor election is bounded by 90 seconds,
+owner relocation by 120 seconds, sink progress during the outage by 60 seconds, returning
+listeners by 120 seconds, and full settlement by 150 seconds after the explicit restart.
+Before and after the fault, acknowledged `CREATE RESOURCE` control canaries must remain visible
+through `DESCRIBE RESOURCE`. A canary attempted during the outage records its CLI response as
+acknowledged or uncertain and its observed final effect. The input ledger is reconstructed from
+Kafka after load stops. The exact-record verifier accepts identical replay duplicates in crash
+cases, reports their count separately, and still fails on missing, unexpected, corrupt or
+wrong-branch records. Unexpected node exits and failures to converge also fail the command.
+Crash runs default to 1,000 paced input records; a smaller `--records` value can exhaust the load
+before fault verification and then fails as a setup limit. When output remains short of accepted
+input after the recovery bound, the controller still saves the available output and runs the exact
+ledger verifier to identify the missing IDs.
+Failed crash runs retain `results/finding.json` with the phase, failure category, image identity,
+and an external reproduction command pinned to a pullable repository digest when available,
+together with Pumba, Docker, public status, broker and log evidence.
+
 The rolling scenario uses the same externally provisioned graph and immutable Nervix image as the
 baseline. A separate producer continuously writes unique records, an independent observer probes
 every configured listener, and Kafka remains up throughout the rotation. The controller observes

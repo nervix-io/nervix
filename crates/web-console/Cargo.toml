@@ -25,6 +25,7 @@ nervix-dataflow-graph = { workspace = true }
 nervix-models = { workspace = true }
 nervix-nspl = { workspace = true, features = ["client"] }
 nervix-recovery = { workspace = true }
+strum = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["js", "v7"] }

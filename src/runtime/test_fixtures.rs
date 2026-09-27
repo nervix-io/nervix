@@ -584,13 +584,11 @@ pub(super) fn validate_wasm_test_output_groups(
             .map(|(relay, _)| super::RelayProcessorOutputNode {
                 relay: relay.clone(),
                 construction: nervix_models::RouteConstruction::default(),
-                branch: None,
                 flush_policy: None,
                 message_error_policy: MessageErrorPolicy::Log,
                 pending: Vec::new(),
                 flush_timer: BranchBufferTimer::default(),
                 compiled_program: None,
-                compiled_branch_program: None,
             })
             .collect(),
     };
@@ -677,6 +675,262 @@ pub(super) fn wasm_guest_stream(schema: StdArc<ArrowSchema>, batches: &[RecordBa
     ipc
 }
 
+/// Lowers `construction` as an ingestor's plan does and binds it as the ingestor's start does, for
+/// tests whose subject is the bound route program.
+pub(super) fn bind_ingestor_route_for_test(
+    domain: &DomainName,
+    identifier: &ModelName,
+    metadata_kind: IngestMetadataKind,
+    allow_header_reads: bool,
+    construction: &RouteConstruction,
+    schemas: RuntimeVmSchemaPair,
+    context: RuntimeVmCompileContext<'_>,
+) -> Result<CompiledProgramWithMaterializedInterest, RuntimeError> {
+    let lowered = LoweredConstruction::transforming(
+        construction,
+        schemas.input.as_ref(),
+        schemas.output.as_ref(),
+    )
+    .assured("the fixture route lowers against its schemas");
+    bind_ingestor_filter_map_program(
+        RuntimeCompileTarget { domain, identifier },
+        metadata_kind,
+        allow_header_reads,
+        &lowered,
+        schemas,
+        context,
+    )
+}
+
+/// Plans the ingestors and reingestors of `models` as the installed schedule would.
+pub(super) fn planned_entrypoints_for_test(
+    domain: &DomainName,
+    models: Vec<nervix_models::Model>,
+) -> EntrypointPlans {
+    let nodes = models
+        .into_iter()
+        .map(scheduled_model)
+        .map(|node| (node.identity(), node))
+        .collect::<ScheduledNodes>();
+    let activation = DomainActivationPlan::from_scheduled_nodes(domain, &nodes)
+        .assured("the fixture surfaces resolve");
+    EntrypointPlans::from_scheduled_nodes(domain, &nodes, &activation)
+        .assured("the fixture entrypoints plan")
+}
+
+/// The relays an entrypoint test plans over: every relay holds one schema of `fields`, decoded by
+/// the JSON codec `payload_codec`, and is branched by `by_<relay>` over `branch_fields` when those
+/// are given and unbranched otherwise.
+/// The decisions a domain build makes for one [`EntrypointTestDomain`].
+pub(super) struct EntrypointTestPlans {
+    pub(super) activation: DomainActivationPlan,
+    pub(super) entrypoints: EntrypointPlans,
+}
+
+impl EntrypointTestPlans {
+    pub(super) fn scheduled(&self) -> ScheduledDomainPlans<'_> {
+        ScheduledDomainPlans {
+            activation: &self.activation,
+            entrypoints: &self.entrypoints,
+        }
+    }
+}
+
+pub(super) struct EntrypointTestDomain<'a> {
+    pub(super) relays: &'a [&'a str],
+    pub(super) fields: &'a [(&'a str, ParseAsType)],
+    pub(super) branch_fields: &'a [(&'a str, ParseAsType)],
+}
+
+impl EntrypointTestDomain<'_> {
+    fn schema_fields(fields: &[(&str, ParseAsType)]) -> Vec<SchemaField> {
+        fields
+            .iter()
+            .map(|(name, ty)| SchemaField {
+                name: named(name),
+                ty: ty.clone(),
+                optional: false,
+                sensitive: false,
+            })
+            .collect()
+    }
+
+    fn wire_type(ty: &ParseAsType) -> nervix_models::JsonType {
+        match ty {
+            ParseAsType::String => nervix_models::JsonType::String,
+            ParseAsType::Bool => nervix_models::JsonType::Boolean,
+            _ => nervix_models::JsonType::Integer,
+        }
+    }
+
+    /// The branch schema every branched relay of this domain resolves to.
+    pub(super) fn branching(&self, relay: &str) -> ResolvedBranching {
+        if self.branch_fields.is_empty() {
+            return ResolvedBranching::unbranched();
+        }
+        ResolvedBranching::branched(
+            named(&format!("by_{relay}")),
+            CreateSchema {
+                name: named("entrypoint_branch"),
+                fields: Self::schema_fields(self.branch_fields),
+            },
+        )
+    }
+
+    /// Plans the ingestors and reingestors among `models` in this domain.
+    pub(super) fn plan(
+        &self,
+        domain: &DomainName,
+        models: Vec<nervix_models::Model>,
+    ) -> EntrypointPlans {
+        self.plans(domain, models).entrypoints
+    }
+
+    /// Plans this domain with `models` scheduled in it, as a domain build decides it.
+    pub(super) fn plans(
+        &self,
+        domain: &DomainName,
+        models: Vec<nervix_models::Model>,
+    ) -> EntrypointTestPlans {
+        let fingerprint = SchemaFingerprint::from_digest([1; 32]);
+        let mut nodes = vec![
+            ScheduledNode::new(
+                nervix_models::Model::Schema(CreateSchema {
+                    name: named("entrypoint_payload"),
+                    fields: Self::schema_fields(self.fields),
+                }),
+                fingerprint,
+            ),
+            ScheduledNode::new(
+                nervix_models::Model::Schema(CreateSchema {
+                    name: named("entrypoint_branch"),
+                    fields: Self::schema_fields(self.branch_fields),
+                }),
+                fingerprint,
+            ),
+            ScheduledNode::new(
+                nervix_models::Model::WireJsonSchema(nervix_models::CreateJsonWireSchema {
+                    name: named("entrypoint_wire"),
+                    strictness: Default::default(),
+                    fields: self
+                        .fields
+                        .iter()
+                        .map(|(name, ty)| nervix_models::WireSchemaField {
+                            name: named(name),
+                            ty: Self::wire_type(ty),
+                            optional: false,
+                        })
+                        .collect(),
+                }),
+                fingerprint,
+            ),
+            ScheduledNode::new(
+                nervix_models::Model::Codec(nervix_models::CreateCodec {
+                    name: named("payload_codec"),
+                    wire_format: nervix_models::CodecWireFormat::Json {
+                        wire_schema: named("entrypoint_wire"),
+                    },
+                    schema: named("entrypoint_payload"),
+                    encoding_rules: Vec::new(),
+                }),
+                fingerprint,
+            ),
+        ];
+        for relay in self.relays {
+            let branching = if self.branch_fields.is_empty() {
+                nervix_models::RelayBranching::unbranched()
+            } else {
+                let branch = named::<BranchName>(&format!("by_{relay}"));
+                nodes.push(ScheduledNode::new(
+                    nervix_models::Model::Branch(CreateBranch {
+                        name: branch.clone(),
+                        schema: named("entrypoint_branch"),
+                        ttl: "5m".to_string(),
+                        eviction: None,
+                    }),
+                    fingerprint,
+                ));
+                nervix_models::RelayBranching::branched_by(branch)
+            };
+            nodes.push(
+                ScheduledNode::new(
+                    nervix_models::Model::Relay(CreateRelay {
+                        name: named(relay),
+                        schema: named("entrypoint_payload"),
+                        buffer: nonzero_capacity(2),
+                        branching,
+                        materialized_state: None,
+                    }),
+                    fingerprint,
+                )
+                .with_resolved_branching(Some(self.branching(relay))),
+            );
+        }
+        for model in models {
+            nodes.push(ScheduledNode::new(model, fingerprint));
+        }
+        let nodes = nodes
+            .into_iter()
+            .map(|node| (node.identity(), node))
+            .collect::<ScheduledNodes>();
+        let activation = DomainActivationPlan::from_scheduled_nodes(domain, &nodes)
+            .assured("the fixture surfaces resolve");
+        let entrypoints = EntrypointPlans::from_scheduled_nodes(domain, &nodes, &activation)
+            .assured("the fixture entrypoints plan");
+        EntrypointTestPlans {
+            activation,
+            entrypoints,
+        }
+    }
+
+    /// Plans `reingestor` in this domain.
+    pub(super) fn plan_reingestor(
+        &self,
+        domain: &DomainName,
+        reingestor: CreateReingestor,
+    ) -> Arc<ReingestorPlan> {
+        let name = reingestor.name.clone();
+        self.plan(domain, vec![nervix_models::Model::Reingestor(reingestor)])
+            .reingestor(&name)
+            .cloned()
+            .assured("the fixture schedules the reingestor")
+    }
+
+    /// The compiled schema every relay of this domain carries at runtime.
+    pub(super) fn relay_schema(&self) -> Arc<CompiledSchema> {
+        test_schema(self.fields)
+    }
+
+    /// The JSON codec `payload_codec` compiled as a domain build installs it.
+    pub(super) fn codec(&self) -> Arc<CompiledCodec> {
+        crate::runtime_schema::compile_codec(
+            &nervix_models::CreateCodec {
+                name: named("payload_codec"),
+                wire_format: nervix_models::CodecWireFormat::Json {
+                    wire_schema: named("entrypoint_wire"),
+                },
+                schema: named("entrypoint_payload"),
+                encoding_rules: Vec::new(),
+            },
+            self.relay_schema(),
+            nervix_models::ResolvedCodecWireFormat::Json(&nervix_models::CreateJsonWireSchema {
+                name: named("entrypoint_wire"),
+                strictness: Default::default(),
+                fields: self
+                    .fields
+                    .iter()
+                    .map(|(name, ty)| nervix_models::WireSchemaField {
+                        name: named(name),
+                        ty: Self::wire_type(ty),
+                        optional: false,
+                    })
+                    .collect(),
+            }),
+        )
+        .assured("the fixture codec compiles")
+    }
+}
+
 pub(super) fn scheduled_model(model: nervix_models::Model) -> ScheduledNode {
     let resolved_branching = match &model {
         nervix_models::Model::Relay(model) => {
@@ -745,7 +999,7 @@ pub(super) fn install_test_domain_execution(
             domain_clock: test_domain_clock(domain),
             shutdown,
             routing: runtime.stage_domain_routing(domain, routing),
-            branched_ingestors: HashMap::default(),
+            entrypoints: Arc::default(),
             branched_entrypoints: HashMap::default(),
             endpoint_routes: HashMap::default(),
             node_tasks: HashMap::default(),

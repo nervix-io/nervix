@@ -7561,6 +7561,7 @@ dependencies = [
  "nervix-models",
  "nervix-nspl",
  "nervix-recovery",
+ "strum 0.26.3",
  "thiserror 2.0.21",
  "url",
  "uuid",
